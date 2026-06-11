@@ -1,12 +1,10 @@
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
 
-use crate::policy::{Decision, Policy};
+use crate::policy::{Decision, EnforceScope, Policy};
 
-/// Rejects Pods that aren't Linkerd-meshed, outside an exempt set of namespaces.
+/// Rejects Pods that aren't Linkerd-meshed, where enforcement is in scope.
 ///
 /// GitOps already enforces the mesh for everything declared in charts, so this
 /// policy earns its keep on workloads that *aren't* in git. Linkerd's mutating
@@ -15,22 +13,18 @@ use crate::policy::{Decision, Policy};
 /// we check for that injected container (the post-injection truth) rather than
 /// trusting the network alone.
 ///
-/// Namespace exemptions are essential, not optional: this cluster *deliberately*
-/// leaves the runner namespace unmeshed so untrusted runners have no mesh
-/// identity. Enforcing injection there would break that design — so the runner
-/// namespace (and the control plane) must be exempt. Ships with `enforce =
-/// false` (audit) like the signature policy.
+/// Audit-by-default is essential here, not just cautious: this cluster
+/// *deliberately* leaves the runner namespace unmeshed so untrusted runners have
+/// no mesh identity. Because enforcement is opt-in via [`EnforceScope`], you
+/// simply never add the runner namespace to the mesh enforce allowlist — it (and
+/// everything else not listed) is audited, never blocked.
 pub struct MeshInjectionPolicy {
-    enforce: bool,
-    exempt_namespaces: HashSet<String>,
+    enforce: EnforceScope,
 }
 
 impl MeshInjectionPolicy {
-    pub fn new(enforce: bool, exempt_namespaces: HashSet<String>) -> Self {
-        Self {
-            enforce,
-            exempt_namespaces,
-        }
+    pub fn new(enforce: EnforceScope) -> Self {
+        Self { enforce }
     }
 }
 
@@ -52,22 +46,13 @@ impl Policy for MeshInjectionPolicy {
             return Decision::Allow;
         }
 
-        // The runner namespace and the control plane are intentionally unmeshed,
-        // so they are never denied — but they are still reported (audit) so an
-        // unexpectedly-unmeshed workload there is discoverable, not invisible.
-        let exempt = req
-            .namespace
-            .as_deref()
-            .is_some_and(|ns| self.exempt_namespaces.contains(ns));
-        let mut msg = "Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string();
-        if exempt {
-            msg.push_str("; namespace exempt from enforcement");
-        }
-        if self.enforce && !exempt {
-            Decision::deny(msg)
-        } else {
-            Decision::audit(msg)
-        }
+        // Unmeshed: deny where enforcement is in scope, audit everywhere else.
+        // Namespaces not on the enforce allowlist (the runner ns, by design) are
+        // still reported, so an unexpectedly-unmeshed workload is discoverable.
+        self.enforce.decide(
+            req,
+            "Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string(),
+        )
     }
 }
 
@@ -123,13 +108,19 @@ mod tests {
         review.try_into().expect("has request")
     }
 
-    fn policy(enforce: bool) -> MeshInjectionPolicy {
-        MeshInjectionPolicy::new(enforce, HashSet::from(["dev".to_string()]))
+    /// Enforce mesh only in "public"; everything else (incl. the runner ns
+    /// "dev") is audited.
+    fn policy() -> MeshInjectionPolicy {
+        use std::collections::HashSet;
+        MeshInjectionPolicy::new(EnforceScope::new(
+            HashSet::from(["public".to_string()]),
+            vec![],
+        ))
     }
 
     #[tokio::test]
     async fn allows_meshed_pod() {
-        let p = policy(true);
+        let p = policy();
         let spec = json!({"containers": [
             {"name": "app", "image": "x"},
             {"name": "linkerd-proxy", "image": "cr.l5d.io/linkerd/proxy"}
@@ -141,8 +132,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denies_unmeshed_pod_when_enforcing() {
-        let p = policy(true);
+    async fn denies_unmeshed_pod_in_enforced_namespace() {
+        let p = policy();
         let spec = json!({"containers": [{"name": "app", "image": "x"}]});
         assert!(matches!(
             p.evaluate(&pod_request("public", spec)).await,
@@ -151,23 +142,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audits_but_does_not_deny_unmeshed_pod_in_exempt_namespace() {
-        // The runner namespace is deliberately unmeshed: never denied, but still
-        // reported so it's discoverable.
-        let p = policy(true);
+    async fn audits_unmeshed_pod_outside_enforce_scope() {
+        // The runner namespace isn't on the enforce allowlist: never denied, but
+        // still reported so it's discoverable.
+        let p = policy();
         let spec = json!({"containers": [{"name": "runner", "image": "x"}]});
         assert!(matches!(
             p.evaluate(&pod_request("dev", spec)).await,
-            Decision::Audit { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn audits_unmeshed_pod_in_audit_mode() {
-        let p = policy(false);
-        let spec = json!({"containers": [{"name": "app", "image": "x"}]});
-        assert!(matches!(
-            p.evaluate(&pod_request("public", spec)).await,
             Decision::Audit { .. }
         ));
     }

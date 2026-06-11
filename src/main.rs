@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{CosignChecker, SignaturePolicy};
-use protector::policy::Engine;
+use protector::policy::{EnforceScope, Engine};
 use protector::server;
 use sigstore::registry::Auth;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +33,21 @@ fn env_set(key: &str, default: &str) -> HashSet<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Parse a comma-separated env var of `key=value` pairs.
+fn env_pairs(key: &str) -> Vec<(String, String)> {
+    env_or(key, "")
+        .split(',')
+        .filter_map(|s| s.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// Build a policy's enforce scope from its namespaces + labels env vars. Empty
+/// (the default) means audit everywhere — enforcement is strictly opt-in.
+fn enforce_scope(ns_key: &str, labels_key: &str) -> EnforceScope {
+    EnforceScope::new(env_set(ns_key, ""), env_pairs(labels_key))
 }
 
 /// Registry auth for pulling signatures of *private* gated images. Anonymous
@@ -75,18 +90,25 @@ async fn main() -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let enforce = env_or("PROTECTOR_ENFORCE", "false") == "true";
     let tuf_cache = PathBuf::from(env_or("PROTECTOR_TUF_CACHE", "/tmp/sigstore"));
     let verify_timeout = Duration::from_secs(env_parse("PROTECTOR_VERIFY_TIMEOUT", 5));
     let cache_ttl = Duration::from_secs(env_parse("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_parse("PROTECTOR_MAX_IMAGES", 32) as usize;
 
-    if !enforce {
-        tracing::warn!(
-            "PROTECTOR_ENFORCE is not 'true' — running in AUDIT mode: signature \
-             violations are logged but admitted. Set PROTECTOR_ENFORCE=true to enforce."
-        );
-    }
+    // Enforcement is opt-in per policy, by namespace and/or pod label. An empty
+    // scope (the default) audits everywhere — violations are logged + metered but
+    // never block. Add namespaces/labels to start blocking, one slice at a time.
+    let signature_enforce =
+        enforce_scope("PROTECTOR_ENFORCE_NAMESPACES", "PROTECTOR_ENFORCE_LABELS");
+    let mesh_enforce = enforce_scope(
+        "PROTECTOR_MESH_ENFORCE_NAMESPACES",
+        "PROTECTOR_MESH_ENFORCE_LABELS",
+    );
+    tracing::info!(
+        signature = %signature_enforce.describe(),
+        mesh = %mesh_enforce.describe(),
+        "policy enforcement scopes"
+    );
 
     let checker = CosignChecker::new(
         &identity_regexp,
@@ -99,20 +121,12 @@ async fn main() -> Result<()> {
     let signature = SignaturePolicy::new(
         Arc::new(checker),
         gated_prefixes,
-        enforce,
+        signature_enforce,
         max_images,
         cache_ttl,
     );
 
-    // Mesh-injection policy. Its own enforce flag, and an exempt set that MUST
-    // include the deliberately-unmeshed runner namespace (dev) and the control
-    // plane — enforcing injection there would break the cluster's design.
-    let mesh_enforce = env_or("PROTECTOR_MESH_ENFORCE", "false") == "true";
-    let mesh_exempt = env_set(
-        "PROTECTOR_MESH_EXEMPT_NAMESPACES",
-        "dev,kube-system,kube-public,kube-node-lease,cert-manager,argocd,linkerd,protector",
-    );
-    let mesh = MeshInjectionPolicy::new(mesh_enforce, mesh_exempt);
+    let mesh = MeshInjectionPolicy::new(mesh_enforce);
 
     // Metrics are shared between the engine (which records violations) and the
     // server's /metrics scrape endpoint.

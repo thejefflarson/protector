@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,6 +35,83 @@ impl Decision {
         Decision::Audit {
             reason: reason.into(),
         }
+    }
+}
+
+/// Where a policy enforces (denies) versus merely audits (logs + allows).
+///
+/// Audit is the default everywhere; enforcement is opt-in via an allowlist. A
+/// request is enforced if its namespace is listed **or** the Pod carries one of
+/// the listed `key=value` labels. Everything else is audited — so a workload can
+/// never be *accidentally* blocked by a broad default; you add it to the
+/// allowlist deliberately. There is intentionally no "enforce everywhere"
+/// wildcard (it would be a footgun — e.g. blocking the deliberately-unmeshed
+/// runner namespace); list the namespaces you mean.
+#[derive(Default)]
+pub struct EnforceScope {
+    namespaces: HashSet<String>,
+    labels: Vec<(String, String)>,
+}
+
+impl EnforceScope {
+    pub fn new(namespaces: HashSet<String>, labels: Vec<(String, String)>) -> Self {
+        Self { namespaces, labels }
+    }
+
+    /// True if this request should be **enforced** (deny on violation); false
+    /// means **audit** (record + allow).
+    pub fn enforces(&self, req: &AdmissionRequest<DynamicObject>) -> bool {
+        if let Some(ns) = req.namespace.as_deref()
+            && self.namespaces.contains(ns)
+        {
+            return true;
+        }
+        if self.labels.is_empty() {
+            return false;
+        }
+        let pod_labels = req.object.as_ref().and_then(|o| o.metadata.labels.as_ref());
+        pod_labels.is_some_and(|labels| {
+            self.labels
+                .iter()
+                .any(|(k, v)| labels.get(k).is_some_and(|pv| pv == v))
+        })
+    }
+
+    /// Turn a violation message into the right outcome for `req`: `Deny` where
+    /// enforcement is in scope, `Audit` (recorded but allowed) everywhere else.
+    pub fn decide(&self, req: &AdmissionRequest<DynamicObject>, reason: String) -> Decision {
+        if self.enforces(req) {
+            Decision::Deny { reason }
+        } else {
+            Decision::Audit { reason }
+        }
+    }
+
+    /// True if nothing is enforced — audit everywhere.
+    pub fn is_audit_only(&self) -> bool {
+        self.namespaces.is_empty() && self.labels.is_empty()
+    }
+
+    /// Human-readable summary for startup logging.
+    pub fn describe(&self) -> String {
+        if self.is_audit_only() {
+            return "audit-only (nothing enforced)".to_string();
+        }
+        let mut parts = Vec::new();
+        if !self.namespaces.is_empty() {
+            let mut ns: Vec<_> = self.namespaces.iter().cloned().collect();
+            ns.sort();
+            parts.push(format!("namespaces=[{}]", ns.join(",")));
+        }
+        if !self.labels.is_empty() {
+            let labels: Vec<_> = self
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            parts.push(format!("labels=[{}]", labels.join(",")));
+        }
+        format!("enforce {}", parts.join(" "))
     }
 }
 

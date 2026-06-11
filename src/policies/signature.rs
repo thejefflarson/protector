@@ -15,7 +15,7 @@ use sigstore::registry::{Auth, OciReference};
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::policy::{Decision, Policy};
+use crate::policy::{Decision, EnforceScope, Policy};
 
 /// Decides whether a single image reference carries a trusted signature.
 ///
@@ -42,7 +42,8 @@ pub trait SignatureChecker: Send + Sync {
 pub struct SignaturePolicy {
     checker: Arc<dyn SignatureChecker>,
     gated_prefixes: Vec<String>,
-    enforce: bool,
+    /// Where this policy denies vs audits. Audit everywhere by default.
+    enforce: EnforceScope,
     /// Upper bound on distinct gated images verified per admission, so a Pod
     /// with hundreds of (init/ephemeral) containers can't amplify outbound
     /// verification work into a DoS.
@@ -60,7 +61,7 @@ impl SignaturePolicy {
     pub fn new(
         checker: Arc<dyn SignatureChecker>,
         gated_prefixes: Vec<String>,
-        enforce: bool,
+        enforce: EnforceScope,
         max_images: usize,
         cache_ttl: Duration,
     ) -> Self {
@@ -100,16 +101,6 @@ impl SignaturePolicy {
             .insert(image.to_string(), (verified, Instant::now()));
         Ok(verified)
     }
-
-    /// Apply the audit/enforce decision to a human-readable violation message.
-    /// The engine records the audit/deny (log + metric); the policy just decides.
-    fn violation(&self, msg: String) -> Decision {
-        if self.enforce {
-            Decision::deny(msg)
-        } else {
-            Decision::audit(msg)
-        }
-    }
 }
 
 #[async_trait]
@@ -137,11 +128,14 @@ impl Policy for SignaturePolicy {
         }
 
         if gated.len() > self.max_images {
-            return self.violation(format!(
-                "Pod references {} gated images (max {})",
-                gated.len(),
-                self.max_images
-            ));
+            return self.enforce.decide(
+                req,
+                format!(
+                    "Pod references {} gated images (max {})",
+                    gated.len(),
+                    self.max_images
+                ),
+            );
         }
 
         let mut unsigned = Vec::new();
@@ -150,11 +144,11 @@ impl Policy for SignaturePolicy {
                 Ok(true) => {}
                 Ok(false) => unsigned.push(image.clone()),
                 Err(err) => {
-                    // Couldn't reach the registry/TUF to decide. In enforce mode
-                    // we must not silently admit a gated image; in audit mode we
+                    // Couldn't reach the registry/TUF to decide. Where enforcing,
+                    // we must not silently admit a gated image; where auditing, we
                     // allow but log.
                     tracing::warn!(%image, error = %err, "signature verification errored");
-                    if self.enforce {
+                    if self.enforce.enforces(req) {
                         return Decision::deny(format!(
                             "could not verify signature for {image}: {err}"
                         ));
@@ -166,10 +160,10 @@ impl Policy for SignaturePolicy {
         if unsigned.is_empty() {
             return Decision::Allow;
         }
-        self.violation(format!(
-            "unsigned or untrusted image(s): {}",
-            unsigned.join(", ")
-        ))
+        self.enforce.decide(
+            req,
+            format!("unsigned or untrusted image(s): {}", unsigned.join(", ")),
+        )
     }
 }
 
@@ -327,6 +321,16 @@ impl VerificationConstraint for IdentityVerifier {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
+
+    /// Enforce everywhere the test pods live (namespace "default"), or nowhere.
+    fn scope(enforce: bool) -> EnforceScope {
+        if enforce {
+            EnforceScope::new(HashSet::from(["default".to_string()]), vec![])
+        } else {
+            EnforceScope::default()
+        }
+    }
 
     fn pod_request(images: &[&str]) -> AdmissionRequest<DynamicObject> {
         let containers: Vec<_> = images
@@ -376,7 +380,7 @@ mod tests {
         SignaturePolicy::new(
             Arc::new(FakeChecker(map)),
             vec!["ghcr.io/thejefflarson/".to_string()],
-            enforce,
+            scope(enforce),
             32,
             Duration::from_secs(300),
         )
@@ -479,7 +483,7 @@ mod tests {
         let p = SignaturePolicy::new(
             Arc::new(FakeChecker(map)),
             vec!["ghcr.io/thejefflarson/".to_string()],
-            true,
+            scope(true),
             32,
             Duration::from_secs(300),
         );
