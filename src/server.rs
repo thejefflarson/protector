@@ -14,7 +14,15 @@ use kube::core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview
 use tokio::signal::ctrl_c;
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::metrics::Metrics;
 use crate::policy::{Decision, Engine};
+
+/// Shared, cheaply-cloneable handler state.
+#[derive(Clone)]
+pub struct AppState {
+    pub engine: Arc<Engine>,
+    pub metrics: Arc<Metrics>,
+}
 
 /// Liveness/readiness probe. The webhook is ready as soon as TLS is bound; it
 /// holds no external dependencies that need warming.
@@ -22,11 +30,17 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Prometheus scrape endpoint. Exposes the policy-violation counters, which are
+/// the discovery signal for "what would enforcement reject".
+async fn metrics_handler(State(state): State<AppState>) -> String {
+    state.metrics.render()
+}
+
 /// The `/validate` endpoint the API server calls. Decodes the review, runs the
 /// policy engine, and replies with an allow/deny `AdmissionResponse` carrying
 /// the request's UID (required for the API server to correlate the reply).
 async fn validate(
-    State(engine): State<Arc<Engine>>,
+    State(state): State<AppState>,
     Json(review): Json<AdmissionReview<DynamicObject>>,
 ) -> Json<AdmissionReview<DynamicObject>> {
     let req: AdmissionRequest<DynamicObject> = match review.try_into() {
@@ -42,9 +56,12 @@ async fn validate(
     };
 
     let response = AdmissionResponse::from(&req);
-    let response = match engine.evaluate(&req).await {
-        Decision::Allow => response,
+    // The engine records audit/deny outcomes itself; here we only map the final
+    // verdict. An Audit outcome never reaches here (the engine resolves it to
+    // Allow), but treat it as allow defensively.
+    let response = match state.engine.evaluate(&req).await {
         Decision::Deny { reason } => response.deny(reason),
+        Decision::Allow | Decision::Audit { .. } => response,
     };
     Json(response.into_review())
 }
@@ -53,14 +70,15 @@ async fn validate(
 /// tens of KB; this caps a hostile/oversized body well below the default.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Build the webhook router with the policy engine as shared state.
-pub fn router(engine: Arc<Engine>) -> Router {
+/// Build the webhook router with the engine + metrics as shared state.
+pub fn router(engine: Arc<Engine>, metrics: Arc<Metrics>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(healthz))
+        .route("/metrics", get(metrics_handler))
         .route("/validate", post(validate))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(engine)
+        .with_state(AppState { engine, metrics })
 }
 
 /// Serve the webhook over HTTPS until SIGTERM/Ctrl-C.
@@ -74,6 +92,7 @@ pub async fn serve(
     cert: PathBuf,
     key: PathBuf,
     engine: Arc<Engine>,
+    metrics: Arc<Metrics>,
 ) -> Result<()> {
     let tls = RustlsConfig::from_pem_file(&cert, &key)
         .await
@@ -85,7 +104,7 @@ pub async fn serve(
     tracing::info!(%addr, "admission webhook listening");
     axum_server::bind_rustls(addr, tls)
         .handle(handle)
-        .serve(router(engine).into_make_service())
+        .serve(router(engine, metrics).into_make_service())
         .await
         .context("webhook server failed")
 }

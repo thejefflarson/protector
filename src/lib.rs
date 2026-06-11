@@ -8,6 +8,7 @@
 //! rules engine — this is not a Kyverno re-implementation.
 //!
 //! [`Policy`]: policy::Policy
+pub mod metrics;
 pub mod policies;
 pub mod policy;
 pub mod server;

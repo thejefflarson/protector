@@ -35,7 +35,11 @@ jobs:
     - name: Audit dependencies
       run: |
         cargo install cargo-audit --locked
-        cargo audit
+        # RUSTSEC-2023-0071 (rsa "Marvin" timing attack) has no fixed release and
+        # reaches us only transitively via sigstore. protector does signature
+        # verification (public-key ops), not the attacker-timed RSA private-key
+        # decryption the attack targets, so it isn't an exposure here.
+        cargo audit --ignore RUSTSEC-2023-0071
     - name: Run tests
       run: cargo nextest run
       env:

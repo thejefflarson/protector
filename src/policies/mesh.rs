@@ -45,13 +45,6 @@ impl Policy for MeshInjectionPolicy {
     }
 
     async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
-        // The runner namespace and the control plane are intentionally unmeshed.
-        if let Some(ns) = req.namespace.as_deref()
-            && self.exempt_namespaces.contains(ns)
-        {
-            return Decision::Allow;
-        }
-
         let Some(obj) = req.object.as_ref() else {
             return Decision::Allow;
         };
@@ -59,14 +52,21 @@ impl Policy for MeshInjectionPolicy {
             return Decision::Allow;
         }
 
-        let msg = "Pod is not Linkerd-meshed (no injected linkerd-proxy) and its \
-                   namespace is not exempt"
-            .to_string();
-        if self.enforce {
+        // The runner namespace and the control plane are intentionally unmeshed,
+        // so they are never denied — but they are still reported (audit) so an
+        // unexpectedly-unmeshed workload there is discoverable, not invisible.
+        let exempt = req
+            .namespace
+            .as_deref()
+            .is_some_and(|ns| self.exempt_namespaces.contains(ns));
+        let mut msg = "Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string();
+        if exempt {
+            msg.push_str("; namespace exempt from enforcement");
+        }
+        if self.enforce && !exempt {
             Decision::deny(msg)
         } else {
-            tracing::warn!(audit = true, "{msg} — allowing (audit mode)");
-            Decision::Allow
+            Decision::audit(msg)
         }
     }
 }
@@ -151,23 +151,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allows_unmeshed_pod_in_exempt_namespace() {
-        // The runner namespace is deliberately unmeshed.
+    async fn audits_but_does_not_deny_unmeshed_pod_in_exempt_namespace() {
+        // The runner namespace is deliberately unmeshed: never denied, but still
+        // reported so it's discoverable.
         let p = policy(true);
         let spec = json!({"containers": [{"name": "runner", "image": "x"}]});
         assert!(matches!(
             p.evaluate(&pod_request("dev", spec)).await,
-            Decision::Allow
+            Decision::Audit { .. }
         ));
     }
 
     #[tokio::test]
-    async fn allows_unmeshed_pod_in_audit_mode() {
+    async fn audits_unmeshed_pod_in_audit_mode() {
         let p = policy(false);
         let spec = json!({"containers": [{"name": "app", "image": "x"}]});
         assert!(matches!(
             p.evaluate(&pod_request("public", spec)).await,
-            Decision::Allow
+            Decision::Audit { .. }
         ));
     }
 }

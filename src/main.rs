@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{CosignChecker, SignaturePolicy};
 use protector::policy::Engine;
@@ -113,8 +114,15 @@ async fn main() -> Result<()> {
     );
     let mesh = MeshInjectionPolicy::new(mesh_enforce, mesh_exempt);
 
-    // The policy set is fixed at startup and shared (read-only) across requests.
-    let engine = Arc::new(Engine::new(vec![Box::new(signature), Box::new(mesh)]));
+    // Metrics are shared between the engine (which records violations) and the
+    // server's /metrics scrape endpoint.
+    let metrics = Arc::new(Metrics::new());
 
-    server::serve(addr, cert, key, engine).await
+    // The policy set is fixed at startup and shared (read-only) across requests.
+    let engine = Arc::new(Engine::new(
+        vec![Box::new(signature), Box::new(mesh)],
+        metrics.clone(),
+    ));
+
+    server::serve(addr, cert, key, engine, metrics).await
 }

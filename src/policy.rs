@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
+
+use crate::metrics::Metrics;
 
 /// Outcome of evaluating a single policy against one admission request.
 #[derive(Debug, Clone)]
@@ -10,12 +14,24 @@ pub enum Decision {
     /// The request violates the policy. `reason` is surfaced to the API caller
     /// (e.g. shown in `kubectl apply` output), so keep it human-actionable.
     Deny { reason: String },
+    /// The request violates the policy, but the policy is in audit mode or the
+    /// workload is exempt, so it is allowed anyway. Recorded (log + metric) as a
+    /// would-deny so you can discover what enforcement *would* reject. `reason`
+    /// is the same human-actionable text a `Deny` would carry.
+    Audit { reason: String },
 }
 
 impl Decision {
     /// Convenience for the common `Deny { reason }` construction.
     pub fn deny(reason: impl Into<String>) -> Self {
         Decision::Deny {
+            reason: reason.into(),
+        }
+    }
+
+    /// Convenience for the `Audit { reason }` construction.
+    pub fn audit(reason: impl Into<String>) -> Self {
+        Decision::Audit {
             reason: reason.into(),
         }
     }
@@ -45,31 +61,63 @@ pub trait Policy: Send + Sync {
 ///
 /// Evaluation is fail-closed per policy: the first applicable policy that denies
 /// short-circuits and the request is rejected. A request is allowed only when
-/// every applicable policy allows it.
+/// every applicable policy allows (or merely audits) it. The engine owns the
+/// recording of violations — both `Deny` and `Audit` outcomes are logged with
+/// request context and metered — so policies just decide; they don't log.
 pub struct Engine {
     policies: Vec<Box<dyn Policy>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Engine {
-    pub fn new(policies: Vec<Box<dyn Policy>>) -> Self {
-        Self { policies }
+    pub fn new(policies: Vec<Box<dyn Policy>>, metrics: Arc<Metrics>) -> Self {
+        Self { policies, metrics }
     }
 
-    /// Run every applicable policy in order, denying on the first violation.
+    /// Run every applicable policy in order. Records every violation (deny or
+    /// audit) with request context, returns `Deny` on the first hard denial,
+    /// else `Allow`. Audit findings never deny — they're the discovery signal.
     pub async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
         for policy in &self.policies {
             if !policy.applies(req) {
                 continue;
             }
-            if let Decision::Deny { reason } = policy.evaluate(req).await {
-                let name = policy.name();
-                tracing::info!(policy = name, %reason, "admission denied");
-                // Prefix with the policy name so the API caller can see which
-                // rule rejected the request.
-                return Decision::deny(format!("[{name}] {reason}"));
+            match policy.evaluate(req).await {
+                Decision::Allow => {}
+                Decision::Audit { reason } => {
+                    self.record(policy.name(), "audit", req, &reason);
+                }
+                Decision::Deny { reason } => {
+                    self.record(policy.name(), "deny", req, &reason);
+                    // Prefix with the policy name so the API caller can see which
+                    // rule rejected the request.
+                    return Decision::deny(format!("[{}] {reason}", policy.name()));
+                }
             }
         }
         Decision::Allow
+    }
+
+    /// Log (with request context) and meter a policy violation. The structured
+    /// fields — policy, namespace, name, kind — are what a discovery query keys
+    /// on to find workloads that should be meshed or images that should be signed.
+    fn record(
+        &self,
+        policy: &'static str,
+        decision: &'static str,
+        req: &AdmissionRequest<DynamicObject>,
+        reason: &str,
+    ) {
+        self.metrics.record_violation(policy, decision);
+        tracing::warn!(
+            policy,
+            decision,
+            namespace = req.namespace.as_deref().unwrap_or_default(),
+            name = %req.name,
+            kind = %req.kind.kind,
+            audit = decision == "audit",
+            "{reason}"
+        );
     }
 }
 
@@ -104,6 +152,11 @@ mod tests {
         review.try_into().expect("review carries a request")
     }
 
+    /// Build an engine with a throwaway metrics sink.
+    fn engine(policies: Vec<Box<dyn Policy>>) -> Engine {
+        Engine::new(policies, Arc::new(Metrics::new()))
+    }
+
     /// A test policy with a fixed verdict, so the engine's combination logic can
     /// be exercised without a real rule.
     struct Fixed {
@@ -127,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn allows_when_every_policy_allows() {
-        let engine = Engine::new(vec![Box::new(Fixed {
+        let engine = engine(vec![Box::new(Fixed {
             name: "a",
             applies: true,
             decision: Decision::Allow,
@@ -140,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn denies_on_first_violation_and_tags_with_policy_name() {
-        let engine = Engine::new(vec![
+        let engine = engine(vec![
             Box::new(Fixed {
                 name: "first",
                 applies: true,
@@ -154,17 +207,39 @@ mod tests {
         ]);
         match engine.evaluate(&pod_request()).await {
             Decision::Deny { reason } => assert_eq!(reason, "[second] nope"),
-            Decision::Allow => panic!("expected deny"),
+            other => panic!("expected deny, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn skips_inapplicable_policies() {
-        let engine = Engine::new(vec![Box::new(Fixed {
+        let engine = engine(vec![Box::new(Fixed {
             name: "off",
             applies: false,
             decision: Decision::deny("should never run"),
         })]);
+        assert!(matches!(
+            engine.evaluate(&pod_request()).await,
+            Decision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn audit_findings_do_not_deny() {
+        // An audit finding is recorded but the request is still allowed, even
+        // when a later policy also audits.
+        let engine = engine(vec![
+            Box::new(Fixed {
+                name: "a",
+                applies: true,
+                decision: Decision::audit("would deny"),
+            }),
+            Box::new(Fixed {
+                name: "b",
+                applies: true,
+                decision: Decision::Allow,
+            }),
+        ]);
         assert!(matches!(
             engine.evaluate(&pod_request()).await,
             Decision::Allow

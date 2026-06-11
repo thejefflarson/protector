@@ -49,11 +49,23 @@ cert-manager-issued cert; Linkerd still meshes the pod for its outbound calls.
 
 - `POST /validate` — the AdmissionReview endpoint
 - `GET /healthz`, `GET /readyz` — probes
+- `GET /metrics` — Prometheus exposition of `protector_policy_violations_total{policy,decision}`
+
+## Audit vs enforce, and discovery
+
+A policy that finds a violation but isn't enforcing — because it's in audit mode
+*or* the workload is exempt (e.g. an unmeshed Pod in the runner namespace) — does
+**not** silently allow. It returns an **audit** outcome: the request is admitted,
+but the engine records a structured log line (`policy`, `namespace`, `name`,
+`kind`, `decision=audit`) and increments the `audit` counter. So exempt/audit
+workloads stay *visible*. That stream is the discovery signal for "what would
+enforcement reject" — query the logs/metric, or run `scripts/protector-discover.py`
+in the cluster repo for an active inventory of mesh/signing candidates.
 
 ## Rollout
 
 Ships fail-safe: `failurePolicy: Ignore` and `PROTECTOR_ENFORCE=false`. Watch the
-audit logs until clean, then flip enforce on (and, per policy, tighten the
+audit logs/metrics until clean, then flip enforce on (and, per policy, tighten the
 webhook to `failurePolicy: Fail`).
 
 ## Develop

@@ -102,12 +102,12 @@ impl SignaturePolicy {
     }
 
     /// Apply the audit/enforce decision to a human-readable violation message.
+    /// The engine records the audit/deny (log + metric); the policy just decides.
     fn violation(&self, msg: String) -> Decision {
         if self.enforce {
             Decision::deny(msg)
         } else {
-            tracing::warn!(audit = true, "{msg} — allowing (audit mode)");
-            Decision::Allow
+            Decision::audit(msg)
         }
     }
 }
@@ -442,17 +442,17 @@ mod tests {
             .await
         {
             Decision::Deny { reason } => assert!(reason.contains("ghcr.io/thejefflarson/app:1")),
-            Decision::Allow => panic!("expected deny"),
+            other => panic!("expected deny, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn allows_unsigned_gated_image_in_audit_mode() {
+    async fn audits_unsigned_gated_image_in_audit_mode() {
         let p = policy(&[("ghcr.io/thejefflarson/app:1", false)], false);
         assert!(matches!(
             p.evaluate(&pod_request(&["ghcr.io/thejefflarson/app:1"]))
                 .await,
-            Decision::Allow
+            Decision::Audit { .. }
         ));
     }
 
@@ -466,7 +466,7 @@ mod tests {
             .await
         {
             Decision::Deny { reason } => assert!(reason.contains("GHCR.IO/thejefflarson/app:1")),
-            Decision::Allow => panic!("case-variant host evaded the gate"),
+            other => panic!("case-variant host evaded the gate: {other:?}"),
         }
     }
 
@@ -489,7 +489,7 @@ mod tests {
         let refs: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
         match p.evaluate(&pod_request(&refs)).await {
             Decision::Deny { reason } => assert!(reason.contains("max 32")),
-            Decision::Allow => panic!("expected deny on too many gated images"),
+            other => panic!("expected deny, got {other:?}"),
         }
     }
 }

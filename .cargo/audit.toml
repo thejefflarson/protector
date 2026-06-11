@@ -1,0 +1,6 @@
+# RUSTSEC-2023-0071 (rsa "Marvin" timing attack) has no fixed release and reaches
+# us only transitively via sigstore. protector does signature verification
+# (public-key ops), not the attacker-timed RSA private-key decryption the attack
+# targets, so it isn't an exposure here. Keep CI's --ignore in sync.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
