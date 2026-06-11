@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use protector::policies::mesh::MeshInjectionPolicy;
@@ -13,6 +15,23 @@ use tracing_subscriber::EnvFilter;
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse a numeric env var, falling back to `default` if unset or unparseable.
+fn env_parse(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Parse a comma-separated env var into a set, falling back to `default`.
+fn env_set(key: &str, default: &str) -> HashSet<String> {
+    env_or(key, default)
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Registry auth for pulling signatures of *private* gated images. Anonymous
@@ -44,7 +63,7 @@ async fn main() -> Result<()> {
     // reject a Pod.
     let identity_regexp = env_or(
         "PROTECTOR_IDENTITY_REGEXP",
-        "^https://github.com/thejefflarson/",
+        r"^https://github\.com/thejefflarson/",
     );
     let oidc_issuer = env_or(
         "PROTECTOR_OIDC_ISSUER",
@@ -57,16 +76,45 @@ async fn main() -> Result<()> {
         .collect();
     let enforce = env_or("PROTECTOR_ENFORCE", "false") == "true";
     let tuf_cache = PathBuf::from(env_or("PROTECTOR_TUF_CACHE", "/tmp/sigstore"));
+    let verify_timeout = Duration::from_secs(env_parse("PROTECTOR_VERIFY_TIMEOUT", 5));
+    let cache_ttl = Duration::from_secs(env_parse("PROTECTOR_CACHE_TTL", 300));
+    let max_images = env_parse("PROTECTOR_MAX_IMAGES", 32) as usize;
 
-    let checker = CosignChecker::new(&identity_regexp, oidc_issuer, registry_auth(), tuf_cache)
-        .context("building cosign checker")?;
-    let signature = SignaturePolicy::new(Arc::new(checker), gated_prefixes, enforce);
+    if !enforce {
+        tracing::warn!(
+            "PROTECTOR_ENFORCE is not 'true' — running in AUDIT mode: signature \
+             violations are logged but admitted. Set PROTECTOR_ENFORCE=true to enforce."
+        );
+    }
+
+    let checker = CosignChecker::new(
+        &identity_regexp,
+        oidc_issuer,
+        registry_auth(),
+        tuf_cache,
+        verify_timeout,
+    )
+    .context("building cosign checker")?;
+    let signature = SignaturePolicy::new(
+        Arc::new(checker),
+        gated_prefixes,
+        enforce,
+        max_images,
+        cache_ttl,
+    );
+
+    // Mesh-injection policy. Its own enforce flag, and an exempt set that MUST
+    // include the deliberately-unmeshed runner namespace (dev) and the control
+    // plane — enforcing injection there would break the cluster's design.
+    let mesh_enforce = env_or("PROTECTOR_MESH_ENFORCE", "false") == "true";
+    let mesh_exempt = env_set(
+        "PROTECTOR_MESH_EXEMPT_NAMESPACES",
+        "dev,kube-system,kube-public,kube-node-lease,cert-manager,argocd,linkerd,protector",
+    );
+    let mesh = MeshInjectionPolicy::new(mesh_enforce, mesh_exempt);
 
     // The policy set is fixed at startup and shared (read-only) across requests.
-    let engine = Arc::new(Engine::new(vec![
-        Box::new(signature),
-        Box::new(MeshInjectionPolicy),
-    ]));
+    let engine = Arc::new(Engine::new(vec![Box::new(signature), Box::new(mesh)]));
 
     server::serve(addr, cert, key, engine).await
 }

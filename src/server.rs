@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_server::Handle;
@@ -49,12 +49,17 @@ async fn validate(
     Json(response.into_review())
 }
 
+/// Largest AdmissionReview body we'll accept on /validate. Real Pod reviews are
+/// tens of KB; this caps a hostile/oversized body well below the default.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
 /// Build the webhook router with the policy engine as shared state.
 pub fn router(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(healthz))
         .route("/validate", post(validate))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(engine)
 }
 

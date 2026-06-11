@@ -12,7 +12,7 @@ a generic rules engine (no Kyverno/OPA re-implementation).
 | Policy | What it does | Default |
 |--------|--------------|---------|
 | `image-signature` | Rejects Pods whose **first-party** images (`ghcr.io/thejefflarson/…`) aren't keyless cosign-signed by our GitHub Actions identity, verified in-process with [sigstore-rs](https://github.com/sigstore/sigstore-rs). Third-party images are out of scope. | audit (allow + log) |
-| `mesh-injection` | (stub) Will require Linkerd injection on non-exempt workloads. | allow |
+| `mesh-injection` | Rejects Pods that aren't Linkerd-meshed (no injected `linkerd-proxy`), outside an exempt namespace set. The exempt set **must** include the deliberately-unmeshed runner namespace and the control plane. | audit (allow + log) |
 
 Signature verification mirrors the fleet-wide cosign check:
 `--certificate-identity-regexp '^https://github.com/thejefflarson/'`
@@ -32,12 +32,17 @@ cert-manager-issued cert; Linkerd still meshes the pod for its outbound calls.
 |-----|---------|---------|
 | `PROTECTOR_ADDR` | `0.0.0.0:8443` | listen address |
 | `PROTECTOR_TLS_CERT` / `PROTECTOR_TLS_KEY` | `/etc/protector/tls/tls.{crt,key}` | serving cert/key (cert-manager) |
-| `PROTECTOR_IDENTITY_REGEXP` | `^https://github.com/thejefflarson/` | trusted signing identity |
+| `PROTECTOR_IDENTITY_REGEXP` | `^https://github\.com/thejefflarson/` | trusted signing identity (start-anchored; substring-anchored if no `^`) |
 | `PROTECTOR_OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | expected OIDC issuer |
-| `PROTECTOR_GATED_PREFIXES` | `ghcr.io/thejefflarson/` | comma-separated image prefixes to enforce |
-| `PROTECTOR_ENFORCE` | `false` | `true` denies violations; `false` logs only (audit) |
+| `PROTECTOR_GATED_PREFIXES` | `ghcr.io/thejefflarson/` | comma-separated image prefixes to enforce (registry host case-normalized) |
+| `PROTECTOR_ENFORCE` | `false` | `true` denies signature violations; `false` logs only (audit) |
 | `PROTECTOR_TUF_CACHE` | `/tmp/sigstore` | writable sigstore TUF cache dir |
 | `PROTECTOR_REGISTRY_USERNAME` / `PROTECTOR_REGISTRY_PASSWORD` | — | registry auth for private gated images |
+| `PROTECTOR_VERIFY_TIMEOUT` | `5` | per-image verification timeout (seconds) |
+| `PROTECTOR_CACHE_TTL` | `300` | verdict cache TTL (seconds); bounds mutable-tag TOCTOU |
+| `PROTECTOR_MAX_IMAGES` | `32` | max distinct gated images verified per Pod |
+| `PROTECTOR_MESH_ENFORCE` | `false` | `true` denies unmeshed Pods; `false` logs only (audit) |
+| `PROTECTOR_MESH_EXEMPT_NAMESPACES` | `dev,kube-system,…,protector` | namespaces exempt from mesh-injection enforcement |
 | `RUST_LOG` | — | tracing filter (e.g. `protector=info`) |
 
 ## Endpoints
