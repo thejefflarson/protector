@@ -1,0 +1,108 @@
+name: Build
+permissions:
+  contents: read
+  pull-requests: write
+on:
+  push:
+    branches: ["main"]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: ["main"]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+jobs:
+  rust:
+    permissions:
+      contents: read
+    runs-on: protector-runners
+    # The runners are self-hosted and persistent, so never execute code from a
+    # forked pull request on them — that would be arbitrary code execution on
+    # the build infrastructure. Push events and same-repo PRs are fine.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+    - name: Enable rust
+      run: |
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+    - name: Format
+      run: cargo fmt --check
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
+    - name: Audit dependencies
+      run: |
+        cargo install cargo-audit --locked
+        cargo audit
+    - name: Run tests
+      run: cargo nextest run
+      env:
+        RUST_BACKTRACE: 1
+  docker:
+    runs-on: protector-runners
+    if: github.event_name != 'pull_request'
+    needs: rust
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Log into registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Emit the bare semver (v0.1.0 tag -> image tag 0.1.0) so the published
+          # image matches what the Helm chart pulls by default
+          # (image.tag | default .Chart.AppVersion, which has no leading "v").
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+        with:
+          driver: remote
+          endpoint: tcp://buildkit.dev.svc.cluster.local:1234
+          # buildkit enforces mTLS; client cert is mounted into the runner pod.
+          driver-opts: |
+            cacert=/home/runner/buildkit-certs/ca.crt
+            cert=/home/runner/buildkit-certs/tls.crt
+            key=/home/runner/buildkit-certs/tls.key
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache,mode=max
+          # SLSA build provenance + SBOM attestations, matching the other images.
+          provenance: mode=max
+          sbom: true
+      # First-party installer verifies the cosign binary's own checksum, unlike
+      # a bare curl|chmod of a release asset.
+      - name: Install cosign
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the published Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "missing/invalid build digest: '$DIGEST'" >&2; exit 1; }
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
