@@ -30,6 +30,7 @@ pub mod dashboard;
 pub mod delta;
 pub mod exploit_intel;
 pub mod graph;
+pub mod graphviz;
 pub mod health;
 pub mod hypothesis;
 pub mod model;
@@ -189,6 +190,10 @@ impl Engine {
         // are the weaker, propose-only case a human acts on).
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
+        // The attack graph (internet → goal) for the /graph view — collapses the
+        // per-objective fan-out the flat list explodes into.
+        self.findings
+            .replace_graph(graphviz::attack_graph_dot(&graph, &chains));
 
         if structurally_changed && !chains.is_empty() {
             tracing::info!(count = chains.len(), "proven chains");

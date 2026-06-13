@@ -213,6 +213,17 @@ fn movement_tree(
 
 /// True if `target` is reachable from `start` over proof-grade movement edges with
 /// `excluded` removed.
+/// Whether the edge `e` is a sensible *cut* candidate — a privilege/movement edge,
+/// not structural substrate (`runs-as`/`runs-image`/`scheduled-on`). Severing a
+/// workload from its ServiceAccount isn't a mitigation; the meaningful cut is the
+/// RBAC/network/data edge.
+fn is_cuttable_edge(graph: &SecurityGraph, e: EdgeIndex) -> bool {
+    graph
+        .inner()
+        .edge_weight(e)
+        .is_some_and(|edge| !edge.relation.is_structural())
+}
+
 fn reachable_without(
     graph: &SecurityGraph,
     start: NodeIndex,
@@ -318,7 +329,9 @@ pub fn confirm(
         .collect();
     let single_edge_cuts = edges
         .iter()
-        .filter(|&&(_, _, e)| !reachable_without(graph, entry_idx, objective_idx, e))
+        .filter(|&&(_, _, e)| {
+            is_cuttable_edge(graph, e) && !reachable_without(graph, entry_idx, objective_idx, e)
+        })
         .map(|&(u, v, e)| link_of(graph, u, v, e))
         .collect();
     Some(ProvenChain {
@@ -377,7 +390,9 @@ pub fn prove_with(
                 .collect();
             let single_edge_cuts = steps
                 .iter()
-                .filter(|&&(_, _, e)| !reachable_without(graph, entry, objective, e))
+                .filter(|&&(_, _, e)| {
+                    is_cuttable_edge(graph, e) && !reachable_without(graph, entry, objective, e)
+                })
                 .map(|&(u, v, e)| link_of(graph, u, v, e))
                 .collect();
             chains.push(ProvenChain {
@@ -564,8 +579,11 @@ mod tests {
         assert_eq!(chain.strength(), 2);
         let relations: Vec<&str> = chain.links.iter().map(|l| l.relation.as_str()).collect();
         assert_eq!(relations, vec!["runs-as", "can-do/get/secrets"]);
-        // Linear path ⇒ either edge alone severs it (cut the binding or the SA link).
-        assert_eq!(chain.single_edge_cuts.len(), 2);
+        // Both edges sever the path, but the structural `runs-as` is not a cut
+        // candidate (you don't sever a pod from its SA) — the only cut is the RBAC
+        // grant, the meaningful, durable fix.
+        assert_eq!(chain.single_edge_cuts.len(), 1);
+        assert_eq!(chain.single_edge_cuts[0].relation, "can-do/get/secrets");
     }
 
     /// A privileged pod scheduled on a node yields a one-link Escape-to-Host chain

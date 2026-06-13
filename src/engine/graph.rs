@@ -307,6 +307,18 @@ pub enum Relation {
 }
 
 impl Relation {
+    /// Structural substrate — a workload to its image, its identity, or its host.
+    /// These connect a chain end to end but are never sensible *cut* candidates: you
+    /// don't sever a pod from its ServiceAccount to mitigate an RBAC path (the
+    /// meaningful cut is the privilege/movement edge). The minimal-cut search skips
+    /// these so a chain isn't reported as cuttable on a `runs-as` edge.
+    pub fn is_structural(&self) -> bool {
+        matches!(
+            self,
+            Relation::RunsAs | Relation::RunsImage | Relation::ScheduledOn
+        )
+    }
+
     /// A compact, stable label for the relation — used in diff signatures and in
     /// the threat-delta log lines. Two edges with the same endpoints and label are
     /// the same edge for diffing.
