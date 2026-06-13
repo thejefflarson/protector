@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use protector::engine::actuator::EnabledActions;
+use protector::engine::exploit_intel::KevCatalog;
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{CosignChecker, SignaturePolicy};
@@ -67,6 +69,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+
+    // Install a process-wide rustls CryptoProvider before any TLS is used. Several
+    // dependencies (sigstore, axum-server, reqwest, kube) link rustls, and both
+    // aws-lc-rs and ring providers are present — so rustls can't pick a default and
+    // panics on first use unless we choose one here. `.ok()`: a no-op if something
+    // already installed one.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let addr: SocketAddr = env_or("PROTECTOR_ADDR", "0.0.0.0:8443")
         .parse()
@@ -137,6 +146,61 @@ async fn main() -> Result<()> {
         vec![Box::new(signature), Box::new(mesh)],
         metrics.clone(),
     ));
+
+    // The mitigation engine is the product: it runs by default, out-of-band, with
+    // its *own* kube client (the webhook keeps its zero-cluster-access property).
+    // Set PROTECTOR_ENGINE=off only to fall back to the bare admission floor.
+    let engine_off = matches!(
+        env_or("PROTECTOR_ENGINE", "on")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "0" | "false" | "no"
+    );
+    if !engine_off {
+        // Hard mode is opt-in per action class: PROTECTOR_ENGINE_ENABLE is a
+        // comma-separated list (network,rbac,mount,identity). Empty = none
+        // (easy mode — proposals only). `escape` is intentionally not enableable.
+        let enabled = env_or("PROTECTOR_ENGINE_ENABLE", "");
+        let active =
+            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()));
+        // Falco ingest endpoint (falcosidekick POSTs alerts here) for the
+        // RuntimeEvidence "corroborated-now" signal. Unset = no runtime feed.
+        let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
+            .ok()
+            .and_then(|v| v.parse::<SocketAddr>().ok());
+        // Read-only findings dashboard endpoint. Unset = no dashboard.
+        let dashboard_addr = env::var("PROTECTOR_DASHBOARD_ADDR")
+            .ok()
+            .and_then(|v| v.parse::<SocketAddr>().ok());
+        // KEV catalogue (a synced ConfigMap of actively-exploited CVEs) for the
+        // ExploitIntel "exploited-in-wild" signal. Unset = no exploit intel.
+        let kev = match env::var("PROTECTOR_KEV_FILE") {
+            Ok(path) => KevCatalog::from_file(&path),
+            Err(_) => KevCatalog::empty(),
+        };
+        match kube::Client::try_default().await {
+            Ok(client) => {
+                tracing::info!("starting mitigation engine (event-driven observer)");
+                tokio::spawn(async move {
+                    if let Err(error) = protector::engine::run_watch(
+                        client,
+                        active,
+                        falco_addr,
+                        dashboard_addr,
+                        kev,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "mitigation engine stopped");
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no kube client; mitigation engine disabled, webhook only");
+            }
+        }
+    }
 
     server::serve(addr, cert, key, engine, metrics).await
 }

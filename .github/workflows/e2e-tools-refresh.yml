@@ -1,0 +1,89 @@
+name: refresh e2e tool pins
+# Dependabot's github-actions ecosystem bumps `uses: …@sha` pins, but it can't see
+# the K3D_VERSION/HELM_VERSION (+ their SHA-256s) baked into e2e.yml's install step.
+# This keeps those current: on a schedule, recompute from the official release
+# artifacts, validate the new pins by running the e2e against the bump branch, and
+# auto-merge only if that e2e is green (a new k3d occasionally breaks a flag — the
+# e2e is the gate, so the merge is safe without a human).
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # dispatch the e2e workflow on the bump branch
+on:
+  schedule:
+    - cron: "0 6 1 * *" # 06:00 UTC on the 1st of each month
+  workflow_dispatch:
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WF: .github/workflows/e2e.yml
+      BRANCH: ci/refresh-e2e-tools
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Resolve latest versions + checksums, rewrite pins
+        id: bump
+        run: |
+          set -euo pipefail
+          # `releases/latest` excludes prereleases, so we never pin an rc.
+          k3d_new=$(gh api repos/k3d-io/k3d/releases/latest --jq .tag_name)
+          helm_new=$(gh api repos/helm/helm/releases/latest --jq .tag_name)
+          k3d_cur=$(grep -oP 'K3D_VERSION=\K\S+' "$WF")
+          helm_cur=$(grep -oP 'HELM_VERSION=\K\S+' "$WF")
+          echo "k3d:  $k3d_cur -> $k3d_new"
+          echo "helm: $helm_cur -> $helm_new"
+          if [ "$k3d_new" = "$k3d_cur" ] && [ "$helm_new" = "$helm_cur" ]; then
+            echo "already current"; echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # k3d has no per-asset checksum sidecar — download the linux-amd64 binary
+          # (the arch the e2e runs on) and compute it. helm publishes a .sha256sum.
+          curl -fsSL -o k3d "https://github.com/k3d-io/k3d/releases/download/${k3d_new}/k3d-linux-amd64"
+          k3d_sha=$(sha256sum k3d | awk '{print $1}')
+          helm_sha=$(curl -fsSL "https://get.helm.sh/helm-${helm_new}-linux-amd64.tar.gz.sha256sum" | awk '{print $1}')
+          [ -n "$helm_sha" ] || { echo "no helm checksum for ${helm_new}" >&2; exit 1; }
+          sed -i \
+            -e "s|\(K3D_VERSION=\).*|\1${k3d_new}|" \
+            -e "s|\(K3D_SHA256=\).*|\1${k3d_sha}|" \
+            -e "s|\(HELM_VERSION=\).*|\1${helm_new}|" \
+            -e "s|\(HELM_SHA256=\).*|\1${helm_sha}|" \
+            "$WF"
+          rm -f k3d
+          {
+            echo "changed=true"
+            echo "k3d_new=$k3d_new"
+            echo "helm_new=$helm_new"
+          } >> "$GITHUB_OUTPUT"
+      - name: Push bump branch + open PR
+        if: steps.bump.outputs.changed == 'true'
+        id: pr
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add "$WF"
+          git commit -m "ci: bump e2e k3d ${{ steps.bump.outputs.k3d_new }} + helm ${{ steps.bump.outputs.helm_new }}"
+          git push -f origin "$BRANCH"
+          title="ci: refresh e2e tool pins (k3d ${{ steps.bump.outputs.k3d_new }}, helm ${{ steps.bump.outputs.helm_new }})"
+          body="Automated monthly refresh. SHA-256s recomputed in this run from the official release artifacts. Auto-merges once the e2e (dispatched against this branch, so it exercises the NEW pins) is green."
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$BRANCH" --base main --title "$title" --body "$body"
+          fi
+      - name: Validate the new pins — run the e2e against the bump branch
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # A dispatched run uses the workflow file FROM --ref, so this exercises the
+          # bumped e2e.yml (new k3d/helm), unlike a reusable-workflow call.
+          gh workflow run e2e.yml --ref "$BRANCH"
+          # Grab the run we just dispatched on this branch and block on its result.
+          sleep 10
+          run_id=$(gh run list --workflow=e2e.yml --branch="$BRANCH" --event=workflow_dispatch \
+            --limit=1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$run_id" ] || { echo "could not find dispatched e2e run" >&2; exit 1; }
+          echo "watching e2e run $run_id"
+          gh run watch "$run_id" --exit-status # non-zero if the e2e fails ⇒ no merge
+      - name: Auto-merge (e2e passed)
+        if: steps.bump.outputs.changed == 'true'
+        run: gh pr merge "$BRANCH" --squash --delete-branch

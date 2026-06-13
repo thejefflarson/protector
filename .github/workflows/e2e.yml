@@ -1,0 +1,53 @@
+name: e2e (k3d)
+# The engine's cluster-facing glue — watch streams, the kube actuator's
+# apply/delete, the Falco ingest, the isolation NetworkPolicy + self-revert — runs
+# only against a real API server, so it's exercised here on a k3d cluster (k3d is
+# k3s: same flannel + kube-router CNI as the Pis). See scripts/e2e.sh.
+#
+# Opt-in (workflow_dispatch), NOT per-PR: it builds an image and stands up a
+# cluster — minutes, not seconds. It runs on a GitHub-hosted runner because it
+# needs a local Docker daemon; the self-hosted protector-runners offload builds to
+# a remote BuildKit and have no local daemon for k3d. The same script runs locally:
+#   scripts/e2e.sh
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout protector
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Checkout cluster (for the Helm chart)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # The protector Helm chart lives in the cluster repo. Same owner as this
+          # repo; if it's private, add a PAT with read access as a secret and set
+          # `token:` here.
+          repository: ${{ github.repository_owner }}/cluster
+          path: cluster
+      - name: Install k3d + helm
+        # Pinned versions + sha256 verification — no `curl | bash` of a mutable
+        # upstream script (the repo pins all GitHub Actions to a SHA for the same
+        # reason). jq, kubectl, docker are preinstalled on ubuntu-latest runners.
+        run: |
+          set -euo pipefail
+          K3D_VERSION=v5.8.3
+          K3D_SHA256=dbaa79a76ace7f4ca230a1ff41dc7d8a5036a8ad0309e9c54f9bf3836dbe853e
+          HELM_VERSION=v3.16.4
+          HELM_SHA256=fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+          curl -fsSL -o k3d "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          echo "${K3D_SHA256}  k3d" | sha256sum -c -
+          install -m 0755 k3d /usr/local/bin/k3d
+          curl -fsSL -o helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          k3d version
+          helm version
+          kubectl version --client
+      - name: Run the e2e
+        env:
+          CHART_PATH: ${{ github.workspace }}/cluster/charts/protector
+        run: scripts/e2e.sh

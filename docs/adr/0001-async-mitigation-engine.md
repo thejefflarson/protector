@@ -1,6 +1,6 @@
 # 0001. Async mitigation engine: propose / prove / respond, local-first
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-11
 
 ## Context
