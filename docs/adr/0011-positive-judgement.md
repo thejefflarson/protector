@@ -43,9 +43,13 @@ only reason about the remote attack surface.
 
 ### 1. The model is a bidirectional corroboration source (revises ADR-0008)
 
-The adjudicator keeps its veto and the engine gains **promotion** to auto-eligible
-for proven, non-corroborated chains (behind the `judgement` opt-in). Two lanes, by
-how strong the *deterministic* signal is:
+**The model is consulted only where there is evidence to weigh** — a CVE foothold
+or a runtime signal. Asking a model to judge an evidence-empty chain (`(no CVE),
+(no runtime)`) is asking it to invent a threat from nothing; empirically that is
+exactly where small models flail (over-eager *or* timid, depending on framing). A
+chain with neither is a deterministic *latent/structural proposal* and is never
+sent to the model. Two evidence-bearing lanes, behind the `judgement` opt-in for the
+non-corroborated one:
 
 - **Veto (unchanged).** On a runtime-corroborated chain, `Refuted`/`Uncertain`
   downgrades to a proposal.
@@ -57,14 +61,17 @@ how strong the *deterministic* signal is:
   ("log4j must promote"): the positive signal is deterministic (KEV/critical +
   exposed + reachable, not a model guess), so a weak local model can't block it, and
   the model is back to its safe subtractive role — it can only veto a genuinely
-  non-exploitable/mitigated CVE. *Real-world note: ≤3B local models tested all
-  abstain (`Uncertain`/`Refuted`) even on log4shell, so making the model the
-  positive gate was the wrong mechanism; the deterministic foothold is.*
-- **Speculative promotion (model-positive).** A proven chain from an exposed entry
-  with **no** CVE foothold can still be raised by an affirmative `Exploitable`
-  verdict — the model judging an end-to-end game-over path. Only a real, capable
-  (frontier-tier) model emits `Exploitable`; `NullAdjudicator` never does, so this
-  lane is dark without one.
+  non-exploitable/mitigated CVE.
+
+*Real-world note (the `engine::adjudicate` competence probe against local Ollama):
+with a hedging prompt, ≤3B models abstain even on log4shell; with a decisive
+analyst prompt they over-promote evidence-empty paths. Anchoring the prompt on the
+evidence — and never sending an evidence-empty chain at all — got `qwen3:1.7b` and
+`granite4:3b-h` to classify CALIBRATED (promote log4shell, refuse the empty case),
+and no model wrongly refuted a real foothold. A model **replaces the analyst** on
+the evidence-bearing judgement; deterministic proof carries the rest. There is no
+speculative "no-evidence game-over" lane — that was a misframing that fed the model
+nothing and asked for a verdict.*
 
 Promotion is contained so a wrong or prompt-injected positive cannot do real harm:
 
@@ -76,12 +83,14 @@ Promotion is contained so a wrong or prompt-injected positive cannot do real har
   fail-safe included), self-reverting — and, as above, unable to sever
   control-plane access. A wrong "yes" is at worst a temporary, auto-reverting cut of
   a workload's *network*.
-- **Promotion needs an affirmative verdict only a real model emits.** `Exploitable`
-  is distinct from the neutral `Confirmed`; `NullAdjudicator` returns `Confirmed`
-  and therefore **never promotes**. Absent a model, behaviour is exactly ADR-0009.
-- **Promotion runs on the escalation (frontier) tier**, on **fenced** evidence
-  (untrusted CVE/rule/node strings delimited and labelled, closing the
-  prompt-injection finding).
+- **The promotion signal is deterministic, not a model guess.** A foothold promotes
+  on the proven facts (exposed ∧ KEV/critical ∧ reachable); the model only *vetoes*
+  (`Refuted`). `NullAdjudicator` confirms, so a foothold promotes with no model at
+  all — which is the point ("log4j must promote") and safe, because the trigger is
+  deterministic and the action reversible.
+- **Evidence is fenced** in the prompt (untrusted CVE/rule/node strings delimited and
+  labelled), closing the prompt-injection finding; a capable model is the
+  escalation tier for the veto.
 - **It is its own opt-in:** a `judgement` action class, off by default and separate
   from the runtime-corroborated `network` class.
 
@@ -126,8 +135,11 @@ Harder / accepted downsides:
 
 ## Validation
 
-The e2e gains a remote-exploitation promotion case: an internet-exposed entry on a
-proven path to a secret, no live Falco signal, and a positive `Exploitable` verdict
-from a stubbed adjudicator → assert the engine promotes, applies the bounded cut,
-and self-reverts once the chain stops being proven. The default (no model) must
-still apply nothing — promotion requires the affirmative verdict.
+The e2e proves the log4j case end-to-end: an internet-exposed `web` with a CRITICAL
+`CVE-2021-44228` (a trivy `VulnerabilityReport`) reaching a secret, **no model and no
+Falco signal** → the deterministic foothold auto-promotes, the engine applies the
+bounded cut and labels it `foothold — auto-eligible`, then self-reverts once the
+chain stops being proven. (The CVE attaches only because of the canonical image-key
+fix — the pod's short ref and the scanner's qualified ref resolve to one node.) The
+model's evidence-bearing judgement is covered by the `engine::adjudicate` competence
+probe rather than the e2e, since it needs a live model.

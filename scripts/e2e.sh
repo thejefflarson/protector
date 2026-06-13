@@ -41,6 +41,10 @@ ENTRY="workload/${APP_NS}/Pod/web"
 OBJECTIVE="secret/${APP_NS}/session-key"
 CM_VERSION="${CM_VERSION:-v1.16.2}"
 
+# Isolate the kubeconfig to a throwaway file so a caller's multi-path KUBECONFIG
+# (which makes k3d refuse to write/select the context) can't break the run.
+export KUBECONFIG="$(mktemp -t protector-e2e-kubeconfig)"
+
 # --- output helpers -----------------------------------------------------------
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
 log()  { echo "${YELLOW}==>${OFF} $*"; }
@@ -59,6 +63,7 @@ log "chart: $CHART_PATH"
 PF_PIDS=()
 cleanup() {
   for p in "${PF_PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  rm -f "$KUBECONFIG" 2>/dev/null || true
   if [ "${KEEP:-0}" = "1" ]; then
     log "KEEP=1 — leaving cluster '$CLUSTER' up (delete with: k3d cluster delete $CLUSTER)"
   else
@@ -202,73 +207,7 @@ kubectl -n "$APP_NS" delete networkpolicy store-ingress
 wait_until "engine deletes its managed NetworkPolicy" 120 managed_np_absent
 pass "engine reverted its compensating control once the chain stopped being proven (Q5 invariant)"
 
-step "9/12  JUDGEMENT: the model promotes a proven remote-exploitation chain (no Falco signal)"
-# A stub adjudicator that always returns the positive verdict, in OpenAI chat shape:
-# choices[0].message.content is itself the JSON verdict the engine parses.
-kubectl -n "$APP_NS" apply -f - <<'YAML'
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: model-stub, namespace: app }
-spec:
-  replicas: 1
-  selector: { matchLabels: { app: model-stub } }
-  template:
-    metadata: { labels: { app: model-stub } }
-    spec:
-      containers:
-        - name: echo
-          image: hashicorp/http-echo:0.2.3
-          args:
-            - "-listen=:5678"
-            - '-text={"choices":[{"message":{"content":"{\"verdict\":\"exploitable\",\"reason\":\"e2e remote exploitation\"}"}}]}'
-          ports: [{ containerPort: 5678 }]
----
-apiVersion: v1
-kind: Service
-metadata: { name: model-stub, namespace: app }
-spec:
-  selector: { app: model-stub }
-  ports: [{ port: 5678, targetPort: 5678 }]
-YAML
-kubectl -n "$APP_NS" rollout status deploy/model-stub --timeout=120s
-# Re-create the durable allow (step 8 deleted it) so web → store is provable again.
-kubectl -n "$APP_NS" apply -f - <<'YAML'
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: store-ingress, namespace: app }
-spec:
-  podSelector: { matchLabels: { role: store } }
-  policyTypes: [Ingress]
-  ingress:
-    - from: [{ podSelector: { matchLabels: { role: web } } }]
-YAML
-# Enable the judgement opt-in and point the engine at the stub model. The pod
-# restart clears the in-memory runtime store, so web is NOT corroborated — promotion
-# is the only path to auto-eligibility, and we send no Falco event.
-helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
-  --set 'engine.enable=network\,judgement' \
-  --set engine.model.endpoint=http://model-stub.app:5678/ \
-  --wait --timeout 180s
-kubectl -n "$NS" rollout status deploy/protector --timeout=120s
-pf_reset
-wait_until "engine promotes + applies a managed NetworkPolicy with no runtime signal" 150 managed_np_present
-pass "model promotion drove an auto-cut with no live corroboration (ADR-0011)"
-finding_promoted() {
-  curl -fsS localhost:8080/findings 2>/dev/null \
-    | jq -e --arg e "$ENTRY" --arg o "$OBJECTIVE" \
-        '[.[] | select(.entry==$e and .objective==$o and .promoted==true and .corroborated==false
-                       and .disposition=="promoted (model judgement) — auto-eligible")] | length > 0' \
-        >/dev/null 2>&1
-}
-wait_until "dashboard classifies the chain as model-promoted (not runtime-live)" 30 finding_promoted
-pass "dashboard shows the chain promoted by model judgement, not runtime corroboration"
-
-step "10/12  SELF-REVERT: remove the durable allow; promotion no longer holds, engine reverts"
-kubectl -n "$APP_NS" delete networkpolicy store-ingress
-wait_until "engine reverts the promotion-driven cut" 120 managed_np_absent
-pass "engine reverted the promotion-driven control once the chain stopped being proven"
-
-step "11/12  LOG4J: a proven foothold (exposed + critical CVE) auto-promotes — NO model, NO Falco"
+step "9/10  LOG4J: a proven foothold (exposed + critical CVE) auto-promotes — NO model, NO Falco"
 # Minimal trivy VulnerabilityReport CRD (open schema) so the engine's Vulnerability
 # port has something to list. (trivy-operator itself isn't needed for the test.)
 kubectl apply -f - <<'YAML'
@@ -335,10 +274,10 @@ finding_foothold() {
 wait_until "dashboard classifies log4j as a promoted foothold" 30 finding_foothold
 pass "dashboard shows log4j as 'foothold — auto-eligible' (exposed + critical CVE, model-free)"
 
-step "12/12  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts"
+step "10/10  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
 wait_until "engine reverts the foothold cut" 120 managed_np_absent
 pass "engine reverted the foothold control once the chain stopped being proven"
 
 echo
-echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated, model-promoted, and deterministic-foothold (log4j) action paths, the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
+echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated and deterministic-foothold (log4j) action paths, the isolation actuator, and self-revert all verified against a real API server on the prod CNI."

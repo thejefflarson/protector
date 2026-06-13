@@ -32,7 +32,7 @@ scripts/e2e.sh               # full engine e2e on a throwaway k3d cluster
 
 `scripts/e2e.sh` stands up k3d (k3s — the same flannel + kube-router CNI as prod),
 drives a real exposed→reaches→secret chain, exercises both the runtime-corroborated
-and model-promoted action paths, and asserts the engine quarantines the workload and
+and deterministic-foothold (log4j) action paths, and asserts the engine quarantines the workload and
 then **self-reverts**. A gated real-model check lives in `cargo test … --ignored`
 (see `engine::adjudicate` — point `PROTECTOR_E2E_MODEL` at an Ollama).
 
@@ -53,7 +53,7 @@ chain and its disposition.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `PROTECTOR_ENGINE` | `on` | `off`/`0`/`false` runs the bare webhook floor, no engine |
-| `PROTECTOR_ENGINE_ENABLE` | — | comma list of auto-applied action classes (`network`,`rbac`,`mount`,`identity`); empty = propose-only. Only `network` is live-actuatable; `escape` is never enableable. Add `judgement` to let a proven foothold (or a frontier model's positive verdict) promote a chain to auto-eligible (ADR-0011; needs `network` to cut) |
+| `PROTECTOR_ENGINE_ENABLE` | — | comma list of auto-applied action classes (`network`,`rbac`,`mount`,`identity`); empty = propose-only. Only `network` is live-actuatable; `escape` is never enableable. Add `judgement` to let a proven foothold (internet-exposed + KEV/critical CVE, e.g. log4shell) auto-promote to a cut, with the model as an optional veto (ADR-0011; needs `network` to cut) |
 | `PROTECTOR_ENGINE_ACTUATOR` | `dryrun` | live-cut mechanism: `networkpolicy` (flannel — this cluster), `adminnetworkpolicy` (Cilium/Calico), `dryrun`. Unknown/empty fails safe to dry-run |
 | `PROTECTOR_DASHBOARD_ADDR` | — | findings dashboard listen addr; unset = off |
 | `PROTECTOR_FALCO_ADDR` | — | Falco/falcosidekick runtime-evidence ingest addr; unset = no runtime feed |

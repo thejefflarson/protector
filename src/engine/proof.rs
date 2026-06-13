@@ -180,16 +180,6 @@ fn entry_corroborated(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     )
 }
 
-/// Whether `entry` is an internet-exposed workload — the remote attack surface.
-/// Model promotion (ADR-0011) is scoped to these: we auto-act on *remote*
-/// exploitation, not arbitrary internal paths.
-pub fn is_internet_exposed(graph: &SecurityGraph, entry: &NodeKey) -> bool {
-    matches!(
-        graph.index_of(entry).and_then(|i| graph.inner().node_weight(i)),
-        Some(Node::Workload(w)) if w.exposure == Exposure::Internet
-    )
-}
-
 /// BFS over proof-grade movement edges from `start`. Returns, for every reachable
 /// node, the (predecessor, edge) it was first reached by — a shortest-path tree.
 /// If `excluded` is set, that one edge is skipped (used to test cuts).

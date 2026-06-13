@@ -140,16 +140,17 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0008 + ADR-0011). The model judges; deterministic proof
-        // sets the default. Three cases, all behind the `judgement` opt-in for the
-        // non-corroborated lanes:
-        // - Corroborated chain → veto path: a non-confirming verdict downgrades it.
+        // Adjudicate (ADR-0008 + ADR-0011). The model is consulted ONLY where there
+        // is evidence to weigh — never on an evidence-empty chain (asking a model to
+        // judge "(no CVE), (no runtime)" invents threats from nothing). Two lanes:
+        // - Corroborated chain (runtime evidence) → veto path: a non-confirming
+        //   verdict downgrades it to a proposal. The model can only subtract.
         // - Proven FOOTHOLD (internet-exposed ∧ exploited-in-wild/critical CVE ∧
         //   reachable — i.e. log4shell) → auto-promote UNLESS the model *confidently
         //   refutes* it. Uncertain / no model leaves the deterministic foothold to
         //   govern, so a weak local model can't silently block a known foothold.
-        // - No foothold but exposed + actionable → only an affirmative `Exploitable`
-        //   verdict promotes (the speculative, frontier-tier judgement).
+        // A chain with neither runtime nor a foothold has no exploitation evidence —
+        // it stays a deterministic latent/structural proposal; the model isn't asked.
         for chain in chains.iter_mut() {
             if chain.corroborated {
                 let verdict = self.adjudicator.judge(chain, &graph).await;
@@ -161,36 +162,26 @@ impl Engine {
                         "adjudicator vetoed auto-action; downgraded to proposal"
                     );
                 }
-            } else if self.active.judgement_enabled() && !chain.single_edge_cuts.is_empty() {
-                if chain.foothold.is_some() {
-                    let verdict = self.adjudicator.judge(chain, &graph).await;
-                    if let adjudicate::Verdict::Refuted(reason) = &verdict {
-                        tracing::info!(
-                            entry = %chain.entry.0,
-                            objective = %chain.objective.0,
-                            %reason,
-                            "adjudicator refuted foothold; left as proposal"
-                        );
-                    } else {
-                        chain.promoted = true;
-                        tracing::warn!(
-                            entry = %chain.entry.0,
-                            objective = %chain.objective.0,
-                            foothold = chain.foothold.map(|f| f.technique_id),
-                            "foothold promoted to auto-action (exposed + exploited/critical CVE, ADR-0011)"
-                        );
-                    }
-                } else if proof::is_internet_exposed(&graph, &chain.entry) {
-                    let verdict = self.adjudicator.judge(chain, &graph).await;
-                    if let adjudicate::Verdict::Exploitable(reason) = &verdict {
-                        chain.promoted = true;
-                        tracing::warn!(
-                            entry = %chain.entry.0,
-                            objective = %chain.objective.0,
-                            %reason,
-                            "model promoted chain to auto-action (positive judgement, ADR-0011)"
-                        );
-                    }
+            } else if self.active.judgement_enabled()
+                && chain.foothold.is_some()
+                && !chain.single_edge_cuts.is_empty()
+            {
+                let verdict = self.adjudicator.judge(chain, &graph).await;
+                if let adjudicate::Verdict::Refuted(reason) = &verdict {
+                    tracing::info!(
+                        entry = %chain.entry.0,
+                        objective = %chain.objective.0,
+                        %reason,
+                        "adjudicator refuted foothold; left as proposal"
+                    );
+                } else {
+                    chain.promoted = true;
+                    tracing::warn!(
+                        entry = %chain.entry.0,
+                        objective = %chain.objective.0,
+                        foothold = chain.foothold.map(|f| f.technique_id),
+                        "foothold promoted to auto-action (exposed + exploited/critical CVE, ADR-0011)"
+                    );
                 }
             }
         }
