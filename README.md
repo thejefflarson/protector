@@ -97,20 +97,27 @@ So a foothold makes a chain *latent* (propose); a live runtime signal makes it
 
 ### Where the model fits
 
-A model never decides to act. It has two safe roles (ADR-0008):
+The model judges; deterministic proof always establishes the path. It has three
+roles (ADR-0008, ADR-0011):
 
-- **Adjudicate** (its primary job): when a chain meets the full bar, the model
-  judges whether it's *contextually real* — is the CVE actually exploitable in
-  *this* deployment, is that Falco shell an attacker or a benign exec? Its verdict
-  is **one-way**: it can only *veto* (downgrade an eligible auto-cut to a human
-  proposal), never authorize. A wrong model causes at worst a missed auto-action,
-  never a bad cut. It defaults to skeptic, and it never *exercises* an exploit —
-  we prove preconditions, not exploitation.
+- **Veto** (ADR-0008): on a live-corroborated chain, the model downgrades a false
+  positive to a human proposal — a one-way subtraction that can never manufacture a
+  cut. It defaults to skeptic and never *exercises* an exploit (we prove
+  preconditions, not exploitation).
+- **Promote** (ADR-0011, opt-in `judgement`): on a proven chain from an
+  internet-exposed entry, an affirmative *exploitable* verdict raises it to
+  auto-eligible — the positive "web → vulnerable pod → game over" judgement
+  deterministic proof can't make. Contained: proof still establishes the path
+  (the model never invents an edge), the action stays the same reversible,
+  self-reverting cut, and only a real model promotes (absent one, nothing is
+  promoted). Operator/control-plane access is out of scope and defended in depth —
+  the network cut can't sever a `kubectl exec` session.
 - **Propose** (secondary): suggest candidate chains, which the deterministic gate
   accepts only if every link is a real proof-grade edge.
 
-Both run local-first (an in-cluster Ollama by default) so the graph never leaves
-the cluster; a frontier model is the escalation for high-stakes, ambiguous chains.
+All run local-first (an in-cluster Ollama by default) so the graph never leaves the
+cluster; a frontier model is the escalation, and promotion runs on it with the
+untrusted evidence fenced in the prompt.
 
 ### Easy mode (default) and hard mode
 
@@ -171,7 +178,7 @@ everywhere). Enforcement is opt-in per policy, one namespace/label at a time.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `PROTECTOR_ENGINE` | `on` | set `off`/`0`/`false` to run the bare webhook floor with no engine |
-| `PROTECTOR_ENGINE_ENABLE` | — | comma list of auto-applied action classes (`network`,`rbac`,`mount`,`identity`); empty = propose-only. Only `network` is live-actuatable today; `escape` is never enableable |
+| `PROTECTOR_ENGINE_ENABLE` | — | comma list of auto-applied action classes (`network`,`rbac`,`mount`,`identity`); empty = propose-only. Only `network` is live-actuatable today; `escape` is never enableable. Add `judgement` (ADR-0011) to let a model *promote* a proven, internet-exposed chain to auto-eligible (needs a model endpoint + `network` to actually cut) |
 | `PROTECTOR_ENGINE_ACTUATOR` | `dryrun` | live-cut mechanism when a class is enabled: `networkpolicy` (flannel/kube-router — this cluster), `adminnetworkpolicy` (ANP-capable CNI), or `dryrun` (log only) |
 | `PROTECTOR_DASHBOARD_ADDR` | — | listen address for the read-only findings dashboard (`/` HTML, `/findings` JSON); unset = no dashboard |
 | `PROTECTOR_FALCO_ADDR` | — | listen address for the Falco/falcosidekick ingest endpoint (the runtime-corroboration feed); unset = no runtime feed |

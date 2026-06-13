@@ -84,6 +84,11 @@ pub struct ProvenChain {
     /// it `false` — a one-way veto demoting an eligible auto-action to a human
     /// proposal. Absent a model it stays `true` and the deterministic bar governs.
     pub adjudicated: bool,
+    /// Whether the model *promoted* this proven-but-uncorroborated chain to
+    /// auto-eligible (ADR-0011) — its positive "game-over" judgement on an
+    /// internet-exposed entry. Defaults `false`; only an affirmative model verdict
+    /// (never `NullAdjudicator`) sets it, and only behind the `judgement` opt-in.
+    pub promoted: bool,
     /// The path, entry → objective, in order.
     pub links: Vec<Link>,
     /// Edges on the path whose removal alone disconnects `entry` from `objective`
@@ -107,13 +112,12 @@ impl ProvenChain {
         self.foothold.is_some() && !self.corroborated
     }
 
-    /// Whether the chain is **live-actionable** (ADR-0009): a proven (reachable ∧
-    /// privileged) chain with live runtime corroboration. Live evidence is
-    /// sufficient on its own — a KEV foothold is *not* required — and the
-    /// adjudicator's one-way veto is the false-positive filter that makes that
-    /// safe. This gates adjudication and auto-action.
+    /// Whether the chain is **live-actionable**: either live runtime corroboration
+    /// (ADR-0009) or a positive model promotion (ADR-0011) raises a proven chain to
+    /// auto-eligible. Both are filtered by the adjudicator's veto and bounded by the
+    /// reversible, self-reverting action. This gates auto-action.
     pub fn meets_action_bar(&self) -> bool {
-        self.corroborated
+        self.corroborated || self.promoted
     }
 
     /// Log the chain as a structured line, including the ATT&CK technique it
@@ -173,6 +177,16 @@ fn entry_corroborated(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     matches!(
         graph.inner().node_weight(entry),
         Some(Node::Workload(w)) if !w.runtime.is_empty()
+    )
+}
+
+/// Whether `entry` is an internet-exposed workload — the remote attack surface.
+/// Model promotion (ADR-0011) is scoped to these: we auto-act on *remote*
+/// exploitation, not arbitrary internal paths.
+pub fn is_internet_exposed(graph: &SecurityGraph, entry: &NodeKey) -> bool {
+    matches!(
+        graph.index_of(entry).and_then(|i| graph.inner().node_weight(i)),
+        Some(Node::Workload(w)) if w.exposure == Exposure::Internet
     )
 }
 
@@ -324,6 +338,7 @@ pub fn confirm(
         foothold: entry_foothold(graph, entry_idx),
         corroborated: entry_corroborated(graph, entry_idx),
         adjudicated: true,
+        promoted: false,
         links,
         single_edge_cuts,
     })
@@ -382,6 +397,7 @@ pub fn prove_with(
                 foothold,
                 corroborated,
                 adjudicated: true,
+                promoted: false,
                 links,
                 single_edge_cuts,
             });

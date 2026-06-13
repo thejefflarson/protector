@@ -104,6 +104,9 @@ pub struct Justification {
     pub foothold: bool,
     pub corroborated: bool,
     pub adjudicated: bool,
+    /// The model promoted this chain (ADR-0011) — a positive judgement standing in
+    /// for runtime corroboration as the auto-action trigger.
+    pub promoted: bool,
 }
 
 impl Justification {
@@ -115,6 +118,7 @@ impl Justification {
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
             adjudicated: chain.adjudicated,
+            promoted: chain.promoted,
         }
     }
 }
@@ -136,15 +140,15 @@ impl Mitigation {
         cut_signature(&self.cut)
     }
 
-    /// Whether some justifying chain is **live-actionable** (ADR-0009): live runtime
-    /// corroboration on a proven (reachable ∧ privileged) chain, not vetoed by the
-    /// adjudicator (ADR-0008). A KEV foothold is *not* required — live evidence is
-    /// sufficient on its own; a foothold without corroboration is the propose-only
-    /// latent case. The actuator requires this before any auto-application.
+    /// Whether some justifying chain is **auto-actionable**: a proven (reachable ∧
+    /// privileged) chain that is either live-corroborated (ADR-0009) or
+    /// model-promoted (ADR-0011), and not vetoed by the adjudicator (ADR-0008). A KEV
+    /// foothold is not required. The actuator requires this before any
+    /// auto-application.
     pub fn is_live_corroborated(&self) -> bool {
         self.justifications
             .iter()
-            .any(|j| j.corroborated && j.adjudicated)
+            .any(|j| (j.corroborated || j.promoted) && j.adjudicated)
     }
 }
 

@@ -140,12 +140,16 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0008): the model judges chains that already meet the full
-        // action bar — is this contextually real, or a false positive? The verdict
-        // is one-way: it can only veto (set `adjudicated = false`), demoting an
-        // eligible auto-action to a human proposal. It can never authorize.
+        // Adjudicate. Two directions (ADR-0008 + ADR-0011):
+        // - Veto: a live-corroborated chain is judged; a non-confirming verdict
+        //   downgrades it to a proposal. The model can only subtract here.
+        // - Promote: when the `judgement` opt-in is on, the model may raise a proven,
+        //   internet-exposed, actionable chain that is NOT yet corroborated to
+        //   auto-eligible, with an affirmative `Exploitable` verdict. Only a real
+        //   model emits that (NullAdjudicator never promotes); the action stays the
+        //   bounded, reversible, self-reverting cut.
         for chain in chains.iter_mut() {
-            if chain.meets_action_bar() {
+            if chain.corroborated {
                 let verdict = self.adjudicator.judge(chain, &graph).await;
                 if !verdict.is_confirmed() {
                     chain.adjudicated = false;
@@ -153,6 +157,20 @@ impl Engine {
                         entry = %chain.entry.0,
                         objective = %chain.objective.0,
                         "adjudicator vetoed auto-action; downgraded to proposal"
+                    );
+                }
+            } else if self.active.judgement_enabled()
+                && !chain.single_edge_cuts.is_empty()
+                && proof::is_internet_exposed(&graph, &chain.entry)
+            {
+                let verdict = self.adjudicator.judge(chain, &graph).await;
+                if let adjudicate::Verdict::Exploitable(reason) = &verdict {
+                    chain.promoted = true;
+                    tracing::warn!(
+                        entry = %chain.entry.0,
+                        objective = %chain.objective.0,
+                        %reason,
+                        "adjudicator promoted chain to auto-action (positive judgement, ADR-0011)"
                     );
                 }
             }

@@ -56,6 +56,10 @@ fn action_from_name(name: &str) -> Option<ProposedAction> {
 #[derive(Debug, Default, Clone)]
 pub struct EnabledActions {
     enabled: HashSet<ProposedAction>,
+    /// The `judgement` opt-in (ADR-0011): allow the model to *promote* a proven,
+    /// internet-exposed chain to auto-eligible. Separate from an action class — it
+    /// gates promotion, not the cut; the cut still needs its own class (`network`).
+    judgement: bool,
 }
 
 impl EnabledActions {
@@ -70,12 +74,21 @@ impl EnabledActions {
         self
     }
 
-    /// Build from operator-facing class names (e.g. `["network", "rbac"]`).
-    /// Unknown or non-enableable names (like `escape`) are ignored.
+    /// Enable model promotion (builder-style, for tests).
+    pub fn enable_judgement(mut self) -> Self {
+        self.judgement = true;
+        self
+    }
+
+    /// Build from operator-facing class names (e.g. `["network", "judgement"]`).
+    /// `judgement` toggles model promotion; other unknown / non-enableable names
+    /// (like `escape`) are ignored.
     pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         let mut policy = Self::none();
         for name in names {
-            if let Some(action) = action_from_name(name) {
+            if name.trim() == "judgement" {
+                policy.judgement = true;
+            } else if let Some(action) = action_from_name(name) {
                 policy = policy.enable(action);
             }
         }
@@ -86,6 +99,14 @@ impl EnabledActions {
         self.enabled.contains(&action)
     }
 
+    /// Whether model promotion (ADR-0011) is permitted.
+    pub fn judgement_enabled(&self) -> bool {
+        self.judgement
+    }
+
+    /// No action class enabled (the actuator is dry-run). Note `judgement` alone
+    /// leaves this true: promotion surfaces findings but applies nothing until an
+    /// action class (`network`) is also enabled.
     pub fn is_empty(&self) -> bool {
         self.enabled.is_empty()
     }
@@ -627,12 +648,21 @@ mod tests {
             foothold,
             corroborated,
             adjudicated,
+            promoted: false,
         }
     }
 
     /// A justification that is live-actionable (corroborated + adjudicated).
     fn corroborated() -> Justification {
         justification(true, true, true)
+    }
+
+    /// A justification auto-actionable via model promotion, not runtime corroboration.
+    fn promoted() -> Justification {
+        Justification {
+            promoted: true,
+            ..justification(false, false, true)
+        }
     }
 
     fn health(entries: &[(&str, Health)]) -> HealthReport {
@@ -865,6 +895,30 @@ mod tests {
             decide(&net(), &EnabledActions::none(), &BlastRadius::default()),
             Decision::Propose(_)
         ));
+    }
+
+    #[test]
+    fn decide_auto_applies_a_model_promoted_chain() {
+        // ADR-0011: a model-promoted justification (no runtime corroboration) is
+        // auto-actionable just like a live one, gated by the same bounded action.
+        let promoted_net = Mitigation {
+            justifications: vec![promoted()],
+            ..mitigation(
+                "workload/app/Pod/web",
+                "reaches/Tcp/5432",
+                "workload/ext/Pod/attacker",
+                ProposedAction::DenyNetworkPath,
+            )
+        };
+        let enabled = EnabledActions::none().enable(ProposedAction::DenyNetworkPath);
+        assert_eq!(
+            decide(&promoted_net, &enabled, &BlastRadius::default()),
+            Decision::AutoApply
+        );
+        // The `judgement` opt-in toggles promotion (consumed in the engine loop), not
+        // the cut's action class.
+        assert!(EnabledActions::from_names(["judgement"]).judgement_enabled());
+        assert!(!EnabledActions::from_names(["network"]).judgement_enabled());
     }
 
     #[test]

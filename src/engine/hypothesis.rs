@@ -295,6 +295,7 @@ mod tests {
             foothold,
             corroborated: false,
             adjudicated: true,
+            promoted: false,
             links: vec![Link {
                 from: key("workload/app/Pod/x"),
                 to: key("host/node-1"),

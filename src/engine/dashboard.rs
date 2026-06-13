@@ -28,7 +28,10 @@ pub struct Finding {
     pub foothold: bool,
     pub corroborated: bool,
     pub adjudicated: bool,
-    /// Human-readable disposition (the classification ADR-0009 draws).
+    /// The model promoted this chain to auto-eligible (ADR-0011), as opposed to live
+    /// runtime corroboration.
+    pub promoted: bool,
+    /// Human-readable disposition (the classification ADR-0009/0011 draws).
     pub disposition: String,
     /// The single-edge cut that severs it, if one exists.
     pub cut: Option<String>,
@@ -37,10 +40,10 @@ pub struct Finding {
 impl Finding {
     pub fn from_chain(chain: &ProvenChain) -> Self {
         let disposition = if chain.meets_action_bar() {
-            if chain.adjudicated {
-                "live — auto-eligible"
-            } else {
-                "live — vetoed by adjudicator (proposed)"
+            match (chain.adjudicated, chain.corroborated) {
+                (false, _) => "live — vetoed by adjudicator (proposed)",
+                (true, true) => "live — auto-eligible",
+                (true, false) => "promoted (model judgement) — auto-eligible",
             }
         } else if chain.is_latent_foothold() {
             "latent foothold — proposed"
@@ -62,6 +65,7 @@ impl Finding {
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
             adjudicated: chain.adjudicated,
+            promoted: chain.promoted,
             disposition,
             cut,
         }
@@ -189,6 +193,7 @@ mod tests {
             foothold: foothold.then_some(EXPLOIT_PUBLIC_FACING),
             corroborated,
             adjudicated,
+            promoted: false,
             links: vec![],
             single_edge_cuts: vec![],
         }
