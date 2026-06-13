@@ -140,14 +140,16 @@ impl Engine {
             }
         }
 
-        // Adjudicate. Two directions (ADR-0008 + ADR-0011):
-        // - Veto: a live-corroborated chain is judged; a non-confirming verdict
-        //   downgrades it to a proposal. The model can only subtract here.
-        // - Promote: when the `judgement` opt-in is on, the model may raise a proven,
-        //   internet-exposed, actionable chain that is NOT yet corroborated to
-        //   auto-eligible, with an affirmative `Exploitable` verdict. Only a real
-        //   model emits that (NullAdjudicator never promotes); the action stays the
-        //   bounded, reversible, self-reverting cut.
+        // Adjudicate (ADR-0008 + ADR-0011). The model judges; deterministic proof
+        // sets the default. Three cases, all behind the `judgement` opt-in for the
+        // non-corroborated lanes:
+        // - Corroborated chain → veto path: a non-confirming verdict downgrades it.
+        // - Proven FOOTHOLD (internet-exposed ∧ exploited-in-wild/critical CVE ∧
+        //   reachable — i.e. log4shell) → auto-promote UNLESS the model *confidently
+        //   refutes* it. Uncertain / no model leaves the deterministic foothold to
+        //   govern, so a weak local model can't silently block a known foothold.
+        // - No foothold but exposed + actionable → only an affirmative `Exploitable`
+        //   verdict promotes (the speculative, frontier-tier judgement).
         for chain in chains.iter_mut() {
             if chain.corroborated {
                 let verdict = self.adjudicator.judge(chain, &graph).await;
@@ -159,19 +161,36 @@ impl Engine {
                         "adjudicator vetoed auto-action; downgraded to proposal"
                     );
                 }
-            } else if self.active.judgement_enabled()
-                && !chain.single_edge_cuts.is_empty()
-                && proof::is_internet_exposed(&graph, &chain.entry)
-            {
-                let verdict = self.adjudicator.judge(chain, &graph).await;
-                if let adjudicate::Verdict::Exploitable(reason) = &verdict {
-                    chain.promoted = true;
-                    tracing::warn!(
-                        entry = %chain.entry.0,
-                        objective = %chain.objective.0,
-                        %reason,
-                        "adjudicator promoted chain to auto-action (positive judgement, ADR-0011)"
-                    );
+            } else if self.active.judgement_enabled() && !chain.single_edge_cuts.is_empty() {
+                if chain.foothold.is_some() {
+                    let verdict = self.adjudicator.judge(chain, &graph).await;
+                    if let adjudicate::Verdict::Refuted(reason) = &verdict {
+                        tracing::info!(
+                            entry = %chain.entry.0,
+                            objective = %chain.objective.0,
+                            %reason,
+                            "adjudicator refuted foothold; left as proposal"
+                        );
+                    } else {
+                        chain.promoted = true;
+                        tracing::warn!(
+                            entry = %chain.entry.0,
+                            objective = %chain.objective.0,
+                            foothold = chain.foothold.map(|f| f.technique_id),
+                            "foothold promoted to auto-action (exposed + exploited/critical CVE, ADR-0011)"
+                        );
+                    }
+                } else if proof::is_internet_exposed(&graph, &chain.entry) {
+                    let verdict = self.adjudicator.judge(chain, &graph).await;
+                    if let adjudicate::Verdict::Exploitable(reason) = &verdict {
+                        chain.promoted = true;
+                        tracing::warn!(
+                            entry = %chain.entry.0,
+                            objective = %chain.objective.0,
+                            %reason,
+                            "model promoted chain to auto-action (positive judgement, ADR-0011)"
+                        );
+                    }
                 }
             }
         }

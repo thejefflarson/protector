@@ -309,4 +309,100 @@ mod tests {
             Verdict::Confirmed
         );
     }
+
+    /// Exercises the *real* judgement path (build_judgment_prompt → a real model →
+    /// parse_verdict) against an OpenAI-compatible endpoint, on a genuinely toxic
+    /// chain vs an unevidenced one. Gated — `cargo test`/CI skip it; run with e.g.
+    ///   PROTECTOR_E2E_MODEL=http://localhost:11434/v1/chat/completions \
+    ///   PROTECTOR_E2E_MODEL_NAME=qwen2.5:1.5b \
+    ///   cargo nextest run real_model_judges -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs a real model endpoint (PROTECTOR_E2E_MODEL)"]
+    async fn real_model_judges_toxic_vs_unevidenced() {
+        let Ok(endpoint) = std::env::var("PROTECTOR_E2E_MODEL") else {
+            eprintln!("skipping: set PROTECTOR_E2E_MODEL to a chat-completions endpoint");
+            return;
+        };
+        let model =
+            std::env::var("PROTECTOR_E2E_MODEL_NAME").unwrap_or_else(|_| "qwen2.5:1.5b".into());
+        let adjudicator = ModelAdjudicator::new(&endpoint, &model);
+
+        // An internet-exposed `web` (LoadBalancer) that mounts a session-key secret;
+        // optionally carrying a critical, exploited-in-wild CVE (log4shell).
+        let exposed_chain = |with_cve: bool| {
+            let web = serde_json::from_value(json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+                "spec": {"containers": [{
+                    "name": "web", "image": "web:1",
+                    "envFrom": [{"secretRef": {"name": "session-key"}}]
+                }]}
+            }))
+            .unwrap();
+            let lb = serde_json::from_value(json!({
+                "apiVersion": "v1", "kind": "Service",
+                "metadata": {"name": "web-lb", "namespace": "app"},
+                "spec": {"type": "LoadBalancer", "selector": {"app": "web"}}
+            }))
+            .unwrap();
+            let image_vulns = if with_cve {
+                vec![ImageVulnerabilities {
+                    image: "web:1".into(),
+                    vulnerabilities: vec![Vulnerability {
+                        id: "CVE-2021-44228".into(),
+                        severity: Severity::Critical,
+                        exploited_in_wild: true,
+                        epss: None,
+                        sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    }],
+                }]
+            } else {
+                vec![]
+            };
+            let snap = Snapshot {
+                pods: vec![web],
+                services: vec![lb],
+                secrets: vec![crate::engine::observe::SecretMeta {
+                    namespace: "app".into(),
+                    name: "session-key".into(),
+                }],
+                image_vulns,
+                ..Default::default()
+            };
+            let graph = build_graph(&snap, &default_adapters());
+            let chain = prove(&graph)
+                .into_iter()
+                .find(|c| {
+                    c.entry.0 == "workload/app/Pod/web" && c.objective.0 == "secret/app/session-key"
+                })
+                .expect("exposed chain to the secret");
+            (graph, chain)
+        };
+
+        let (g_toxic, toxic) = exposed_chain(true);
+        let toxic_verdict = adjudicator.judge(&toxic, &g_toxic).await;
+        eprintln!("[{model}] exposed + critical KEV CVE -> secret : {toxic_verdict:?}");
+
+        let (g_bare, bare) = exposed_chain(false);
+        let bare_verdict = adjudicator.judge(&bare, &g_bare).await;
+        eprintln!("[{model}] exposed, NO cve / NO runtime -> secret: {bare_verdict:?}");
+
+        // Safety-critical and model-independent: a chain with NO exploitation
+        // evidence must never be promoted. This must hold for any model.
+        assert!(
+            !bare_verdict.promotes(),
+            "model promoted an unevidenced chain (over-eager): {bare_verdict:?}"
+        );
+        // Utility is observed, not asserted: whether a model is confident enough to
+        // *promote* the toxic chain is model-dependent. Small local models (≤3B) tend
+        // to abstain (Uncertain/Refuted) even on log4shell — which is safe but not
+        // useful, and is why promotion is a frontier-tier job (ADR-0011). Surface it.
+        if !toxic_verdict.promotes() {
+            eprintln!(
+                "NOTE: [{model}] did not promote a log4shell-on-exposed-credentials chain \
+                 ({toxic_verdict:?}) — too cautious to be useful for promotion; use a \
+                 stronger (frontier) model for the judgement tier."
+            );
+        }
+    }
 }

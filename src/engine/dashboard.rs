@@ -40,10 +40,14 @@ pub struct Finding {
 impl Finding {
     pub fn from_chain(chain: &ProvenChain) -> Self {
         let disposition = if chain.meets_action_bar() {
-            match (chain.adjudicated, chain.corroborated) {
-                (false, _) => "live — vetoed by adjudicator (proposed)",
-                (true, true) => "live — auto-eligible",
-                (true, false) => "promoted (model judgement) — auto-eligible",
+            if !chain.adjudicated {
+                "live — vetoed by adjudicator (proposed)"
+            } else if chain.corroborated {
+                "live — auto-eligible"
+            } else if chain.foothold.is_some() {
+                "foothold — auto-eligible"
+            } else {
+                "promoted (model judgement) — auto-eligible"
             }
         } else if chain.is_latent_foothold() {
             "latent foothold — proposed"
@@ -216,6 +220,24 @@ mod tests {
         assert_eq!(
             Finding::from_chain(&chain(false, false, true)).disposition,
             "structural — proposed"
+        );
+
+        // ADR-0011 promotions (promoted, not runtime-corroborated):
+        let foothold_promoted = ProvenChain {
+            promoted: true,
+            ..chain(true, false, true) // foothold present, no corroboration
+        };
+        assert_eq!(
+            Finding::from_chain(&foothold_promoted).disposition,
+            "foothold — auto-eligible"
+        );
+        let model_promoted = ProvenChain {
+            promoted: true,
+            ..chain(false, false, true) // no foothold — only a model verdict promoted it
+        };
+        assert_eq!(
+            Finding::from_chain(&model_promoted).disposition,
+            "promoted (model judgement) — auto-eligible"
         );
     }
 }

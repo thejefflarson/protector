@@ -43,16 +43,28 @@ only reason about the remote attack surface.
 
 ### 1. The model is a bidirectional corroboration source (revises ADR-0008)
 
-The adjudicator keeps its veto and gains a **promotion**:
+The adjudicator keeps its veto and the engine gains **promotion** to auto-eligible
+for proven, non-corroborated chains (behind the `judgement` opt-in). Two lanes, by
+how strong the *deterministic* signal is:
 
 - **Veto (unchanged).** On a runtime-corroborated chain, `Refuted`/`Uncertain`
   downgrades to a proposal.
-- **Promote (new).** A proven chain **whose entry is internet-exposed** (the remote
-  surface) can be raised to auto-eligible by an affirmative `Exploitable` verdict —
-  the model judging that remote exploitation of that exposed entry leads to a
-  game-over objective. The bar is **any proven path from an exposed entry**, *not*
-  gated on a CVE foothold: the model judges exploitability of a real, proof-grade
-  path; it does not require a catalogued CVE.
+- **Foothold promotion (deterministic + veto).** A proven chain whose entry is a
+  **foothold** — internet-exposed ∧ exploited-in-wild/critical CVE ∧ a proof-grade
+  path to the objective (i.e. log4shell on the front door reaching credentials) — is
+  **auto-promoted unless the model confidently `Refuted`s it**. `Uncertain` or no
+  model leaves the deterministic foothold to govern. This is the load-bearing case
+  ("log4j must promote"): the positive signal is deterministic (KEV/critical +
+  exposed + reachable, not a model guess), so a weak local model can't block it, and
+  the model is back to its safe subtractive role — it can only veto a genuinely
+  non-exploitable/mitigated CVE. *Real-world note: ≤3B local models tested all
+  abstain (`Uncertain`/`Refuted`) even on log4shell, so making the model the
+  positive gate was the wrong mechanism; the deterministic foothold is.*
+- **Speculative promotion (model-positive).** A proven chain from an exposed entry
+  with **no** CVE foothold can still be raised by an affirmative `Exploitable`
+  verdict — the model judging an end-to-end game-over path. Only a real, capable
+  (frontier-tier) model emits `Exploitable`; `NullAdjudicator` never does, so this
+  lane is dark without one.
 
 Promotion is contained so a wrong or prompt-injected positive cannot do real harm:
 
