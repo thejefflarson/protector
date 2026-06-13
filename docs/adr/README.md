@@ -20,5 +20,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0009](0009-asymmetric-action-bar.md) | Asymmetric action bar: live evidence acts, latent exposure proposes | Accepted (amended by 0011) |
 | [0010](0010-flannel-actuator-workload-isolation.md) | Flannel actuator: quarantine the source with a default-deny NetworkPolicy | Accepted |
 | [0011](0011-positive-judgement.md) | The model corroborates positively; operator access is out of scope, defended in depth | Proposed |
+| [0012](0012-exposure-observed-or-declared.md) | Exposure is observed where possible, declared (annotation) where it can't be — tunnels | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.

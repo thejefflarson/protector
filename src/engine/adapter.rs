@@ -759,11 +759,28 @@ impl Adapter for HostEscapeAdapter {
     }
 }
 
-/// Sets a Workload's `exposure` fact from the Services that select it — the entry
-/// side of the action bar. A `LoadBalancer`/`NodePort` Service (or one with
+/// The annotation that declares a workload internet-exposed when the engine cannot
+/// observe it (ADR-0012). Some real exposure is out-of-cluster — a Cloudflare token
+/// tunnel routes the public hostname to a plain `ClusterIP` Service, with the
+/// hostname→service map held in Cloudflare, not in any in-cluster object — so it
+/// must be *declared*. Set `protector.jeffl.es/exposure: internet` on the fronted
+/// Service (or the pod) and the engine treats it as internet-reachable.
+pub const EXPOSURE_ANNOTATION: &str = "protector.jeffl.es/exposure";
+
+/// True if `annotations` declares internet exposure via [`EXPOSURE_ANNOTATION`].
+fn declares_internet(annotations: Option<&BTreeMap<String, String>>) -> bool {
+    annotations
+        .and_then(|a| a.get(EXPOSURE_ANNOTATION))
+        .is_some_and(|v| v.eq_ignore_ascii_case("internet"))
+}
+
+/// Sets a Workload's `exposure` fact — the entry side of the action bar — from the
+/// Services that select it. A `LoadBalancer`/`NodePort` Service (or one with
 /// `externalIPs`) makes its pods internet-reachable; any other selecting Service
-/// makes them cluster-reachable. Reads and rewrites the Workload nodes the
-/// [`WorkloadAdapter`] created, so it must run after it.
+/// makes them cluster-reachable. Exposure the engine can't *observe* — notably a
+/// Cloudflare token tunnel fronting a `ClusterIP` Service — is declared with the
+/// [`EXPOSURE_ANNOTATION`] on the Service or the pod (ADR-0012). Reads and rewrites
+/// the Workload nodes the [`WorkloadAdapter`] created, so it must run after it.
 pub struct ExposureAdapter;
 
 impl ExposureAdapter {
@@ -776,6 +793,10 @@ impl ExposureAdapter {
     }
 
     fn service_exposure(service: &Service) -> Exposure {
+        // A declared exposure wins — the tunnel/Ingress case the engine can't see.
+        if declares_internet(service.metadata.annotations.as_ref()) {
+            return Exposure::Internet;
+        }
         let spec = service.spec.as_ref();
         let kind = spec.and_then(|s| s.type_.as_deref()).unwrap_or("ClusterIP");
         let has_external_ips = spec
@@ -819,6 +840,11 @@ impl Adapter for ExposureAdapter {
                         exposure = e;
                     }
                 }
+            }
+            // A pod-level declaration also marks it internet-exposed (a workload
+            // chart can annotate its own pod template for the tunnel case, ADR-0012).
+            if declares_internet(pod.metadata.annotations.as_ref()) {
+                exposure = Exposure::Internet;
             }
             if exposure == Exposure::Internal {
                 continue;
@@ -933,6 +959,68 @@ mod tests {
 
     fn netpol(value: Value) -> NetworkPolicy {
         serde_json::from_value(value).expect("valid NetworkPolicy fixture")
+    }
+
+    #[test]
+    fn exposure_from_service_type_and_declared_annotation() {
+        let workload_exposure = |snap: &Snapshot, ns: &str, name: &str| {
+            let g = build_graph(snap, &default_adapters());
+            match g.node(g.index_of(&workload_node(ns, name).key()).unwrap()) {
+                Some(Node::Workload(w)) => w.exposure,
+                _ => panic!("workload node"),
+            }
+        };
+        let web = |annotations: Value| {
+            pod(json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"},
+                             "annotations": annotations},
+                "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+            }))
+        };
+        let svc = |type_: &str, annotations: Value| {
+            serde_json::from_value::<Service>(json!({
+                "apiVersion": "v1", "kind": "Service",
+                "metadata": {"name": "web", "namespace": "app", "annotations": annotations},
+                "spec": {"type": type_, "selector": {"app": "web"}}
+            }))
+            .unwrap()
+        };
+
+        // A plain ClusterIP Service → only cluster-exposed (the tunnel blind spot).
+        let plain = Snapshot {
+            pods: vec![web(json!({}))],
+            services: vec![svc("ClusterIP", json!({}))],
+            ..Default::default()
+        };
+        assert_eq!(
+            workload_exposure(&plain, "app", "web"),
+            Exposure::ClusterExposed
+        );
+
+        // The SAME ClusterIP Service, annotated as tunnel-fronted → Internet.
+        let declared_svc = Snapshot {
+            pods: vec![web(json!({}))],
+            services: vec![svc(
+                "ClusterIP",
+                json!({"protector.jeffl.es/exposure": "internet"}),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            workload_exposure(&declared_svc, "app", "web"),
+            Exposure::Internet
+        );
+
+        // Declaring it on the pod works too, even with no Service at all.
+        let declared_pod = Snapshot {
+            pods: vec![web(json!({"protector.jeffl.es/exposure": "Internet"}))],
+            ..Default::default()
+        };
+        assert_eq!(
+            workload_exposure(&declared_pod, "app", "web"),
+            Exposure::Internet
+        );
     }
 
     #[test]
