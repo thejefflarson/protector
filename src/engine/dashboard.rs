@@ -174,61 +174,126 @@ fn escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// CSS class for a disposition, for a touch of semantic colour (flat, no chrome).
-fn disposition_class(disposition: &str) -> &'static str {
-    if disposition.starts_with("auto-eligible") {
-        "live"
-    } else if disposition.starts_with("latent") {
-        "latent"
-    } else {
-        "muted"
+/// A short, human label for a node key — drop the kind prefix (`workload/`, …).
+fn short(key: &str) -> String {
+    key.split_once('/')
+        .map_or_else(|| key.to_string(), |(_, rest)| rest.to_string())
+}
+
+/// Which "what do I do about it" bucket a finding falls in: 0 act, 1 fix, 2 watch,
+/// 3 context. Derived from the (already decision-aware) disposition.
+fn bucket(f: &Finding) -> usize {
+    match f.disposition.as_str() {
+        "auto-eligible" => 0,
+        "durable-fix PR" | "forbidden" => 1,
+        "latent foothold — propose" | "vetoed — propose" => 2,
+        _ => 3, // structural / no-cut / unclassified — assume-breach context
     }
 }
 
-/// Render the findings as a flat HTML table — system font, thin borders, no
-/// gradients, no rounded corners.
+/// Render the findings grouped by what to *do* — a one-line summary, then four
+/// collapsible buckets (act / fix / watch / context), each item a plain sentence.
+/// Flat, system font, no gradients, no rounded corners.
 fn render_html(findings: &[Finding]) -> String {
-    let mut rows = String::new();
+    let mut counts = [0usize; 4];
     for f in findings {
-        let yn = |b: bool| if b { "yes" } else { "—" };
-        rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{} {}</td><td>{}</td><td>{}</td><td>{}</td>\
-             <td class=\"{}\">{}</td><td>{}</td><td>{}</td></tr>",
-            escape(&f.entry),
-            escape(&f.objective),
-            escape(&f.tactic),
-            escape(&f.technique),
-            yn(f.foothold),
-            yn(f.corroborated),
-            yn(f.adjudicated),
-            disposition_class(&f.disposition),
-            escape(&f.disposition),
+        counts[bucket(f)] += 1;
+    }
+
+    let item = |f: &Finding| {
+        let evidence = if f.corroborated {
+            "live (runtime signal)"
+        } else if f.promoted {
+            "model-promoted"
+        } else if f.foothold {
+            "internet-exposed + CVE"
+        } else {
+            "reachable"
+        };
+        format!(
+            "<li><span class=\"path\">{} → {}</span> <span class=\"ev\">{}</span>\
+             <div class=\"why\">{}</div></li>",
+            escape(&short(&f.entry)),
+            escape(&short(&f.objective)),
+            escape(evidence),
             escape(&f.decision),
-            escape(f.cut.as_deref().unwrap_or("—")),
-        ));
-    }
-    if findings.is_empty() {
-        rows.push_str("<tr><td colspan=\"9\" class=\"muted\">no proven chains</td></tr>");
-    }
+        )
+    };
+    let section = |title: &str, desc: &str, b: usize, open: bool| {
+        let body = if counts[b] == 0 {
+            "<p class=\"muted\">none</p>".to_string()
+        } else {
+            let items: String = findings
+                .iter()
+                .filter(|f| bucket(f) == b)
+                .map(&item)
+                .collect();
+            format!("<ul>{items}</ul>")
+        };
+        format!(
+            "<details class=\"b{b}\"{}><summary><b>{}</b> <span class=\"n\">{}</span>\
+             <span class=\"muted\"> — {}</span></summary>{}</details>",
+            if open { " open" } else { "" },
+            escape(title),
+            counts[b],
+            escape(desc),
+            body,
+        )
+    };
+
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>protector</title>\
          <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
-         h1{{font-size:1.2rem;font-weight:600;margin-bottom:1rem}}\
-         table{{border-collapse:collapse;width:100%;font-size:.85rem}}\
-         th,td{{border:1px solid #ccc;padding:4px 8px;text-align:left}}\
-         th{{background:#f0f0f0;font-weight:600}}\
-         .live{{color:#b00000;font-weight:600}}\
-         .latent{{color:#9a5b00}}\
-         .muted{{color:#666}}\
+         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111;max-width:60rem}}\
+         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
+         .sum{{margin:.5rem 0 1.5rem;color:#444}}\
+         details{{border-left:3px solid #ccc;padding:.3rem .8rem;margin:.6rem 0}}\
+         details.b0{{border-color:#b00000}} details.b1{{border-color:#9a5b00}}\
+         details.b2{{border-color:#888}} details.b3{{border-color:#ddd}}\
+         summary{{cursor:pointer;font-size:.95rem}}\
+         .n{{display:inline-block;min-width:1.5rem;color:#000;font-weight:600}}\
+         ul{{list-style:none;padding:0;margin:.5rem 0}}\
+         li{{padding:.35rem 0;border-top:1px solid #eee}}\
+         .path{{font-family:ui-monospace,monospace;font-size:.85rem}}\
+         .ev{{font-size:.75rem;color:#666;margin-left:.4rem}}\
+         .why{{font-size:.8rem;color:#333;margin-top:.15rem}}\
+         .muted{{color:#777;font-weight:400}}\
+         a{{color:#06c}}\
          </style></head><body>\
-         <h1>protector — proven chains ({count})</h1>\
-         <table><thead><tr>\
-         <th>entry</th><th>objective</th><th>ATT&amp;CK</th><th>foothold</th>\
-         <th>live</th><th>adjudicated</th><th>disposition</th><th>decision</th><th>cut</th>\
-         </tr></thead><tbody>{rows}</tbody></table></body></html>",
-        count = findings.len(),
-        rows = rows,
+         <h1>protector</h1>\
+         <p class=\"sum\"><b>{act}</b> to act on · <b>{fix}</b> to fix in code · \
+         <b>{watch}</b> to watch · <b>{ctx}</b> assume-breach paths (context) &nbsp;|&nbsp; \
+         <a href=\"/graph\">attack graph</a> · <a href=\"/findings\">json</a></p>\
+         {s_act}{s_fix}{s_watch}{s_ctx}\
+         </body></html>",
+        act = counts[0],
+        fix = counts[1],
+        watch = counts[2],
+        ctx = counts[3],
+        s_act = section(
+            "Act now",
+            "the engine auto-applies a reversible network cut for these once the matching action class is armed",
+            0,
+            true,
+        ),
+        s_fix = section(
+            "Fix in code",
+            "a live or exposed risk whose only cut is subtractive (revoke RBAC, remove a mount, rebind a ServiceAccount) — land a GitOps change; not auto-cuttable",
+            1,
+            true,
+        ),
+        s_watch = section(
+            "Watch",
+            "proven but not acted on — an exposed CVE with no live activity, or a live signal the model judged benign",
+            2,
+            true,
+        ),
+        s_ctx = section(
+            "Assume-breach (context)",
+            "if this workload were compromised, what it could reach — the baseline blast-radius map, not findings to chase",
+            3,
+            false,
+        ),
     )
 }
 
@@ -346,5 +411,46 @@ mod tests {
         let f = Finding::from_chain(&promoted);
         assert_eq!(f.disposition, "auto-eligible");
         assert!(f.decision.contains("NetworkPolicy"));
+    }
+
+    #[test]
+    fn render_groups_by_what_to_do_and_dumps_a_sample() {
+        // A representative mix shaped like the real cluster: one act-now network
+        // cut, the argocd/whisperer RBAC fan-out (fix-in-code), and a big
+        // assume-breach tail (context).
+        let f = |entry: &str, objective: &str, disposition: &str, decision: &str, corroborated: bool| Finding {
+            entry: entry.into(),
+            objective: objective.into(),
+            tactic: "TA0006".into(),
+            technique: "T1552".into(),
+            foothold: false,
+            corroborated,
+            adjudicated: true,
+            promoted: false,
+            disposition: disposition.into(),
+            decision: decision.into(),
+            cut: Some(format!("{entry} -[…]-> {objective}")),
+        };
+        let mut findings = vec![f(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "auto-eligible",
+            "auto-applies a reversible NetworkPolicy cut when `network` is enabled and no live workload is collateral",
+            true,
+        )];
+        for o in ["secret/argocd/argocd-secret", "secret/analytics/postgres.creds", "capability/cluster/create/pods"] {
+            findings.push(f("workload/argocd/Pod/argocd-application-controller-0", o, "durable-fix PR", "subtractive: revoke the RBAC grant via GitOps — not live-actuatable", true));
+        }
+        for i in 0..40 {
+            findings.push(f(&format!("workload/kube-system/Pod/p{i}"), "secret/kube-system/sh.helm.release.v1.x", "structural — propose", "assume-breach path, no live or foothold evidence — propose only", false));
+        }
+
+        let html = render_html(&findings);
+        assert!(html.contains("to act on"));
+        assert!(html.contains("Act now"));
+        assert!(html.contains("Fix in code"));
+        assert!(html.contains("Assume-breach (context)"));
+        // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
+        let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
     }
 }
