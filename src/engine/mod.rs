@@ -49,7 +49,7 @@ use delta::GraphSnapshot;
 use health::{Health, HealthProvider, PodStatusHealth};
 use observe::Snapshot;
 use response::MitigationLedger;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The engine's stateful processing core. It owns everything that persists across
 /// observations — the prior graph state, the mitigation ledger, and the applied-
@@ -152,38 +152,37 @@ impl Engine {
         //   govern, so a weak local model can't silently block a known foothold.
         // A chain with neither runtime nor a foothold has no exploitation evidence —
         // it stays a deterministic latent/structural proposal; the model isn't asked.
+        //
+        // The verdict is judged ONCE PER ENTRY and cached: corroboration and the
+        // foothold are properties of the entry workload, not of each objective it
+        // reaches, so a workload that fans out to 100 objectives is one judgement,
+        // not 100 model calls. The cached verdict then applies to all its chains.
+        let mut entry_verdict: HashMap<String, adjudicate::Verdict> = HashMap::new();
         for chain in chains.iter_mut() {
+            let needs_judging = chain.corroborated
+                || (self.active.judgement_enabled()
+                    && chain.foothold.is_some()
+                    && !chain.single_edge_cuts.is_empty());
+            if !needs_judging {
+                continue;
+            }
+            let verdict = match entry_verdict.get(&chain.entry.0) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = self.adjudicator.judge(chain, &graph).await;
+                    tracing::info!(entry = %chain.entry.0, verdict = ?v, "adjudicated entry");
+                    entry_verdict.insert(chain.entry.0.clone(), v.clone());
+                    v
+                }
+            };
             if chain.corroborated {
-                let verdict = self.adjudicator.judge(chain, &graph).await;
+                // Veto lane: a non-confirming verdict downgrades to a proposal.
                 if !verdict.is_confirmed() {
                     chain.adjudicated = false;
-                    tracing::info!(
-                        entry = %chain.entry.0,
-                        objective = %chain.objective.0,
-                        "adjudicator vetoed auto-action; downgraded to proposal"
-                    );
                 }
-            } else if self.active.judgement_enabled()
-                && chain.foothold.is_some()
-                && !chain.single_edge_cuts.is_empty()
-            {
-                let verdict = self.adjudicator.judge(chain, &graph).await;
-                if let adjudicate::Verdict::Refuted(reason) = &verdict {
-                    tracing::info!(
-                        entry = %chain.entry.0,
-                        objective = %chain.objective.0,
-                        %reason,
-                        "adjudicator refuted foothold; left as proposal"
-                    );
-                } else {
-                    chain.promoted = true;
-                    tracing::warn!(
-                        entry = %chain.entry.0,
-                        objective = %chain.objective.0,
-                        foothold = chain.foothold.map(|f| f.technique_id),
-                        "foothold promoted to auto-action (exposed + exploited/critical CVE, ADR-0011)"
-                    );
-                }
+            } else if !matches!(verdict, adjudicate::Verdict::Refuted(_)) {
+                // Foothold lane: promote unless the model confidently refuted it.
+                chain.promoted = true;
             }
         }
         // Publish the current findings for the dashboard (the latent-foothold rows
