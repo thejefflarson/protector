@@ -29,7 +29,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use super::attack::{self, CAPABILITY_CATALOG};
 use super::graph::{
     Capability, Edge, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol, Provenance,
-    Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload,
+    Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload, canonical_image,
 };
 use super::observe::Snapshot;
 
@@ -170,10 +170,11 @@ impl Adapter for WorkloadAdapter {
                     .chain(spec.init_containers.iter().flatten())
                     .filter_map(|c| c.image.clone());
                 for image in images {
-                    // Tag-level identity for now; digest resolution arrives with
-                    // the Vulnerability/Trust ports.
+                    // Key on the canonical form so trivy findings (which carry a
+                    // fully-qualified ref) attach to the same node as this pod's
+                    // possibly-short ref; keep the raw ref for display.
                     let img = graph.upsert_node(Node::Image(Image {
-                        digest: image.clone(),
+                        digest: canonical_image(&image),
                         reference: Some(image),
                         trust: super::graph::Trust::Unknown,
                         vulnerabilities: vec![],
@@ -848,8 +849,11 @@ impl Adapter for VulnerabilityAdapter {
 
     fn contribute(&self, snapshot: &Snapshot, graph: &mut SecurityGraph) {
         for finding in &snapshot.image_vulns {
+            // Canonicalize the finding's ref to match the Image node the workload
+            // adapter keyed (a short pod ref vs a scanner's fully-qualified one) —
+            // without this the CVE silently fails to attach (security fix [15]).
             let key = Node::Image(Image {
-                digest: finding.image.clone(),
+                digest: canonical_image(&finding.image),
                 reference: None,
                 trust: Trust::Unknown,
                 vulnerabilities: vec![],

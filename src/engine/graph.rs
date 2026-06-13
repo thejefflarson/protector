@@ -76,6 +76,27 @@ impl Node {
     }
 }
 
+/// Canonicalize an image reference so the Vulnerability port's findings land on the
+/// same Image node as the workload that runs the image. A pod's `nginx:alpine` and
+/// trivy's reconstructed `index.docker.io/library/nginx:alpine` must resolve to one
+/// key — otherwise a CVE silently fails to attach and a vulnerable image looks clean
+/// (the foothold, and log4j promotion, never fire). Prefers a digest when present;
+/// falls back to the raw string if the reference doesn't parse.
+pub fn canonical_image(reference: &str) -> String {
+    use sigstore::registry::OciReference;
+    match reference.parse::<OciReference>() {
+        Ok(r) => {
+            let base = format!("{}/{}", r.registry(), r.repository());
+            match (r.digest(), r.tag()) {
+                (Some(digest), _) => format!("{base}@{digest}"),
+                (None, Some(tag)) => format!("{base}:{tag}"),
+                (None, None) => format!("{base}:latest"),
+            }
+        }
+        Err(_) => reference.to_string(),
+    }
+}
+
 /// A stable, comparable handle for a [`Node`], derived from its identity (not its
 /// facts) so a node keeps the same key as its facts change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -476,6 +497,31 @@ impl SecurityGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_image_converges_pod_and_scanner_forms() {
+        // A pod's short ref and a scanner's fully-qualified ref for the SAME image
+        // must canonicalize identically, or CVEs never attach (security fix [15]).
+        let pod = canonical_image("nginx:alpine");
+        eprintln!("canonical(nginx:alpine) = {pod}");
+        assert_eq!(pod, canonical_image("docker.io/library/nginx:alpine"));
+        assert_eq!(pod, canonical_image("index.docker.io/library/nginx:alpine"));
+        // A digest pins identity regardless of how it's written.
+        let d = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            canonical_image(&format!("nginx@{d}")),
+            canonical_image(&format!("docker.io/library/nginx@{d}"))
+        );
+        // A private-registry ref round-trips and stays distinct from docker.io.
+        assert_eq!(
+            canonical_image("ghcr.io/thejefflarson/api:1.2.3"),
+            "ghcr.io/thejefflarson/api:1.2.3"
+        );
+        assert_ne!(
+            canonical_image("nginx:alpine"),
+            canonical_image("nginx:1.27")
+        );
+    }
 
     fn prov(source: &str) -> Provenance {
         Provenance::new(source, SystemTime::UNIX_EPOCH)

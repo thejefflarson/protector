@@ -119,20 +119,20 @@ managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
 # ==============================================================================
-step "1/8  Create k3d cluster (flannel + kube-router, like prod)"
+step "1/12  Create k3d cluster (flannel + kube-router, like prod)"
 k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER" --wait --timeout 180s
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
-step "2/8  Build + import the protector image"
+step "2/12  Build + import the protector image"
 docker build -t "$IMAGE" "$(dirname "$0")/.."
 k3d image import "$IMAGE" -c "$CLUSTER"
 
-step "3/8  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
+step "3/12  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
 kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CM_VERSION}/cert-manager.yaml"
 kubectl wait --for=condition=Available -n cert-manager deploy --all --timeout=180s
 
-step "4/8  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
+step "4/12  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
 helm install protector "$CHART_PATH" \
   --namespace "$NS" --create-namespace \
   --set replicaCount=1 \
@@ -144,7 +144,7 @@ helm install protector "$CHART_PATH" \
 kubectl -n "$NS" rollout status deploy/protector --timeout=120s
 pf_reset
 
-step "5/8  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
+step "5/12  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
 kubectl create ns "$APP_NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$APP_NS" create secret generic session-key --from-literal=k=x \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -172,7 +172,7 @@ spec:
 YAML
 kubectl -n "$APP_NS" wait --for=condition=Ready pod/web pod/store --timeout=120s
 
-step "6/8  SHADOW: chain proves structurally, then corroboration flips it auto-eligible — but NOTHING is applied"
+step "6/12  SHADOW: chain proves structurally, then corroboration flips it auto-eligible — but NOTHING is applied"
 wait_until "structural chain web→session-key" 90 finding_is "structural — proposed"
 pass "structural chain proven (no foothold, no corroboration)"
 
@@ -183,7 +183,7 @@ pass "corroboration alone meets the asymmetric action bar (no vuln required)"
 managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only was violated"
 pass "shadow mode applied nothing (propose-only honored)"
 
-step "7/10  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
+step "7/12  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
 helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
   --set engine.enable=network --set engine.actuationRBAC=true \
   --wait --timeout 180s
@@ -197,12 +197,12 @@ selector="$(kubectl -n "$APP_NS" get "$np" -o jsonpath='{.spec.podSelector.match
 [ "$selector" = "web" ] || fail "managed NetworkPolicy selects role='$selector', expected 'web'"
 pass "engine applied $np quarantining role=web"
 
-step "8/10  SELF-REVERT: remove the durable allow; the chain is no longer provable, so the engine reverts"
+step "8/12  SELF-REVERT: remove the durable allow; the chain is no longer provable, so the engine reverts"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
 wait_until "engine deletes its managed NetworkPolicy" 120 managed_np_absent
 pass "engine reverted its compensating control once the chain stopped being proven (Q5 invariant)"
 
-step "9/10  JUDGEMENT: the model promotes a proven remote-exploitation chain (no Falco signal)"
+step "9/12  JUDGEMENT: the model promotes a proven remote-exploitation chain (no Falco signal)"
 # A stub adjudicator that always returns the positive verdict, in OpenAI chat shape:
 # choices[0].message.content is itself the JSON verdict the engine parses.
 kubectl -n "$APP_NS" apply -f - <<'YAML'
@@ -263,10 +263,82 @@ finding_promoted() {
 wait_until "dashboard classifies the chain as model-promoted (not runtime-live)" 30 finding_promoted
 pass "dashboard shows the chain promoted by model judgement, not runtime corroboration"
 
-step "10/10  SELF-REVERT: remove the durable allow; promotion no longer holds, engine reverts"
+step "10/12  SELF-REVERT: remove the durable allow; promotion no longer holds, engine reverts"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
 wait_until "engine reverts the promotion-driven cut" 120 managed_np_absent
 pass "engine reverted the promotion-driven control once the chain stopped being proven"
 
+step "11/12  LOG4J: a proven foothold (exposed + critical CVE) auto-promotes — NO model, NO Falco"
+# Minimal trivy VulnerabilityReport CRD (open schema) so the engine's Vulnerability
+# port has something to list. (trivy-operator itself isn't needed for the test.)
+kubectl apply -f - <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vulnerabilityreports.aquasecurity.github.io
+spec:
+  group: aquasecurity.github.io
+  scope: Namespaced
+  names: { plural: vulnerabilityreports, singular: vulnerabilityreport, kind: VulnerabilityReport, shortNames: [vulns] }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+YAML
+kubectl wait --for=condition=Established crd/vulnerabilityreports.aquasecurity.github.io --timeout=60s
+# A CRITICAL log4shell finding on web's image. The report uses a fully-qualified
+# ref (index.docker.io/library/nginx:alpine); the pod used the short `nginx:alpine`.
+# Canonical image keying (fix [15]) makes them the SAME Image node, so the CVE
+# attaches — otherwise the foothold would never form.
+kubectl -n "$APP_NS" apply -f - <<'YAML'
+apiVersion: aquasecurity.github.io/v1alpha1
+kind: VulnerabilityReport
+metadata: { name: web-nginx, namespace: app }
+report:
+  registry: { server: index.docker.io }
+  artifact: { repository: library/nginx, tag: alpine }
+  vulnerabilities:
+    - { vulnerabilityID: CVE-2021-44228, severity: CRITICAL }
+YAML
+# Recreate the reaches edge (step 10 deleted it) so web → store → secret is provable.
+kubectl -n "$APP_NS" apply -f - <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: store-ingress, namespace: app }
+spec:
+  podSelector: { matchLabels: { role: store } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { role: web } } }]
+YAML
+# Hard mode + judgement, with NO model endpoint: NullAdjudicator confirms (never
+# refutes), so the deterministic foothold governs. No Falco event is sent.
+helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
+  --set 'engine.enable=network\,judgement' \
+  --set engine.model.endpoint= \
+  --wait --timeout 180s
+kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+pf_reset
+wait_until "engine promotes the log4shell foothold and quarantines web" 150 managed_np_present
+pass "log4j foothold auto-promoted to a cut — no runtime signal, no model (ADR-0011)"
+finding_foothold() {
+  curl -fsS localhost:8080/findings 2>/dev/null \
+    | jq -e --arg e "$ENTRY" --arg o "$OBJECTIVE" \
+        '[.[] | select(.entry==$e and .objective==$o and .foothold==true and .promoted==true
+                       and .corroborated==false and .disposition=="foothold — auto-eligible")] | length > 0' \
+        >/dev/null 2>&1
+}
+wait_until "dashboard classifies log4j as a promoted foothold" 30 finding_foothold
+pass "dashboard shows log4j as 'foothold — auto-eligible' (exposed + critical CVE, model-free)"
+
+step "12/12  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts"
+kubectl -n "$APP_NS" delete networkpolicy store-ingress
+wait_until "engine reverts the foothold cut" 120 managed_np_absent
+pass "engine reverted the foothold control once the chain stopped being proven"
+
 echo
-echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated and model-promoted (ADR-0011) action paths, the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
+echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated, model-promoted, and deterministic-foothold (log4j) action paths, the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
