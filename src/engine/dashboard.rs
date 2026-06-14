@@ -216,6 +216,11 @@ fn short(key: &str) -> String {
         .map_or_else(|| key.to_string(), |(_, rest)| rest.to_string())
 }
 
+/// The node kind — the key's first path segment (`secret`, `capability`, …).
+fn kind(key: &str) -> &str {
+    key.split('/').next().unwrap_or("node")
+}
+
 /// Strip the characters that break a Mermaid quoted label.
 fn mm(s: &str) -> String {
     s.replace(['"', '`', '\n', '\r'], " ")
@@ -389,7 +394,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
             if step.to == f.objective {
                 objectives += 1;
                 let reason = not_remediated_reason(f);
-                let kind = step.to.split('/').next().unwrap_or("node").to_string();
+                let kind = kind(&step.to).to_string();
                 groups
                     .entry((step.from.clone(), step.relation.clone(), reason, kind))
                     .or_default()
@@ -444,17 +449,14 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
 ///   2. Possible attack paths, one coalesced graph per internet-facing endpoint,
 ///      each terminal edge labeled with why it isn't remediated.
 fn render_html(findings: &[Finding], armed: bool) -> String {
-    let breach: Vec<&Finding> = findings.iter().filter(|f| f.breach_relevant).collect();
-    let remediations: Vec<&Finding> = breach
-        .iter()
-        .copied()
-        .filter(|f| f.disposition == "auto-eligible")
-        .collect();
-
-    // The rest, grouped by endpoint (entry), stable order.
+    // One pass over the breach-relevant findings: the auto-eligible ones are
+    // remediations; the rest group by endpoint (entry) for the attack-path graphs.
+    let mut remediations: Vec<&Finding> = Vec::new();
     let mut endpoints: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
-    for f in &breach {
-        if f.disposition != "auto-eligible" {
+    for f in findings.iter().filter(|f| f.breach_relevant) {
+        if f.disposition == "auto-eligible" {
+            remediations.push(f);
+        } else {
             endpoints.entry(f.entry.as_str()).or_default().push(f);
         }
     }
