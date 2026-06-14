@@ -39,6 +39,21 @@ impl Tactic {
             Tactic::Impact => "TA0040",
         }
     }
+
+    /// The ATT&CK tactic name (e.g. `Credential Access`) — for human-facing summaries.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tactic::InitialAccess => "Initial Access",
+            Tactic::Execution => "Execution",
+            Tactic::Persistence => "Persistence",
+            Tactic::PrivilegeEscalation => "Privilege Escalation",
+            Tactic::CredentialAccess => "Credential Access",
+            Tactic::Discovery => "Discovery",
+            Tactic::LateralMovement => "Lateral Movement",
+            Tactic::Exfiltration => "Exfiltration",
+            Tactic::Impact => "Impact",
+        }
+    }
 }
 
 /// A reference to a specific ATT&CK technique under a tactic. `'static` strings so

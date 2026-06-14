@@ -25,7 +25,11 @@ pub struct Finding {
     pub entry: String,
     pub objective: String,
     pub tactic: String,
+    /// The ATT&CK tactic name (e.g. "Credential Access") — for the attack-vector summary.
+    pub tactic_name: String,
     pub technique: String,
+    /// The ATT&CK technique name (e.g. "Unsecured Credentials").
+    pub technique_name: String,
     pub foothold: bool,
     pub corroborated: bool,
     pub adjudicated: bool,
@@ -75,7 +79,9 @@ impl Finding {
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
             tactic: chain.attack.tactic.id().to_string(),
+            tactic_name: chain.attack.tactic.name().to_string(),
             technique: chain.attack.technique_id.to_string(),
+            technique_name: chain.attack.technique.to_string(),
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
             adjudicated: chain.adjudicated,
@@ -466,6 +472,73 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     )
 }
 
+/// A model verdict counts as a flag only when the model affirmed exploitability —
+/// its own words begin with "exploitable" (a "not exploitable — …" verdict does not).
+fn flagged(verdict: Option<&str>) -> bool {
+    verdict.is_some_and(|v| {
+        v.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("exploitable")
+    })
+}
+
+/// The attack-vector summary: the ATT&CK outcomes an external attacker can actually
+/// reach, aggregated across the breach-relevant findings. Each row is one
+/// tactic→technique pair with how many distinct objectives are reachable and how many
+/// the model has affirmed exploitable. This is the "what can hit us, by ATT&CK
+/// technique" overview that sits above the per-endpoint graphs — proof winnows the
+/// reachable set, the model decides which are genuinely exploitable (ADR-0013).
+fn attack_vectors(findings: &[Finding]) -> String {
+    // (tactic, technique_id, technique_name) → (objectives reachable, objectives the
+    // model flagged exploitable). Distinct objectives, since several chains may reach
+    // the same one. BTreeMap keeps the table stable, ordered by tactic then technique.
+    type VectorKey = (String, String, String);
+    type VectorCounts = (BTreeSet<String>, BTreeSet<String>);
+    let mut rows: BTreeMap<VectorKey, VectorCounts> = BTreeMap::new();
+    for f in findings.iter().filter(|f| f.breach_relevant) {
+        let entry = rows
+            .entry((
+                f.tactic_name.clone(),
+                f.technique.clone(),
+                f.technique_name.clone(),
+            ))
+            .or_default();
+        entry.0.insert(f.objective.clone());
+        if flagged(f.verdict.as_deref()) {
+            entry.1.insert(f.objective.clone());
+        }
+    }
+
+    if rows.is_empty() {
+        return "<p class=\"muted\">no internet-facing exposure reaches an objective</p>"
+            .to_string();
+    }
+
+    let body: String = rows
+        .iter()
+        .map(|((tactic, tid, tname), (reachable, flagged))| {
+            let flag = if flagged.is_empty() {
+                "<span class=\"muted\">—</span>".to_string()
+            } else {
+                format!("<span class=\"flagged\">{}</span>", flagged.len())
+            };
+            format!(
+                "<tr><td>{}</td><td><code>{}</code> {}</td><td>{}</td><td>{}</td></tr>",
+                escape(tactic),
+                escape(tid),
+                escape(tname),
+                reachable.len(),
+                flag,
+            )
+        })
+        .collect();
+
+    format!(
+        "<table class=\"vectors\"><thead><tr><th>Tactic</th><th>Technique</th>\
+         <th>Reachable</th><th>Model-flagged</th></tr></thead><tbody>{body}</tbody></table>"
+    )
+}
+
 /// Render the dashboard: two sections, both graph-based.
 ///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
 ///      the cut marked.
@@ -508,6 +581,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
             .map(|(entry, fs)| endpoint_card(entry, fs))
             .collect()
     };
+    let vectors_body = attack_vectors(findings);
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
@@ -542,6 +616,11 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .expand li{{margin:.05rem 0;font-family:ui-monospace,monospace}}\
          .legend{{font-size:.75rem;color:#555;margin:.2rem 0 .6rem}}\
          .legend code{{background:#f4f4f4;padding:0 .2rem}}\
+         table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
+         table.vectors th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ddd;padding:.25rem .5rem}}\
+         table.vectors td{{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0}}\
+         table.vectors code{{background:#f4f4f4;padding:0 .2rem}}\
+         table.vectors .flagged{{color:#b00000;font-weight:600}}\
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
@@ -557,6 +636,11 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
+         <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
+         <p class=\"sum\">ATT&amp;CK outcomes reachable from an internet-facing front door. \
+         <b>Reachable</b> is what proof winnows to; <b>model-flagged</b> is where the model \
+         affirmed exploitability (ADR-0013).</p>\
+         {vectors_body}\
          <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
          <p class=\"legend\">edge legend — \
          <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
@@ -710,7 +794,9 @@ mod tests {
             entry: entry.into(),
             objective: objective.into(),
             tactic: "TA0006".into(),
+            tactic_name: "Credential Access".into(),
             technique: "T1552".into(),
+            technique_name: "Unsecured Credentials".into(),
             foothold: false,
             corroborated: true,
             adjudicated: true,
@@ -793,6 +879,12 @@ mod tests {
         assert!(html.contains("Proposed Remediations"));
         assert!(render_html(&findings, true).contains("Active Remediations"));
         assert!(html.contains("Possible attack paths"));
+        // The attack-vector summary names the ATT&CK outcomes reachable, with the
+        // model-flagged count (one objective was judged exploitable above).
+        assert!(html.contains("Attack vectors"));
+        assert!(html.contains("Credential Access"));
+        assert!(html.contains("Unsecured Credentials"));
+        assert!(html.contains("class=\"flagged\""));
         // Graphs are Mermaid flowcharts with an Internet source.
         assert!(html.contains("class=\"mermaid\""));
         assert!(html.contains("flowchart LR"));

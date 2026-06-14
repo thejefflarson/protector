@@ -69,11 +69,13 @@ Shipped via the Helm chart in the cluster repo (`charts/protector`), Argo-synced
 it never touches the cluster. Enable hard mode one reversible class at a time
 (`PROTECTOR_ENGINE_ENABLE`); the only live action today is an additive, reversible,
 self-reverting network deny (`networkpolicy` on flannel, `adminnetworkpolicy` on
-ANP-capable CNIs). A read-only dashboard (`/` HTML, `/findings` JSON) shows two
-graph sections — active/proposed remediations, and possible attack paths coalesced
-per internet-facing endpoint, each captioned with the **model's** exploitability
-judgement in its own words ("not exploitable — …") rather than a rule-based category:
-the model judges every breach-relevant path, not just the ones it auto-cuts (ADR-0013).
+ANP-capable CNIs). A read-only dashboard (`/` HTML, `/findings` JSON) shows active/proposed
+remediations, an **Attack vectors (ATT&CK)** summary — the reachable tactic→technique
+outcomes with how many objectives the model affirmed exploitable — and possible attack
+paths coalesced per internet-facing endpoint, each captioned with the **model's**
+exploitability judgement in its own words ("not exploitable — …") rather than a
+rule-based category: the model judges every breach-relevant path, not just the ones it
+auto-cuts (ADR-0013).
 Only breach-relevant (internet-reachable) chains are surfaced; internal access paths
 are assume-breach context, not findings.
 
