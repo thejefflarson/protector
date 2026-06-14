@@ -440,7 +440,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          </script></head><body>\
          <h1>protector</h1>\
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
-         un-remediated paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
+         possible attack paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>{path_body}\
          </body></html>",
