@@ -453,6 +453,12 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
             .collect()
     };
 
+    // NOTE: this HTML is a single `\`-continued string literal, so every source-line
+    // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
+    // line comment inside the inline <script>: it would comment out the rest of the
+    // collapsed line (the import + all rendering). Use /* */ block comments only.
+    // The graph renderer is beautiful-mermaid (ELK layout), vendored + bundled into
+    // web/dist and served SAME-ORIGIN at /assets — never a third-party CDN.
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>protector</title>\
          <style>\
@@ -476,10 +482,6 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .why li{{margin:.1rem 0}}\
          </style>\
          <script type=\"module\">\
-         // beautiful-mermaid: ELK layout, synchronous SVG. Served SAME-ORIGIN from\
-         // protector (vendored + bundled, web/dist) — never a third-party CDN, so a\
-         // compromised package registry can't inject JS into an operator's session.\
-         // Render each graph source in place; on failure leave the coalesced source.\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
          for (const pre of document.querySelectorAll('pre.mermaid')) {{\
            try {{\
