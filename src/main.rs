@@ -14,7 +14,6 @@ use protector::policies::signature::{CosignChecker, SignaturePolicy};
 use protector::policy::{EnforceScope, Engine};
 use protector::server;
 use sigstore::registry::Auth;
-use tracing_subscriber::EnvFilter;
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
@@ -98,9 +97,9 @@ fn docker_config_basic(path: &str, registry: &str) -> Option<(String, String)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // Logging + (when OTEL_EXPORTER_OTLP_ENDPOINT is set) OTLP export of traces and
+    // engine metrics to the node-local collector, like the cluster's other services.
+    let telemetry = protector::telemetry::init(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
     // Install a process-wide rustls CryptoProvider before any TLS is used. Several
     // dependencies (sigstore, axum-server, reqwest, kube) link rustls, and both
@@ -234,7 +233,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    server::serve(addr, cert, key, engine, metrics).await
+    let result = server::serve(addr, cert, key, engine, metrics).await;
+    // Flush + stop the OTLP exporters so the final trace/metric window isn't lost.
+    telemetry.shutdown();
+    result
 }
 
 #[cfg(test)]

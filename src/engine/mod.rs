@@ -51,6 +51,63 @@ use observe::Snapshot;
 use response::MitigationLedger;
 use std::collections::{HashMap, HashSet};
 
+/// OTLP instruments for the engine, recorded against the global meter (see
+/// [`crate::telemetry`]). When no OTLP endpoint is configured the global meter is a
+/// no-op, so these calls cost nothing — the engine is instrumented unconditionally.
+/// Counters are cumulative; gauges hold the last pass's snapshot.
+struct EngineMetrics {
+    /// Process passes (one per observed change).
+    passes: opentelemetry::metrics::Counter<u64>,
+    /// Adjudicator model invocations, by `result` (`ok`/`unavailable`).
+    model_calls: opentelemetry::metrics::Counter<u64>,
+    /// Mitigations actuated, by `action` (`applied`/`reverted`).
+    mitigations: opentelemetry::metrics::Counter<u64>,
+    /// Proven chains in the last pass.
+    chains: opentelemetry::metrics::Gauge<u64>,
+    /// Breach-relevant findings (internet-facing) in the last pass.
+    breach_paths: opentelemetry::metrics::Gauge<u64>,
+    /// Active mitigations currently in the ledger.
+    active_mitigations: opentelemetry::metrics::Gauge<u64>,
+    /// Breach-path count by model `verdict` (the current judgement distribution).
+    verdicts: opentelemetry::metrics::Gauge<u64>,
+}
+
+impl EngineMetrics {
+    fn new() -> Self {
+        let m = opentelemetry::global::meter("protector.engine");
+        Self {
+            passes: m
+                .u64_counter("protector.engine.passes")
+                .with_description("Engine process passes (one per observed change).")
+                .build(),
+            model_calls: m
+                .u64_counter("protector.engine.model_calls")
+                .with_description("Adjudicator model invocations by result.")
+                .build(),
+            mitigations: m
+                .u64_counter("protector.engine.mitigations")
+                .with_description("Mitigations actuated by action.")
+                .build(),
+            chains: m
+                .u64_gauge("protector.engine.chains")
+                .with_description("Proven chains in the last pass.")
+                .build(),
+            breach_paths: m
+                .u64_gauge("protector.engine.breach_paths")
+                .with_description("Breach-relevant (internet-facing) findings in the last pass.")
+                .build(),
+            active_mitigations: m
+                .u64_gauge("protector.engine.active_mitigations")
+                .with_description("Active mitigations in the ledger.")
+                .build(),
+            verdicts: m
+                .u64_gauge("protector.engine.verdicts")
+                .with_description("Breach paths by model verdict (current distribution).")
+                .build(),
+        }
+    }
+}
+
 /// The engine's stateful processing core. It owns everything that persists across
 /// observations — the prior graph state, the mitigation ledger, and the applied-
 /// action log — and exposes one operation, [`Engine::process`], run once per
@@ -74,6 +131,8 @@ pub struct Engine {
     /// brand-new path is judged because it's a new key. Pruned to currently-present
     /// paths each pass (ephemeral workloads, removed exposure).
     verdict_cache: HashMap<(String, String), (String, adjudicate::Verdict)>,
+    /// OTLP instruments (no-op when no collector is configured).
+    metrics: EngineMetrics,
 }
 
 impl Engine {
@@ -105,6 +164,7 @@ impl Engine {
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
             verdict_cache: HashMap::new(),
+            metrics: EngineMetrics::new(),
         }
     }
 
@@ -122,7 +182,9 @@ impl Engine {
     /// corroborated without adding a node or edge). The structural delta only gates
     /// the *verbose reporting* (the Q1 threat-delta and per-chain logs), to keep a
     /// quiet cluster quiet.
+    #[tracing::instrument(name = "engine.process", skip_all)]
     pub async fn process(&mut self, snapshot: &Snapshot) {
+        self.metrics.passes.add(1, &[]);
         let graph = adapter::build_graph(snapshot, &self.adapters);
         let current = GraphSnapshot::of(&graph);
         let health = PodStatusHealth.assess(snapshot);
@@ -159,6 +221,13 @@ impl Engine {
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
+        // Snapshot gauges for this pass.
+        self.metrics.chains.record(chains.len() as u64, &[]);
+        self.metrics.breach_paths.record(
+            chains.iter().filter(|c| c.is_breach_relevant()).count() as u64,
+            &[],
+        );
+
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant PATH,
         // always. The deterministic proof winnows to the paths an internet-facing
         // workload can actually reach (internet → entry → objective); the model then
@@ -189,6 +258,7 @@ impl Engine {
             .filter(|c| c.is_breach_relevant())
             .map(|c| (c.entry.0.clone(), c.objective.0.clone()))
             .collect();
+        let mut verdict_counts: HashMap<&'static str, u64> = HashMap::new();
         for chain in chains.iter_mut() {
             if !chain.is_breach_relevant() {
                 continue;
@@ -202,18 +272,24 @@ impl Engine {
                     // An Uncertain is usually a transient model outage (e.g. a CPU-model
                     // timeout) — log it quietly and re-judge next pass rather than pin
                     // the failure into the cache. Decisive verdicts are logged + cached.
-                    match &v {
+                    let result = match &v {
                         adjudicate::Verdict::Uncertain(why) => {
                             tracing::debug!(entry = %chain.entry.0, objective = %chain.objective.0, %why, "adjudication inconclusive (will retry)");
+                            "unavailable"
                         }
                         decisive => {
                             tracing::info!(entry = %chain.entry.0, objective = %chain.objective.0, verdict = ?decisive, "adjudicated path");
                             self.verdict_cache.insert(path, (fingerprint, v.clone()));
+                            "ok"
                         }
-                    }
+                    };
+                    self.metrics
+                        .model_calls
+                        .add(1, &[opentelemetry::KeyValue::new("result", result)]);
                     v
                 }
             };
+            *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
             // Keep the model's call — positive *and* negative — on the chain so the
             // dashboard can show why it did or didn't act (not just the outcome).
             chain.verdict = Some(verdict.summary());
@@ -229,6 +305,12 @@ impl Engine {
         // exposure), so the cache tracks the live cluster rather than growing forever.
         self.verdict_cache
             .retain(|path, _| current_paths.contains(path));
+        // Current verdict distribution over breach paths (per-label gauge).
+        for (verdict, count) in &verdict_counts {
+            self.metrics
+                .verdicts
+                .record(*count, &[opentelemetry::KeyValue::new("verdict", *verdict)]);
+        }
         // Re-publish with the model's verdicts now attached — the enriched view
         // (promotions move into remediations; judged paths show the model's words).
         self.findings
@@ -265,6 +347,9 @@ impl Engine {
         // acted on. AutoApply is deduped by the action log; propose/forbid is logged
         // only for newly-proposed cuts to avoid per-pass spam.
         let active_mitigations: Vec<_> = self.ledger.active().cloned().collect();
+        self.metrics
+            .active_mitigations
+            .record(active_mitigations.len() as u64, &[]);
         for mitigation in &active_mitigations {
             let blast = predict_blast_radius(mitigation, &graph, &health);
             match decide(mitigation, &self.active, &blast) {
@@ -273,6 +358,9 @@ impl Engine {
                         self.actuator.apply(mitigation).await;
                         self.actions
                             .record(mitigation.clone(), health.alive_workloads());
+                        self.metrics
+                            .mitigations
+                            .add(1, &[opentelemetry::KeyValue::new("action", "applied")]);
                     }
                 }
                 Decision::Propose(reason) => {
@@ -295,6 +383,9 @@ impl Engine {
         for reversion in self.actions.reconcile(&health, &justified) {
             tracing::info!(reason = %reversion.reason, "reverting applied mitigation");
             self.actuator.revert(&reversion.mitigation).await;
+            self.metrics
+                .mitigations
+                .add(1, &[opentelemetry::KeyValue::new("action", "reverted")]);
         }
 
         self.previous = current;

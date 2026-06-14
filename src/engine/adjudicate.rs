@@ -55,6 +55,16 @@ impl Verdict {
         matches!(self, Verdict::Exploitable(_))
     }
 
+    /// A stable, low-cardinality label for metrics (the verdict kind, no free text).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Verdict::Confirmed => "confirmed",
+            Verdict::Exploitable(_) => "exploitable",
+            Verdict::Refuted(_) => "refuted",
+            Verdict::Uncertain(_) => "uncertain",
+        }
+    }
+
     /// A one-line, human summary of the model's call — kept on the finding so the
     /// dashboard can show *both* positive (cut) and negative (don't-cut) decisions
     /// with the model's own reasoning, not just the outcome.
@@ -257,6 +267,11 @@ impl ModelAdjudicator {
 
 #[async_trait::async_trait]
 impl Adjudicator for ModelAdjudicator {
+    #[tracing::instrument(
+        name = "engine.adjudicate",
+        skip_all,
+        fields(model = %self.model, entry = %chain.entry.0, objective = %chain.objective.0)
+    )]
     async fn judge(&self, chain: &ProvenChain, graph: &SecurityGraph) -> Verdict {
         let prompt = build_judgment_prompt(chain, graph);
         match super::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {

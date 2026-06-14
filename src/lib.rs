@@ -13,3 +13,4 @@ pub mod metrics;
 pub mod policies;
 pub mod policy;
 pub mod server;
+pub mod telemetry;
