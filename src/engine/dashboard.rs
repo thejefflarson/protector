@@ -381,24 +381,32 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
-    // The model's verdict for this entry (uniform across the card — judged per entry).
-    // A path is judged only when it carries evidence (a foothold CVE or runtime
-    // signal); with neither, there is nothing to adjudicate, so `None` here means
-    // latent exposure, NOT a model that declined or is missing.
-    let judgement = match fs.iter().find_map(|f| f.verdict.as_deref()) {
-        Some(v) => format!("<div class=\"verdict\">model: {}</div>", escape(v)),
-        None => "<div class=\"verdict muted\">latent exposure — no CVE or runtime signal on this exposed path; nothing to exploit yet</div>"
-            .to_string(),
-    };
+    // The model's judgement of each path from this endpoint — the LLM is the judge
+    // (ADR-0013), so this is its own words, never a rule-based category. Every
+    // breach-relevant path is judged; a path the model hasn't reached yet (slow or
+    // unreachable CPU model) shows as awaiting judgement, with the path still drawn.
+    let mut verdicts: BTreeMap<String, usize> = BTreeMap::new();
+    for f in fs {
+        let v = f
+            .verdict
+            .clone()
+            .unwrap_or_else(|| "awaiting model judgement".to_string());
+        *verdicts.entry(v).or_default() += 1;
+    }
+    let judgement: String = verdicts
+        .iter()
+        .map(|(v, n)| format!("<li><b>{n}</b> — {}</li>", escape(v)))
+        .collect();
 
     format!(
         "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
-         {}<pre class=\"mermaid\">{}</pre></div>",
+         <pre class=\"mermaid\">{}</pre>\
+         <div class=\"why\">model judgement:<ul>{}</ul></div></div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
-        judgement,
         m.finish(),
+        judgement,
     )
 }
 
@@ -463,6 +471,9 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#999}}\
          .graph svg{{max-width:100%;height:auto}}\
          .verdict.muted{{color:#777;border-left-color:#ccc}}\
+         .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
+         .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
+         .why li{{margin:.1rem 0}}\
          </style>\
          <script type=\"module\">\
          // beautiful-mermaid: ELK layout, synchronous SVG. Served SAME-ORIGIN from\

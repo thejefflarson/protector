@@ -67,12 +67,13 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
-    /// Cross-pass verdict cache, keyed by entry node key → (evidence fingerprint,
-    /// the model's verdict). The model is the judge of every breach-relevant path
-    /// (ADR-0013), but a CPU-only local model is far too slow to re-run on every
-    /// watch event; an entry is re-judged only when its evidence fingerprint
-    /// changes. Pruned to currently-present entries each pass (ephemeral workloads).
-    verdict_cache: HashMap<String, (String, adjudicate::Verdict)>,
+    /// Cross-pass verdict cache, keyed by path `(entry, objective)` → (evidence
+    /// fingerprint, the model's verdict). The model judges every breach-relevant path
+    /// (ADR-0013), but a CPU-only local model is far too slow to re-run on every watch
+    /// event; a path is re-judged only when its evidence fingerprint changes, and a
+    /// brand-new path is judged because it's a new key. Pruned to currently-present
+    /// paths each pass (ephemeral workloads, removed exposure).
+    verdict_cache: HashMap<(String, String), (String, adjudicate::Verdict)>,
 }
 
 impl Engine {
@@ -158,49 +159,57 @@ impl Engine {
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
-        // Adjudicate (ADR-0013): the model is the JUDGE, but only where there is
-        // EVIDENCE to weigh. The deterministic proof has WINNOWED the search space to
-        // the breach-relevant paths (internet-facing entry → objective); the model
-        // then makes the call a human analyst would on the ones that carry a concrete
-        // break-in primitive — a proven foothold (a critical/KEV CVE on the exposed
-        // entry) or a live runtime signal. A breach-relevant path with NEITHER has
-        // nothing to adjudicate: it is latent exposure, not an exploitable break-in,
-        // and asking the model would only force the foregone "no evidence" answer (and
-        // burn a slow CPU call). Those chains carry no verdict; the dashboard shows
-        // them honestly as latent exposure. Non-breach-relevant chains are
-        // assume-breach context, not findings, so they are not judged at all.
+        // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant PATH,
+        // always. The deterministic proof winnows to the paths an internet-facing
+        // workload can actually reach (internet → entry → objective); the model then
+        // makes the analyst's call on EACH one — is this reachability a real breach
+        // risk, or legitimate? A path is risky two independent ways: an ACTIVE EXPLOIT
+        // (a critical/KEV CVE or a live runtime signal), OR a STRUCTURAL EXPOSURE (the
+        // objective is reachable from the internet when it shouldn't be — a
+        // misconfiguration). So absence of a CVE is NOT safety: an internet-reachable
+        // path to something sensitive is a finding on its own. Defense in depth —
+        // every path is evaluated, every time the facts behind it change.
         //
-        // The verdict is judged ONCE PER ENTRY: exposure, CVEs, and runtime signals
-        // are properties of the entry workload, not of each objective it reaches, so
-        // a workload that fans out to 100 objectives is one judgement, not 100 calls.
-        // It is also cached ACROSS passes by an evidence fingerprint, because a local
-        // CPU model is far too slow to re-run on every watch event — an entry is
-        // re-judged only when the facts behind its verdict change.
+        // Judged ONCE PER PATH (entry → objective) and cached across passes. The cache
+        // is keyed by the path and invalidated by an evidence fingerprint (the entry's
+        // CVEs/runtime/exposure), so a path is re-judged when a scan lands a new CVE —
+        // and a brand-new path (e.g. a misconfig that newly exposes a secret) is judged
+        // because it's a new key. A local CPU model is slow, so this caching is what
+        // keeps steady state quiet; the findings were already published above, so a
+        // slow or unavailable model never blocks the dashboard.
         //
         // Two consequences follow from the verdict:
         // - Corroborated chain (live runtime signal): a non-confirming verdict
         //   downgrades the eligible auto-action to a human proposal (the veto direction).
-        // - Uncorroborated foothold: an affirmative `exploitable` verdict PROMOTES it
-        //   to auto-eligible — but only when the `judgement` class is armed, since
+        // - Uncorroborated path: an affirmative `exploitable` verdict PROMOTES it to
+        //   auto-eligible — but only when the `judgement` class is armed, since
         //   promoting on the model's say-so is the opt-in speculative lane.
-        let current_entries: HashSet<String> = chains.iter().map(|c| c.entry.0.clone()).collect();
+        let current_paths: HashSet<(String, String)> = chains
+            .iter()
+            .filter(|c| c.is_breach_relevant())
+            .map(|c| (c.entry.0.clone(), c.objective.0.clone()))
+            .collect();
         for chain in chains.iter_mut() {
-            // Judge only breach-relevant chains that carry evidence (foothold CVE or
-            // live runtime signal). No evidence → nothing to judge → no model call.
-            if !chain.is_breach_relevant() || !(chain.foothold.is_some() || chain.corroborated) {
+            if !chain.is_breach_relevant() {
                 continue;
             }
+            let path = (chain.entry.0.clone(), chain.objective.0.clone());
             let fingerprint = adjudicate::entry_fingerprint(&graph, chain);
-            let verdict = match self.verdict_cache.get(&chain.entry.0) {
+            let verdict = match self.verdict_cache.get(&path) {
                 Some((fp, v)) if *fp == fingerprint => v.clone(),
                 _ => {
                     let v = self.adjudicator.judge(chain, &graph).await;
-                    tracing::info!(entry = %chain.entry.0, verdict = ?v, "adjudicated entry");
-                    // Cache decisive verdicts only; an Uncertain is usually a transient
-                    // model outage — re-judge next pass rather than pin the failure.
-                    if !matches!(v, adjudicate::Verdict::Uncertain(_)) {
-                        self.verdict_cache
-                            .insert(chain.entry.0.clone(), (fingerprint, v.clone()));
+                    // An Uncertain is usually a transient model outage (e.g. a CPU-model
+                    // timeout) — log it quietly and re-judge next pass rather than pin
+                    // the failure into the cache. Decisive verdicts are logged + cached.
+                    match &v {
+                        adjudicate::Verdict::Uncertain(why) => {
+                            tracing::debug!(entry = %chain.entry.0, objective = %chain.objective.0, %why, "adjudication inconclusive (will retry)");
+                        }
+                        decisive => {
+                            tracing::info!(entry = %chain.entry.0, objective = %chain.objective.0, verdict = ?decisive, "adjudicated path");
+                            self.verdict_cache.insert(path, (fingerprint, v.clone()));
+                        }
                     }
                     v
                 }
@@ -216,10 +225,10 @@ impl Engine {
                 chain.promoted = true;
             }
         }
-        // Drop verdicts for entries that no longer exist (ephemeral workloads), so the
-        // cache tracks the live cluster rather than growing without bound.
+        // Drop verdicts for paths that no longer exist (ephemeral workloads, removed
+        // exposure), so the cache tracks the live cluster rather than growing forever.
         self.verdict_cache
-            .retain(|entry, _| current_entries.contains(entry));
+            .retain(|path, _| current_paths.contains(path));
         // Re-publish with the model's verdicts now attached — the enriched view
         // (promotions move into remediations; judged paths show the model's words).
         self.findings
@@ -640,35 +649,38 @@ mod tests {
         )
     }
 
-    /// The model judges a breach-relevant path ONLY when it carries evidence (a
-    /// foothold CVE or runtime signal). An exposed path with neither is latent
-    /// exposure — nothing to adjudicate, so the model is never called for it.
+    /// The model judges EVERY breach-relevant path, with or without a CVE — an
+    /// internet-reachable path to a secret is a finding on its own (structural
+    /// exposure), so absence of a CVE is not a reason to skip it (ADR-0013, defense in
+    /// depth). The verdict is cached per path, so re-processing the same facts doesn't
+    /// re-call the model.
     #[tokio::test]
-    async fn judges_only_breach_paths_that_carry_evidence() {
+    async fn judges_every_breach_relevant_path_even_without_a_cve() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut engine = engine_with(calls.clone());
 
-        // Exposed, reaches a secret, but NO CVE and NO runtime → not judged.
+        // Exposed, reaches a secret, NO CVE and NO runtime → still judged (structural).
         engine.process(&exposed_snapshot(false)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "an evidence-less exposed path must not be sent to the model"
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "an internet-reachable path must be judged even with no CVE"
         );
-        // It is still surfaced as a finding (latent exposure), just unjudged.
+        // The model's verdict is attached to the published finding.
         let findings = engine.findings().snapshot();
         assert!(
             findings
                 .iter()
-                .any(|f| f.breach_relevant && f.verdict.is_none()),
-            "the exposed path is published as an unjudged breach finding"
+                .any(|f| f.breach_relevant && f.verdict.is_some()),
+            "the judged breach path carries the model's verdict"
         );
 
-        // Add a critical exploited CVE → proven foothold → the model IS consulted.
-        engine.process(&exposed_snapshot(true)).await;
-        assert!(
-            calls.load(Ordering::SeqCst) >= 1,
-            "a proven foothold (evidence present) must be judged by the model"
+        // Re-processing identical facts reuses the cached verdict — no new model call.
+        let before = calls.load(Ordering::SeqCst);
+        engine.process(&exposed_snapshot(false)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "an unchanged path must not be re-judged (cache hit)"
         );
     }
 
