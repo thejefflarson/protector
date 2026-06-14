@@ -66,6 +66,12 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
+    /// Cross-pass verdict cache, keyed by entry node key → (evidence fingerprint,
+    /// the model's verdict). The model is the judge of every breach-relevant path
+    /// (ADR-0013), but a CPU-only local model is far too slow to re-run on every
+    /// watch event; an entry is re-judged only when its evidence fingerprint
+    /// changes. Pruned to currently-present entries each pass (ephemeral workloads).
+    verdict_cache: HashMap<String, (String, adjudicate::Verdict)>,
 }
 
 impl Engine {
@@ -96,6 +102,7 @@ impl Engine {
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
+            verdict_cache: HashMap::new(),
         }
     }
 
@@ -142,38 +149,45 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0013). The deterministic proof has WINNOWED the
-        // search space to a handful of candidate breach paths; the model makes the
-        // judgement a human analyst would. It is consulted ONLY where there is
-        // evidence to weigh — never on an evidence-empty chain. Two lanes:
-        // - Proven FOOTHOLD (internet-exposed ∧ critical/KEV CVE ∧ reachable — e.g.
-        //   log4shell): the model DECIDES exploitability. A cut requires its
-        //   affirmative `exploitable` verdict — a CVE being *present* is not proof it
-        //   can be *exercised*. Uncertain / refuted / no model → propose-only (the
-        //   foothold is surfaced for a human, never auto-cut on mere presence).
-        // - Corroborated chain (live runtime signal) → veto path: live activity is
-        //   auto-eligible, but a non-confirming verdict downgrades it to a proposal.
-        // A chain with neither a foothold nor runtime evidence is not asked.
+        // Adjudicate (ADR-0013): the model is the JUDGE. The deterministic proof has
+        // WINNOWED the search space to the breach-relevant paths (internet-facing
+        // entry → objective); the model then makes the call a human analyst would on
+        // EVERY one of them — is this genuinely exploitable end to end, or just a
+        // present-but-inert path? Its verdict, in its own words, is the disposition
+        // the dashboard shows for each path; there is no rule-based exploitability
+        // category. Non-breach-relevant chains are assume-breach context, not
+        // findings, so they are not judged.
         //
-        // The verdict is judged ONCE PER ENTRY and cached: corroboration and the
-        // foothold are properties of the entry workload, not of each objective it
-        // reaches, so a workload that fans out to 100 objectives is one judgement,
-        // not 100 model calls. The cached verdict then applies to all its chains.
-        let mut entry_verdict: HashMap<String, adjudicate::Verdict> = HashMap::new();
+        // The verdict is judged ONCE PER ENTRY: exposure, CVEs, and runtime signals
+        // are properties of the entry workload, not of each objective it reaches, so
+        // a workload that fans out to 100 objectives is one judgement, not 100 calls.
+        // It is also cached ACROSS passes by an evidence fingerprint, because a local
+        // CPU model is far too slow to re-run on every watch event — an entry is
+        // re-judged only when the facts behind its verdict change.
+        //
+        // Two consequences follow from the verdict:
+        // - Corroborated chain (live runtime signal): a non-confirming verdict
+        //   downgrades the eligible auto-action to a human proposal (the one-way veto).
+        // - Uncorroborated path: an affirmative `exploitable` verdict PROMOTES it to
+        //   auto-eligible — but only when the `judgement` class is armed, since
+        //   promoting on the model's say-so is the opt-in speculative lane.
+        let current_entries: HashSet<String> = chains.iter().map(|c| c.entry.0.clone()).collect();
         for chain in chains.iter_mut() {
-            let needs_judging = chain.corroborated
-                || (self.active.judgement_enabled()
-                    && chain.foothold.is_some()
-                    && !chain.single_edge_cuts.is_empty());
-            if !needs_judging {
+            if !chain.is_breach_relevant() {
                 continue;
             }
-            let verdict = match entry_verdict.get(&chain.entry.0) {
-                Some(v) => v.clone(),
-                None => {
+            let fingerprint = adjudicate::entry_fingerprint(&graph, chain);
+            let verdict = match self.verdict_cache.get(&chain.entry.0) {
+                Some((fp, v)) if *fp == fingerprint => v.clone(),
+                _ => {
                     let v = self.adjudicator.judge(chain, &graph).await;
                     tracing::info!(entry = %chain.entry.0, verdict = ?v, "adjudicated entry");
-                    entry_verdict.insert(chain.entry.0.clone(), v.clone());
+                    // Cache decisive verdicts only; an Uncertain is usually a transient
+                    // model outage — re-judge next pass rather than pin the failure.
+                    if !matches!(v, adjudicate::Verdict::Uncertain(_)) {
+                        self.verdict_cache
+                            .insert(chain.entry.0.clone(), (fingerprint, v.clone()));
+                    }
                     v
                 }
             };
@@ -181,16 +195,17 @@ impl Engine {
             // dashboard can show why it did or didn't act (not just the outcome).
             chain.verdict = Some(verdict.summary());
             if chain.corroborated {
-                // Veto lane: a non-confirming verdict downgrades to a proposal.
                 if !verdict.is_confirmed() {
                     chain.adjudicated = false;
                 }
-            } else if verdict.promotes() {
-                // Foothold lane: the model affirmatively judged the path exploitable
-                // (not mere CVE presence) — only then does it become auto-eligible.
+            } else if verdict.promotes() && self.active.judgement_enabled() {
                 chain.promoted = true;
             }
         }
+        // Drop verdicts for entries that no longer exist (ephemeral workloads), so the
+        // cache tracks the live cluster rather than growing without bound.
+        self.verdict_cache
+            .retain(|entry, _| current_entries.contains(entry));
         // Publish the current findings for the dashboard: remediations the engine
         // applies/proposes, and the per-endpoint exploit-path graphs.
         self.findings

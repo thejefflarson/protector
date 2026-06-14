@@ -309,29 +309,6 @@ impl Mermaid {
     }
 }
 
-/// Why a breach-relevant chain is *not* auto-remediated — the model's own words when
-/// it judged the chain (e.g. "not exploitable — …"), otherwise the plain-English
-/// reason derived from the disposition.
-fn not_remediated_reason(f: &Finding) -> String {
-    if let Some(v) = &f.verdict {
-        return v.clone();
-    }
-    match f.disposition.as_str() {
-        "latent foothold — propose" => {
-            "exposed + critical/KEV CVE, but no live signal — needs human approval"
-        }
-        "vetoed — propose" => "the model judged this benign",
-        "durable-fix PR" => {
-            "subtractive cut (RBAC/mount/identity) — fix via GitOps, not auto-cuttable"
-        }
-        "forbidden" => "irreversible (container escape) — durable fix only",
-        "structural — propose" => "no live signal or exploitable CVE yet",
-        "no-cut" => "no single edge severs it — needs deeper remediation",
-        _ => "not auto-remediated",
-    }
-    .to_string()
-}
-
 /// One remediation card: the kill chain caption and a graph of the path with the
 /// severing edge dashed.
 fn remediation_card(f: &Finding, armed: bool) -> String {
@@ -380,28 +357,30 @@ fn plural(kind: &str, n: usize) -> String {
     }
 }
 
-/// One endpoint card: every un-remediated breach path from this internet-facing
-/// entry in a single graph. A broadly-privileged entry (argocd, protector) fans out
-/// to hundreds of objectives, so terminal objectives sharing a (hop, reason, kind)
-/// are **collapsed into one aggregate node** ("47 secrets") — the graph stays
-/// readable instead of exploding. Intermediate hops are deduped.
+/// One endpoint card: every breach path from this internet-facing entry in a single
+/// graph, captioned with the **model's judgement** of the entry — the LLM is the
+/// judge (ADR-0013), so the disposition is its own words ("not exploitable — …"),
+/// never a rule-based category. The verdict is per-entry, so one judgement covers the
+/// whole card. A broadly-privileged entry (argocd, protector) fans out to hundreds of
+/// objectives, so terminal objectives sharing a (hop, kind) are **collapsed into one
+/// aggregate node** ("47 secrets") — the graph stays readable. Intermediate hops are
+/// deduped.
 fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
     let mut seen_intermediate: BTreeSet<String> = BTreeSet::new();
-    // Terminal fan-out grouped by (from-node, relation, reason, objective-kind) →
-    // the objective keys in that group. One group → one node (or aggregate).
-    let mut groups: BTreeMap<(String, String, String, String), Vec<String>> = BTreeMap::new();
+    // Terminal fan-out grouped by (from-node, relation, objective-kind) → the
+    // objective keys in that group. One group → one node (or aggregate).
+    let mut groups: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
     let mut objectives = 0usize;
 
     for f in fs {
         for step in &f.path {
             if step.to == f.objective {
                 objectives += 1;
-                let reason = not_remediated_reason(f);
                 let kind = kind(&step.to).to_string();
                 groups
-                    .entry((step.from.clone(), step.relation.clone(), reason, kind))
+                    .entry((step.from.clone(), step.relation.clone(), kind))
                     .or_default()
                     .push(step.to.clone());
             } else if seen_intermediate
@@ -412,39 +391,35 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
-    // Distinct "why not addressed" reasons, with how many objectives each covers —
-    // shown as text so it's explicit, not just buried in the graph edge labels.
-    let mut reason_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for ((_, _, reason, _), objs) in &groups {
-        *reason_counts.entry(reason.clone()).or_default() += objs.len();
-    }
-
-    for ((from, relation, reason, kind), objs) in &groups {
-        let edge = format!("{relation} — {reason}");
+    for ((from, relation, kind), objs) in &groups {
         if objs.len() == 1 {
-            m.edge(from, &objs[0], &edge, false);
+            m.edge(from, &objs[0], relation, false);
         } else {
             // Collapse the fan-out into one aggregate node.
-            let agg_key = format!("{kind}/__agg/{from}/{relation}/{reason}");
+            let agg_key = format!("{kind}/__agg/{from}/{relation}");
             let agg_label = format!("{} {}", objs.len(), plural(kind, objs.len()));
-            m.edge_to_labeled(from, &agg_key, &agg_label, &edge);
+            m.edge_to_labeled(from, &agg_key, &agg_label, relation);
         }
     }
 
-    let why: String = reason_counts
-        .iter()
-        .map(|(reason, n)| format!("<li><b>{n}</b> — {}</li>", escape(reason)))
-        .collect();
+    // The model's verdict for this entry (uniform across the card — it's judged per
+    // entry). `None` only when no model is configured.
+    let judgement = match fs.iter().find_map(|f| f.verdict.as_deref()) {
+        Some(v) => format!("<div class=\"verdict\">model: {}</div>", escape(v)),
+        None => {
+            "<div class=\"verdict muted\">no model configured — latent exposure, unjudged</div>"
+                .to_string()
+        }
+    };
 
     format!(
         "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
-         <pre class=\"mermaid\">{}</pre>\
-         <div class=\"why\">not addressed:<ul>{}</ul></div></div>",
+         {}<pre class=\"mermaid\">{}</pre></div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
+        judgement,
         m.finish(),
-        why,
     )
 }
 
@@ -508,9 +483,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          a{{color:#06c}}\
          .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#999}}\
          .graph svg{{max-width:100%;height:auto}}\
-         .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
-         .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
-         .why li{{margin:.1rem 0}}\
+         .verdict.muted{{color:#777;border-left-color:#ccc}}\
          </style>\
          <script type=\"module\">\
          // beautiful-mermaid: ELK layout, synchronous SVG. Served SAME-ORIGIN from\

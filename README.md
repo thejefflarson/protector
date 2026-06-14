@@ -49,9 +49,11 @@ it never touches the cluster. Enable hard mode one reversible class at a time
 self-reverting network deny (`networkpolicy` on flannel, `adminnetworkpolicy` on
 ANP-capable CNIs). A read-only dashboard (`/` HTML, `/findings` JSON) shows two
 graph sections — active/proposed remediations, and possible attack paths coalesced
-per internet-facing endpoint with the reason each isn't remediated. Only
-breach-relevant (internet-reachable) chains are surfaced; internal access paths are
-assume-breach context, not findings (ADR-0013).
+per internet-facing endpoint, each captioned with the **model's** exploitability
+judgement in its own words ("not exploitable — …") rather than a rule-based category:
+the model judges every breach-relevant path, not just the ones it auto-cuts (ADR-0013).
+Only breach-relevant (internet-reachable) chains are surfaced; internal access paths
+are assume-breach context, not findings.
 
 ## Configuration (env)
 

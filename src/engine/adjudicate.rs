@@ -111,6 +111,25 @@ fn entry_evidence(graph: &SecurityGraph, chain: &ProvenChain) -> (Vec<String>, V
     (cves, runtime)
 }
 
+/// A stable fingerprint of the evidence a verdict depends on — the entry's
+/// exposure, its exploited/critical CVEs, and its runtime signals. The cross-pass
+/// verdict cache keys on this so an entry is re-judged only when the facts that
+/// would change the model's call change, not on every watch event (one CPU-only
+/// model call per endpoint is dear on a Pi).
+pub(crate) fn entry_fingerprint(graph: &SecurityGraph, chain: &ProvenChain) -> String {
+    let (mut cves, mut runtime) = entry_evidence(graph, chain);
+    cves.sort();
+    cves.dedup();
+    runtime.sort();
+    runtime.dedup();
+    format!(
+        "{}|cves={}|rt={}",
+        chain.exposed_entry,
+        cves.join(","),
+        runtime.join(",")
+    )
+}
+
 /// Wrap an untrusted value in a fence and strip the characters that could close it
 /// or inject prompt structure (ADR-0011 — closes the prompt-injection finding). The
 /// values come from cluster objects and third-party feeds, so they are data, never
