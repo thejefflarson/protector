@@ -28,7 +28,12 @@ pub fn client() -> reqwest::Client {
         .timeout(Duration::from_secs(timeout))
         .connect_timeout(Duration::from_secs(5))
         .build()
-        .unwrap_or_default()
+        .unwrap_or_else(|error| {
+            // The fallback default client has NO timeouts — the exact stall this
+            // module exists to bound — so a builder failure must be loud, not silent.
+            tracing::warn!(%error, "model client builder failed; using a default client WITHOUT timeouts");
+            reqwest::Client::new()
+        })
 }
 
 /// Send `prompt` as a single user message and return the assistant's text, or

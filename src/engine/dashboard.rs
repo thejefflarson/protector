@@ -235,7 +235,7 @@ fn mm(s: &str) -> String {
 /// cylinder, capability = hexagon, host = parallelogram, identity = stadium, else
 /// rectangle (workload / image / endpoint).
 fn shape(key: &str) -> (&'static str, &'static str) {
-    match key.split('/').next().unwrap_or("") {
+    match kind(key) {
         "secret" => ("[(", ")]"),
         "capability" => ("{{", "}}"),
         "host" => ("[/", "/]"),

@@ -946,7 +946,6 @@ pub fn build_graph(snapshot: &Snapshot, adapters: &[Box<dyn Adapter>]) -> Securi
     graph
 }
 
-#[allow(unused_imports)]
 #[cfg(test)]
 mod tests {
     use super::*;

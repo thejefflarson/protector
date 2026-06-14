@@ -8,8 +8,9 @@
 //! [`Engine::process`] runs the five-question pipeline against one observed
 //! snapshot: build the [`graph`], diff it (Q1, [`delta`]), assess health (Q3,
 //! [`health`]), prove ATT&CK-tagged chains and cuts (Q2, [`proof`]) — a model may
-//! [`hypothesis`]ize candidates the proof gate confirms, and [`adjudicate`] a
-//! full-bar chain with a one-way veto — reconcile proposed mitigations as
+//! [`hypothesis`]ize candidates the proof gate confirms, and [`adjudicate`] each
+//! breach-relevant chain — the model judges exploitability, vetoing a live chain or
+//! promoting an exposed one (ADR-0013) — reconcile proposed mitigations as
 //! self-retiring debt (Q4/Q5, [`response`]), and gate + (closed-loop) actuate them
 //! ([`actuator`]). [`run_watch`] drives it event-driven (the default); [`run`] is
 //! the poll fallback.
@@ -167,7 +168,7 @@ impl Engine {
         //
         // Two consequences follow from the verdict:
         // - Corroborated chain (live runtime signal): a non-confirming verdict
-        //   downgrades the eligible auto-action to a human proposal (the one-way veto).
+        //   downgrades the eligible auto-action to a human proposal (the veto direction).
         // - Uncorroborated path: an affirmative `exploitable` verdict PROMOTES it to
         //   auto-eligible — but only when the `judgement` class is armed, since
         //   promoting on the model's say-so is the opt-in speculative lane.
@@ -338,9 +339,22 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
     }
 }
 
-/// Choose the hypothesis source: a model-backed one when `PROTECTOR_ENGINE_MODEL`
-/// names an OpenAI-compatible endpoint (a local Ollama by default), else the null
-/// source. Local-first: point it at an in-cluster model so the graph never leaves.
+/// The model endpoint + name, read once from `PROTECTOR_ENGINE_MODEL` /
+/// `PROTECTOR_ENGINE_MODEL_NAME`. `None` when no endpoint is set (deterministic-only
+/// — null hypothesizer and adjudicator). Shared by both model-backed builders so the
+/// endpoint and the default model name have a single source of truth.
+fn model_config() -> Option<(String, String)> {
+    let endpoint = std::env::var("PROTECTOR_ENGINE_MODEL")
+        .ok()
+        .filter(|e| !e.is_empty())?;
+    let name =
+        std::env::var("PROTECTOR_ENGINE_MODEL_NAME").unwrap_or_else(|_| "qwen2.5:3b".to_string());
+    Some((endpoint, name))
+}
+
+/// Choose the hypothesis source: a model-backed one when a model is configured AND
+/// `PROTECTOR_ENGINE_HYPOTHESIS=model` opts it in, else the null source. Local-first:
+/// point it at an in-cluster model so the graph never leaves.
 fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
     // The model hypothesis source is OFF by default. The deterministic enumerator
     // already finds every structural chain at this cluster's scale (so model
@@ -350,10 +364,8 @@ fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
     // `PROTECTOR_ENGINE_HYPOTHESIS=model` only where the model is fast enough; the
     // model's real job is adjudication (ADR-0013), wired separately below.
     let opt_in = std::env::var("PROTECTOR_ENGINE_HYPOTHESIS").as_deref() == Ok("model");
-    match std::env::var("PROTECTOR_ENGINE_MODEL") {
-        Ok(endpoint) if opt_in && !endpoint.is_empty() => {
-            let model = std::env::var("PROTECTOR_ENGINE_MODEL_NAME")
-                .unwrap_or_else(|_| "qwen2.5:3b".to_string());
+    match model_config() {
+        Some((endpoint, model)) if opt_in => {
             tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
             Box::new(hypothesis::ModelHypothesizer::new(
                 endpoint,
@@ -365,18 +377,17 @@ fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
     }
 }
 
-/// Choose the adjudicator (ADR-0013): a model-backed judge when a model endpoint
-/// is configured (the same `PROTECTOR_ENGINE_MODEL` as the hypothesis source),
-/// else the null adjudicator (confirm everything — the deterministic bar governs).
+/// Choose the adjudicator (ADR-0013): a model-backed judge when a model endpoint is
+/// configured, else the null adjudicator (confirm everything — the deterministic bar
+/// governs). The model judges exploitability bidirectionally — vetoing a live chain
+/// the deterministic bar would act on, or promoting an exposed one it wouldn't.
 fn build_adjudicator() -> Box<dyn adjudicate::Adjudicator> {
-    match std::env::var("PROTECTOR_ENGINE_MODEL") {
-        Ok(endpoint) if !endpoint.is_empty() => {
-            let model = std::env::var("PROTECTOR_ENGINE_MODEL_NAME")
-                .unwrap_or_else(|_| "qwen2.5:3b".to_string());
-            tracing::info!("adjudicator: model-backed (one-way veto)");
+    match model_config() {
+        Some((endpoint, model)) => {
+            tracing::info!(%model, "adjudicator: model-backed (judges exploitability — promote/veto)");
             Box::new(adjudicate::ModelAdjudicator::new(endpoint, model))
         }
-        _ => Box::new(adjudicate::NullAdjudicator),
+        None => Box::new(adjudicate::NullAdjudicator),
     }
 }
 

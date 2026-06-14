@@ -80,9 +80,10 @@ pub struct ProvenChain {
     /// right now.
     pub corroborated: bool,
     /// Whether the model adjudicator confirmed this is a real, contextually-
-    /// exploitable attack (ADR-0013). Defaults `true`; the adjudicator can only set
-    /// it `false` — a one-way veto demoting an eligible auto-action to a human
+    /// exploitable attack (ADR-0013). Defaults `true`; the veto direction of the
+    /// model's judgement sets it `false`, demoting an eligible auto-action to a human
     /// proposal. Absent a model it stays `true` and the deterministic bar governs.
+    /// (The promote direction is the separate [`promoted`](Self::promoted) flag.)
     pub adjudicated: bool,
     /// Whether the model *promoted* this proven-but-uncorroborated chain to
     /// auto-eligible (ADR-0011) — its positive "game-over" judgement on an

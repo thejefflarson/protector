@@ -1,15 +1,21 @@
-//! The adjudicator (ADR-0013): the model's primary job — *judge* a
-//! deterministically-proven chain, never authorize one.
+//! The adjudicator (ADR-0013): proof winnows, the model decides. Deterministic
+//! proof establishes the *preconditions* (reachable, exposed, CVE present); the
+//! model makes the *exploitability* call a human analyst would on the chains proof
+//! has winnowed to — but it never *runs* an exploit (the named bound: it reasons
+//! about exploitability, it does not exercise it).
 //!
-//! Adjudication runs only on a chain that already meets the full action bar. The
-//! model is asked the two questions a deterministic check answers worst: is this
-//! KEV CVE actually exploitable *in this deployment*, and is this Falco signal
-//! actually an attack (vs a benign exec)? Its verdict is **one-way**: `Refuted` or
-//! `Uncertain` downgrades an eligible auto-action to a human proposal; nothing the
-//! model says can *create* permission. A wrong model causes at worst a missed
-//! auto-action, never a bad cut — so "only deterministic proof moves privilege"
-//! survives a model that hallucinates or flatters. The model never runs an exploit
-//! (the named bound): it reasons about exploitability; it does not exercise it.
+//! The model judges every breach-relevant chain and the verdict moves in **both**
+//! directions:
+//! - *veto* — on a live-corroborated chain, `Refuted`/`Uncertain` downgrades an
+//!   otherwise auto-eligible cut to a human proposal;
+//! - *promote* — on an internet-exposed but uncorroborated chain, an affirmative
+//!   `Exploitable` is what makes a cut auto-eligible at all (behind the `judgement`
+//!   opt-in); CVE *presence* alone never is.
+//!
+//! What keeps a miscalibrated model survivable is the architecture around it, not
+//! the model's restraint: the deterministic foothold floor gates what it's even
+//! asked, and the only live action is additive, reversible, and self-reverting. So
+//! a wrong call costs at most a missed or a transient cut, never an irreversible one.
 //!
 //! The prompt-building and verdict-parsing are pure and tested; the model call is
 //! the shared glue in [`super::model`].
@@ -38,7 +44,7 @@ pub enum Verdict {
 
 impl Verdict {
     /// Whether the verdict lets an otherwise-eligible auto-action proceed (no veto).
-    /// `Refuted`/`Uncertain` demote to a human proposal — the one-way veto.
+    /// `Refuted`/`Uncertain` demote to a human proposal — the veto direction.
     pub fn is_confirmed(&self) -> bool {
         matches!(self, Verdict::Confirmed | Verdict::Exploitable(_))
     }
