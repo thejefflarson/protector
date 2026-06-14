@@ -46,7 +46,13 @@ jobs:
         RUST_BACKTRACE: 1
   docker:
     runs-on: protector-runners
-    if: github.event_name != 'pull_request'
+    # Build + push + sign ONLY on a version tag. The deployable image is consumed
+    # from semver tags (argocd-image-updater), so a main-branch docker build adds no
+    # deploy value — and worse, a release pushes main and the tag together, so two
+    # docker builds would run concurrently against the same remote buildkit + shared
+    # registry cache and corrupt each other's layers (the intermittent `cook`/link
+    # failures). main pushes still run the `rust` job (fmt/clippy/audit/test).
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: rust
     permissions:
       contents: read
