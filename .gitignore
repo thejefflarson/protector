@@ -1,1 +1,4 @@
 /target
+
+# JS bundle build (vendored output in web/dist is committed)
+web/node_modules/

@@ -506,9 +506,11 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .why li{{margin:.1rem 0}}\
          </style>\
          <script type=\"module\">\
-         // beautiful-mermaid: ELK layout, synchronous SVG. Render each graph source\
-         // in place; on any failure leave the (readable, coalesced) source text.\
-         import {{ renderMermaidSVG }} from 'https://cdn.jsdelivr.net/npm/beautiful-mermaid@1.1.3/dist/index.js';\
+         // beautiful-mermaid: ELK layout, synchronous SVG. Served SAME-ORIGIN from\
+         // protector (vendored + bundled, web/dist) — never a third-party CDN, so a\
+         // compromised package registry can't inject JS into an operator's session.\
+         // Render each graph source in place; on failure leave the coalesced source.\
+         import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
          for (const pre of document.querySelectorAll('pre.mermaid')) {{\
            try {{\
              const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
@@ -538,12 +540,28 @@ async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> 
     Json(findings.snapshot())
 }
 
+/// The vendored, self-hosted graph renderer (beautiful-mermaid + elkjs, bundled in
+/// `web/dist` and embedded in the binary). Served same-origin so the dashboard never
+/// loads third-party JS — see the import in [`render_html`].
+const BEAUTIFUL_MERMAID_JS: &str = include_str!("../../web/dist/beautiful-mermaid.js");
+
+async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        BEAUTIFUL_MERMAID_JS,
+    )
+}
+
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON). Read-only;
 /// cluster-facing glue around the tested classification.
 pub async fn serve_dashboard(addr: SocketAddr, findings: Arc<Findings>) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(html_view))
         .route("/findings", get(json_view))
+        .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
         .with_state(findings);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "findings dashboard listening");
