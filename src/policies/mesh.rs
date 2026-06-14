@@ -42,6 +42,16 @@ impl Policy for MeshInjectionPolicy {
         let Some(obj) = req.object.as_ref() else {
             return Decision::Allow;
         };
+        // Mesh is for long-running, traffic-serving workloads. One-shot pods — Jobs,
+        // CronJobs, and ephemeral helper/task pods (`restartPolicy` Never/OnFailure,
+        // e.g. local-path-provisioner's PVC helpers) — don't serve traffic and
+        // shouldn't carry a mesh identity (Linkerd's own guidance), so they're out of
+        // scope. The webhook is blind to reachability — the engine's domain — and
+        // `restartPolicy` is the signal available at admission that separates a
+        // service from a task.
+        if !pod_is_long_running(obj) {
+            return Decision::Allow;
+        }
         if pod_is_meshed(obj) {
             return Decision::Allow;
         }
@@ -54,6 +64,19 @@ impl Policy for MeshInjectionPolicy {
             "Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string(),
         )
     }
+}
+
+/// A long-running, traffic-serving workload — the only kind mesh applies to.
+/// `restartPolicy` defaults to `Always` (the only value Deployments/StatefulSets/
+/// DaemonSets allow); Job, CronJob, and helper pods use `Never`/`OnFailure` and are
+/// one-shot tasks that don't need a mesh identity.
+fn pod_is_long_running(obj: &DynamicObject) -> bool {
+    matches!(
+        obj.data["spec"]
+            .get("restartPolicy")
+            .and_then(|v| v.as_str()),
+        None | Some("Always")
+    )
 }
 
 /// Whether the Pod carries Linkerd's injected sidecar. Checks for the
@@ -150,6 +173,33 @@ mod tests {
         assert!(matches!(
             p.evaluate(&pod_request("dev", spec)).await,
             Decision::Audit { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_shot_pods_are_out_of_scope_for_mesh() {
+        // A one-shot helper/Job pod (restartPolicy != Always, e.g. local-path's PVC
+        // helper) serves no traffic and is never flagged, even unmeshed in an
+        // enforced namespace — no deny, no audit noise.
+        let p = policy();
+        for restart in ["Never", "OnFailure"] {
+            let spec = json!({
+                "restartPolicy": restart,
+                "containers": [{"name": "helper", "image": "x"}]
+            });
+            assert!(
+                matches!(
+                    p.evaluate(&pod_request("public", spec)).await,
+                    Decision::Allow
+                ),
+                "restartPolicy={restart} should be out of mesh scope"
+            );
+        }
+        // A long-running service (default restartPolicy) is still enforced.
+        let svc = json!({"containers": [{"name": "app", "image": "x"}]});
+        assert!(matches!(
+            p.evaluate(&pod_request("public", svc)).await,
+            Decision::Deny { .. }
         ));
     }
 }
