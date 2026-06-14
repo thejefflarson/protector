@@ -197,6 +197,7 @@ helm install protector "$CHART_PATH" \
   --set replicaCount=1 \
   --set image.repository="${IMAGE%:*}" --set image.tag="${IMAGE#*:}" --set image.pullPolicy=Never \
   --set imagePullSecrets=null \
+  --set registryAuth.dockerconfigSecret="" \
   --set signature.enforceNamespaces="" --set signature.enforceLabels="" \
   --set engine.enable="" --set engine.actuationRBAC=false \
   --set engine.model.endpoint= \
