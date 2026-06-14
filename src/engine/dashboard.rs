@@ -246,15 +246,30 @@ struct Mermaid {
 
 impl Mermaid {
     fn node(&mut self, key: &str) -> String {
+        let label = short(key);
+        self.node_labeled(key, &label)
+    }
+
+    /// Like [`node`](Self::node) but with an explicit label (the key still drives the
+    /// shape + dedup identity). Used for aggregate fan-out nodes like "47 secrets".
+    fn node_labeled(&mut self, key: &str, label: &str) -> String {
         if let Some(id) = self.ids.get(key) {
             return id.clone();
         }
         let id = format!("n{}", self.ids.len());
         let (open, close) = shape(key);
         self.nodes
-            .push_str(&format!("  {id}{open}\"{}\"{close}\n", mm(&short(key))));
+            .push_str(&format!("  {id}{open}\"{}\"{close}\n", mm(label)));
         self.ids.insert(key.to_string(), id.clone());
         id
+    }
+
+    /// An edge to a node carrying an explicit label (for aggregate targets).
+    fn edge_to_labeled(&mut self, from: &str, to_key: &str, to_label: &str, label: &str) {
+        let a = self.node(from);
+        let b = self.node_labeled(to_key, to_label);
+        self.edges
+            .push_str(&format!("  {a} -->|\"{}\"| {b}\n", mm(label)));
     }
 
     /// The fixed Internet source node (a circle), linked into `entry` with a bold
@@ -343,33 +358,68 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     )
 }
 
+/// Pluralize an objective kind for an aggregate label ("47 secrets").
+fn plural(kind: &str, n: usize) -> String {
+    if n == 1 {
+        return kind.to_string();
+    }
+    match kind {
+        "capability" => "capabilities".to_string(),
+        "identity" => "identities".to_string(),
+        k => format!("{k}s"),
+    }
+}
+
 /// One endpoint card: every un-remediated breach path from this internet-facing
-/// entry, coalesced into a single graph, each terminal edge labeled with why it
-/// isn't remediated.
+/// entry in a single graph. A broadly-privileged entry (argocd, protector) fans out
+/// to hundreds of objectives, so terminal objectives sharing a (hop, reason, kind)
+/// are **collapsed into one aggregate node** ("47 secrets") — the graph stays
+/// readable instead of exploding. Intermediate hops are deduped.
 fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen_intermediate: BTreeSet<String> = BTreeSet::new();
+    // Terminal fan-out grouped by (from-node, relation, reason, objective-kind) →
+    // the objective keys in that group. One group → one node (or aggregate).
+    let mut groups: BTreeMap<(String, String, String, String), Vec<String>> = BTreeMap::new();
+    let mut objectives = 0usize;
+
     for f in fs {
         for step in &f.path {
-            let terminal = step.to == f.objective;
-            let label = if terminal {
-                format!("{} — {}", step.relation, not_remediated_reason(f))
-            } else {
-                step.relation.clone()
-            };
-            // Dedupe shared intermediate edges; terminal edges differ by reason.
-            if seen.insert(format!("{}|{}|{}", step.from, step.to, label)) {
-                m.edge(&step.from, &step.to, &label, false);
+            if step.to == f.objective {
+                objectives += 1;
+                let reason = not_remediated_reason(f);
+                let kind = step.to.split('/').next().unwrap_or("node").to_string();
+                groups
+                    .entry((step.from.clone(), step.relation.clone(), reason, kind))
+                    .or_default()
+                    .push(step.to.clone());
+            } else if seen_intermediate
+                .insert(format!("{}|{}|{}", step.from, step.to, step.relation))
+            {
+                m.edge(&step.from, &step.to, &step.relation, false);
             }
         }
     }
+
+    for ((from, relation, reason, kind), objs) in &groups {
+        let edge = format!("{relation} — {reason}");
+        if objs.len() == 1 {
+            m.edge(from, &objs[0], &edge, false);
+        } else {
+            // Collapse the fan-out into one aggregate node.
+            let agg_key = format!("{kind}/__agg/{from}/{relation}/{reason}");
+            let agg_label = format!("{} {}", objs.len(), plural(kind, objs.len()));
+            m.edge_to_labeled(from, &agg_key, &agg_label, &edge);
+        }
+    }
+
     format!(
-        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} path{})</span></div>\
+        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
          <pre class=\"mermaid\">{}</pre></div>",
         escape(&short(entry)),
-        fs.len(),
-        if fs.len() == 1 { "" } else { "s" },
+        objectives,
+        if objectives == 1 { "" } else { "s" },
         m.finish(),
     )
 }
@@ -432,11 +482,20 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .proposed{{color:#9a5b00;font-weight:600}}\
          .muted{{color:#777}}\
          a{{color:#06c}}\
-         .mermaid{{margin:.2rem 0}}\
+         .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#999}}\
+         .graph svg{{max-width:100%;height:auto}}\
          </style>\
          <script type=\"module\">\
-         import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';\
-         mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'strict'}});\
+         // beautiful-mermaid: ELK layout, synchronous SVG. Render each graph source\
+         // in place; on any failure leave the (readable, coalesced) source text.\
+         import {{ renderMermaidSVG }} from 'https://cdn.jsdelivr.net/npm/beautiful-mermaid@1.1.3/dist/index.js';\
+         for (const pre of document.querySelectorAll('pre.mermaid')) {{\
+           try {{\
+             const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
+             const g = document.createElement('div'); g.className = 'graph'; g.innerHTML = svg;\
+             pre.replaceWith(g);\
+           }} catch (e) {{ /* leave the source text as a fallback */ }}\
+         }}\
          </script></head><body>\
          <h1>protector</h1>\
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
