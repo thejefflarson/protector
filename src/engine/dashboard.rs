@@ -6,6 +6,7 @@
 //! renders it as a flat table (`/`) and as JSON (`/findings`). The classification
 //! ([`Finding::from_chain`]) is pure and tested; the server is glue.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -42,16 +43,18 @@ pub struct Finding {
     /// The single-edge cut that severs it, if one exists.
     pub cut: Option<String>,
     /// Whether the entry is internet-facing — the discriminator between a real breach
-    /// path and an assume-breach access path. Drives the bucket: a non-breach-relevant
-    /// chain is context, no matter what it can reach. See [`ProvenChain::is_breach_relevant`].
+    /// path and an assume-breach access path. Only breach-relevant chains are shown;
+    /// see [`ProvenChain::is_breach_relevant`].
     pub breach_relevant: bool,
-    /// The proven attack path, hop by hop (entry → … → objective) — rendered as a
-    /// small per-row graph so each finding reads on its own.
+    /// The ATT&CK kill chain this path realizes, in plain terms — the Initial Access
+    /// foothold (if any) through the objective's technique.
+    pub killchain: String,
+    /// The proven attack path, hop by hop (entry → … → objective).
     pub path: Vec<PathStep>,
 }
 
-/// One hop of a proven chain: `from -[relation]-> to`, with short (kind-stripped)
-/// node labels ready to render.
+/// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
+/// (so the renderer can derive both a short label and the node kind/shape).
 #[derive(Debug, Clone, Serialize)]
 pub struct PathStep {
     pub from: String,
@@ -83,16 +86,28 @@ impl Finding {
                 .first()
                 .map(super::response::cut_signature),
             breach_relevant: chain.is_breach_relevant(),
+            killchain: killchain(chain),
             path: chain
                 .links
                 .iter()
                 .map(|l| PathStep {
-                    from: short(&l.from.0),
+                    from: l.from.0.clone(),
                     relation: l.relation.clone(),
-                    to: short(&l.to.0),
+                    to: l.to.0.clone(),
                 })
                 .collect(),
         }
+    }
+}
+
+/// The ATT&CK kill chain in plain terms: the Initial Access foothold (T1190), when
+/// the entry is an exploitable front door, through the objective's own technique.
+fn killchain(chain: &ProvenChain) -> String {
+    let goal = format!("{} {}", chain.attack.technique_id, chain.attack.technique);
+    if chain.foothold.is_some() {
+        format!("T1190 Exploit Public-Facing Application → {goal}")
+    } else {
+        goal
     }
 }
 
@@ -153,13 +168,24 @@ fn classify(
 #[derive(Default)]
 pub struct Findings {
     rows: Mutex<Vec<Finding>>,
-    /// The attack graph as Graphviz DOT (internet → goal), served at `/graph`.
-    graph_dot: Mutex<String>,
+    /// Whether any action class is armed (`engine.enable` non-empty). Drives the
+    /// remediations section title: "Active" when armed, "Proposed" in shadow.
+    armed: std::sync::atomic::AtomicBool,
 }
 
 impl Findings {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record whether an action class is armed (set once from `EnabledActions`).
+    pub fn set_armed(&self, armed: bool) {
+        self.armed
+            .store(armed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_armed(&self) -> bool {
+        self.armed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Replace the snapshot with this pass's findings.
@@ -169,15 +195,6 @@ impl Findings {
 
     pub fn snapshot(&self) -> Vec<Finding> {
         self.rows.lock().expect("findings mutex poisoned").clone()
-    }
-
-    /// Replace the attack-graph DOT for the `/graph` view.
-    pub fn replace_graph(&self, dot: String) {
-        *self.graph_dot.lock().expect("graph mutex poisoned") = dot;
-    }
-
-    pub fn graph_dot(&self) -> String {
-        self.graph_dot.lock().expect("graph mutex poisoned").clone()
     }
 }
 
@@ -194,158 +211,243 @@ fn short(key: &str) -> String {
         .map_or_else(|| key.to_string(), |(_, rest)| rest.to_string())
 }
 
-/// Which "what do I do about it" bucket a finding falls in: 0 act, 1 fix, 2 watch,
-/// 3 context. A chain is only a *finding* (buckets 0-2) if it's breach-relevant —
-/// the entry is internet-facing, an origin an attacker can actually reach. Everything
-/// else (an internal workload that can read a secret or reach the DB — normal cluster
-/// topology) is the assume-breach blast-radius map: context, not a to-do.
-fn bucket(f: &Finding) -> usize {
-    if !f.breach_relevant {
-        return 3; // assume-breach context: not reachable from the internet
-    }
-    match f.disposition.as_str() {
-        "auto-eligible" => 0,
-        "durable-fix PR" | "forbidden" => 1,
-        "latent foothold — propose" | "vetoed — propose" => 2,
-        _ => 3, // structural / no-cut / unclassified — assume-breach context
+/// Strip the characters that break a Mermaid quoted label.
+fn mm(s: &str) -> String {
+    s.replace(['"', '`', '\n', '\r'], " ")
+}
+
+/// Mermaid node-shape delimiters by node kind (from the key prefix): secret =
+/// cylinder, capability = hexagon, host = parallelogram, identity = stadium, else
+/// rectangle (workload / image / endpoint).
+fn shape(key: &str) -> (&'static str, &'static str) {
+    match key.split('/').next().unwrap_or("") {
+        "secret" => ("[(", ")]"),
+        "capability" => ("{{", "}}"),
+        "host" => ("[/", "/]"),
+        "identity" => ("([", "])"),
+        _ => ("[", "]"),
     }
 }
 
-/// Render the findings grouped by what to *do* — a one-line summary, then four
-/// collapsible buckets (act / fix / watch / context), each item a plain sentence.
-/// Flat, system font, no gradients, no rounded corners.
-fn render_html(findings: &[Finding]) -> String {
-    let mut counts = [0usize; 4];
-    for f in findings {
-        counts[bucket(f)] += 1;
+/// Accumulates a Mermaid `flowchart LR`: every distinct node key gets a stable
+/// synthetic id (Mermaid ids must be identifier-safe), labeled with its short name
+/// and shaped by kind.
+#[derive(Default)]
+struct Mermaid {
+    ids: BTreeMap<String, String>,
+    nodes: String,
+    edges: String,
+}
+
+impl Mermaid {
+    fn node(&mut self, key: &str) -> String {
+        if let Some(id) = self.ids.get(key) {
+            return id.clone();
+        }
+        let id = format!("n{}", self.ids.len());
+        let (open, close) = shape(key);
+        self.nodes
+            .push_str(&format!("  {id}{open}\"{}\"{close}\n", mm(&short(key))));
+        self.ids.insert(key.to_string(), id.clone());
+        id
     }
 
-    let item = |f: &Finding| {
-        let evidence = if f.corroborated {
-            "live (runtime signal)"
-        } else if f.promoted {
-            "model-promoted"
-        } else if f.foothold {
-            "internet-exposed + CVE"
+    /// The fixed Internet source node (a circle), linked into `entry` with a bold
+    /// arrow — the attacker's origin.
+    fn add_internet(&mut self, entry: &str) {
+        let net = self.ids.get("__internet__").cloned().unwrap_or_else(|| {
+            let id = format!("n{}", self.ids.len());
+            self.nodes.push_str(&format!("  {id}((\"Internet\"))\n"));
+            self.ids.insert("__internet__".into(), id.clone());
+            id
+        });
+        let to = self.node(entry);
+        self.edges.push_str(&format!("  {net} ==> {to}\n"));
+    }
+
+    /// A labeled edge; `cut` draws it dashed (the severing action).
+    fn edge(&mut self, from: &str, to: &str, label: &str, cut: bool) {
+        let a = self.node(from);
+        let b = self.node(to);
+        let arrow = if cut { "-.->" } else { "-->" };
+        self.edges
+            .push_str(&format!("  {a} {arrow}|\"{}\"| {b}\n", mm(label)));
+    }
+
+    fn finish(self) -> String {
+        format!("flowchart LR\n{}{}", self.nodes, self.edges)
+    }
+}
+
+/// Why a breach-relevant chain is *not* auto-remediated — the plain-English reason
+/// shown on its terminal edge, derived from the disposition.
+fn not_remediated_reason(f: &Finding) -> &'static str {
+    match f.disposition.as_str() {
+        "latent foothold — propose" => {
+            "exposed + critical/KEV CVE, but no live signal — needs human approval"
+        }
+        "vetoed — propose" => "the model judged this benign",
+        "durable-fix PR" => {
+            "subtractive cut (RBAC/mount/identity) — fix via GitOps, not auto-cuttable"
+        }
+        "forbidden" => "irreversible (container escape) — durable fix only",
+        "structural — propose" => "no live signal or exploitable CVE yet",
+        "no-cut" => "no single edge severs it — needs deeper remediation",
+        _ => "not auto-remediated",
+    }
+}
+
+/// One remediation card: the kill chain caption and a graph of the path with the
+/// severing edge dashed.
+fn remediation_card(f: &Finding, armed: bool) -> String {
+    let mut m = Mermaid::default();
+    m.add_internet(&f.entry);
+    for step in &f.path {
+        let sig = format!("{} -[{}]-> {}", step.from, step.relation, step.to);
+        let is_cut = f.cut.as_deref() == Some(sig.as_str());
+        let label = if is_cut {
+            "✂ NetworkPolicy cut".to_string()
         } else {
-            "reachable"
+            step.relation.clone()
         };
-        // The attack path as a small inline graph: entry, then each hop's relation
-        // and next node. Falls back to the endpoints if no links were recorded.
-        let path = if f.path.is_empty() {
-            format!(
-                "{} <span class=\"arr\">→</span> {}",
-                escape(&short(&f.entry)),
-                escape(&short(&f.objective)),
-            )
-        } else {
-            let mut s = format!("<span class=\"node\">{}</span>", escape(&f.path[0].from));
-            for step in &f.path {
-                s.push_str(&format!(
-                    " <span class=\"rel\">{}</span> <span class=\"arr\">→</span> \
-                     <span class=\"node\">{}</span>",
-                    escape(&step.relation),
-                    escape(&step.to),
-                ));
-            }
-            s
-        };
-        format!(
-            "<li><div class=\"path\">{path}</div> <span class=\"ev\">{}</span></li>",
-            escape(evidence),
-        )
+        m.edge(&step.from, &step.to, &label, is_cut);
+    }
+    let status = if armed {
+        "<span class=\"applied\">applied</span>"
+    } else {
+        "<span class=\"proposed\">would apply (shadow)</span>"
     };
-    let section = |title: &str, b: usize, open: bool| {
-        let body = if counts[b] == 0 {
-            "<p class=\"muted\">none</p>".to_string()
-        } else {
-            let items: String = findings
-                .iter()
-                .filter(|f| bucket(f) == b)
-                .map(&item)
-                .collect();
-            format!("<ul>{items}</ul>")
-        };
-        format!(
-            "<details class=\"b{b}\"{}><summary><b>{}</b> <span class=\"n\">{}</span>\
-             </summary>{}</details>",
-            if open { " open" } else { "" },
-            escape(title),
-            counts[b],
-            body,
-        )
+    format!(
+        "<div class=\"card\"><div class=\"kc\">{} → {}  {status}</div>\
+         <div class=\"kc2\">kill chain: {}</div><pre class=\"mermaid\">{}</pre></div>",
+        escape(&short(&f.entry)),
+        escape(&short(&f.objective)),
+        escape(&f.killchain),
+        m.finish(),
+    )
+}
+
+/// One endpoint card: every un-remediated breach path from this internet-facing
+/// entry, coalesced into a single graph, each terminal edge labeled with why it
+/// isn't remediated.
+fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
+    let mut m = Mermaid::default();
+    m.add_internet(entry);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for f in fs {
+        for step in &f.path {
+            let terminal = step.to == f.objective;
+            let label = if terminal {
+                format!("{} — {}", step.relation, not_remediated_reason(f))
+            } else {
+                step.relation.clone()
+            };
+            // Dedupe shared intermediate edges; terminal edges differ by reason.
+            if seen.insert(format!("{}|{}|{}", step.from, step.to, label)) {
+                m.edge(&step.from, &step.to, &label, false);
+            }
+        }
+    }
+    format!(
+        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} path{})</span></div>\
+         <pre class=\"mermaid\">{}</pre></div>",
+        escape(&short(entry)),
+        fs.len(),
+        if fs.len() == 1 { "" } else { "s" },
+        m.finish(),
+    )
+}
+
+/// Render the dashboard: two sections, both graph-based.
+///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
+///      the cut marked.
+///   2. Possible attack paths, one coalesced graph per internet-facing endpoint,
+///      each terminal edge labeled with why it isn't remediated.
+fn render_html(findings: &[Finding], armed: bool) -> String {
+    let breach: Vec<&Finding> = findings.iter().filter(|f| f.breach_relevant).collect();
+    let remediations: Vec<&Finding> = breach
+        .iter()
+        .copied()
+        .filter(|f| f.disposition == "auto-eligible")
+        .collect();
+
+    // The rest, grouped by endpoint (entry), stable order.
+    let mut endpoints: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    for f in &breach {
+        if f.disposition != "auto-eligible" {
+            endpoints.entry(f.entry.as_str()).or_default().push(f);
+        }
+    }
+
+    let rem_title = if armed {
+        "Active Remediations"
+    } else {
+        "Proposed Remediations"
+    };
+    let rem_body = if remediations.is_empty() {
+        "<p class=\"muted\">none</p>".to_string()
+    } else {
+        remediations
+            .iter()
+            .map(|f| remediation_card(f, armed))
+            .collect()
+    };
+    let path_body = if endpoints.is_empty() {
+        "<p class=\"muted\">no internet-facing exposure reaches an objective</p>".to_string()
+    } else {
+        endpoints
+            .iter()
+            .map(|(entry, fs)| endpoint_card(entry, fs))
+            .collect()
     };
 
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>protector</title>\
          <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111;max-width:60rem}}\
+         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111;max-width:64rem}}\
          h1{{font-size:1.2rem;font-weight:600;margin:0}}\
-         .sum{{margin:.5rem 0 1.5rem;color:#444}}\
-         details{{border-left:3px solid #ccc;padding:.3rem .8rem;margin:.6rem 0}}\
-         details.b0{{border-color:#b00000}} details.b1{{border-color:#9a5b00}}\
-         details.b2{{border-color:#888}} details.b3{{border-color:#ddd}}\
-         summary{{cursor:pointer;font-size:.95rem}}\
-         .n{{display:inline-block;min-width:1.5rem;color:#000;font-weight:600}}\
-         ul{{list-style:none;padding:0;margin:.5rem 0}}\
-         li{{padding:.35rem 0;border-top:1px solid #eee}}\
-         .path{{font-family:ui-monospace,monospace;font-size:.85rem;line-height:1.6}}\
-         .node{{color:#111}}\
-         .rel{{color:#999;font-size:.72rem}}\
-         .arr{{color:#bbb}}\
-         .ev{{font-size:.75rem;color:#666;margin-left:.4rem}}\
-         .muted{{color:#777;font-weight:400}}\
+         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
+         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
+         .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
+         .kc{{font-family:ui-monospace,monospace;font-size:.85rem;font-weight:600}}\
+         .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
+         .applied{{color:#b00000;font-weight:600}}\
+         .proposed{{color:#9a5b00;font-weight:600}}\
+         .muted{{color:#777}}\
          a{{color:#06c}}\
-         </style></head><body>\
+         .mermaid{{margin:.2rem 0}}\
+         </style>\
+         <script type=\"module\">\
+         import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';\
+         mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'strict'}});\
+         </script></head><body>\
          <h1>protector</h1>\
-         <p class=\"sum\"><b>{breach}</b> breach path{plural} reachable from the internet — \
-         <b>{act}</b> to act on · <b>{fix}</b> to fix in code · <b>{watch}</b> to watch. \
-         <span class=\"muted\">{ctx} internal access paths are assume-breach context, not findings.</span> \
-         &nbsp;|&nbsp; <a href=\"/graph\">attack graph</a> · <a href=\"/findings\">json</a></p>\
-         {s_act}{s_fix}{s_watch}{s_ctx}\
+         <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
+         un-remediated paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
+         <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
+         <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>{path_body}\
          </body></html>",
-        breach = counts[0] + counts[1] + counts[2],
-        plural = if counts[0] + counts[1] + counts[2] == 1 {
-            ""
-        } else {
-            "s"
-        },
-        act = counts[0],
-        fix = counts[1],
-        watch = counts[2],
-        ctx = counts[3],
-        s_act = section("Act now", 0, true),
-        s_fix = section("Fix in code", 1, true),
-        s_watch = section("Watch", 2, true),
-        s_ctx = section("Assume-breach", 3, false),
+        rem_n = remediations.len(),
+        rem_word = if armed { "active" } else { "proposed" },
+        ep_n = endpoints.len(),
+        ep_plural = if endpoints.len() == 1 { "" } else { "s" },
     )
 }
 
 async fn html_view(State(findings): State<Arc<Findings>>) -> Html<String> {
-    Html(render_html(&findings.snapshot()))
+    Html(render_html(&findings.snapshot(), findings.is_armed()))
 }
 
 async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> {
     Json(findings.snapshot())
 }
 
-/// The attack graph as Graphviz DOT (`curl .../graph | dot -Tsvg`).
-async fn graph_view(
-    State(findings): State<Arc<Findings>>,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/vnd.graphviz")],
-        findings.graph_dot(),
-    )
-}
-
-/// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/graph` DOT).
-/// Read-only; cluster-facing glue around the tested classification.
+/// Serve the findings dashboard (`/` HTML, `/findings` JSON). Read-only;
+/// cluster-facing glue around the tested classification.
 pub async fn serve_dashboard(addr: SocketAddr, findings: Arc<Findings>) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(html_view))
         .route("/findings", get(json_view))
-        .route("/graph", get(graph_view))
         .with_state(findings);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "findings dashboard listening");
@@ -441,17 +543,15 @@ mod tests {
         assert!(f.decision.contains("NetworkPolicy"));
     }
 
-    #[test]
-    fn render_groups_by_what_to_do_and_dumps_a_sample() {
-        // Shaped like the real cluster: a couple of internet-facing breach paths
-        // (the only real findings), and a big internal RBAC/access mass that is
-        // assume-breach context — exactly the "everything that can read secrets"
-        // noise that must NOT be flagged as fix-in-code.
-        let f = |entry: &str,
-                 objective: &str,
-                 disposition: &str,
-                 decision: &str,
-                 breach_relevant: bool| Finding {
+    /// Build a Finding with a two-hop path entry →reaches→ store →&lt;rel&gt;→ objective.
+    fn finding(
+        entry: &str,
+        objective: &str,
+        disposition: &str,
+        terminal_rel: &str,
+        breach_relevant: bool,
+    ) -> Finding {
+        Finding {
             entry: entry.into(),
             objective: objective.into(),
             tactic: "TA0006".into(),
@@ -461,80 +561,80 @@ mod tests {
             adjudicated: true,
             promoted: false,
             disposition: disposition.into(),
-            decision: decision.into(),
-            cut: Some(format!("{entry} -[…]-> {objective}")),
+            decision: "decision".into(),
+            // The cut is the first hop (the reaches edge entry → store), matching
+            // the first PathStep below so the remediation graph can mark it.
+            cut: Some(format!("{entry} -[reaches/Tcp]-> workload/app/Pod/store")),
             breach_relevant,
+            killchain: "T1190 Exploit Public-Facing Application → T1552 Unsecured Credentials"
+                .into(),
             path: vec![
                 PathStep {
-                    from: short(entry),
+                    from: entry.into(),
                     relation: "reaches/Tcp".into(),
-                    to: "app/Pod/store".into(),
+                    to: "workload/app/Pod/store".into(),
                 },
                 PathStep {
-                    from: "app/Pod/store".into(),
-                    relation: "can-read".into(),
-                    to: short(objective),
+                    from: "workload/app/Pod/store".into(),
+                    relation: terminal_rel.into(),
+                    to: objective.into(),
                 },
             ],
-        };
-        // Two internet-facing front doors: one auto-cuttable, one durable-fix.
-        let mut findings = vec![
-            f(
+        }
+    }
+
+    #[test]
+    fn renders_two_graph_sections_and_drops_internal_paths() {
+        let findings = vec![
+            // Remediation: an auto-eligible cut from the exposed web endpoint.
+            finding(
                 "workload/app/Pod/web",
                 "secret/app/session-key",
                 "auto-eligible",
-                "auto-applies a reversible NetworkPolicy cut when `network` is armed",
+                "reaches/Tcp",
                 true,
             ),
-            f(
+            // Un-remediated paths from the SAME endpoint (coalesce into one graph).
+            finding(
                 "workload/app/Pod/web",
                 "capability/cluster/create/pods",
                 "durable-fix PR",
-                "revoke the RBAC grant via GitOps",
+                "can-do/create/pods",
                 true,
             ),
-        ];
-        // The internal mass: control-plane + workloads that can read secrets / reach
-        // the DB. Real cluster topology, NOT a breach — must land in context.
-        for o in [
-            "secret/argocd/argocd-secret",
-            "secret/analytics/postgres.creds",
-            "capability/cluster/create/pods",
-        ] {
-            findings.push(f(
+            finding(
+                "workload/app/Pod/web",
+                "secret/app/other",
+                "latent foothold — propose",
+                "can-read",
+                true,
+            ),
+            // Internal (not breach-relevant): must NOT appear in either section.
+            finding(
                 "workload/argocd/Pod/argocd-application-controller-0",
-                o,
+                "secret/argocd/argocd-secret",
                 "durable-fix PR",
-                "revoke the RBAC grant via GitOps",
+                "can-do/get/secrets",
                 false,
-            ));
-        }
-        for i in 0..40 {
-            findings.push(f(
-                &format!("workload/kube-system/Pod/p{i}"),
-                "secret/kube-system/sh.helm.release.v1.x",
-                "structural — propose",
-                "no live or foothold evidence — propose only",
-                false,
-            ));
-        }
+            ),
+        ];
 
-        let html = render_html(&findings);
-        assert!(html.contains("breach path"));
-        assert!(html.contains("Act now"));
-        assert!(html.contains("Fix in code"));
-        assert!(html.contains("Assume-breach"));
-        assert!(html.contains("not findings"));
-        // The internal RBAC mass is context, not fix-in-code: only the one
-        // internet-facing durable-fix is in bucket 1.
-        assert_eq!(findings.iter().filter(|f| bucket(f) == 1).count(), 1);
-        // The argocd + kube-system mass (43) all collapses into context.
-        assert_eq!(findings.iter().filter(|f| bucket(f) == 3).count(), 43);
-        // The per-row attack path renders as an inline graph (hop relations shown).
-        assert!(html.contains("class=\"rel\">can-read"));
-        assert!(html.contains("app/Pod/store"));
-        // Header explanations are gone — no "—"-prefixed description in summaries.
-        assert!(!html.contains("auto-cut when armed"));
+        let html = render_html(&findings, false);
+        // Shadow → "Proposed Remediations"; armed → "Active Remediations".
+        assert!(html.contains("Proposed Remediations"));
+        assert!(render_html(&findings, true).contains("Active Remediations"));
+        assert!(html.contains("Possible attack paths"));
+        // Graphs are Mermaid flowcharts with an Internet source.
+        assert!(html.contains("class=\"mermaid\""));
+        assert!(html.contains("flowchart LR"));
+        assert!(html.contains("Internet"));
+        // The remediation graph marks the cut (dashed edge + scissors).
+        assert!(html.contains("✂"));
+        // The un-remediated terminal edges carry their reason.
+        assert!(html.contains("not auto-cuttable") || html.contains("needs human approval"));
+        // The internal control-plane path is dropped entirely (one endpoint: web).
+        assert!(!html.contains("argocd-secret"));
+        assert!(html.contains("1 endpoint"));
         // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
         let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
     }

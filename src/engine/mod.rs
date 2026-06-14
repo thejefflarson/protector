@@ -30,7 +30,6 @@ pub mod dashboard;
 pub mod delta;
 pub mod exploit_intel;
 pub mod graph;
-pub mod graphviz;
 pub mod health;
 pub mod hypothesis;
 pub mod model;
@@ -85,13 +84,15 @@ impl Engine {
         } else {
             tracing::warn!("engine: action classes enabled — auto-application is on for them");
         }
+        let findings = std::sync::Arc::new(dashboard::Findings::new());
+        findings.set_armed(!active.is_empty());
         Self {
             adapters: adapter::default_adapters(),
             active,
             actuator,
             hypothesizer,
             adjudicator,
-            findings: std::sync::Arc::new(dashboard::Findings::new()),
+            findings,
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
@@ -185,14 +186,10 @@ impl Engine {
                 chain.promoted = true;
             }
         }
-        // Publish the current findings for the dashboard (the latent-foothold rows
-        // are the weaker, propose-only case a human acts on).
+        // Publish the current findings for the dashboard: remediations the engine
+        // applies/proposes, and the per-endpoint exploit-path graphs.
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
-        // The attack graph (internet → goal) for the /graph view — collapses the
-        // per-objective fan-out the flat list explodes into.
-        self.findings
-            .replace_graph(graphviz::attack_graph_dot(&graph, &chains));
 
         if structurally_changed && !chains.is_empty() {
             tracing::info!(count = chains.len(), "proven chains");
