@@ -17,6 +17,14 @@ FROM chef AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake \
     && rm -rf /var/lib/apt/lists/*
+# Pin the C standard for aws-lc-sys' C build. A C23-defaulting gcc (which newer
+# cargo-chef base images now ship) rewrites sscanf/strtol to the glibc-2.38
+# `__isoc23_*` variants; linked against the bookworm-slim runtime's glibc 2.36 those
+# are undefined references and the release link fails ("undefined reference to
+# __isoc23_sscanf"). gnu17 keeps the emitted libc symbols in step with the runtime
+# glibc. (Changing CFLAGS also reruns aws-lc-sys' build script, rebuilding a stale,
+# toolchain-mismatched object left in the build cache.)
+ENV CFLAGS=-std=gnu17
 COPY --from=planner /app/recipe.json recipe.json
 # Build dependencies - this is the caching Docker layer!
 RUN --mount=type=cache,target=/app/target,sharing=locked \

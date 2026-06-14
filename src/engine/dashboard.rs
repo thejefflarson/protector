@@ -456,7 +456,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>protector</title>\
          <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111;max-width:64rem}}\
+         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
          h1{{font-size:1.2rem;font-weight:600;margin:0}}\
          h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
          .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
