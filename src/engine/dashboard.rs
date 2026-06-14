@@ -411,22 +411,18 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
-    // The model's judgement of each path from this endpoint — the LLM is the judge
-    // (ADR-0013), so this is its own words, never a rule-based category. Every
-    // breach-relevant path is judged; a path the model hasn't reached yet (slow or
-    // unreachable CPU model) shows as awaiting judgement, with the path still drawn.
-    let mut verdicts: BTreeMap<String, usize> = BTreeMap::new();
-    for f in fs {
-        let v = f
-            .verdict
-            .clone()
-            .unwrap_or_else(|| "awaiting model judgement".to_string());
-        *verdicts.entry(v).or_default() += 1;
-    }
-    let judgement: String = verdicts
-        .iter()
-        .map(|(v, n)| format!("<li><b>{n}</b> — {}</li>", escape(v)))
-        .collect();
+    // ONE model judgement for the whole endpoint — the model judges per internet-facing
+    // entry, over everything it reaches, in a single call (ADR-0013); it is NOT a
+    // per-edge or per-objective verdict. So show the entry's one verdict (the model's
+    // own words), not a count that would imply many judgements. `None` = the model
+    // hasn't reached this entry yet (slow CPU model); the paths still render.
+    let judgement = match fs.iter().find_map(|f| f.verdict.as_deref()) {
+        Some(v) => format!(
+            "<div class=\"verdict\">model judgement: {}</div>",
+            escape(v)
+        ),
+        None => "<div class=\"verdict muted\">awaiting model judgement</div>".to_string(),
+    };
 
     // Expand the coalesced fan-out: a collapsed aggregate node ("47 secrets") hides
     // the names, so list each aggregated group's members under a native <details>
@@ -452,14 +448,13 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         .collect();
 
     format!(
-        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
-         <pre class=\"mermaid\">{}</pre>\
-         <div class=\"why\">model judgement:<ul>{}</ul></div>{}</div>",
+        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{} reachable)</span></div>\
+         {}<pre class=\"mermaid\">{}</pre>{}</div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
-        m.finish(),
         judgement,
+        m.finish(),
         if expand.is_empty() {
             String::new()
         } else {
