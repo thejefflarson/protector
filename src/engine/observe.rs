@@ -90,7 +90,14 @@ impl Snapshot {
             image_vulns,
         ) = tokio::try_join!(
             async { anyhow::Ok(Api::<Pod>::all(client.clone()).list(&lp).await?.items) },
-            async { anyhow::Ok(Api::<NetworkPolicy>::all(client.clone()).list(&lp).await?.items) },
+            async {
+                anyhow::Ok(
+                    Api::<NetworkPolicy>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items,
+                )
+            },
             async { anyhow::Ok(Api::<Service>::all(client.clone()).list(&lp).await?.items) },
             // Secrets are listed for their metadata only; values are dropped here and
             // never enter the graph.
@@ -111,8 +118,22 @@ impl Snapshot {
                 )
             },
             async { anyhow::Ok(Api::<Role>::all(client.clone()).list(&lp).await?.items) },
-            async { anyhow::Ok(Api::<RoleBinding>::all(client.clone()).list(&lp).await?.items) },
-            async { anyhow::Ok(Api::<ClusterRole>::all(client.clone()).list(&lp).await?.items) },
+            async {
+                anyhow::Ok(
+                    Api::<RoleBinding>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items,
+                )
+            },
+            async {
+                anyhow::Ok(
+                    Api::<ClusterRole>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items,
+                )
+            },
             async {
                 anyhow::Ok(
                     Api::<ClusterRoleBinding>::all(client.clone())
