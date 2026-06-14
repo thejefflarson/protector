@@ -398,15 +398,43 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         .map(|(v, n)| format!("<li><b>{n}</b> — {}</li>", escape(v)))
         .collect();
 
+    // Expand the coalesced fan-out: a collapsed aggregate node ("47 secrets") hides
+    // the names, so list each aggregated group's members under a native <details>
+    // the operator can open. Singletons are already named in the graph, so skip them.
+    let expand: String = groups
+        .iter()
+        .filter(|(_, objs)| objs.len() > 1)
+        .map(|((_, relation, kind), objs)| {
+            let mut names: Vec<String> = objs.iter().map(|o| short(o)).collect();
+            names.sort();
+            let items: String = names
+                .iter()
+                .map(|n| format!("<li>{}</li>", escape(n)))
+                .collect();
+            format!(
+                "<details><summary>{} {} <span class=\"muted\">via {}</span></summary><ul>{}</ul></details>",
+                objs.len(),
+                plural(kind, objs.len()),
+                escape(relation),
+                items
+            )
+        })
+        .collect();
+
     format!(
         "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
          <pre class=\"mermaid\">{}</pre>\
-         <div class=\"why\">model judgement:<ul>{}</ul></div></div>",
+         <div class=\"why\">model judgement:<ul>{}</ul></div>{}</div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
         m.finish(),
         judgement,
+        if expand.is_empty() {
+            String::new()
+        } else {
+            format!("<div class=\"expand\">{expand}</div>")
+        },
     )
 }
 
@@ -480,6 +508,10 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
          .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
          .why li{{margin:.1rem 0}}\
+         .expand{{font-size:.78rem;margin-top:.3rem}}\
+         .expand summary{{cursor:pointer;color:#06c}}\
+         .expand ul{{margin:.15rem 0 .4rem;padding-left:1.1rem;columns:2}}\
+         .expand li{{margin:.05rem 0;font-family:ui-monospace,monospace}}\
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\

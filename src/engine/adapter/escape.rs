@@ -1,15 +1,22 @@
 use super::*;
 
 /// Linux capabilities whose presence on a container is a strong container-escape
-/// signal (the capability half of KubeHound's `CE_*` family).
+/// signal (the capability half of KubeHound's `CE_*` family) — each grants a
+/// concrete path to host code execution: SYS_ADMIN (mounts/cgroups), SYS_MODULE
+/// (load a kernel module), SYS_PTRACE (attach to host processes under hostPID),
+/// DAC_READ_SEARCH / DAC_OVERRIDE (read/write arbitrary host files).
+///
+/// Deliberately EXCLUDED: capabilities that are dangerous but are NOT host escape.
+/// NET_ADMIN controls the network stack (can bypass NetworkPolicy, MITM, sniff) and
+/// SYS_BOOT reboots the node (impact/DoS) — real risks, but neither yields host code
+/// execution, so flagging them as escape-to-host (T1611) is a false positive. They
+/// belong to a network-privilege / impact objective, not this one.
 const ESCAPE_CAPABILITIES: &[&str] = &[
     "SYS_ADMIN",
     "SYS_MODULE",
     "SYS_PTRACE",
-    "SYS_BOOT",
     "DAC_READ_SEARCH",
     "DAC_OVERRIDE",
-    "NET_ADMIN",
 ];
 
 /// `escapes-to` edges from a Workload to the Host it can break out to (ATT&CK
