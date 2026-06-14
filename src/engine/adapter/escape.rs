@@ -6,18 +6,17 @@ use super::*;
 /// (load a kernel module), SYS_PTRACE (attach to host processes under hostPID),
 /// DAC_READ_SEARCH / DAC_OVERRIDE (read/write arbitrary host files).
 ///
-/// Deliberately EXCLUDED: capabilities that are dangerous but are NOT host escape.
-/// NET_ADMIN controls the network stack (can bypass NetworkPolicy, MITM, sniff) and
-/// SYS_BOOT reboots the node (impact/DoS) — real risks, but neither yields host code
-/// execution, so flagging them as escape-to-host (T1611) is a false positive. They
-/// belong to a network-privilege / impact objective, not this one.
-const ESCAPE_CAPABILITIES: &[&str] = &[
-    "SYS_ADMIN",
-    "SYS_MODULE",
-    "SYS_PTRACE",
-    "DAC_READ_SEARCH",
-    "DAC_OVERRIDE",
-];
+/// SYS_PTRACE is escape-enabling ONLY together with hostPID (see [`escape_vias`]);
+/// on its own the container sees only its own PID namespace, so it is gated there.
+///
+/// Deliberately EXCLUDED, because none yields host code execution on its own —
+/// flagging them as escape-to-host (T1611) is a false positive:
+/// - NET_ADMIN: network-stack control (NetworkPolicy bypass / MITM / sniff).
+/// - SYS_BOOT: reboot the node (impact / DoS).
+/// - DAC_OVERRIDE: bypasses file *permission* checks but NOT the mount namespace, so
+///   with no host path mounted it is container-local (unlike DAC_READ_SEARCH, whose
+///   open_by_handle_at reaches the host fs directly — the `shocker` read).
+const ESCAPE_CAPABILITIES: &[&str] = &["SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "DAC_READ_SEARCH"];
 
 /// `escapes-to` edges from a Workload to the Host it can break out to (ATT&CK
 /// Escape to Host, T1611).
@@ -38,7 +37,8 @@ impl HostEscapeAdapter {
         let Some(spec) = pod.spec.as_ref() else {
             return vias;
         };
-        if spec.host_pid == Some(true) {
+        let host_pid = spec.host_pid == Some(true);
+        if host_pid {
             vias.push("hostPID".to_string());
         }
         if spec.host_ipc == Some(true) {
@@ -55,6 +55,11 @@ impl HostEscapeAdapter {
                 }
                 if let Some(caps) = &sc.capabilities {
                     for cap in caps.add.iter().flatten() {
+                        // SYS_PTRACE only enables host escape WITH hostPID — without it
+                        // the container can't see, let alone attach to, host processes.
+                        if cap == "SYS_PTRACE" && !host_pid {
+                            continue;
+                        }
                         if ESCAPE_CAPABILITIES.contains(&cap.as_str()) {
                             vias.push(format!("cap:{cap}"));
                         }
@@ -158,6 +163,56 @@ mod tests {
                 "hostPID".to_string(),
                 "runtime-socket".to_string()
             ]
+        );
+    }
+
+    /// SYS_PTRACE is an escape primitive only WITH hostPID — without it the container
+    /// sees only its own PID namespace, so it must not be flagged (false-positive
+    /// guard, the NET_ADMIN class of bug). NET_ADMIN/SYS_BOOT/DAC_OVERRIDE are never
+    /// escapes and never flagged.
+    fn ptrace_pod(host_pid: bool) -> Snapshot {
+        Snapshot {
+            pods: vec![pod(json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "p", "namespace": "ci"},
+                "spec": {
+                    "nodeName": "node-1",
+                    "hostPID": host_pid,
+                    "containers": [{
+                        "name": "c", "image": "c:1",
+                        "securityContext": {"capabilities": {"add":
+                            ["SYS_PTRACE", "NET_ADMIN", "SYS_BOOT", "DAC_OVERRIDE"]}}
+                    }]
+                }
+            }))],
+            ..Default::default()
+        }
+    }
+
+    fn escape_vias_of(snap: &Snapshot) -> Vec<String> {
+        let g = build_graph(snap, &default_adapters());
+        let wl = g.index_of(&workload_node("ci", "p").key()).unwrap();
+        let mut vias: Vec<String> = g
+            .inner()
+            .edges(wl)
+            .filter_map(|e| match &e.weight().relation {
+                Relation::EscapesTo { via } => Some(via.clone()),
+                _ => None,
+            })
+            .collect();
+        vias.sort();
+        vias
+    }
+
+    #[test]
+    fn sys_ptrace_is_an_escape_only_with_host_pid() {
+        // No hostPID: SYS_PTRACE is not escape; NET_ADMIN/SYS_BOOT/DAC_OVERRIDE never
+        // are → no escape edges at all.
+        assert!(escape_vias_of(&ptrace_pod(false)).is_empty());
+        // hostPID present: hostPID itself + the now-relevant SYS_PTRACE are flagged.
+        assert_eq!(
+            escape_vias_of(&ptrace_pod(true)),
+            vec!["cap:SYS_PTRACE".to_string(), "hostPID".to_string()]
         );
     }
 }
