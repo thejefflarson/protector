@@ -188,6 +188,10 @@ async fn main() -> Result<()> {
             .as_str(),
         "off" | "0" | "false" | "no"
     );
+    // The engine runs as a detached task; we keep its handle so it can be stopped
+    // before telemetry shuts down (otherwise it emits spans after the TracerProvider
+    // is gone — "Spans are being emitted even after Shutdown").
+    let mut engine_task: Option<tokio::task::JoinHandle<()>> = None;
     if !engine_off {
         // Hard mode is opt-in per action class: PROTECTOR_ENGINE_ENABLE is a
         // comma-separated list (network,rbac,mount,identity). Empty = none
@@ -213,7 +217,7 @@ async fn main() -> Result<()> {
         match kube::Client::try_default().await {
             Ok(client) => {
                 tracing::info!("starting mitigation engine (event-driven observer)");
-                tokio::spawn(async move {
+                engine_task = Some(tokio::spawn(async move {
                     if let Err(error) = protector::engine::run_watch(
                         client,
                         active,
@@ -225,7 +229,7 @@ async fn main() -> Result<()> {
                     {
                         tracing::error!(%error, "mitigation engine stopped");
                     }
-                });
+                }));
             }
             Err(error) => {
                 tracing::warn!(%error, "no kube client; mitigation engine disabled, webhook only");
@@ -234,7 +238,14 @@ async fn main() -> Result<()> {
     }
 
     let result = server::serve(addr, cert, key, engine, metrics).await;
-    // Flush + stop the OTLP exporters so the final trace/metric window isn't lost.
+
+    // Server returned (shutdown signal). Stop the engine task BEFORE telemetry so it
+    // can't emit spans after the TracerProvider is shut down, then flush + stop the
+    // OTLP exporters so the final trace/metric window isn't lost.
+    if let Some(task) = engine_task {
+        task.abort();
+        let _ = task.await;
+    }
     telemetry.shutdown();
     result
 }
