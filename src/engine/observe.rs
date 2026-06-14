@@ -65,6 +65,12 @@ pub struct Snapshot {
     /// Live runtime events per workload (RuntimeEvidence port). Populated from a
     /// runtime sensor; see `observe`'s note on the live source.
     pub runtime_events: Vec<RuntimeObservation>,
+    /// Linkerd authorization-policy inputs — the mesh-native reachability source
+    /// (`Server` + `AuthorizationPolicy` + `MeshTLSAuthentication`). Empty when the
+    /// policy CRDs aren't present. See [`super::linkerd`].
+    pub linkerd_servers: Vec<super::linkerd::LinkerdServer>,
+    pub linkerd_authz_policies: Vec<super::linkerd::LinkerdAuthzPolicy>,
+    pub linkerd_mtls_auths: Vec<super::linkerd::LinkerdMeshTlsAuth>,
 }
 
 impl Snapshot {
@@ -88,6 +94,7 @@ impl Snapshot {
             cluster_roles,
             cluster_role_bindings,
             image_vulns,
+            linkerd,
         ) = tokio::try_join!(
             async { anyhow::Ok(Api::<Pod>::all(client.clone()).list(&lp).await?.items) },
             async {
@@ -143,7 +150,9 @@ impl Snapshot {
                 )
             },
             async { anyhow::Ok(list_image_vulns(&client).await) },
+            async { anyhow::Ok(list_linkerd_authz(&client).await) },
         )?;
+        let (linkerd_servers, linkerd_authz_policies, linkerd_mtls_auths) = linkerd;
 
         // Runtime events come from a runtime sensor (Falco/Tetragon) — typically a
         // stream, not a list. Wiring that source is the remaining cluster-facing
@@ -163,6 +172,9 @@ impl Snapshot {
             cluster_role_bindings,
             image_vulns,
             runtime_events,
+            linkerd_servers,
+            linkerd_authz_policies,
+            linkerd_mtls_auths,
         })
     }
 }
@@ -185,6 +197,58 @@ pub async fn list_image_vulns(client: &kube::Client) -> Vec<ImageVulnerabilities
             .collect(),
         Err(error) => {
             tracing::debug!(%error, "no VulnerabilityReports (trivy-operator absent?)");
+            Vec::new()
+        }
+    }
+}
+
+/// Best-effort list of the Linkerd policy CRDs the reachability adapter consumes
+/// (`Server` v1beta3, `AuthorizationPolicy`/`MeshTLSAuthentication` v1alpha1). Empty
+/// if Linkerd's policy CRDs aren't installed. The CRD→input mapping is unit-tested in
+/// [`super::linkerd`]; this is the cluster-facing list, shared by the poll observer
+/// and the watch assembler.
+pub async fn list_linkerd_authz(
+    client: &kube::Client,
+) -> (
+    Vec<super::linkerd::LinkerdServer>,
+    Vec<super::linkerd::LinkerdAuthzPolicy>,
+    Vec<super::linkerd::LinkerdMeshTlsAuth>,
+) {
+    let servers = list_dynamic(client, "v1beta3", "Server", super::linkerd::parse_server).await;
+    let policies = list_dynamic(
+        client,
+        "v1alpha1",
+        "AuthorizationPolicy",
+        super::linkerd::parse_authz_policy,
+    )
+    .await;
+    let mtls = list_dynamic(
+        client,
+        "v1alpha1",
+        "MeshTLSAuthentication",
+        super::linkerd::parse_mtls_auth,
+    )
+    .await;
+    (servers, policies, mtls)
+}
+
+/// List a `policy.linkerd.io` kind as `DynamicObject` and parse each item, dropping
+/// the ones that don't parse. Empty (with a debug log) when the CRD is absent.
+async fn list_dynamic<T>(
+    client: &kube::Client,
+    version: &str,
+    kind: &str,
+    parse: fn(&DynamicObject) -> Option<T>,
+) -> Vec<T> {
+    let gvk = GroupVersionKind::gvk("policy.linkerd.io", version, kind);
+    let ar = ApiResource::from_gvk(&gvk);
+    match Api::<DynamicObject>::all_with(client.clone(), &ar)
+        .list(&ListParams::default())
+        .await
+    {
+        Ok(list) => list.items.iter().filter_map(parse).collect(),
+        Err(error) => {
+            tracing::debug!(%error, kind, "no Linkerd policy CRDs (linkerd absent?)");
             Vec::new()
         }
     }

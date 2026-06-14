@@ -11,6 +11,9 @@
 //! - [`SecretMountAdapter`] — Secret nodes and `can-read` edges for secrets a pod
 //!   mounts or references directly (readable with no API call).
 //! - [`ReachabilityAdapter`] — `reaches` edges granted by NetworkPolicy ingress.
+//! - [`LinkerdReachabilityAdapter`] — `reaches` edges granted by Linkerd authz
+//!   (`AuthorizationPolicy` + `Server` + `MeshTLSAuthentication`), the mesh-native
+//!   reachability source where the cluster uses no NetworkPolicy.
 //! - [`PrivilegeAdapter`] — `can-do` edges from an Identity to the Secrets it can
 //!   read via RBAC, and to Capability nodes for the dangerous verbs it holds
 //!   (create pods, bind roles, delete PVCs, …) per the ATT&CK capability catalogue.
@@ -36,6 +39,7 @@ use super::observe::Snapshot;
 mod enrich;
 mod escape;
 mod exposure;
+mod linkerd;
 mod network;
 mod rbac;
 mod secret_mount;
@@ -44,6 +48,7 @@ mod workload;
 pub use self::enrich::{RuntimeAdapter, VulnerabilityAdapter};
 pub use self::escape::HostEscapeAdapter;
 pub use self::exposure::ExposureAdapter;
+pub use self::linkerd::LinkerdReachabilityAdapter;
 pub use self::network::ReachabilityAdapter;
 pub use self::rbac::PrivilegeAdapter;
 pub use self::secret_mount::SecretMountAdapter;
@@ -153,6 +158,7 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(WorkloadAdapter),
         Box::new(SecretMountAdapter),
         Box::new(ReachabilityAdapter),
+        Box::new(LinkerdReachabilityAdapter),
         Box::new(PrivilegeAdapter),
         Box::new(HostEscapeAdapter),
         // Fact-enrichment adapters run last: they read-modify nodes the structural

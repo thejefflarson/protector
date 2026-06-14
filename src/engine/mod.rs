@@ -33,6 +33,7 @@ pub mod exploit_intel;
 pub mod graph;
 pub mod health;
 pub mod hypothesis;
+pub mod linkerd;
 pub mod model;
 pub mod objective;
 pub mod observe;
@@ -641,6 +642,8 @@ pub async fn run_watch(
         while change_rx.try_recv().is_ok() {}
         while falco_rx.try_recv().is_ok() {}
 
+        let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
+            observe::list_linkerd_authz(&client).await;
         let snapshot = Snapshot {
             pods: pods.state().iter().map(|p| (**p).clone()).collect(),
             network_policies: netpols.state().iter().map(|n| (**n).clone()).collect(),
@@ -672,6 +675,11 @@ pub async fn run_watch(
                 v
             },
             runtime_events: runtime_events.current(),
+            // Linkerd authz CRDs, listed best-effort each pass (the mesh-native
+            // reachability source — see LinkerdReachabilityAdapter).
+            linkerd_servers: linkerd_servers_now,
+            linkerd_authz_policies: linkerd_policies_now,
+            linkerd_mtls_auths: linkerd_mtls_now,
         };
         engine.process(&snapshot).await;
     }
