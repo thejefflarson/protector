@@ -197,13 +197,23 @@ impl LedgerDelta {
         for m in &self.retired {
             tracing::info!(cut = %cut_signature(&m.cut), "mitigation retired (chain no longer proven)");
         }
-        for j in &self.unsevered {
-            tracing::warn!(
-                entry = %j.entry,
-                objective = %j.objective,
-                technique = j.attack.technique_id,
-                "no single-edge cut — chain needs deeper remediation"
+        // Chains with no single reversible cut (typically broad multi-verb / cluster-
+        // wide secret RBAC, severable only by narrowing the grant). These are surfaced
+        // on the dashboard already and recomputed every pass, so log a one-line summary
+        // at info and the per-chain detail at debug — not a WARN per chain per pass.
+        if !self.unsevered.is_empty() {
+            tracing::info!(
+                count = self.unsevered.len(),
+                "chains with no single-edge cut (need deeper remediation, e.g. narrow an RBAC grant)"
             );
+            for j in &self.unsevered {
+                tracing::debug!(
+                    entry = %j.entry,
+                    objective = %j.objective,
+                    technique = j.attack.technique_id,
+                    "no single-edge cut"
+                );
+            }
         }
     }
 }
