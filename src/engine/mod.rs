@@ -124,13 +124,14 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
-    /// Cross-pass verdict cache, keyed by path `(entry, objective)` → (evidence
-    /// fingerprint, the model's verdict). The model judges every breach-relevant path
-    /// (ADR-0013), but a CPU-only local model is far too slow to re-run on every watch
-    /// event; a path is re-judged only when its evidence fingerprint changes, and a
-    /// brand-new path is judged because it's a new key. Pruned to currently-present
-    /// paths each pass (ephemeral workloads, removed exposure).
-    verdict_cache: HashMap<(String, String), (String, adjudicate::Verdict)>,
+    /// Cross-pass verdict cache, keyed by internet-facing ENTRY → (evidence
+    /// fingerprint, the model's verdict). The model judges each breach-relevant entry
+    /// holistically over everything it reaches (ADR-0013), but a CPU-only local model
+    /// is far too slow to re-run on every watch event; an entry is re-judged only when
+    /// its fingerprint changes (its CVEs/runtime OR its reachable-objective set — so a
+    /// misconfig that newly exposes something re-triggers it). Pruned to present
+    /// entries each pass (ephemeral workloads, removed exposure).
+    verdict_cache: HashMap<String, (String, adjudicate::Verdict)>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -253,33 +254,47 @@ impl Engine {
         // - Uncorroborated path: an affirmative `exploitable` verdict PROMOTES it to
         //   auto-eligible — but only when the `judgement` class is armed, since
         //   promoting on the model's say-so is the opt-in speculative lane.
-        let current_paths: HashSet<(String, String)> = chains
-            .iter()
-            .filter(|c| c.is_breach_relevant())
-            .map(|c| (c.entry.0.clone(), c.objective.0.clone()))
-            .collect();
-        let mut verdict_counts: HashMap<&'static str, u64> = HashMap::new();
-        for chain in chains.iter_mut() {
-            if !chain.is_breach_relevant() {
-                continue;
+        // Group the breach-relevant chains by their internet-facing ENTRY, then judge
+        // each entry ONCE over everything it can reach — not once per path. A
+        // broadly-privileged entry reaches dozens of objectives; per-path that's dozens
+        // of slow CPU-model calls (which queue and time out, so verdicts never land).
+        // Per-entry it's ~one call per internet front door.
+        let mut by_entry: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (i, c) in chains.iter().enumerate() {
+            if c.is_breach_relevant() {
+                by_entry.entry(c.entry.0.clone()).or_default().push(i);
             }
-            let path = (chain.entry.0.clone(), chain.objective.0.clone());
-            let fingerprint = adjudicate::entry_fingerprint(&graph, chain);
-            let verdict = match self.verdict_cache.get(&path) {
+        }
+        let current_entries: HashSet<String> = by_entry.keys().cloned().collect();
+        let mut verdict_counts: HashMap<&'static str, u64> = HashMap::new();
+        for (entry_key, idxs) in &by_entry {
+            let entry = chains[idxs[0]].entry.clone();
+            // The (objective, technique) set this entry reaches — what the model judges.
+            let mut objectives: Vec<(graph::NodeKey, attack::AttackRef)> = idxs
+                .iter()
+                .map(|&i| (chains[i].objective.clone(), chains[i].attack))
+                .collect();
+            objectives.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+            objectives.dedup_by(|a, b| a.0 == b.0);
+
+            let fingerprint = adjudicate::entry_fingerprint(&graph, &entry, &objectives);
+            let verdict = match self.verdict_cache.get(entry_key) {
                 Some((fp, v)) if *fp == fingerprint => v.clone(),
                 _ => {
-                    let v = self.adjudicator.judge(chain, &graph).await;
+                    let v = self.adjudicator.judge(&entry, &objectives, &graph).await;
                     // An Uncertain is usually a transient model outage (e.g. a CPU-model
                     // timeout) — log it quietly and re-judge next pass rather than pin
                     // the failure into the cache. Decisive verdicts are logged + cached.
                     let result = match &v {
                         adjudicate::Verdict::Uncertain(why) => {
-                            tracing::debug!(entry = %chain.entry.0, objective = %chain.objective.0, %why, "adjudication inconclusive (will retry)");
+                            tracing::debug!(entry = %entry.0, %why, "adjudication inconclusive (will retry)");
                             "unavailable"
                         }
                         decisive => {
-                            tracing::info!(entry = %chain.entry.0, objective = %chain.objective.0, verdict = ?decisive, "adjudicated path");
-                            self.verdict_cache.insert(path, (fingerprint, v.clone()));
+                            tracing::info!(entry = %entry.0, objectives = objectives.len(), verdict = ?decisive, "adjudicated entry");
+                            self.verdict_cache
+                                .insert(entry_key.clone(), (fingerprint, v.clone()));
                             "ok"
                         }
                     };
@@ -289,22 +304,24 @@ impl Engine {
                     v
                 }
             };
-            *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
-            // Keep the model's call — positive *and* negative — on the chain so the
-            // dashboard can show why it did or didn't act (not just the outcome).
-            chain.verdict = Some(verdict.summary());
-            if chain.corroborated {
-                if !verdict.is_confirmed() {
-                    chain.adjudicated = false;
+            // The entry's verdict applies to every chain from it. Keep the model's call
+            // — positive *and* negative — on each so the dashboard shows why it acted.
+            for &i in idxs {
+                *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
+                chains[i].verdict = Some(verdict.summary());
+                if chains[i].corroborated {
+                    if !verdict.is_confirmed() {
+                        chains[i].adjudicated = false;
+                    }
+                } else if verdict.promotes() && self.active.judgement_enabled() {
+                    chains[i].promoted = true;
                 }
-            } else if verdict.promotes() && self.active.judgement_enabled() {
-                chain.promoted = true;
             }
         }
-        // Drop verdicts for paths that no longer exist (ephemeral workloads, removed
+        // Drop verdicts for entries that no longer exist (ephemeral workloads, removed
         // exposure), so the cache tracks the live cluster rather than growing forever.
         self.verdict_cache
-            .retain(|path, _| current_paths.contains(path));
+            .retain(|entry, _| current_entries.contains(entry));
         // Current verdict distribution over breach paths (per-label gauge).
         for (verdict, count) in &verdict_counts {
             self.metrics
@@ -666,9 +683,9 @@ pub async fn run_watch(
 mod tests {
     use super::*;
     use crate::engine::adjudicate::Verdict;
-    use crate::engine::graph::SecurityGraph;
+    use crate::engine::attack::AttackRef;
+    use crate::engine::graph::{NodeKey, SecurityGraph};
     use crate::engine::observe::{SecretMeta, Snapshot};
-    use crate::engine::proof::ProvenChain;
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -678,7 +695,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl adjudicate::Adjudicator for CountingAdjudicator {
-        async fn judge(&self, _chain: &ProvenChain, _graph: &SecurityGraph) -> Verdict {
+        async fn judge(
+            &self,
+            _entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+        ) -> Verdict {
             self.0.fetch_add(1, Ordering::SeqCst);
             Verdict::Refuted("counted".into())
         }
