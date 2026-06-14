@@ -130,9 +130,11 @@ finding_is() {
 }
 
 post_falco() {
+  # Critical: protector only corroborates on critical+ (benign Notice/Warning
+  # activity must not flip a chain live).
   curl -fsS -XPOST localhost:9999/ -H 'content-type: application/json' -d '{
     "rule": "Terminal shell in container",
-    "priority": "Notice",
+    "priority": "Critical",
     "output_fields": { "k8s.ns.name": "app", "k8s.pod.name": "web" }
   }' >/dev/null
 }

@@ -79,10 +79,28 @@ impl RuntimeEvents {
     }
 }
 
+/// Whether a Falco priority is **critical or higher** (Critical/Alert/Emergency).
+/// protector corroborates only on these: lower priorities (Notice/Warning/…) fire
+/// constantly on benign activity — a postgres health-check shell trips "Run shell
+/// untrusted" at Notice — and corroboration must mean "something genuinely alarming
+/// is happening now," not routine noise. Filtering here (not just at falcosidekick)
+/// makes the policy protector's own, regardless of the sensor's forwarding config.
+fn is_critical_or_higher(priority: &str) -> bool {
+    matches!(
+        priority.trim().to_ascii_lowercase().as_str(),
+        "critical" | "alert" | "emergency"
+    )
+}
+
 /// Normalize a Falco (falcosidekick) alert into a [`RuntimeObservation`]. Returns
-/// `None` if the alert isn't attributable to a specific pod (Falco's k8s metadata
-/// fields absent) — an event we can't tie to a workload can't corroborate a chain.
+/// `None` if the alert is below critical priority, or isn't attributable to a
+/// specific pod (Falco's k8s metadata fields absent) — neither can corroborate a
+/// chain.
 pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
+    let priority = event.get("priority").and_then(|v| v.as_str()).unwrap_or("");
+    if !is_critical_or_higher(priority) {
+        return None;
+    }
     let rule = event.get("rule")?.as_str()?.to_string();
     let fields = event.get("output_fields")?;
     let namespace = fields.get("k8s.ns.name")?.as_str()?.to_string();
@@ -169,8 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_falco_alert_with_pod_metadata() {
+    fn parses_critical_falco_alert_with_pod_metadata() {
         let event = json!({
+            "priority": "Critical",
             "rule": "Terminal shell in container",
             "output_fields": {
                 "k8s.ns.name": "app",
@@ -185,8 +204,32 @@ mod tests {
     }
 
     #[test]
+    fn below_critical_alerts_are_dropped() {
+        // The exact benign case from prod: postgres' health-check shell at Notice.
+        let event = json!({
+            "priority": "Notice",
+            "rule": "Run shell untrusted",
+            "output_fields": {"k8s.ns.name": "watcher", "k8s.pod.name": "watcher-db-0"}
+        });
+        assert!(
+            parse_falco_event(&event).is_none(),
+            "Notice must not corroborate"
+        );
+        // Warning too; only critical/alert/emergency pass.
+        let warn = json!({
+            "priority": "Warning", "rule": "x",
+            "output_fields": {"k8s.ns.name": "a", "k8s.pod.name": "b"}
+        });
+        assert!(parse_falco_event(&warn).is_none());
+    }
+
+    #[test]
     fn alert_without_pod_metadata_is_dropped() {
-        let event = json!({"rule": "Some host rule", "output_fields": {"proc.name": "bash"}});
+        let event = json!({
+            "priority": "Critical",
+            "rule": "Some host rule",
+            "output_fields": {"proc.name": "bash"}
+        });
         assert!(parse_falco_event(&event).is_none());
     }
 }

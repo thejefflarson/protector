@@ -402,6 +402,13 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
+    // Distinct "why not addressed" reasons, with how many objectives each covers —
+    // shown as text so it's explicit, not just buried in the graph edge labels.
+    let mut reason_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for ((_, _, reason, _), objs) in &groups {
+        *reason_counts.entry(reason.clone()).or_default() += objs.len();
+    }
+
     for ((from, relation, reason, kind), objs) in &groups {
         let edge = format!("{relation} — {reason}");
         if objs.len() == 1 {
@@ -414,13 +421,20 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
+    let why: String = reason_counts
+        .iter()
+        .map(|(reason, n)| format!("<li><b>{n}</b> — {}</li>", escape(reason)))
+        .collect();
+
     format!(
         "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{})</span></div>\
-         <pre class=\"mermaid\">{}</pre></div>",
+         <pre class=\"mermaid\">{}</pre>\
+         <div class=\"why\">not addressed:<ul>{}</ul></div></div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
         m.finish(),
+        why,
     )
 }
 
@@ -461,7 +475,10 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
     let path_body = if endpoints.is_empty() {
         "<p class=\"muted\">no internet-facing exposure reaches an objective</p>".to_string()
     } else {
-        endpoints
+        // Rank by graph size — the widest blast radius (most objectives) first.
+        let mut ranked: Vec<(&&str, &Vec<&Finding>)> = endpoints.iter().collect();
+        ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        ranked
             .iter()
             .map(|(entry, fs)| endpoint_card(entry, fs))
             .collect()
@@ -484,6 +501,9 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          a{{color:#06c}}\
          .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#999}}\
          .graph svg{{max-width:100%;height:auto}}\
+         .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
+         .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
+         .why li{{margin:.1rem 0}}\
          </style>\
          <script type=\"module\">\
          // beautiful-mermaid: ELK layout, synchronous SVG. Render each graph source\

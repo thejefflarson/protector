@@ -53,15 +53,47 @@ fn enforce_scope(ns_key: &str, labels_key: &str) -> EnforceScope {
 }
 
 /// Registry auth for pulling signatures of *private* gated images. Anonymous
-/// unless both username and password are supplied (mounted from a Secret).
+/// unless credentials are supplied — either explicit username/password env, or a
+/// mounted dockerconfigjson (the cluster's `github` pull secret).
 fn registry_auth() -> Auth {
-    match (
+    if let (Ok(user), Ok(pass)) = (
         env::var("PROTECTOR_REGISTRY_USERNAME"),
         env::var("PROTECTOR_REGISTRY_PASSWORD"),
     ) {
-        (Ok(user), Ok(pass)) => Auth::Basic(user, pass),
-        _ => Auth::Anonymous,
+        return Auth::Basic(user, pass);
     }
+    // Reuse the mounted dockerconfigjson's ghcr creds. Signatures inherit the
+    // (private) package's visibility, so the verifier needs the same creds the
+    // kubelet pulls with — without this, manifest fetches of private first-party
+    // images 401 ("Not authorized") and verification errors out.
+    if let Ok(path) = env::var("PROTECTOR_REGISTRY_AUTH_FILE")
+        && let Some((user, pass)) = docker_config_basic(&path, "ghcr.io")
+    {
+        return Auth::Basic(user, pass);
+    }
+    Auth::Anonymous
+}
+
+/// Extract `(username, password)` for `registry` from a Docker `config.json`
+/// (k8s `.dockerconfigjson`): prefer explicit username/password, else decode the
+/// base64 `auth` field (`user:token`). `None` if absent/unparseable.
+fn docker_config_basic(path: &str, registry: &str) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let data = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let entry = json.get("auths")?.get(registry)?;
+    if let (Some(u), Some(p)) = (
+        entry.get("username").and_then(|v| v.as_str()),
+        entry.get("password").and_then(|v| v.as_str()),
+    ) {
+        return Some((u.to_string(), p.to_string()));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(entry.get("auth")?.as_str()?)
+        .ok()?;
+    let pair = String::from_utf8(decoded).ok()?;
+    let (user, pass) = pair.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
 }
 
 #[tokio::main]
@@ -203,4 +235,29 @@ async fn main() -> Result<()> {
     }
 
     server::serve(addr, cert, key, engine, metrics).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::docker_config_basic;
+
+    #[test]
+    fn docker_config_decodes_ghcr_auth() {
+        // base64("thejefflarson:ghp_token") = dGhlamVmZmxhcnNvbjpnaHBfdG9rZW4=
+        let dir = std::env::temp_dir().join(format!("protector-dockercfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"auths":{"ghcr.io":{"auth":"dGhlamVmZmxhcnNvbjpnaHBfdG9rZW4="}}}"#,
+        )
+        .unwrap();
+        let p = path.to_str().unwrap();
+        assert_eq!(
+            docker_config_basic(p, "ghcr.io"),
+            Some(("thejefflarson".into(), "ghp_token".into()))
+        );
+        assert_eq!(docker_config_basic(p, "docker.io"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

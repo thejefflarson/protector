@@ -84,7 +84,8 @@ The engine uses its own ServiceAccount: cluster **read** (pods, services, secret
 | `PROTECTOR_GATED_PREFIXES` | `ghcr.io/thejefflarson/` | image prefixes to enforce signing on |
 | `PROTECTOR_ENFORCE_NAMESPACES` / `PROTECTOR_ENFORCE_LABELS` | — | where signature enforcement *denies* vs audits |
 | `PROTECTOR_MESH_ENFORCE_NAMESPACES` / `PROTECTOR_MESH_ENFORCE_LABELS` | — | where mesh enforcement *denies* (never the runner ns) |
-| `PROTECTOR_REGISTRY_USERNAME` / `PROTECTOR_REGISTRY_PASSWORD` | — | registry auth for private gated images |
+| `PROTECTOR_REGISTRY_USERNAME` / `PROTECTOR_REGISTRY_PASSWORD` | — | registry auth for verifying signatures of private gated images |
+| `PROTECTOR_REGISTRY_AUTH_FILE` | — | path to a mounted dockerconfigjson (the cluster pull secret); its `ghcr.io` creds are reused for signature verification when username/password aren't set. Without registry auth, private packages 401 |
 | `RUST_LOG` | — | tracing filter (e.g. `protector=info`) |
 
 ### Endpoints
