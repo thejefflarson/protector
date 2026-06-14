@@ -82,52 +82,40 @@ fn classify(
     use super::response::ProposedAction as A;
     let s = |a: &str, b: &str| (a.to_string(), b.to_string());
     match action {
-        None => s(
-            "no-cut",
-            "no single edge severs this chain — needs more than one cut, no minimal fix",
-        ),
+        None => s("no-cut", "no single edge severs this — no minimal fix"),
         Some(A::RemoveEscapePrimitive) => s(
             "forbidden",
-            "irreversible (container-escape primitive) — never auto-applied; durable fix only",
+            "irreversible container-escape — durable fix only",
         ),
-        Some(A::RevokeRbacGrant) => s(
-            "durable-fix PR",
-            "subtractive: revoke the RBAC grant via GitOps — not live-actuatable",
-        ),
-        Some(A::RemoveSecretMount) => s(
-            "durable-fix PR",
-            "subtractive: remove the secret mount/reference via GitOps — not live-actuatable",
-        ),
+        Some(A::RevokeRbacGrant) => s("durable-fix PR", "revoke the RBAC grant via GitOps"),
+        Some(A::RemoveSecretMount) => s("durable-fix PR", "remove the secret mount via GitOps"),
         Some(A::RebindIdentity) => s(
             "durable-fix PR",
-            "subtractive: rebind to a least-privilege ServiceAccount — not live-actuatable",
+            "rebind to a least-privilege ServiceAccount",
         ),
-        Some(A::Unclassified) => s(
-            "unclassified",
-            "no automatic action mapped — manual remediation",
-        ),
+        Some(A::Unclassified) => s("unclassified", "no action mapped — manual"),
         Some(A::DenyNetworkPath) => {
             if !chain.meets_action_bar() {
                 if chain.is_latent_foothold() {
                     s(
                         "latent foothold — propose",
-                        "exposed + exploited/critical CVE but no live signal — propose a cut to a human",
+                        "exposed + CVE, no live signal — propose a cut",
                     )
                 } else {
                     s(
                         "structural — propose",
-                        "assume-breach path, no live or foothold evidence — propose only",
+                        "no live or foothold evidence — propose only",
                     )
                 }
             } else if !chain.adjudicated {
                 s(
                     "vetoed — propose",
-                    "live, but the model vetoed the auto-cut — downgraded to a human proposal",
+                    "live, but the model vetoed the auto-cut",
                 )
             } else {
                 s(
                     "auto-eligible",
-                    "auto-applies a reversible NetworkPolicy cut when `network` is enabled and no live workload is collateral",
+                    "auto-applies a reversible NetworkPolicy cut when `network` is armed",
                 )
             }
         }
@@ -270,30 +258,10 @@ fn render_html(findings: &[Finding]) -> String {
         fix = counts[1],
         watch = counts[2],
         ctx = counts[3],
-        s_act = section(
-            "Act now",
-            "the engine auto-applies a reversible network cut for these once the matching action class is armed",
-            0,
-            true,
-        ),
-        s_fix = section(
-            "Fix in code",
-            "a live or exposed risk whose only cut is subtractive (revoke RBAC, remove a mount, rebind a ServiceAccount) — land a GitOps change; not auto-cuttable",
-            1,
-            true,
-        ),
-        s_watch = section(
-            "Watch",
-            "proven but not acted on — an exposed CVE with no live activity, or a live signal the model judged benign",
-            2,
-            true,
-        ),
-        s_ctx = section(
-            "Assume-breach (context)",
-            "if this workload were compromised, what it could reach — the baseline blast-radius map, not findings to chase",
-            3,
-            false,
-        ),
+        s_act = section("Act now", "auto-cut when armed", 0, true),
+        s_fix = section("Fix in code", "needs a GitOps change", 1, true),
+        s_watch = section("Watch", "proven, not acted on", 2, true),
+        s_ctx = section("Assume-breach", "blast radius if compromised", 3, false),
     )
 }
 
@@ -418,7 +386,11 @@ mod tests {
         // A representative mix shaped like the real cluster: one act-now network
         // cut, the argocd/whisperer RBAC fan-out (fix-in-code), and a big
         // assume-breach tail (context).
-        let f = |entry: &str, objective: &str, disposition: &str, decision: &str, corroborated: bool| Finding {
+        let f = |entry: &str,
+                 objective: &str,
+                 disposition: &str,
+                 decision: &str,
+                 corroborated: bool| Finding {
             entry: entry.into(),
             objective: objective.into(),
             tactic: "TA0006".into(),
@@ -438,18 +410,34 @@ mod tests {
             "auto-applies a reversible NetworkPolicy cut when `network` is enabled and no live workload is collateral",
             true,
         )];
-        for o in ["secret/argocd/argocd-secret", "secret/analytics/postgres.creds", "capability/cluster/create/pods"] {
-            findings.push(f("workload/argocd/Pod/argocd-application-controller-0", o, "durable-fix PR", "subtractive: revoke the RBAC grant via GitOps — not live-actuatable", true));
+        for o in [
+            "secret/argocd/argocd-secret",
+            "secret/analytics/postgres.creds",
+            "capability/cluster/create/pods",
+        ] {
+            findings.push(f(
+                "workload/argocd/Pod/argocd-application-controller-0",
+                o,
+                "durable-fix PR",
+                "subtractive: revoke the RBAC grant via GitOps — not live-actuatable",
+                true,
+            ));
         }
         for i in 0..40 {
-            findings.push(f(&format!("workload/kube-system/Pod/p{i}"), "secret/kube-system/sh.helm.release.v1.x", "structural — propose", "assume-breach path, no live or foothold evidence — propose only", false));
+            findings.push(f(
+                &format!("workload/kube-system/Pod/p{i}"),
+                "secret/kube-system/sh.helm.release.v1.x",
+                "structural — propose",
+                "assume-breach path, no live or foothold evidence — propose only",
+                false,
+            ));
         }
 
         let html = render_html(&findings);
         assert!(html.contains("to act on"));
         assert!(html.contains("Act now"));
         assert!(html.contains("Fix in code"));
-        assert!(html.contains("Assume-breach (context)"));
+        assert!(html.contains("Assume-breach"));
         // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
         let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
     }
