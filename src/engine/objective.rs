@@ -15,7 +15,9 @@
 //! Escape to Host (reach a Host). Capability-shaped objectives (RBAC
 //! self-escalation, deploy/exec) arrive with the Capability-node work.
 
-use super::attack::{AttackRef, CREDENTIAL_ACCESS, ESCAPE_TO_HOST, capability_technique};
+use super::attack::{
+    AttackRef, CREDENTIAL_ACCESS, ESCAPE_TO_HOST, EXFILTRATION, capability_technique,
+};
 use super::graph::{Node, NodeKey, SecurityGraph};
 
 /// A recognized objective: a graph node that is an adversary goal, with the
@@ -91,11 +93,32 @@ impl ObjectiveRecognizer for CapabilityObjective {
     }
 }
 
+/// The `internet` egress endpoint is an Exfiltration objective (ATT&CK T1041):
+/// reaching a compromised position with an internet-egress channel is where accessed
+/// data leaves the cluster. The egress edges that make it reachable are minted by the
+/// `EgressAdapter` (an explicit egress posture only).
+pub struct ExfiltrationObjective;
+
+impl ObjectiveRecognizer for ExfiltrationObjective {
+    fn recognize(&self, graph: &SecurityGraph) -> Vec<Objective> {
+        graph
+            .inner()
+            .node_weights()
+            .filter(|n| matches!(n, Node::Endpoint(e) if e.address == "internet"))
+            .map(|n| Objective {
+                node: n.key(),
+                attack: EXFILTRATION,
+            })
+            .collect()
+    }
+}
+
 /// The default recognizer set for this slice.
 pub fn default_recognizers() -> Vec<Box<dyn ObjectiveRecognizer>> {
     vec![
         Box::new(SecretObjective),
         Box::new(HostObjective),
         Box::new(CapabilityObjective),
+        Box::new(ExfiltrationObjective),
     ]
 }

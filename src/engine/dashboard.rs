@@ -359,6 +359,9 @@ fn humanize_relation(rel: &str) -> String {
     if let Some(via) = rel.strip_prefix("escapes-to/") {
         return format!("escapes via {via}");
     }
+    if rel.starts_with("can-egress") {
+        return "internet egress (exfil)".to_string();
+    }
     if rel.starts_with("reaches") {
         return "network reach".to_string();
     }

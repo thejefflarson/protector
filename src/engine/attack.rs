@@ -20,6 +20,7 @@ pub enum Tactic {
     CredentialAccess,
     Discovery,
     LateralMovement,
+    Exfiltration,
     Impact,
 }
 
@@ -34,6 +35,7 @@ impl Tactic {
             Tactic::CredentialAccess => "TA0006",
             Tactic::Discovery => "TA0007",
             Tactic::LateralMovement => "TA0008",
+            Tactic::Exfiltration => "TA0010",
             Tactic::Impact => "TA0040",
         }
     }
@@ -69,6 +71,14 @@ pub const ESCAPE_TO_HOST: AttackRef = AttackRef {
     tactic: Tactic::PrivilegeEscalation,
     technique_id: "T1611",
     technique: "Escape to Host",
+};
+
+/// Exfiltration — Exfiltration Over C2 Channel (T1041): a compromised workload with
+/// an internet-egress channel can ship accessed data out of the cluster.
+pub const EXFILTRATION: AttackRef = AttackRef {
+    tactic: Tactic::Exfiltration,
+    technique_id: "T1041",
+    technique: "Exfiltration Over C2 Channel",
 };
 
 /// Execution — Deploy Container (T1610): create pods.

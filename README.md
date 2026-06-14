@@ -16,6 +16,28 @@ Two layers:
 - **The webhook** (the floor) — a synchronous validating admission webhook with
   *zero* cluster access, enforcing image signing + mesh injection at admission. Small and frozen.
 
+## What it looks for (ATT&CK)
+
+The engine is centered on the adversary **outcomes** an external attacker could reach
+from an internet-facing front door, each an ATT&CK technique it proves and the model
+judges:
+
+- **Secret leakage / Credential Access** (T1552) — reaching a Secret, by mount
+  (`can-read`) or RBAC (`can-do/get/secrets`).
+- **Lateral Movement** (TA0008) — the `reaches` hops (NetworkPolicy *and* Linkerd
+  authz), gated by compromise: reaching a workload isn't controlling it (ADR-0002).
+- **Privilege Escalation** — Escape to Host (T1611) and RBAC self-escalation
+  (T1098.006).
+- **Execution** — Deploy Container (T1610), Container Admin Command (T1609).
+- **Persistence** — Container Orchestration Job (T1053.007).
+- **Impact** — Data Destruction (T1485).
+- **Exfiltration** (T1041) — a compromised workload with an internet-egress channel
+  (declared, or an open `0.0.0.0/0` egress allow) can ship accessed data out.
+
+Only *breach-relevant* chains (internet-facing entry) are findings; internal access
+is assume-breach context. Proof winnows what's reachable; the model decides whether
+each outcome is genuinely a risk or legitimate for that workload (ADR-0013).
+
 On every observed change the engine answers five questions: (1) how the threat
 model changed, (2) which new attack chains are provable and their minimal cut, (3)
 whether production is alive/degraded/halted and whether the levers can be trusted,

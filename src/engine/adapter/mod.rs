@@ -31,11 +31,13 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 use super::attack::{self, CAPABILITY_CATALOG};
 use super::graph::{
-    Capability, Edge, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol, Provenance,
-    Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload, canonical_image,
+    Capability, Edge, Endpoint, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol,
+    Provenance, Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload,
+    canonical_image,
 };
 use super::observe::Snapshot;
 
+mod egress;
 mod enrich;
 mod escape;
 mod exposure;
@@ -45,6 +47,7 @@ mod rbac;
 mod secret_mount;
 mod workload;
 
+pub use self::egress::EgressAdapter;
 pub use self::enrich::{RuntimeAdapter, VulnerabilityAdapter};
 pub use self::escape::HostEscapeAdapter;
 pub use self::exposure::ExposureAdapter;
@@ -161,6 +164,7 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(LinkerdReachabilityAdapter),
         Box::new(PrivilegeAdapter),
         Box::new(HostEscapeAdapter),
+        Box::new(EgressAdapter),
         // Fact-enrichment adapters run last: they read-modify nodes the structural
         // adapters already created.
         Box::new(ExposureAdapter),

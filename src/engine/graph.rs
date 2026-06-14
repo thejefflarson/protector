@@ -298,6 +298,10 @@ pub enum Relation {
     /// `via` (e.g. `privileged`, `hostPID`, `hostPath`, `runtime-socket`,
     /// `cap:SYS_ADMIN`). The ATT&CK Escape-to-Host (T1611) movement edge.
     EscapesTo { via: String },
+    /// Exfiltration channel: the source workload can egress to the internet (an
+    /// `internet` Endpoint), so a compromise there can ship accessed data out. `via`
+    /// names the signal (`annotation`, `egress-0.0.0.0/0`). ATT&CK T1041.
+    CanEgress { via: String },
     /// Structural: the workload runs as the target identity.
     RunsAs,
     /// Structural: the workload runs the target image.
@@ -331,6 +335,7 @@ impl Relation {
             Relation::CanDo { verb, resource } => format!("can-do/{verb}/{resource}"),
             Relation::CanRead => "can-read".to_string(),
             Relation::EscapesTo { via } => format!("escapes-to/{via}"),
+            Relation::CanEgress { via } => format!("can-egress/{via}"),
             Relation::RunsAs => "runs-as".to_string(),
             Relation::RunsImage => "runs-image".to_string(),
             Relation::ScheduledOn => "scheduled-on".to_string(),
@@ -350,6 +355,7 @@ impl Relation {
                 (v, r) => attack::capability_technique(v, r),
             },
             Relation::EscapesTo { .. } => Some(attack::ESCAPE_TO_HOST),
+            Relation::CanEgress { .. } => Some(attack::EXFILTRATION),
             _ => None,
         }
     }

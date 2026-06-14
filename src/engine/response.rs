@@ -44,7 +44,9 @@ impl ProposedAction {
     /// Classify the action from the cut edge's relation label.
     pub fn for_cut(cut: &Link) -> Self {
         let r = cut.relation.as_str();
-        if r.starts_with("reaches") {
+        if r.starts_with("reaches") || r.starts_with("can-egress") {
+            // Both are severable by an additive, reversible network deny — ingress for
+            // reaches, egress for the exfil channel.
             ProposedAction::DenyNetworkPath
         } else if r.starts_with("can-do") {
             ProposedAction::RevokeRbacGrant
