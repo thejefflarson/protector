@@ -221,9 +221,14 @@ fn kind(key: &str) -> &str {
     key.split('/').next().unwrap_or("node")
 }
 
-/// Strip the characters that break a Mermaid quoted label.
+/// Sanitize an untrusted label for the Mermaid source. Strips the characters that
+/// break a Mermaid quoted label (`"` backtick CR LF) AND the HTML metacharacters
+/// `< > &` — the source is interpolated into a `<pre>` and then re-parsed by the
+/// client renderer into `innerHTML`'d SVG, so a label like `</pre><img onerror=…>`
+/// would otherwise be stored XSS. Node keys/relations are RFC-1123-ish and never
+/// legitimately contain these, so stripping is lossless for real data.
 fn mm(s: &str) -> String {
-    s.replace(['"', '`', '\n', '\r'], " ")
+    s.replace(['"', '`', '\n', '\r', '<', '>', '&'], " ")
 }
 
 /// Mermaid node-shape delimiters by node kind (from the key prefix): secret =
@@ -699,6 +704,15 @@ mod tests {
                     to: objective.into(),
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn mm_strips_html_metacharacters_to_prevent_xss() {
+        // A malicious label can't break out of the <pre> or inject into the SVG.
+        let evil = mm("</pre><img src=x onerror=\"alert(1)\">&");
+        for c in ['<', '>', '&', '"'] {
+            assert!(!evil.contains(c), "mm must strip {c:?}");
         }
     }
 
