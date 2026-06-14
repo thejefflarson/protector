@@ -74,43 +74,55 @@ impl Snapshot {
     pub async fn observe(client: kube::Client) -> anyhow::Result<Self> {
         let lp = ListParams::default();
 
-        let pods = Api::<Pod>::all(client.clone()).list(&lp).await?.items;
-        let network_policies = Api::<NetworkPolicy>::all(client.clone())
-            .list(&lp)
-            .await?
-            .items;
-        let services = Api::<Service>::all(client.clone()).list(&lp).await?.items;
-
-        // Secrets are listed for their metadata only; values are dropped here and
-        // never enter the graph.
-        let secrets = Api::<Secret>::all(client.clone())
-            .list(&lp)
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|s| {
-                Some(SecretMeta {
-                    namespace: s.metadata.namespace?,
-                    name: s.metadata.name?,
-                })
-            })
-            .collect();
-
-        let roles = Api::<Role>::all(client.clone()).list(&lp).await?.items;
-        let role_bindings = Api::<RoleBinding>::all(client.clone())
-            .list(&lp)
-            .await?
-            .items;
-        let cluster_roles = Api::<ClusterRole>::all(client.clone())
-            .list(&lp)
-            .await?
-            .items;
-        let cluster_role_bindings = Api::<ClusterRoleBinding>::all(client.clone())
-            .list(&lp)
-            .await?
-            .items;
-
-        let image_vulns = list_image_vulns(&client).await;
+        // The lists are independent, so fire them concurrently (one round-trip of
+        // latency, not nine) and fail the whole observe on the first error — same
+        // semantics the sequential `?` chain had. Image vulns are best-effort
+        // (return empty on absence), so they ride along without failing the join.
+        let (
+            pods,
+            network_policies,
+            services,
+            secrets,
+            roles,
+            role_bindings,
+            cluster_roles,
+            cluster_role_bindings,
+            image_vulns,
+        ) = tokio::try_join!(
+            async { anyhow::Ok(Api::<Pod>::all(client.clone()).list(&lp).await?.items) },
+            async { anyhow::Ok(Api::<NetworkPolicy>::all(client.clone()).list(&lp).await?.items) },
+            async { anyhow::Ok(Api::<Service>::all(client.clone()).list(&lp).await?.items) },
+            // Secrets are listed for their metadata only; values are dropped here and
+            // never enter the graph.
+            async {
+                anyhow::Ok(
+                    Api::<Secret>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items
+                        .into_iter()
+                        .filter_map(|s| {
+                            Some(SecretMeta {
+                                namespace: s.metadata.namespace?,
+                                name: s.metadata.name?,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            },
+            async { anyhow::Ok(Api::<Role>::all(client.clone()).list(&lp).await?.items) },
+            async { anyhow::Ok(Api::<RoleBinding>::all(client.clone()).list(&lp).await?.items) },
+            async { anyhow::Ok(Api::<ClusterRole>::all(client.clone()).list(&lp).await?.items) },
+            async {
+                anyhow::Ok(
+                    Api::<ClusterRoleBinding>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items,
+                )
+            },
+            async { anyhow::Ok(list_image_vulns(&client).await) },
+        )?;
 
         // Runtime events come from a runtime sensor (Falco/Tetragon) — typically a
         // stream, not a list. Wiring that source is the remaining cluster-facing
