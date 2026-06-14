@@ -147,6 +147,33 @@ managed_np_name() {
 managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
+# cert-manager's Deployment going Available does NOT mean its admission webhook is
+# actually serving (CA injection + endpoints lag), and protector's chart creates a
+# Certificate the moment helm runs — against a half-ready webhook that Certificate is
+# never issued, the serving-cert secret never lands, and the pod can't start. Gate on
+# the webhook truly admitting a (server dry-run) Certificate before deploying.
+cm_webhook_ready() {
+  kubectl apply --dry-run=server -f - >/dev/null 2>&1 <<'YAML'
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: webhook-probe, namespace: cert-manager }
+spec:
+  secretName: webhook-probe
+  issuerRef: { name: does-not-exist, kind: Issuer }
+  dnsNames: [probe.invalid]
+YAML
+}
+
+# Dump why protector didn't become Ready (the cluster is torn down on exit, so grab
+# this before failing): pod state, recent events, the cert + its serving secret.
+diagnose_protector() {
+  log "protector did not become Ready — diagnostics:"
+  kubectl -n "$NS" get pods -o wide 2>&1 | sed 's/^/    /' || true
+  kubectl -n "$NS" describe pod -l app.kubernetes.io/name=protector 2>&1 | grep -iE "state|reason|message|event|warn|mount|secret" | tail -25 | sed 's/^/    /' || true
+  kubectl -n "$NS" get certificate,secret 2>&1 | sed 's/^/    /' || true
+  kubectl -n "$NS" logs -l app.kubernetes.io/name=protector --tail=30 2>&1 | sed 's/^/    /' || true
+}
+
 # ==============================================================================
 step "1/11  Create k3d cluster (flannel + kube-router, like prod)"
 k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
@@ -160,6 +187,9 @@ k3d image import "$IMAGE" -c "$CLUSTER"
 step "3/11  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
 kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CM_VERSION}/cert-manager.yaml"
 kubectl wait --for=condition=Available -n cert-manager deploy --all --timeout=180s
+kubectl wait --for=condition=Established crd/certificates.cert-manager.io --timeout=60s
+# ...and wait until the webhook actually admits a Certificate (Available != serving).
+wait_until "cert-manager webhook ready to issue" 120 cm_webhook_ready
 
 step "4/11  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
 helm install protector "$CHART_PATH" \
@@ -170,8 +200,9 @@ helm install protector "$CHART_PATH" \
   --set signature.enforceNamespaces="" --set signature.enforceLabels="" \
   --set engine.enable="" --set engine.actuationRBAC=false \
   --set engine.model.endpoint= \
-  --wait --timeout 240s
-kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+  --wait --timeout 300s \
+  || { diagnose_protector; fail "protector did not become ready in shadow mode"; }
+kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
 
 step "5/11  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
