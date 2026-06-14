@@ -299,7 +299,7 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
         let label = if is_cut {
             "✂ NetworkPolicy cut".to_string()
         } else {
-            step.relation.clone()
+            humanize_relation(&step.relation)
         };
         m.edge(&step.from, &step.to, &label, is_cut);
     }
@@ -344,6 +344,30 @@ fn plural(kind: &str, n: usize) -> String {
 /// objectives, so terminal objectives sharing a (hop, kind) are **collapsed into one
 /// aggregate node** ("47 secrets") — the graph stays readable. Intermediate hops are
 /// deduped.
+/// A human edge label for a graph relation, so an operator can tell *how* a hop works
+/// — most importantly the two ways to reach a secret: a **mounted** secret it already
+/// holds (`can-read`, direct, just that one secret) vs an **RBAC** grant its identity
+/// can exercise against the API (`can-do/get/secrets`, often any secret in scope).
+fn humanize_relation(rel: &str) -> String {
+    if rel == "can-read" {
+        return "mounts (direct read)".to_string();
+    }
+    if let Some(rest) = rel.strip_prefix("can-do/") {
+        // can-do/get/secrets → "RBAC get secrets (API)"
+        return format!("RBAC {} (API)", rest.replace('/', " "));
+    }
+    if let Some(via) = rel.strip_prefix("escapes-to/") {
+        return format!("escapes via {via}");
+    }
+    if rel.starts_with("reaches") {
+        return "network reach".to_string();
+    }
+    if rel == "runs-as" {
+        return "runs as".to_string();
+    }
+    rel.to_string()
+}
+
 fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
@@ -365,19 +389,25 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
             } else if seen_intermediate
                 .insert(format!("{}|{}|{}", step.from, step.to, step.relation))
             {
-                m.edge(&step.from, &step.to, &step.relation, false);
+                m.edge(
+                    &step.from,
+                    &step.to,
+                    &humanize_relation(&step.relation),
+                    false,
+                );
             }
         }
     }
 
     for ((from, relation, kind), objs) in &groups {
+        let label = humanize_relation(relation);
         if objs.len() == 1 {
-            m.edge(from, &objs[0], relation, false);
+            m.edge(from, &objs[0], &label, false);
         } else {
             // Collapse the fan-out into one aggregate node.
             let agg_key = format!("{kind}/__agg/{from}/{relation}");
             let agg_label = format!("{} {}", objs.len(), plural(kind, objs.len()));
-            m.edge_to_labeled(from, &agg_key, &agg_label, relation);
+            m.edge_to_labeled(from, &agg_key, &agg_label, &label);
         }
     }
 
@@ -512,6 +542,8 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .expand summary{{cursor:pointer;color:#06c}}\
          .expand ul{{margin:.15rem 0 .4rem;padding-left:1.1rem;columns:2}}\
          .expand li{{margin:.05rem 0;font-family:ui-monospace,monospace}}\
+         .legend{{font-size:.75rem;color:#555;margin:.2rem 0 .6rem}}\
+         .legend code{{background:#f4f4f4;padding:0 .2rem}}\
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
@@ -527,7 +559,14 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
-         <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>{path_body}\
+         <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
+         <p class=\"legend\">edge legend — \
+         <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
+         <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
+         <code>network reach</code>: a NetworkPolicy- or Linkerd-authorized connection · \
+         <code>runs as</code>: assumes the ServiceAccount identity · \
+         <code>escapes via</code>: a container-escape primitive to the host node</p>\
+         {path_body}\
          </body></html>",
         rem_n = remediations.len(),
         rem_word = if armed { "active" } else { "proposed" },
