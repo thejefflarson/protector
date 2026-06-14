@@ -32,14 +32,13 @@ pub struct Finding {
     /// The model promoted this chain to auto-eligible (ADR-0011), as opposed to live
     /// runtime corroboration.
     pub promoted: bool,
-    /// Short evidence-class tag (auto-eligible / latent / structural / durable-fix /
-    /// forbidden) — what kind of finding this is.
+    /// The chain's **mechanical** disposition — what its minimal cut can do
+    /// (auto-eligible / latent foothold / structural / durable-fix PR / forbidden /
+    /// no-cut), independent of the model's exploitability call. This is metadata for
+    /// the JSON view and drives only the dashboard's remediation-vs-attack-path
+    /// routing; the human-facing "is this exploitable" judgement is [`verdict`], the
+    /// model's own words (the LLM is the judge — ADR-0013).
     pub disposition: String,
-    /// What the engine would actually *do* with it, and why — the `decide()` verdict
-    /// in plain words. The honest answer to "auto-eligible?": a corroborated chain
-    /// whose only cut is a subtractive RBAC/mount edge is NOT auto-applied, it's a
-    /// durable-fix PR. This is what the flat "auto-eligible" disposition hid.
-    pub decision: String,
     /// The single-edge cut that severs it, if one exists.
     pub cut: Option<String>,
     /// Whether the entry is internet-facing — the discriminator between a real breach
@@ -72,8 +71,6 @@ impl Finding {
             .single_edge_cuts
             .first()
             .map(super::response::ProposedAction::for_cut);
-        let (disposition, decision) = classify(chain, action);
-
         Finding {
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
@@ -83,8 +80,7 @@ impl Finding {
             corroborated: chain.corroborated,
             adjudicated: chain.adjudicated,
             promoted: chain.promoted,
-            disposition,
-            decision,
+            disposition: classify(chain, action),
             cut: chain
                 .single_edge_cuts
                 .first()
@@ -116,56 +112,39 @@ fn killchain(chain: &ProvenChain) -> String {
     }
 }
 
-/// Classify a chain into (disposition, decision) by what its minimal cut can
-/// actually do — mirroring [`super::actuator::decide`] without the runtime-only
-/// gates (enabled class, live blast radius). Only a network cut (`DenyNetworkPath`)
-/// is ever auto-applied; subtractive cuts are durable-fix PRs, an escape primitive
-/// is irreversible, and a chain with no live/foothold evidence is just a proposal.
-fn classify(
-    chain: &ProvenChain,
-    action: Option<super::response::ProposedAction>,
-) -> (String, String) {
+/// The one disposition that routes to the remediations section: a reversible network
+/// cut that meets the action bar (so it auto-applies armed, or is proposed in shadow).
+const AUTO_ELIGIBLE: &str = "auto-eligible";
+
+/// The chain's mechanical disposition — what its minimal cut can do, by cut type. This
+/// is *not* the exploitability judgement (that's the model's [`ProvenChain::verdict`],
+/// shown to humans); it's the deterministic "can we cut this, and does it meet the
+/// bar" annotation that routes the dashboard and rides along in the JSON. It mirrors
+/// [`super::actuator::decide`] minus the runtime-only gates (enabled class, blast
+/// radius): only a network cut (`DenyNetworkPath`) auto-applies; subtractive cuts are
+/// durable GitOps fixes, an escape primitive is irreversible, no single edge is no-cut.
+fn classify(chain: &ProvenChain, action: Option<super::response::ProposedAction>) -> String {
     use super::response::ProposedAction as A;
-    let s = |a: &str, b: &str| (a.to_string(), b.to_string());
     match action {
-        None => s("no-cut", "no single edge severs this — no minimal fix"),
-        Some(A::RemoveEscapePrimitive) => s(
-            "forbidden",
-            "irreversible container-escape — durable fix only",
-        ),
-        Some(A::RevokeRbacGrant) => s("durable-fix PR", "revoke the RBAC grant via GitOps"),
-        Some(A::RemoveSecretMount) => s("durable-fix PR", "remove the secret mount via GitOps"),
-        Some(A::RebindIdentity) => s(
-            "durable-fix PR",
-            "rebind to a least-privilege ServiceAccount",
-        ),
-        Some(A::Unclassified) => s("unclassified", "no action mapped — manual"),
+        None => "no-cut",
+        Some(A::RemoveEscapePrimitive) => "forbidden",
+        Some(A::RevokeRbacGrant | A::RemoveSecretMount | A::RebindIdentity) => "durable-fix PR",
+        Some(A::Unclassified) => "unclassified",
         Some(A::DenyNetworkPath) => {
             if !chain.meets_action_bar() {
                 if chain.is_latent_foothold() {
-                    s(
-                        "latent foothold — propose",
-                        "exposed + CVE, no live signal — propose a cut",
-                    )
+                    "latent foothold — propose"
                 } else {
-                    s(
-                        "structural — propose",
-                        "no live or foothold evidence — propose only",
-                    )
+                    "structural — propose"
                 }
             } else if !chain.adjudicated {
-                s(
-                    "vetoed — propose",
-                    "live, but the model vetoed the auto-cut",
-                )
+                "vetoed — propose"
             } else {
-                s(
-                    "auto-eligible",
-                    "auto-applies a reversible NetworkPolicy cut when `network` is armed",
-                )
+                AUTO_ELIGIBLE
             }
         }
     }
+    .to_string()
 }
 
 /// The current findings snapshot, shared between the engine (writer) and the HTTP
@@ -434,7 +413,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
     let mut remediations: Vec<&Finding> = Vec::new();
     let mut endpoints: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
     for f in findings.iter().filter(|f| f.breach_relevant) {
-        if f.disposition == "auto-eligible" {
+        if f.disposition == AUTO_ELIGIBLE {
             remediations.push(f);
         } else {
             endpoints.entry(f.entry.as_str()).or_default().push(f);
@@ -628,14 +607,12 @@ mod tests {
             "forbidden"
         );
 
-        // A model-promoted network chain auto-applies; the `decision` explains why.
+        // A model-promoted network chain is auto-eligible even without corroboration.
         let promoted = ProvenChain {
             promoted: true,
             ..chain("reaches/Tcp", false, false, true)
         };
-        let f = Finding::from_chain(&promoted);
-        assert_eq!(f.disposition, "auto-eligible");
-        assert!(f.decision.contains("NetworkPolicy"));
+        assert_eq!(Finding::from_chain(&promoted).disposition, "auto-eligible");
     }
 
     /// Build a Finding with a two-hop path entry →reaches→ store →&lt;rel&gt;→ objective.
@@ -657,7 +634,6 @@ mod tests {
             adjudicated: true,
             promoted: false,
             disposition: disposition.into(),
-            decision: "decision".into(),
             // The cut is the first hop (the reaches edge entry → store), matching
             // the first PathStep below so the remediation graph can mark it.
             cut: Some(format!("{entry} -[reaches/Tcp]-> workload/app/Pod/store")),
