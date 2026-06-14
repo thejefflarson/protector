@@ -142,17 +142,18 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0008 + ADR-0011). The model is consulted ONLY where there
-        // is evidence to weigh — never on an evidence-empty chain (asking a model to
-        // judge "(no CVE), (no runtime)" invents threats from nothing). Two lanes:
-        // - Corroborated chain (runtime evidence) → veto path: a non-confirming
-        //   verdict downgrades it to a proposal. The model can only subtract.
-        // - Proven FOOTHOLD (internet-exposed ∧ exploited-in-wild/critical CVE ∧
-        //   reachable — i.e. log4shell) → auto-promote UNLESS the model *confidently
-        //   refutes* it. Uncertain / no model leaves the deterministic foothold to
-        //   govern, so a weak local model can't silently block a known foothold.
-        // A chain with neither runtime nor a foothold has no exploitation evidence —
-        // it stays a deterministic latent/structural proposal; the model isn't asked.
+        // Adjudicate (ADR-0008 + ADR-0011). The deterministic proof has WINNOWED the
+        // search space to a handful of candidate breach paths; the model makes the
+        // judgement a human analyst would. It is consulted ONLY where there is
+        // evidence to weigh — never on an evidence-empty chain. Two lanes:
+        // - Proven FOOTHOLD (internet-exposed ∧ critical/KEV CVE ∧ reachable — e.g.
+        //   log4shell): the model DECIDES exploitability. A cut requires its
+        //   affirmative `exploitable` verdict — a CVE being *present* is not proof it
+        //   can be *exercised*. Uncertain / refuted / no model → propose-only (the
+        //   foothold is surfaced for a human, never auto-cut on mere presence).
+        // - Corroborated chain (live runtime signal) → veto path: live activity is
+        //   auto-eligible, but a non-confirming verdict downgrades it to a proposal.
+        // A chain with neither a foothold nor runtime evidence is not asked.
         //
         // The verdict is judged ONCE PER ENTRY and cached: corroboration and the
         // foothold are properties of the entry workload, not of each objective it
@@ -176,13 +177,17 @@ impl Engine {
                     v
                 }
             };
+            // Keep the model's call — positive *and* negative — on the chain so the
+            // dashboard can show why it did or didn't act (not just the outcome).
+            chain.verdict = Some(verdict.summary());
             if chain.corroborated {
                 // Veto lane: a non-confirming verdict downgrades to a proposal.
                 if !verdict.is_confirmed() {
                     chain.adjudicated = false;
                 }
-            } else if !matches!(verdict, adjudicate::Verdict::Refuted(_)) {
-                // Foothold lane: promote unless the model confidently refuted it.
+            } else if verdict.promotes() {
+                // Foothold lane: the model affirmatively judged the path exploitable
+                // (not mere CVE presence) — only then does it become auto-eligible.
                 chain.promoted = true;
             }
         }

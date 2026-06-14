@@ -1,8 +1,20 @@
 # 0011. The model corroborates positively; operator access is out of scope, defended in depth
 
-- Status: Proposed
+- Status: Superseded in part by [0013](0013-proof-winnows-model-decides.md)
 - Date: 2026-06-13
 - Amends: [0008](0008-model-adjudicates-never-authorizes.md), [0009](0009-asymmetric-action-bar.md)
+- Superseded: §1's "deterministic-promote unless the model refutes" is replaced by
+  [0013](0013-proof-winnows-model-decides.md) — the foothold lane is now a **positive
+  gate** (a cut requires the model's affirmative `exploitable` verdict; no
+  model/uncertain/refuted ⇒ propose-only). CVE *presence* no longer auto-cuts. §2
+  (operator access out of scope; control-plane orthogonality) stands.
+
+> **Superseded note (2026-06-14):** This ADR made the foothold a deterministic
+> auto-cut with the model as a veto — "log4j must promote with no model." We reversed
+> that in [0013](0013-proof-winnows-model-decides.md): a CVE being *present* is not
+> proof it can be *exercised*, so the model must affirmatively judge it exploitable
+> before a cut. Read §1 below as history; the operator-scope reasoning (§2) remains
+> current.
 
 ## Context
 

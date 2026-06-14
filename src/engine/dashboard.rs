@@ -49,6 +49,10 @@ pub struct Finding {
     /// The ATT&CK kill chain this path realizes, in plain terms — the Initial Access
     /// foothold (if any) through the objective's technique.
     pub killchain: String,
+    /// The model's adjudication, if it judged this chain — both positive ("exploitable
+    /// — …") and negative ("not exploitable — …") calls, with the model's reasoning.
+    /// `None` if no model was consulted.
+    pub verdict: Option<String>,
     /// The proven attack path, hop by hop (entry → … → objective).
     pub path: Vec<PathStep>,
 }
@@ -87,6 +91,7 @@ impl Finding {
                 .map(super::response::cut_signature),
             breach_relevant: chain.is_breach_relevant(),
             killchain: killchain(chain),
+            verdict: chain.verdict.clone(),
             path: chain
                 .links
                 .iter()
@@ -279,9 +284,13 @@ impl Mermaid {
     }
 }
 
-/// Why a breach-relevant chain is *not* auto-remediated — the plain-English reason
-/// shown on its terminal edge, derived from the disposition.
-fn not_remediated_reason(f: &Finding) -> &'static str {
+/// Why a breach-relevant chain is *not* auto-remediated — the model's own words when
+/// it judged the chain (e.g. "not exploitable — …"), otherwise the plain-English
+/// reason derived from the disposition.
+fn not_remediated_reason(f: &Finding) -> String {
+    if let Some(v) = &f.verdict {
+        return v.clone();
+    }
     match f.disposition.as_str() {
         "latent foothold — propose" => {
             "exposed + critical/KEV CVE, but no live signal — needs human approval"
@@ -295,6 +304,7 @@ fn not_remediated_reason(f: &Finding) -> &'static str {
         "no-cut" => "no single edge severs it — needs deeper remediation",
         _ => "not auto-remediated",
     }
+    .to_string()
 }
 
 /// One remediation card: the kill chain caption and a graph of the path with the
@@ -317,12 +327,18 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     } else {
         "<span class=\"proposed\">would apply (shadow)</span>"
     };
+    // The model's verdict (why it decided to act), when a model judged this chain.
+    let verdict = match &f.verdict {
+        Some(v) => format!("<div class=\"verdict\">model: {}</div>", escape(v)),
+        None => String::new(),
+    };
     format!(
         "<div class=\"card\"><div class=\"kc\">{} → {}  {status}</div>\
-         <div class=\"kc2\">kill chain: {}</div><pre class=\"mermaid\">{}</pre></div>",
+         <div class=\"kc2\">kill chain: {}</div>{}<pre class=\"mermaid\">{}</pre></div>",
         escape(&short(&f.entry)),
         escape(&short(&f.objective)),
         escape(&f.killchain),
+        verdict,
         m.finish(),
     )
 }
@@ -411,6 +427,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
          .kc{{font-family:ui-monospace,monospace;font-size:.85rem;font-weight:600}}\
          .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
+         .verdict{{font-size:.78rem;color:#333;background:#f4f4f4;border-left:2px solid #888;padding:.2rem .5rem;margin:.2rem 0 .4rem}}\
          .applied{{color:#b00000;font-weight:600}}\
          .proposed{{color:#9a5b00;font-weight:600}}\
          .muted{{color:#777}}\
@@ -490,6 +507,7 @@ mod tests {
             // breach-relevance; treat the entry as a front door so the chain is a
             // finding (bucket gating is exercised in the render test instead).
             exposed_entry: true,
+            verdict: None,
             links: vec![cut.clone()],
             single_edge_cuts: vec![cut],
         }
@@ -550,6 +568,7 @@ mod tests {
         disposition: &str,
         terminal_rel: &str,
         breach_relevant: bool,
+        verdict: Option<&str>,
     ) -> Finding {
         Finding {
             entry: entry.into(),
@@ -568,6 +587,7 @@ mod tests {
             breach_relevant,
             killchain: "T1190 Exploit Public-Facing Application → T1552 Unsecured Credentials"
                 .into(),
+            verdict: verdict.map(str::to_string),
             path: vec![
                 PathStep {
                     from: entry.into(),
@@ -586,13 +606,14 @@ mod tests {
     #[test]
     fn renders_two_graph_sections_and_drops_internal_paths() {
         let findings = vec![
-            // Remediation: an auto-eligible cut from the exposed web endpoint.
+            // Remediation: the model judged it exploitable → auto-eligible cut.
             finding(
                 "workload/app/Pod/web",
                 "secret/app/session-key",
                 "auto-eligible",
                 "reaches/Tcp",
                 true,
+                Some("exploitable — CVE-2021-44228 is a remote RCE reaching the secret"),
             ),
             // Un-remediated paths from the SAME endpoint (coalesce into one graph).
             finding(
@@ -601,13 +622,16 @@ mod tests {
                 "durable-fix PR",
                 "can-do/create/pods",
                 true,
+                None,
             ),
+            // The model's NEGATIVE call is kept too — shown as the reason.
             finding(
                 "workload/app/Pod/web",
                 "secret/app/other",
                 "latent foothold — propose",
                 "can-read",
                 true,
+                Some("not exploitable — the CVE is in a code path this service never invokes"),
             ),
             // Internal (not breach-relevant): must NOT appear in either section.
             finding(
@@ -616,6 +640,7 @@ mod tests {
                 "durable-fix PR",
                 "can-do/get/secrets",
                 false,
+                None,
             ),
         ];
 
@@ -630,8 +655,10 @@ mod tests {
         assert!(html.contains("Internet"));
         // The remediation graph marks the cut (dashed edge + scissors).
         assert!(html.contains("✂"));
-        // The un-remediated terminal edges carry their reason.
-        assert!(html.contains("not auto-cuttable") || html.contains("needs human approval"));
+        // BOTH the positive verdict (on the remediation) and the negative one (on the
+        // un-remediated path) are surfaced with the model's reasoning.
+        assert!(html.contains("exploitable — CVE-2021-44228 is a remote RCE"));
+        assert!(html.contains("not exploitable — the CVE is in a code path"));
         // The internal control-plane path is dropped entirely (one endpoint: web).
         assert!(!html.contains("argocd-secret"));
         assert!(html.contains("1 endpoint"));

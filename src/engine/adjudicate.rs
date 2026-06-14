@@ -48,6 +48,18 @@ impl Verdict {
     pub fn promotes(&self) -> bool {
         matches!(self, Verdict::Exploitable(_))
     }
+
+    /// A one-line, human summary of the model's call — kept on the finding so the
+    /// dashboard can show *both* positive (cut) and negative (don't-cut) decisions
+    /// with the model's own reasoning, not just the outcome.
+    pub fn summary(&self) -> String {
+        match self {
+            Verdict::Confirmed => "confirmed (live attack stands)".to_string(),
+            Verdict::Exploitable(why) => format!("exploitable — {why}"),
+            Verdict::Refuted(why) => format!("not exploitable — {why}"),
+            Verdict::Uncertain(why) => format!("uncertain — {why}"),
+        }
+    }
 }
 
 /// Judges a proven chain. Implementations are a model (the real one) or a fixed
@@ -331,6 +343,7 @@ mod tests {
             adjudicated: true,
             promoted: false,
             exposed_entry: true,
+            verdict: None,
             links: vec![],
             single_edge_cuts: vec![],
         };

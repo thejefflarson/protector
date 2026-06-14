@@ -96,6 +96,11 @@ pub struct ProvenChain {
     /// what could it reach"). An internal-only entry reaching a secret is normal
     /// Kubernetes topology, not a breach. See [`ProvenChain::is_breach_relevant`].
     pub exposed_entry: bool,
+    /// The model's adjudication summary for this chain, when it was judged (ADR-0013)
+    /// — both positive ("exploitable — …") and negative ("not exploitable — …")
+    /// calls, kept so the dashboard can show *why* the model did or didn't act. `None`
+    /// when no model was consulted (no evidence to weigh, or no model configured).
+    pub verdict: Option<String>,
     /// The path, entry → objective, in order.
     pub links: Vec<Link>,
     /// Edges on the path whose removal alone disconnects `entry` from `objective`
@@ -374,6 +379,7 @@ pub fn confirm(
         adjudicated: true,
         promoted: false,
         exposed_entry: entry_exposed(graph, entry_idx),
+        verdict: None,
         links,
         single_edge_cuts,
     })
@@ -437,6 +443,7 @@ pub fn prove_with(
                 adjudicated: true,
                 promoted: false,
                 exposed_entry,
+                verdict: None,
                 links,
                 single_edge_cuts,
             });

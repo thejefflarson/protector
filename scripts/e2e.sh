@@ -17,17 +17,26 @@
 #
 #   A. shadow      — the chain proves STRUCTURALLY (no vuln, no corroboration).
 #   B. corroborate — a simulated falcosidekick alert on `web` flips it to
-#                    "live — auto-eligible", but nothing is applied (shadow).
+#                    "auto-eligible", but nothing is applied (shadow).
 #   C. hard mode   — enable=network: the engine applies a default-deny
 #                    NetworkPolicy quarantining `web`.
 #   D. self-revert — remove the durable allow (store-ingress); the chain stops
 #                    being provable, so the engine DELETES its NetworkPolicy.
 #
-# Requirements: docker, k3d, kubectl, helm, jq, curl.
+# Then the core thesis — proofs WINNOW, the model DECIDES:
+#   E. log4j present, NO model — a critical CVE is proven reachable, but presence
+#      is not proof of exploitability, so the engine only PROPOSES (no auto-cut).
+#   F. log4j + model — the model examines the proven path, judges it EXPLOITABLE,
+#      and ONLY THEN does the engine cut. The determination is the model's, not a
+#      rule's. (Skipped if no Ollama is reachable; see PROTECTOR_E2E_MODEL.)
+#   G. self-revert — the model-driven cut reverts when the chain stops proving.
+#
+# Requirements: docker, k3d, kubectl, helm, jq, curl. A reachable Ollama for E/F.
 # Usage:        scripts/e2e.sh
 # Env knobs:    CHART_PATH (default ../cluster/charts/protector)
 #               IMAGE      (default protector:e2e — built from this repo)
 #               CLUSTER    (default protector-e2e)
+#               PROTECTOR_E2E_MODEL / _NAME / _PROBE — the model-decides endpoint
 #               KEEP=1     leave the cluster up on exit for debugging
 #
 set -euo pipefail
@@ -40,6 +49,19 @@ APP_NS=app
 ENTRY="workload/${APP_NS}/Pod/web"
 OBJECTIVE="secret/${APP_NS}/session-key"
 CM_VERSION="${CM_VERSION:-v1.16.2}"
+# The model that makes the exploitability determination (ADR-0013). k3d pods reach
+# the host's Ollama via host.docker.internal (Docker Desktop resolves it inside
+# pods; host.k3d.internal only works in the node containers, not pods). Override
+# PROTECTOR_E2E_MODEL for a different endpoint (e.g. a Linux bridge gateway IP).
+MODEL_NAME="${PROTECTOR_E2E_MODEL_NAME:-ibm/granite4:3b-h}"
+MODEL_ENDPOINT="${PROTECTOR_E2E_MODEL:-http://host.docker.internal:11434/v1/chat/completions}"
+# Host-side probe (host.k3d.internal is pod-only, so the host checks localhost):
+# is an Ollama endpoint actually serving the model? The model phase only runs if
+# so (otherwise it's skipped, not failed).
+MODEL_PROBE_URL="${PROTECTOR_E2E_MODEL_PROBE:-http://localhost:11434/api/tags}"
+model_available() {
+  curl -fsS --max-time 5 "$MODEL_PROBE_URL" 2>/dev/null | grep -q "$MODEL_NAME"
+}
 
 # Isolate the kubeconfig to a throwaway file so a caller's multi-path KUBECONFIG
 # (which makes k3d refuse to write/select the context) can't break the run.
@@ -124,20 +146,20 @@ managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
 # ==============================================================================
-step "1/12  Create k3d cluster (flannel + kube-router, like prod)"
+step "1/11  Create k3d cluster (flannel + kube-router, like prod)"
 k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER" --wait --timeout 180s
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
-step "2/12  Build + import the protector image"
+step "2/11  Build + import the protector image"
 docker build -t "$IMAGE" "$(dirname "$0")/.."
 k3d image import "$IMAGE" -c "$CLUSTER"
 
-step "3/12  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
+step "3/11  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
 kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CM_VERSION}/cert-manager.yaml"
 kubectl wait --for=condition=Available -n cert-manager deploy --all --timeout=180s
 
-step "4/12  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
+step "4/11  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
 helm install protector "$CHART_PATH" \
   --namespace "$NS" --create-namespace \
   --set replicaCount=1 \
@@ -150,7 +172,7 @@ helm install protector "$CHART_PATH" \
 kubectl -n "$NS" rollout status deploy/protector --timeout=120s
 pf_reset
 
-step "5/12  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
+step "5/11  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
 kubectl create ns "$APP_NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$APP_NS" create secret generic session-key --from-literal=k=x \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -178,7 +200,7 @@ spec:
 YAML
 kubectl -n "$APP_NS" wait --for=condition=Ready pod/web pod/store --timeout=120s
 
-step "6/12  SHADOW: chain proves structurally, then corroboration flips it auto-eligible — but NOTHING is applied"
+step "6/11  SHADOW: chain proves structurally, then corroboration flips it auto-eligible — but NOTHING is applied"
 wait_until "structural chain web→session-key" 90 finding_is "structural — propose"
 pass "structural chain proven (no foothold, no corroboration)"
 
@@ -189,7 +211,7 @@ pass "corroboration on an internet-facing entry meets the asymmetric action bar 
 managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only was violated"
 pass "shadow mode applied nothing (propose-only honored)"
 
-step "7/12  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
+step "7/11  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
 helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
   --set engine.enable=network --set engine.actuationRBAC=true \
   --wait --timeout 180s
@@ -203,14 +225,15 @@ selector="$(kubectl -n "$APP_NS" get "$np" -o jsonpath='{.spec.podSelector.match
 [ "$selector" = "web" ] || fail "managed NetworkPolicy selects role='$selector', expected 'web'"
 pass "engine applied $np quarantining role=web"
 
-step "8/12  SELF-REVERT: remove the durable allow; the chain is no longer provable, so the engine reverts"
+step "8/11  SELF-REVERT: remove the durable allow; the chain is no longer provable, so the engine reverts"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
 wait_until "engine deletes its managed NetworkPolicy" 120 managed_np_absent
 pass "engine reverted its compensating control once the chain stopped being proven (Q5 invariant)"
 
-step "9/10  LOG4J: a proven foothold (exposed + critical CVE) auto-promotes — NO model, NO Falco"
+step "9/11  LOG4J PRESENT, NO MODEL: a critical CVE on the exposed image is PROVEN reachable — but presence ≠ exploitability, so with no analyst to judge it, the engine only PROPOSES (no auto-cut)"
 # Minimal trivy VulnerabilityReport CRD (open schema) so the engine's Vulnerability
-# port has something to list. (trivy-operator itself isn't needed for the test.)
+# port has something to list. (trivy-operator itself isn't needed for the test —
+# we inject the report a real scan would produce.)
 kubectl apply -f - <<'YAML'
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -244,7 +267,21 @@ report:
   vulnerabilities:
     - { vulnerabilityID: CVE-2021-44228, severity: CRITICAL }
 YAML
-# Recreate the reaches edge (step 10 deleted it) so web → store → secret is provable.
+# Hard mode + judgement, but NO model endpoint. The proof winnows the candidate;
+# without an analyst to make the exploitability call, the engine must NOT auto-cut
+# on mere CVE presence — the foothold stays a propose-only latent finding.
+#
+# The helm upgrade replaces the pod, resetting its in-memory runtime store — so the
+# Falco corroboration from steps 6-7 is cleared. We recreate the `reaches` edge only
+# AFTER the fresh, uncorroborated pod is up, so the chain it proves carries ONLY the
+# CVE foothold (no lingering runtime signal that would auto-cut via the veto lane).
+helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
+  --set 'engine.enable=network\,judgement' \
+  --set engine.model.endpoint= \
+  --wait --timeout 180s
+kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+pf_reset
+# Recreate the reaches edge (step 8 deleted it) so web → store → secret is provable.
 kubectl -n "$APP_NS" apply -f - <<'YAML'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -255,31 +292,54 @@ spec:
   ingress:
     - from: [{ podSelector: { matchLabels: { role: web } } }]
 YAML
-# Hard mode + judgement, with NO model endpoint: NullAdjudicator confirms (never
-# refutes), so the deterministic foothold governs. No Falco event is sent.
-helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
-  --set 'engine.enable=network\,judgement' \
-  --set engine.model.endpoint= \
-  --wait --timeout 180s
-kubectl -n "$NS" rollout status deploy/protector --timeout=120s
-pf_reset
-wait_until "engine promotes the log4shell foothold and quarantines web" 150 managed_np_present
-pass "log4j foothold auto-promoted to a cut — no runtime signal, no model (ADR-0011)"
-finding_foothold() {
-  curl -fsS localhost:8080/findings 2>/dev/null \
-    | jq -e --arg e "$ENTRY" --arg o "$OBJECTIVE" \
-        '[.[] | select(.entry==$e and .objective==$o and .foothold==true and .promoted==true
-                       and .corroborated==false and .breach_relevant==true
-                       and .disposition=="auto-eligible")] | length > 0' \
-        >/dev/null 2>&1
-}
-wait_until "dashboard classifies log4j as a promoted foothold" 30 finding_foothold
-pass "dashboard shows log4j foothold auto-eligible (exposed + critical CVE, promoted, model-free)"
+wait_until "log4j foothold proven but propose-only (no model to judge it)" 150 \
+  finding_is "latent foothold — propose"
+pass "CVE present + exposed, but with no model the engine PROPOSES — it does not cut"
+# Give the reconcile a few cycles; assert it never cuts on mere presence.
+sleep 10
+managed_np_absent || fail "engine auto-cut on mere CVE presence with no model — the positive-gate is violated"
+pass "no NetworkPolicy applied: the model, not a rule, must decide to cut"
 
-step "10/10  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts"
-kubectl -n "$APP_NS" delete networkpolicy store-ingress
-wait_until "engine reverts the foothold cut" 120 managed_np_absent
-pass "engine reverted the foothold control once the chain stopped being proven"
+if model_available; then
+  step "10/11  LOG4J + MODEL: the model examines the proven path, judges log4shell EXPLOITABLE, and the engine cuts — the determination is the model's"
+  log "model: $MODEL_NAME @ $MODEL_ENDPOINT"
+  # Warm the model so the engine's first judge call doesn't pay the cold-load cost
+  # against its 30s HTTP timeout (a freshly-restarted engine judges once per pass).
+  log "warming the model (one inference to load it into memory)…"
+  curl -fsS --max-time 90 "${MODEL_PROBE_URL%/api/tags}/v1/chat/completions" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg m "$MODEL_NAME" '{model:$m,messages:[{role:"user",content:"ready? reply ok"}],stream:false}')" \
+    >/dev/null 2>&1 || true
+  helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
+    --set engine.model.endpoint="$MODEL_ENDPOINT" \
+    --set engine.model.name="$MODEL_NAME" \
+    --wait --timeout 180s
+  kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+  pf_reset
+  wait_until "model promotes the exploitable log4shell foothold → engine quarantines web" 180 managed_np_present
+  pass "the MODEL decided to cut — its 'exploitable' verdict promoted the foothold (ADR-0011)"
+  finding_foothold() {
+    curl -fsS localhost:8080/findings 2>/dev/null \
+      | jq -e --arg e "$ENTRY" --arg o "$OBJECTIVE" \
+          '[.[] | select(.entry==$e and .objective==$o and .foothold==true and .promoted==true
+                         and .corroborated==false and .breach_relevant==true
+                         and .disposition=="auto-eligible")] | length > 0' \
+          >/dev/null 2>&1
+  }
+  wait_until "dashboard shows the model-promoted foothold" 30 finding_foothold
+  pass "dashboard: foothold auto-eligible because the model judged it exploitable"
+  # Surface the model's actual verdict + reasoning from the engine logs.
+  log "model verdict (from engine logs):"
+  kubectl -n "$NS" logs deploy/protector --tail=400 2>/dev/null \
+    | grep -i 'adjudicated entry' | tail -2 || true
+
+  step "11/11  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts the model-driven cut"
+  kubectl -n "$APP_NS" delete networkpolicy store-ingress
+  wait_until "engine reverts the model-driven foothold cut" 120 managed_np_absent
+  pass "engine reverted the model-driven control once the chain stopped being proven"
+else
+  log "${YELLOW}SKIP 10-11/11${OFF}: no model at $MODEL_PROBE_URL serving $MODEL_NAME — start Ollama and re-run to exercise the model-decides path"
+fi
 
 echo
-echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated and deterministic-foothold (log4j) action paths, the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
+echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated path, the proof-winnows→model-decides foothold path (presence is propose-only; the model's 'exploitable' verdict is what cuts), the isolation actuator, and self-revert all verified against a real API server on the prod CNI."

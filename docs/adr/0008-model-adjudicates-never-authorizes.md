@@ -1,7 +1,15 @@
 # 0008. The model adjudicates (one-way veto); it never authorizes, and never exploits
 
-- Status: Accepted
+- Status: Accepted — amended by [0011](0011-positive-judgement.md), [0013](0013-proof-winnows-model-decides.md)
 - Date: 2026-06-12
+
+> **Later doctrine (see [0013](0013-proof-winnows-model-decides.md)):** the "one-way
+> veto, never authorizes" rule below was the starting point. The model is now also a
+> **positive gate** on the foothold lane — on a proven, internet-facing foothold it
+> *must* affirmatively judge `exploitable` for a cut (otherwise propose-only). It
+> still never invents topology (proof owns that) and never exploits; what changed is
+> that proof *winnows* and the model *decides exploitability*. The veto role here
+> remains current for the runtime-corroborated lane.
 
 ## Context
 

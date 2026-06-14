@@ -49,20 +49,35 @@ the reachable edge, revoke one RBAC binding, rotate one secret — breaking the
 chain at its narrowest point while the workload keeps running. Minimal-cut, not
 demolition.
 
-That power is only safe because of one rule, and the whole design exists to
-enforce it:
+That power is only safe because of one division of labor, and the whole design
+exists to enforce it:
 
-> **A model may propose. Only deterministic proof may move privilege.**
+> **Proof winnows the search space; the model makes the exploitability call.
+> Privilege moves only on their conjunction.**
 
-Large language models — and especially the small, local ones a Pi cluster can
-run — are good at *imagining* attack paths and bad at *adjudicating* them. They
-inflate, they flatter, they vary run to run. So the model never decides. It
-generates a hypothesis with named links; deterministic checks (graph queries,
-RBAC checks, KEV/EPSS lookups, Falco corroboration, cross-scanner agreement)
-either confirm each link or drop it; and an automated action fires only when the
-chain is proven *and* corroborated live — never on the model's confidence. The
-model can be wrong all day and the worst it causes is wasted verifier cycles.
-Every action it does enable is reversible, announced, and self-reverting.
+Deterministic proof is the search-space reducer. It walks the graph and establishes
+what is *possible* — which paths are reachable, privileged, internet-facing, and
+carry a known CVE — and it can never be talked out of the topology: every edge is
+proof-grade, and `confirm` discards any step a model makes up. That winnows a
+small cluster down to a handful of candidate breach paths.
+
+The model then makes the judgement a deterministic rule *cannot*: given a proven
+candidate, is it genuinely **exploitable**, end to end, from the internet — or is
+the CVE merely *present*? A log4shell layer in an image is not proof the vulnerable
+code is reachable or that attacker input ever reaches it; that call is exactly what
+an analyst is for, and what the model replaces. On a proven foothold, the cut
+requires the model's affirmative `exploitable` verdict — with no model (or an
+uncertain one) the candidate is propose-only, never auto-cut on mere presence. The
+parallel runtime lane is the other half: a live Falco signal is genuine evidence of
+activity, auto-eligible with the model able to veto.
+
+The model still cannot *invent* a chain — proof owns the topology — and every action
+it can trigger is the same bounded one: reversible, announced, blast-radius-gated,
+self-reverting, and unable to touch the control plane. So the worst a wrong model
+verdict causes is a temporary, auto-reverting network cut of one exposed workload.
+(See [`adr/0013`](adr/0013-proof-winnows-model-decides.md); this evolved from the
+original veto-only rule of [`adr/0008`](adr/0008-model-adjudicates-never-authorizes.md)
+through [`adr/0011`](adr/0011-positive-judgement.md).)
 
 ## Local-first, by conviction
 
