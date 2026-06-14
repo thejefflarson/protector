@@ -41,6 +41,18 @@ pub struct Finding {
     pub decision: String,
     /// The single-edge cut that severs it, if one exists.
     pub cut: Option<String>,
+    /// The proven attack path, hop by hop (entry → … → objective) — rendered as a
+    /// small per-row graph so each finding reads on its own.
+    pub path: Vec<PathStep>,
+}
+
+/// One hop of a proven chain: `from -[relation]-> to`, with short (kind-stripped)
+/// node labels ready to render.
+#[derive(Debug, Clone, Serialize)]
+pub struct PathStep {
+    pub from: String,
+    pub relation: String,
+    pub to: String,
 }
 
 impl Finding {
@@ -66,6 +78,15 @@ impl Finding {
                 .single_edge_cuts
                 .first()
                 .map(super::response::cut_signature),
+            path: chain
+                .links
+                .iter()
+                .map(|l| PathStep {
+                    from: short(&l.from.0),
+                    relation: l.relation.clone(),
+                    to: short(&l.to.0),
+                })
+                .collect(),
         }
     }
 }
@@ -198,16 +219,32 @@ fn render_html(findings: &[Finding]) -> String {
         } else {
             "reachable"
         };
+        // The attack path as a small inline graph: entry, then each hop's relation
+        // and next node. Falls back to the endpoints if no links were recorded.
+        let path = if f.path.is_empty() {
+            format!(
+                "{} <span class=\"arr\">→</span> {}",
+                escape(&short(&f.entry)),
+                escape(&short(&f.objective)),
+            )
+        } else {
+            let mut s = format!("<span class=\"node\">{}</span>", escape(&f.path[0].from));
+            for step in &f.path {
+                s.push_str(&format!(
+                    " <span class=\"rel\">{}</span> <span class=\"arr\">→</span> \
+                     <span class=\"node\">{}</span>",
+                    escape(&step.relation),
+                    escape(&step.to),
+                ));
+            }
+            s
+        };
         format!(
-            "<li><span class=\"path\">{} → {}</span> <span class=\"ev\">{}</span>\
-             <div class=\"why\">{}</div></li>",
-            escape(&short(&f.entry)),
-            escape(&short(&f.objective)),
+            "<li><div class=\"path\">{path}</div> <span class=\"ev\">{}</span></li>",
             escape(evidence),
-            escape(&f.decision),
         )
     };
-    let section = |title: &str, desc: &str, b: usize, open: bool| {
+    let section = |title: &str, b: usize, open: bool| {
         let body = if counts[b] == 0 {
             "<p class=\"muted\">none</p>".to_string()
         } else {
@@ -220,11 +257,10 @@ fn render_html(findings: &[Finding]) -> String {
         };
         format!(
             "<details class=\"b{b}\"{}><summary><b>{}</b> <span class=\"n\">{}</span>\
-             <span class=\"muted\"> — {}</span></summary>{}</details>",
+             </summary>{}</details>",
             if open { " open" } else { "" },
             escape(title),
             counts[b],
-            escape(desc),
             body,
         )
     };
@@ -242,9 +278,11 @@ fn render_html(findings: &[Finding]) -> String {
          .n{{display:inline-block;min-width:1.5rem;color:#000;font-weight:600}}\
          ul{{list-style:none;padding:0;margin:.5rem 0}}\
          li{{padding:.35rem 0;border-top:1px solid #eee}}\
-         .path{{font-family:ui-monospace,monospace;font-size:.85rem}}\
+         .path{{font-family:ui-monospace,monospace;font-size:.85rem;line-height:1.6}}\
+         .node{{color:#111}}\
+         .rel{{color:#999;font-size:.72rem}}\
+         .arr{{color:#bbb}}\
          .ev{{font-size:.75rem;color:#666;margin-left:.4rem}}\
-         .why{{font-size:.8rem;color:#333;margin-top:.15rem}}\
          .muted{{color:#777;font-weight:400}}\
          a{{color:#06c}}\
          </style></head><body>\
@@ -258,10 +296,10 @@ fn render_html(findings: &[Finding]) -> String {
         fix = counts[1],
         watch = counts[2],
         ctx = counts[3],
-        s_act = section("Act now", "auto-cut when armed", 0, true),
-        s_fix = section("Fix in code", "needs a GitOps change", 1, true),
-        s_watch = section("Watch", "proven, not acted on", 2, true),
-        s_ctx = section("Assume-breach", "blast radius if compromised", 3, false),
+        s_act = section("Act now", 0, true),
+        s_fix = section("Fix in code", 1, true),
+        s_watch = section("Watch", 2, true),
+        s_ctx = section("Assume-breach", 3, false),
     )
 }
 
@@ -402,6 +440,18 @@ mod tests {
             disposition: disposition.into(),
             decision: decision.into(),
             cut: Some(format!("{entry} -[…]-> {objective}")),
+            path: vec![
+                PathStep {
+                    from: short(entry),
+                    relation: "reaches/Tcp".into(),
+                    to: "app/Pod/store".into(),
+                },
+                PathStep {
+                    from: "app/Pod/store".into(),
+                    relation: "can-read".into(),
+                    to: short(objective),
+                },
+            ],
         };
         let mut findings = vec![f(
             "workload/app/Pod/web",
@@ -438,6 +488,11 @@ mod tests {
         assert!(html.contains("Act now"));
         assert!(html.contains("Fix in code"));
         assert!(html.contains("Assume-breach"));
+        // The per-row attack path renders as an inline graph (hop relations shown).
+        assert!(html.contains("class=\"rel\">can-read"));
+        assert!(html.contains("app/Pod/store"));
+        // Header explanations are gone — no "—"-prefixed description in summaries.
+        assert!(!html.contains("auto-cut when armed"));
         // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
         let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
     }
