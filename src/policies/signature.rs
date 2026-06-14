@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
@@ -238,6 +238,13 @@ impl CosignChecker {
         } else {
             format!("^(?:{identity_regexp})")
         };
+        // sigstore-rs reads/writes the TUF trust-root cache in `cache_dir` but does
+        // not create it. Under readOnlyRootFilesystem the cache points into a /tmp
+        // emptyDir subdir that doesn't exist yet, so without this every verification
+        // failed with `No such file or directory (os error 2)` — surfacing as a
+        // spurious "signature verification errored" rather than a real verdict.
+        std::fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("creating sigstore TUF cache dir {}", cache_dir.display()))?;
         Ok(Self {
             identity: Regex::new(&anchored)?,
             oidc_issuer,
@@ -415,6 +422,27 @@ mod tests {
         );
         // No host segment → left untouched.
         assert_eq!(normalize_registry_host("postgres:16"), "postgres:16");
+    }
+
+    #[test]
+    fn new_creates_the_missing_tuf_cache_dir() {
+        // The bug: sigstore-rs won't mkdir the TUF cache, so a non-existent
+        // (emptyDir subdir) path made every verification fail with ENOENT. new()
+        // must create it. (No network — the TUF fetch is lazy in trust_root.)
+        let base = std::env::temp_dir().join(format!("protector-tuf-{}", std::process::id()));
+        let cache = base.join("sigstore");
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!cache.exists());
+        let checker = CosignChecker::new(
+            "^https://github\\.com/thejefflarson/",
+            "https://token.actions.githubusercontent.com".to_string(),
+            Auth::Anonymous,
+            cache.clone(),
+            Duration::from_secs(5),
+        );
+        assert!(checker.is_ok(), "new() failed: {:?}", checker.err());
+        assert!(cache.is_dir(), "new() must create the TUF cache dir");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
