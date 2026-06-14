@@ -3,7 +3,12 @@
 - Status: Accepted
 - Date: 2026-06-14
 - Supersedes the foothold mechanism of [0011](0011-positive-judgement.md) §1
-- Amends: [0008](0008-model-adjudicates-never-authorizes.md), [0009](0009-asymmetric-action-bar.md)
+- Amends: [0009](0009-asymmetric-action-bar.md)
+
+> Note: an earlier ADR-0008 ("the model adjudicates with a one-way veto; it never
+> authorizes") was **retracted** — this ADR is the current statement of the model's
+> role. The model authorizes positively here: on a proven, internet-facing foothold
+> its affirmative `exploitable` verdict is what moves privilege.
 
 ## Context
 

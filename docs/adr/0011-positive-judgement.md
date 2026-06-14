@@ -2,7 +2,7 @@
 
 - Status: Superseded in part by [0013](0013-proof-winnows-model-decides.md)
 - Date: 2026-06-13
-- Amends: [0008](0008-model-adjudicates-never-authorizes.md), [0009](0009-asymmetric-action-bar.md)
+- Amends: [0009](0009-asymmetric-action-bar.md)
 - Superseded: §1's "deterministic-promote unless the model refutes" is replaced by
   [0013](0013-proof-winnows-model-decides.md) — the foothold lane is now a **positive
   gate** (a cut requires the model's affirmative `exploitable` verdict; no
@@ -18,7 +18,7 @@
 
 ## Context
 
-[ADR-0008](0008-model-adjudicates-never-authorizes.md) made the model a **one-way
+ADR-0008 (retracted) made the model a **one-way
 veto**: it can downgrade an auto-eligible chain to a human proposal, never the
 reverse. That is safe by construction, but it leaves the most valuable judgement
 unmade — the positive call deterministic proof *cannot* make: "web is

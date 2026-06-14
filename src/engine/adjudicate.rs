@@ -1,4 +1,4 @@
-//! The adjudicator (ADR-0008): the model's primary job — *judge* a
+//! The adjudicator (ADR-0013): the model's primary job — *judge* a
 //! deterministically-proven chain, never authorize one.
 //!
 //! Adjudication runs only on a chain that already meets the full action bar. The

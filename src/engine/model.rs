@@ -14,9 +14,18 @@ use serde_json::{Value, json};
 /// then degrades to the safe `None` path (callers treat that as "no verdict") rather
 /// than stalling the single engine loop indefinitely. Falls back to a default client
 /// only if the TLS backend fails to initialize.
+///
+/// The total timeout is `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS` (default 30). A small
+/// local model on CPU-only hardware (a Pi cluster) can take far longer than 30s to
+/// answer an adjudication prompt, so the deployment raises this; the watch loop no
+/// longer starves while it waits (the reflectors run in their own tasks).
 pub fn client() -> reqwest::Client {
+    let timeout = std::env::var("PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(timeout))
         .connect_timeout(Duration::from_secs(5))
         .build()
         .unwrap_or_default()

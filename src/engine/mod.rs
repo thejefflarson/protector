@@ -142,7 +142,7 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0008 + ADR-0011). The deterministic proof has WINNOWED the
+        // Adjudicate (ADR-0013). The deterministic proof has WINNOWED the
         // search space to a handful of candidate breach paths; the model makes the
         // judgement a human analyst would. It is consulted ONLY where there is
         // evidence to weigh — never on an evidence-empty chain. Two lanes:
@@ -327,8 +327,16 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
 /// names an OpenAI-compatible endpoint (a local Ollama by default), else the null
 /// source. Local-first: point it at an in-cluster model so the graph never leaves.
 fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
+    // The model hypothesis source is OFF by default. The deterministic enumerator
+    // already finds every structural chain at this cluster's scale (so model
+    // proposals are redundant), and the hypothesis prompt sends the *whole graph* —
+    // thousands of tokens, minutes of CPU inference on a Pi-class node — which would
+    // block the engine loop every pass for no gain. Opt in with
+    // `PROTECTOR_ENGINE_HYPOTHESIS=model` only where the model is fast enough; the
+    // model's real job is adjudication (ADR-0013), wired separately below.
+    let opt_in = std::env::var("PROTECTOR_ENGINE_HYPOTHESIS").as_deref() == Ok("model");
     match std::env::var("PROTECTOR_ENGINE_MODEL") {
-        Ok(endpoint) if !endpoint.is_empty() => {
+        Ok(endpoint) if opt_in && !endpoint.is_empty() => {
             let model = std::env::var("PROTECTOR_ENGINE_MODEL_NAME")
                 .unwrap_or_else(|_| "qwen2.5:3b".to_string());
             tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
@@ -342,7 +350,7 @@ fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
     }
 }
 
-/// Choose the adjudicator (ADR-0008): a model-backed judge when a model endpoint
+/// Choose the adjudicator (ADR-0013): a model-backed judge when a model endpoint
 /// is configured (the same `PROTECTOR_ENGINE_MODEL` as the hypothesis source),
 /// else the null adjudicator (confirm everything — the deterministic bar governs).
 fn build_adjudicator() -> Box<dyn adjudicate::Adjudicator> {
@@ -374,8 +382,7 @@ pub async fn run_watch(
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: exploit_intel::KevCatalog,
 ) -> anyhow::Result<()> {
-    use futures::FutureExt;
-    use futures::stream::{StreamExt, select_all};
+    use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
     use k8s_openapi::api::networking::v1::NetworkPolicy;
     use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
@@ -431,74 +438,51 @@ pub async fn run_watch(
     let (clusterrolebindings, clusterrolebindings_w) = reflector::store::<ClusterRoleBinding>();
 
     let cfg = watcher::Config::default();
-    let mut changes = select_all([
-        reflector(
-            pods_w,
-            watcher(Api::<Pod>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            netpols_w,
-            watcher(Api::<NetworkPolicy>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            services_w,
-            watcher(Api::<Service>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            secrets_w,
-            watcher(Api::<Secret>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            roles_w,
-            watcher(Api::<Role>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            rolebindings_w,
-            watcher(Api::<RoleBinding>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            clusterroles_w,
-            watcher(Api::<ClusterRole>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-        reflector(
-            clusterrolebindings_w,
-            watcher(Api::<ClusterRoleBinding>::all(client.clone()), cfg.clone()),
-        )
-        .touched_objects()
-        .map(|_| ())
-        .boxed(),
-    ]);
+    // CRITICAL: each reflector runs in its OWN task so its Store stays current no
+    // matter how long `process()` takes. Driving the watches inline in the loop (the
+    // old design) meant a slow pass — e.g. a 30s model call — stopped reading the
+    // apiserver watch streams; unread for that long they reset before the initial
+    // LIST completed, so the stores never populated and the graph stayed empty. The
+    // tasks ping `change_tx` on every touched object; the loop wakes on that.
+    let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(64);
+    macro_rules! spawn_reflector {
+        ($writer:expr, $typ:ty) => {{
+            let tx = change_tx.clone();
+            let api = Api::<$typ>::all(client.clone());
+            let cfg = cfg.clone();
+            tokio::spawn(
+                reflector($writer, watcher(api, cfg))
+                    .touched_objects()
+                    .for_each(move |res| {
+                        let tx = tx.clone();
+                        async move {
+                            if let Err(error) = res {
+                                tracing::warn!(%error, kind = stringify!($typ), "watch error");
+                            }
+                            let _ = tx.try_send(());
+                        }
+                    }),
+            );
+        }};
+    }
+    spawn_reflector!(pods_w, Pod);
+    spawn_reflector!(netpols_w, NetworkPolicy);
+    spawn_reflector!(services_w, Service);
+    spawn_reflector!(secrets_w, Secret);
+    spawn_reflector!(roles_w, Role);
+    spawn_reflector!(rolebindings_w, RoleBinding);
+    spawn_reflector!(clusterroles_w, ClusterRole);
+    spawn_reflector!(clusterrolebindings_w, ClusterRoleBinding);
 
     tracing::info!("engine: watching cluster (event-driven)");
     loop {
         // Wake on either a cluster change or a Falco alert.
         tokio::select! {
-            next = changes.next() => if next.is_none() { break },
+            next = change_rx.recv() => if next.is_none() { break },
             _ = falco_rx.recv() => {},
         }
         // Coalesce a burst (e.g. a Deployment rollout, or a flurry of alerts).
-        while changes.next().now_or_never().flatten().is_some() {}
+        while change_rx.try_recv().is_ok() {}
         while falco_rx.try_recv().is_ok() {}
 
         let snapshot = Snapshot {

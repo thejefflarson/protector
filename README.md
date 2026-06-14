@@ -65,8 +65,10 @@ assume-breach context, not findings (ADR-0013).
 | `PROTECTOR_DASHBOARD_ADDR` | — | findings dashboard listen addr; unset = off |
 | `PROTECTOR_FALCO_ADDR` | — | Falco/falcosidekick runtime-evidence ingest addr; unset = no runtime feed |
 | `PROTECTOR_KEV_FILE` | — | CISA KEV catalogue path (JSON or newline CVE list); unset = no exploit intel |
-| `PROTECTOR_ENGINE_MODEL` | — | OpenAI-compatible endpoint for the adjudicator/hypothesis source (a local Ollama); unset = deterministic only, no adjudication |
+| `PROTECTOR_ENGINE_MODEL` | — | OpenAI-compatible endpoint for the adjudicator (a local Ollama); unset = deterministic only, no adjudication |
 | `PROTECTOR_ENGINE_MODEL_NAME` | `qwen2.5:3b` | model name for the above |
+| `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS` | `30` | per-call model timeout; raise it for slow CPU-only inference (a Pi running a 3B model needs ~90–120s). The watch loop no longer stalls while it waits |
+| `PROTECTOR_ENGINE_HYPOTHESIS` | — | `model` opts the model *hypothesis* source in (off by default — proof already enumerates every chain at this scale, and the whole-graph prompt is too slow on CPU). The model is used for adjudication regardless |
 
 The engine uses its own ServiceAccount: cluster **read** (pods, services, secret
 *metadata*, NetworkPolicies, RBAC) plus, in hard mode, **write** on its deny object.
@@ -105,6 +107,5 @@ The engine uses its own ServiceAccount: cluster **read** (pods, services, secret
 The narrative is in [`docs/VISION.md`](docs/VISION.md); every consequential decision
 is an ADR in [`docs/adr/`](docs/adr/) — the change-driven loop (0002), capability
 ports (0003), the graph (0004), ATT&CK objectives (0005), live cuts (0007/0010), the
-asymmetric action bar (0009), and the model's evolving role: adjudication/veto
-(0008), positive judgement (0011), and the current doctrine — **proof winnows, the
-model decides** (0013), which supersedes the foothold mechanism of 0011.
+asymmetric action bar (0009), and the model's role — **proof winnows, the model
+decides** (0013), via positive judgement (0011).

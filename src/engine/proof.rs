@@ -80,7 +80,7 @@ pub struct ProvenChain {
     /// right now.
     pub corroborated: bool,
     /// Whether the model adjudicator confirmed this is a real, contextually-
-    /// exploitable attack (ADR-0008). Defaults `true`; the adjudicator can only set
+    /// exploitable attack (ADR-0013). Defaults `true`; the adjudicator can only set
     /// it `false` — a one-way veto demoting an eligible auto-action to a human
     /// proposal. Absent a model it stays `true` and the deterministic bar governs.
     pub adjudicated: bool,

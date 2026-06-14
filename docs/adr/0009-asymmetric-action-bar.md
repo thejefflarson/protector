@@ -22,7 +22,7 @@ not equal in strength:
   KEV-vulnerable workload with no live signal is a strong reason to *propose a fix
   fast*, but auto-cutting a running service on a CVE that may not even be
   exploitable in this config is exactly the false positive the adjudicator
-  (ADR-0008) exists to catch.
+  (ADR-0013) exists to catch.
 
 So the conjunction is both too strict (it ignores live-only incidents) and falsely
 symmetric (it weights latent exposure like live exploitation).
@@ -34,7 +34,7 @@ Split the bar by evidence type:
 - **Auto-eligible ⟺ a proven chain (reachable ∧ privileged) that is
   `corroborated` (live) and adjudicator-`Confirmed`.** Live evidence on a
   privileged path is sufficient on its own; a KEV foothold is *not* required. The
-  adjudicator's one-way veto (ADR-0008) is the safety net for a benign signal
+  adjudicator's one-way veto (ADR-0013) is the safety net for a benign signal
   (e.g. a legitimate `exec`) — which is why it becomes load-bearing here.
 - **Latent exposure (a KEV foothold, `corroborated == false`) is propose-only.**
   It is surfaced as a real, exploitable front door and routed to a human (and to

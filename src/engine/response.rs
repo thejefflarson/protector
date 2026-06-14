@@ -147,7 +147,7 @@ impl Mitigation {
 
     /// Whether some justifying chain is **auto-actionable**: a breach-relevant
     /// (internet-facing entry) chain that is either live-corroborated (ADR-0009) or
-    /// model-promoted (ADR-0011), and not vetoed by the adjudicator (ADR-0008). A KEV
+    /// model-promoted (ADR-0011), and not vetoed by the adjudicator (ADR-0013). A KEV
     /// foothold is not required, but an internet-facing entry is — the engine
     /// auto-acts only on remote-exploitation paths, never on internal-only activity.
     /// The actuator requires this before any auto-application.

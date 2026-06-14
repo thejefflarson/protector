@@ -75,9 +75,8 @@ The model still cannot *invent* a chain — proof owns the topology — and ever
 it can trigger is the same bounded one: reversible, announced, blast-radius-gated,
 self-reverting, and unable to touch the control plane. So the worst a wrong model
 verdict causes is a temporary, auto-reverting network cut of one exposed workload.
-(See [`adr/0013`](adr/0013-proof-winnows-model-decides.md); this evolved from the
-original veto-only rule of [`adr/0008`](adr/0008-model-adjudicates-never-authorizes.md)
-through [`adr/0011`](adr/0011-positive-judgement.md).)
+(See [`adr/0013`](adr/0013-proof-winnows-model-decides.md), which states the model's
+role; it evolved through [`adr/0011`](adr/0011-positive-judgement.md).)
 
 ## Local-first, by conviction
 
