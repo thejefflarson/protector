@@ -381,14 +381,14 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         }
     }
 
-    // The model's verdict for this entry (uniform across the card — it's judged per
-    // entry). `None` only when no model is configured.
+    // The model's verdict for this entry (uniform across the card — judged per entry).
+    // A path is judged only when it carries evidence (a foothold CVE or runtime
+    // signal); with neither, there is nothing to adjudicate, so `None` here means
+    // latent exposure, NOT a model that declined or is missing.
     let judgement = match fs.iter().find_map(|f| f.verdict.as_deref()) {
         Some(v) => format!("<div class=\"verdict\">model: {}</div>", escape(v)),
-        None => {
-            "<div class=\"verdict muted\">no model configured — latent exposure, unjudged</div>"
-                .to_string()
-        }
+        None => "<div class=\"verdict muted\">latent exposure — no CVE or runtime signal on this exposed path; nothing to exploit yet</div>"
+            .to_string(),
     };
 
     format!(

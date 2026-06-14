@@ -150,14 +150,25 @@ impl Engine {
             }
         }
 
-        // Adjudicate (ADR-0013): the model is the JUDGE. The deterministic proof has
-        // WINNOWED the search space to the breach-relevant paths (internet-facing
-        // entry → objective); the model then makes the call a human analyst would on
-        // EVERY one of them — is this genuinely exploitable end to end, or just a
-        // present-but-inert path? Its verdict, in its own words, is the disposition
-        // the dashboard shows for each path; there is no rule-based exploitability
-        // category. Non-breach-relevant chains are assume-breach context, not
-        // findings, so they are not judged.
+        // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
+        // unreachable) adjudication. The dashboard must always reflect the current
+        // graph even while the model is judging or down — model latency must never
+        // blank the findings view. The judging loop below enriches verdicts and
+        // re-publishes; until it does, paths show as latent exposure (no verdict yet).
+        self.findings
+            .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
+
+        // Adjudicate (ADR-0013): the model is the JUDGE, but only where there is
+        // EVIDENCE to weigh. The deterministic proof has WINNOWED the search space to
+        // the breach-relevant paths (internet-facing entry → objective); the model
+        // then makes the call a human analyst would on the ones that carry a concrete
+        // break-in primitive — a proven foothold (a critical/KEV CVE on the exposed
+        // entry) or a live runtime signal. A breach-relevant path with NEITHER has
+        // nothing to adjudicate: it is latent exposure, not an exploitable break-in,
+        // and asking the model would only force the foregone "no evidence" answer (and
+        // burn a slow CPU call). Those chains carry no verdict; the dashboard shows
+        // them honestly as latent exposure. Non-breach-relevant chains are
+        // assume-breach context, not findings, so they are not judged at all.
         //
         // The verdict is judged ONCE PER ENTRY: exposure, CVEs, and runtime signals
         // are properties of the entry workload, not of each objective it reaches, so
@@ -169,12 +180,14 @@ impl Engine {
         // Two consequences follow from the verdict:
         // - Corroborated chain (live runtime signal): a non-confirming verdict
         //   downgrades the eligible auto-action to a human proposal (the veto direction).
-        // - Uncorroborated path: an affirmative `exploitable` verdict PROMOTES it to
-        //   auto-eligible — but only when the `judgement` class is armed, since
+        // - Uncorroborated foothold: an affirmative `exploitable` verdict PROMOTES it
+        //   to auto-eligible — but only when the `judgement` class is armed, since
         //   promoting on the model's say-so is the opt-in speculative lane.
         let current_entries: HashSet<String> = chains.iter().map(|c| c.entry.0.clone()).collect();
         for chain in chains.iter_mut() {
-            if !chain.is_breach_relevant() {
+            // Judge only breach-relevant chains that carry evidence (foothold CVE or
+            // live runtime signal). No evidence → nothing to judge → no model call.
+            if !chain.is_breach_relevant() || !(chain.foothold.is_some() || chain.corroborated) {
                 continue;
             }
             let fingerprint = adjudicate::entry_fingerprint(&graph, chain);
@@ -207,8 +220,8 @@ impl Engine {
         // cache tracks the live cluster rather than growing without bound.
         self.verdict_cache
             .retain(|entry, _| current_entries.contains(entry));
-        // Publish the current findings for the dashboard: remediations the engine
-        // applies/proposes, and the per-endpoint exploit-path graphs.
+        // Re-publish with the model's verdicts now attached — the enriched view
+        // (promotions move into remediations; judged paths show the model's words).
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
@@ -547,4 +560,130 @@ pub async fn run_watch(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::adjudicate::Verdict;
+    use crate::engine::graph::SecurityGraph;
+    use crate::engine::observe::{SecretMeta, Snapshot};
+    use crate::engine::proof::ProvenChain;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An adjudicator that counts how many times it's consulted (and confirms).
+    struct CountingAdjudicator(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl adjudicate::Adjudicator for CountingAdjudicator {
+        async fn judge(&self, _chain: &ProvenChain, _graph: &SecurityGraph) -> Verdict {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Verdict::Refuted("counted".into())
+        }
+    }
+
+    /// An internet-exposed (LoadBalancer) web pod that mounts a secret, optionally
+    /// carrying a critical CVE on its image (which makes it a proven foothold).
+    fn exposed_snapshot(with_cve: bool) -> Snapshot {
+        use crate::engine::graph::{Provenance, Severity, Vulnerability};
+        use crate::engine::observe::ImageVulnerabilities;
+        use std::time::SystemTime;
+
+        let web = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{
+                "name": "web", "image": "web:1",
+                "envFrom": [{"secretRef": {"name": "session-key"}}]
+            }]}
+        }))
+        .unwrap();
+        let lb = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web-lb", "namespace": "app"},
+            "spec": {"type": "LoadBalancer", "selector": {"app": "web"}}
+        }))
+        .unwrap();
+        Snapshot {
+            pods: vec![web],
+            services: vec![lb],
+            secrets: vec![SecretMeta {
+                namespace: "app".into(),
+                name: "session-key".into(),
+            }],
+            image_vulns: if with_cve {
+                vec![ImageVulnerabilities {
+                    image: "web:1".into(),
+                    vulnerabilities: vec![Vulnerability {
+                        id: "CVE-2026-0001".into(),
+                        severity: Severity::Critical,
+                        exploited_in_wild: true,
+                        epss: None,
+                        sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    }],
+                }]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        }
+    }
+
+    fn engine_with(counter: Arc<AtomicUsize>) -> Engine {
+        Engine::new(
+            EnabledActions::from_names(std::iter::empty::<&str>()),
+            Box::new(DryRunActuator),
+            Box::new(hypothesis::NullHypothesizer),
+            Box::new(CountingAdjudicator(counter)),
+        )
+    }
+
+    /// The model judges a breach-relevant path ONLY when it carries evidence (a
+    /// foothold CVE or runtime signal). An exposed path with neither is latent
+    /// exposure — nothing to adjudicate, so the model is never called for it.
+    #[tokio::test]
+    async fn judges_only_breach_paths_that_carry_evidence() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with(calls.clone());
+
+        // Exposed, reaches a secret, but NO CVE and NO runtime → not judged.
+        engine.process(&exposed_snapshot(false)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "an evidence-less exposed path must not be sent to the model"
+        );
+        // It is still surfaced as a finding (latent exposure), just unjudged.
+        let findings = engine.findings().snapshot();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.breach_relevant && f.verdict.is_none()),
+            "the exposed path is published as an unjudged breach finding"
+        );
+
+        // Add a critical exploited CVE → proven foothold → the model IS consulted.
+        engine.process(&exposed_snapshot(true)).await;
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "a proven foothold (evidence present) must be judged by the model"
+        );
+    }
+
+    /// Findings are published even when adjudication can't run, so model latency or an
+    /// outage never blanks the dashboard. With evidence present but the (counting)
+    /// model refuting, the breach finding is still there.
+    #[tokio::test]
+    async fn publishes_findings_independent_of_the_model() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with(calls.clone());
+        engine.process(&exposed_snapshot(true)).await;
+        let findings = engine.findings().snapshot();
+        assert!(
+            findings.iter().any(|f| f.breach_relevant),
+            "the breach-relevant finding is published regardless of the verdict"
+        );
+    }
 }
