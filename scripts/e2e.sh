@@ -176,8 +176,17 @@ diagnose_protector() {
 
 # ==============================================================================
 step "1/11  Create k3d cluster (flannel + kube-router, like prod)"
-k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
-k3d cluster create "$CLUSTER" --wait --timeout 180s
+# Retry: k3d maps the serverlb to an ephemeral host port, which a just-torn-down
+# previous run can still hold for a moment ("address already in use") — transient,
+# clears on retry.
+created=0
+for attempt in 1 2 3; do
+  k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
+  if k3d cluster create "$CLUSTER" --wait --timeout 180s; then created=1; break; fi
+  log "cluster create failed (attempt $attempt/3) — retrying after the port settles"
+  sleep 5
+done
+[ "$created" = 1 ] || fail "k3d cluster create failed after 3 attempts"
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
 step "2/11  Build + import the protector image"
