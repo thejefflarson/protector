@@ -15,7 +15,8 @@
 #
 #   web (internet-exposed) ──reaches──▶ store ──can-read──▶ secret/session-key
 #
-#   A. shadow      — the chain proves STRUCTURALLY (no vuln, no corroboration).
+#   A. shadow      — the chain proves (store reachable + compromisable), but the
+#                    entry has no foothold and no corroboration yet.
 #   B. corroborate — a simulated falcosidekick alert on `web` flips it to
 #                    "auto-eligible", but nothing is applied (shadow).
 #   C. hard mode   — enable=network: the engine applies a default-deny
@@ -219,9 +220,44 @@ step "5/11  Create the attack path: exposed web ─reaches→ store ─can-read�
 kubectl create ns "$APP_NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$APP_NS" create secret generic session-key --from-literal=k=x \
   --dry-run=client -o yaml | kubectl apply -f -
-# `store` mounts the secret (envFrom) -> can-read edge store→secret.
-kubectl -n "$APP_NS" run store --image=nginx:alpine --labels=role=store \
-  --overrides='{"spec":{"containers":[{"name":"store","image":"nginx:alpine","envFrom":[{"secretRef":{"name":"session-key"}}]}]}}'
+# The engine reads CVEs from trivy VulnerabilityReport CRs; create the CRD up front
+# (a real scan would produce the reports). Open schema — trivy-operator isn't needed.
+kubectl apply -f - <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vulnerabilityreports.aquasecurity.github.io
+spec:
+  group: aquasecurity.github.io
+  scope: Namespaced
+  names: { plural: vulnerabilityreports, singular: vulnerabilityreport, kind: VulnerabilityReport, shortNames: [vulns] }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+YAML
+kubectl wait --for=condition=Established crd/vulnerabilityreports.aquasecurity.github.io --timeout=60s
+# `store` mounts the secret (envFrom) -> can-read edge store→secret. It runs a
+# DISTINCT, vulnerable image (httpd + the critical CVE below) so it is *compromisable*:
+# under ADR-0002 compromise gating a reached workload's secrets are only in scope once
+# it can be compromised, so without this the web→store→secret lateral chain wouldn't
+# prove. A separate image from web's keeps web a non-foothold until phase 9.
+kubectl -n "$APP_NS" run store --image=httpd:alpine --labels=role=store \
+  --overrides='{"spec":{"containers":[{"name":"store","image":"httpd:alpine","envFrom":[{"secretRef":{"name":"session-key"}}]}]}}'
+kubectl -n "$APP_NS" apply -f - <<'YAML'
+apiVersion: aquasecurity.github.io/v1alpha1
+kind: VulnerabilityReport
+metadata: { name: store-httpd, namespace: app }
+report:
+  registry: { server: index.docker.io }
+  artifact: { repository: library/httpd, tag: alpine }
+  vulnerabilities:
+    - { vulnerabilityID: CVE-2026-9001, severity: CRITICAL }
+YAML
 # `web` is the entry; LoadBalancer Service -> Exposure::Internet.
 kubectl -n "$APP_NS" run web --image=nginx:alpine --labels=role=web
 kubectl -n "$APP_NS" expose pod web --type=LoadBalancer --port=80 --name=web
@@ -274,29 +310,9 @@ wait_until "engine deletes its managed NetworkPolicy" 120 managed_np_absent
 pass "engine reverted its compensating control once the chain stopped being proven (Q5 invariant)"
 
 step "9/11  LOG4J PRESENT, NO MODEL: a critical CVE on the exposed image is PROVEN reachable — but presence ≠ exploitability, so with no analyst to judge it, the engine only PROPOSES (no auto-cut)"
-# Minimal trivy VulnerabilityReport CRD (open schema) so the engine's Vulnerability
-# port has something to list. (trivy-operator itself isn't needed for the test —
-# we inject the report a real scan would produce.)
-kubectl apply -f - <<'YAML'
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: vulnerabilityreports.aquasecurity.github.io
-spec:
-  group: aquasecurity.github.io
-  scope: Namespaced
-  names: { plural: vulnerabilityreports, singular: vulnerabilityreport, kind: VulnerabilityReport, shortNames: [vulns] }
-  versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          x-kubernetes-preserve-unknown-fields: true
-YAML
-kubectl wait --for=condition=Established crd/vulnerabilityreports.aquasecurity.github.io --timeout=60s
-# A CRITICAL log4shell finding on web's image. The report uses a fully-qualified
+# The VulnerabilityReport CRD was created in phase 5. Now a CRITICAL log4shell finding
+# lands on WEB's image — making web (internet-exposed) a proven foothold. The report
+# uses a fully-qualified
 # ref (index.docker.io/library/nginx:alpine); the pod used the short `nginx:alpine`.
 # Canonical image keying (fix [15]) makes them the SAME Image node, so the CVE
 # attaches — otherwise the foothold would never form.

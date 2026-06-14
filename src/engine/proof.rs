@@ -173,30 +173,32 @@ fn is_movement(relation: &Relation) -> bool {
     !matches!(relation, Relation::RunsImage)
 }
 
-/// Whether `entry` is a proven foothold: an internet-exposed workload running an
-/// image with a vulnerability serious enough to treat as an exploitable front door
-/// (ATT&CK T1190). "Serious enough" is **exploited-in-wild (KEV) OR critical
-/// severity** — a critical, reachable CVE is a foothold on its own, even if it
-/// isn't on the KEV catalogue yet. (This drives the propose-only latent case;
-/// auto-action still requires live corroboration, ADR-0009.)
-fn entry_foothold(graph: &SecurityGraph, entry: NodeIndex) -> Option<AttackRef> {
+/// Whether a workload is **compromisable**: it runs an image with a vulnerability
+/// serious enough to assume an attacker with access to it can execute code there —
+/// **exploited-in-wild (KEV) OR critical severity**. This is the per-workload
+/// predicate behind both the entry foothold and the proof walk's compromise gate.
+fn compromisable(graph: &SecurityGraph, node: NodeIndex) -> bool {
     let g = graph.inner();
-    let exposed = matches!(
-        g.node_weight(entry),
-        Some(Node::Workload(w)) if w.exposure == Exposure::Internet
-    );
-    if !exposed {
-        return None;
-    }
-    let exploitable = g.edges(entry).any(|e| {
+    g.edges(node).any(|e| {
         matches!(e.weight().relation, Relation::RunsImage)
             && matches!(
                 g.node_weight(e.target()),
                 Some(Node::Image(im)) if im.vulnerabilities.iter()
                     .any(|v| v.exploited_in_wild || v.severity == Severity::Critical)
             )
-    });
-    exploitable.then_some(EXPLOIT_PUBLIC_FACING)
+    })
+}
+
+/// Whether `entry` is a proven foothold: an internet-exposed workload that is
+/// **compromisable** (a critical/KEV CVE) — an exploitable front door (ATT&CK T1190).
+/// (This drives the propose-only latent case; auto-action still requires live
+/// corroboration, ADR-0009.)
+fn entry_foothold(graph: &SecurityGraph, entry: NodeIndex) -> Option<AttackRef> {
+    let exposed = matches!(
+        graph.inner().node_weight(entry),
+        Some(Node::Workload(w)) if w.exposure == Exposure::Internet
+    );
+    (exposed && compromisable(graph, entry)).then_some(EXPLOIT_PUBLIC_FACING)
 }
 
 /// Whether `entry` is internet-facing — a front door an external attacker can start
@@ -231,6 +233,19 @@ fn movement_tree(
     let mut queue = VecDeque::from([start]);
 
     while let Some(u) = queue.pop_front() {
+        // Compromise gate (ADR-0002): you can only ACT FROM a workload you control —
+        // the entry (the assumed-compromised front door) or a reached workload that is
+        // itself compromisable (a critical/KEV CVE). A merely-reached, uncompromised
+        // workload is a dead end: network-reaching a pod is not executing code in it,
+        // so you can't assume its identity (`runs-as`), read its mounted secrets
+        // (`can-read`), use its RBAC (`can-do`), or pivot onward from it. Non-workload
+        // nodes (an identity you've assumed, an objective) always expand.
+        let blocked = matches!(g.node_weight(u), Some(Node::Workload(_)))
+            && u != start
+            && !compromisable(graph, u);
+        if blocked {
+            continue;
+        }
         for edge in g.edges(u) {
             if Some(edge.id()) == excluded {
                 continue;
@@ -476,9 +491,28 @@ mod tests {
         })
     }
 
-    /// db mounts the secret; an ingress policy allows web → db. The proven chain
-    /// from web is web →(reaches) db →(can-read) secret, and — being a single
-    /// linear path — either edge alone cuts it.
+    /// One critical CVE on `image`, so the workload running it is *compromisable* —
+    /// the precondition for the proof walk to act from a reached (non-entry) workload.
+    fn critical_image(image: &str) -> crate::engine::observe::ImageVulnerabilities {
+        use crate::engine::graph::{Provenance, Severity, Vulnerability};
+        use std::time::SystemTime;
+        crate::engine::observe::ImageVulnerabilities {
+            image: image.into(),
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2026-0001".into(),
+                severity: Severity::Critical,
+                exploited_in_wild: false,
+                epss: None,
+                sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+            }],
+        }
+    }
+
+    /// db mounts the secret; an ingress policy allows web → db; db runs a vulnerable
+    /// image so it is compromisable (ADR-0002: a reached workload's secrets are only
+    /// in scope once it can be compromised). The proven chain from web is
+    /// web →(reaches) db →(can-read) secret, and — being a single linear path —
+    /// either edge alone cuts it.
     #[test]
     fn proves_lateral_chain_and_finds_single_edge_cuts() {
         let db = json!({
@@ -503,6 +537,7 @@ mod tests {
         let snap = Snapshot {
             pods: vec![pod(web("web", "web")), pod(db)],
             network_policies: vec![policy],
+            image_vulns: vec![critical_image("db:1")],
             ..Default::default()
         };
         let chains = prove(&build_graph(&snap, &default_adapters()));
@@ -524,8 +559,9 @@ mod tests {
     }
 
     /// web can reach the secret via two distinct workloads (db and cache), both of
-    /// which mount it. No single edge on the shortest path breaks reachability, so
-    /// `single_edge_cuts` is empty — the honest "needs more than one cut" finding.
+    /// which mount it and both compromisable (vulnerable image). No single edge on the
+    /// shortest path breaks reachability, so `single_edge_cuts` is empty — the honest
+    /// "needs more than one cut" finding.
     #[test]
     fn redundant_paths_have_no_single_edge_cut() {
         let mount = |name: &str, role: &str| {
@@ -558,6 +594,7 @@ mod tests {
         let snap = Snapshot {
             pods: vec![pod(web("web", "web")), pod(db), pod(cache)],
             network_policies: vec![policy],
+            image_vulns: vec![critical_image("x:1")],
             ..Default::default()
         };
         let chains = prove(&build_graph(&snap, &default_adapters()));
