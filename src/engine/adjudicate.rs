@@ -311,6 +311,7 @@ mod tests {
             corroborated: true,
             adjudicated: true,
             promoted: false,
+            exposed_entry: true,
             links: vec![],
             single_edge_cuts: vec![],
         };

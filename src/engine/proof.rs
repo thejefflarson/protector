@@ -89,6 +89,13 @@ pub struct ProvenChain {
     /// internet-exposed entry. Defaults `false`; only an affirmative model verdict
     /// (never `NullAdjudicator`) sets it, and only behind the `judgement` opt-in.
     pub promoted: bool,
+    /// Whether the **entry** workload is internet-facing (`Exposure::Internet`) — a
+    /// front door an external attacker can actually start from. This is the
+    /// discriminator between a *breach path* (internet → entry → objective) and the
+    /// assume-breach blast-radius map ("if this internal workload were compromised,
+    /// what could it reach"). An internal-only entry reaching a secret is normal
+    /// Kubernetes topology, not a breach. See [`ProvenChain::is_breach_relevant`].
+    pub exposed_entry: bool,
     /// The path, entry → objective, in order.
     pub links: Vec<Link>,
     /// Edges on the path whose removal alone disconnects `entry` from `objective`
@@ -112,6 +119,17 @@ impl ProvenChain {
         self.foothold.is_some() && !self.corroborated
     }
 
+    /// Whether this chain is a real **breach path** worth flagging, versus
+    /// assume-breach context. True only when the entry is internet-facing — an
+    /// origin an external attacker can actually reach. A purely-internal access path
+    /// (a control-plane workload that can read a secret, a backend that can reach the
+    /// database) is the *normal* shape of a cluster, not a breach; it belongs in the
+    /// blast-radius map you consult after a compromise, not on a to-do list. The
+    /// engine still proves and surfaces those chains — just as context, not findings.
+    pub fn is_breach_relevant(&self) -> bool {
+        self.exposed_entry
+    }
+
     /// Whether the chain is **live-actionable**: either live runtime corroboration
     /// (ADR-0009) or a positive model promotion (ADR-0011) raises a proven chain to
     /// auto-eligible. Both are filtered by the adjudicator's veto and bounded by the
@@ -132,6 +150,8 @@ impl ProvenChain {
             technique_name = self.attack.technique,
             foothold = self.foothold.map(|f| f.technique_id).unwrap_or("none"),
             corroborated = self.corroborated,
+            exposed_entry = self.exposed_entry,
+            breach_relevant = self.is_breach_relevant(),
             action_bar = self.meets_action_bar(),
             strength = self.strength(),
             single_edge_cuts = self.single_edge_cuts.len(),
@@ -169,6 +189,15 @@ fn entry_foothold(graph: &SecurityGraph, entry: NodeIndex) -> Option<AttackRef> 
             )
     });
     exploitable.then_some(EXPLOIT_PUBLIC_FACING)
+}
+
+/// Whether `entry` is internet-facing — a front door an external attacker can start
+/// from. Drives [`ProvenChain::is_breach_relevant`].
+fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
+    matches!(
+        graph.inner().node_weight(entry),
+        Some(Node::Workload(w)) if w.exposure == Exposure::Internet
+    )
 }
 
 /// Whether `entry` has a live runtime signal — the `corroborated-now` predicate
@@ -342,6 +371,7 @@ pub fn confirm(
         corroborated: entry_corroborated(graph, entry_idx),
         adjudicated: true,
         promoted: false,
+        exposed_entry: entry_exposed(graph, entry_idx),
         links,
         single_edge_cuts,
     })
@@ -379,6 +409,7 @@ pub fn prove_with(
         let tree = movement_tree(graph, entry, None);
         let foothold = entry_foothold(graph, entry);
         let corroborated = entry_corroborated(graph, entry);
+        let exposed_entry = entry_exposed(graph, entry);
         for &(objective, attack) in &objectives {
             if objective == entry || !tree.contains_key(&objective) {
                 continue;
@@ -403,6 +434,7 @@ pub fn prove_with(
                 corroborated,
                 adjudicated: true,
                 promoted: false,
+                exposed_entry,
                 links,
                 single_edge_cuts,
             });

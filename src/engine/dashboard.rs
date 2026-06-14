@@ -41,6 +41,10 @@ pub struct Finding {
     pub decision: String,
     /// The single-edge cut that severs it, if one exists.
     pub cut: Option<String>,
+    /// Whether the entry is internet-facing — the discriminator between a real breach
+    /// path and an assume-breach access path. Drives the bucket: a non-breach-relevant
+    /// chain is context, no matter what it can reach. See [`ProvenChain::is_breach_relevant`].
+    pub breach_relevant: bool,
     /// The proven attack path, hop by hop (entry → … → objective) — rendered as a
     /// small per-row graph so each finding reads on its own.
     pub path: Vec<PathStep>,
@@ -78,6 +82,7 @@ impl Finding {
                 .single_edge_cuts
                 .first()
                 .map(super::response::cut_signature),
+            breach_relevant: chain.is_breach_relevant(),
             path: chain
                 .links
                 .iter()
@@ -190,8 +195,14 @@ fn short(key: &str) -> String {
 }
 
 /// Which "what do I do about it" bucket a finding falls in: 0 act, 1 fix, 2 watch,
-/// 3 context. Derived from the (already decision-aware) disposition.
+/// 3 context. A chain is only a *finding* (buckets 0-2) if it's breach-relevant —
+/// the entry is internet-facing, an origin an attacker can actually reach. Everything
+/// else (an internal workload that can read a secret or reach the DB — normal cluster
+/// topology) is the assume-breach blast-radius map: context, not a to-do.
 fn bucket(f: &Finding) -> usize {
+    if !f.breach_relevant {
+        return 3; // assume-breach context: not reachable from the internet
+    }
     match f.disposition.as_str() {
         "auto-eligible" => 0,
         "durable-fix PR" | "forbidden" => 1,
@@ -287,11 +298,18 @@ fn render_html(findings: &[Finding]) -> String {
          a{{color:#06c}}\
          </style></head><body>\
          <h1>protector</h1>\
-         <p class=\"sum\"><b>{act}</b> to act on · <b>{fix}</b> to fix in code · \
-         <b>{watch}</b> to watch · <b>{ctx}</b> assume-breach paths (context) &nbsp;|&nbsp; \
-         <a href=\"/graph\">attack graph</a> · <a href=\"/findings\">json</a></p>\
+         <p class=\"sum\"><b>{breach}</b> breach path{plural} reachable from the internet — \
+         <b>{act}</b> to act on · <b>{fix}</b> to fix in code · <b>{watch}</b> to watch. \
+         <span class=\"muted\">{ctx} internal access paths are assume-breach context, not findings.</span> \
+         &nbsp;|&nbsp; <a href=\"/graph\">attack graph</a> · <a href=\"/findings\">json</a></p>\
          {s_act}{s_fix}{s_watch}{s_ctx}\
          </body></html>",
+        breach = counts[0] + counts[1] + counts[2],
+        plural = if counts[0] + counts[1] + counts[2] == 1 {
+            ""
+        } else {
+            "s"
+        },
         act = counts[0],
         fix = counts[1],
         watch = counts[2],
@@ -366,6 +384,10 @@ mod tests {
             corroborated,
             adjudicated,
             promoted: false,
+            // The disposition tests below key on the cut + evidence, not on
+            // breach-relevance; treat the entry as a front door so the chain is a
+            // finding (bucket gating is exercised in the render test instead).
+            exposed_entry: true,
             links: vec![cut.clone()],
             single_edge_cuts: vec![cut],
         }
@@ -421,25 +443,27 @@ mod tests {
 
     #[test]
     fn render_groups_by_what_to_do_and_dumps_a_sample() {
-        // A representative mix shaped like the real cluster: one act-now network
-        // cut, the argocd/whisperer RBAC fan-out (fix-in-code), and a big
-        // assume-breach tail (context).
+        // Shaped like the real cluster: a couple of internet-facing breach paths
+        // (the only real findings), and a big internal RBAC/access mass that is
+        // assume-breach context — exactly the "everything that can read secrets"
+        // noise that must NOT be flagged as fix-in-code.
         let f = |entry: &str,
                  objective: &str,
                  disposition: &str,
                  decision: &str,
-                 corroborated: bool| Finding {
+                 breach_relevant: bool| Finding {
             entry: entry.into(),
             objective: objective.into(),
             tactic: "TA0006".into(),
             technique: "T1552".into(),
             foothold: false,
-            corroborated,
+            corroborated: true,
             adjudicated: true,
             promoted: false,
             disposition: disposition.into(),
             decision: decision.into(),
             cut: Some(format!("{entry} -[…]-> {objective}")),
+            breach_relevant,
             path: vec![
                 PathStep {
                     from: short(entry),
@@ -453,13 +477,25 @@ mod tests {
                 },
             ],
         };
-        let mut findings = vec![f(
-            "workload/app/Pod/web",
-            "secret/app/session-key",
-            "auto-eligible",
-            "auto-applies a reversible NetworkPolicy cut when `network` is enabled and no live workload is collateral",
-            true,
-        )];
+        // Two internet-facing front doors: one auto-cuttable, one durable-fix.
+        let mut findings = vec![
+            f(
+                "workload/app/Pod/web",
+                "secret/app/session-key",
+                "auto-eligible",
+                "auto-applies a reversible NetworkPolicy cut when `network` is armed",
+                true,
+            ),
+            f(
+                "workload/app/Pod/web",
+                "capability/cluster/create/pods",
+                "durable-fix PR",
+                "revoke the RBAC grant via GitOps",
+                true,
+            ),
+        ];
+        // The internal mass: control-plane + workloads that can read secrets / reach
+        // the DB. Real cluster topology, NOT a breach — must land in context.
         for o in [
             "secret/argocd/argocd-secret",
             "secret/analytics/postgres.creds",
@@ -469,8 +505,8 @@ mod tests {
                 "workload/argocd/Pod/argocd-application-controller-0",
                 o,
                 "durable-fix PR",
-                "subtractive: revoke the RBAC grant via GitOps — not live-actuatable",
-                true,
+                "revoke the RBAC grant via GitOps",
+                false,
             ));
         }
         for i in 0..40 {
@@ -478,16 +514,22 @@ mod tests {
                 &format!("workload/kube-system/Pod/p{i}"),
                 "secret/kube-system/sh.helm.release.v1.x",
                 "structural — propose",
-                "assume-breach path, no live or foothold evidence — propose only",
+                "no live or foothold evidence — propose only",
                 false,
             ));
         }
 
         let html = render_html(&findings);
-        assert!(html.contains("to act on"));
+        assert!(html.contains("breach path"));
         assert!(html.contains("Act now"));
         assert!(html.contains("Fix in code"));
         assert!(html.contains("Assume-breach"));
+        assert!(html.contains("not findings"));
+        // The internal RBAC mass is context, not fix-in-code: only the one
+        // internet-facing durable-fix is in bucket 1.
+        assert_eq!(findings.iter().filter(|f| bucket(f) == 1).count(), 1);
+        // The argocd + kube-system mass (43) all collapses into context.
+        assert_eq!(findings.iter().filter(|f| bucket(f) == 3).count(), 43);
         // The per-row attack path renders as an inline graph (hop relations shown).
         assert!(html.contains("class=\"rel\">can-read"));
         assert!(html.contains("app/Pod/store"));

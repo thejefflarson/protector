@@ -44,14 +44,10 @@ fn entry_internet_exposed(graph: &SecurityGraph, key: &str) -> bool {
 
 /// Build a DOT graph of the internet→goal attack subgraph from the proven chains.
 pub fn attack_graph_dot(graph: &SecurityGraph, chains: &[ProvenChain]) -> String {
-    let included: Vec<&ProvenChain> = chains
-        .iter()
-        .filter(|c| {
-            c.meets_action_bar()
-                || c.foothold.is_some()
-                || entry_internet_exposed(graph, &c.entry.0)
-        })
-        .collect();
+    // Only breach-relevant chains: the entry is internet-facing, so the path is a
+    // real internet → goal route. Internal-only access paths (the assume-breach
+    // blast-radius map) are deliberately left out — they're context, not the graph.
+    let included: Vec<&ProvenChain> = chains.iter().filter(|c| c.is_breach_relevant()).collect();
 
     let mut node_keys: BTreeSet<String> = BTreeSet::new();
     let mut live_entries: BTreeSet<String> = BTreeSet::new();

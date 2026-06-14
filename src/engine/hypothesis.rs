@@ -296,6 +296,7 @@ mod tests {
             corroborated: false,
             adjudicated: true,
             promoted: false,
+            exposed_entry: foothold.is_some(),
             links: vec![Link {
                 from: key("workload/app/Pod/x"),
                 to: key("host/node-1"),
