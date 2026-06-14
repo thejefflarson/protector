@@ -107,6 +107,10 @@ pub struct Justification {
     /// The model promoted this chain (ADR-0011) — a positive judgement standing in
     /// for runtime corroboration as the auto-action trigger.
     pub promoted: bool,
+    /// Whether the justifying chain is breach-relevant (internet-facing entry).
+    /// Required for auto-action: the engine protects against *remote* exploitation,
+    /// so it never auto-cuts an internal-only path even when corroborated.
+    pub breach_relevant: bool,
 }
 
 impl Justification {
@@ -119,6 +123,7 @@ impl Justification {
             corroborated: chain.corroborated,
             adjudicated: chain.adjudicated,
             promoted: chain.promoted,
+            breach_relevant: chain.is_breach_relevant(),
         }
     }
 }
@@ -140,15 +145,16 @@ impl Mitigation {
         cut_signature(&self.cut)
     }
 
-    /// Whether some justifying chain is **auto-actionable**: a proven (reachable ∧
-    /// privileged) chain that is either live-corroborated (ADR-0009) or
+    /// Whether some justifying chain is **auto-actionable**: a breach-relevant
+    /// (internet-facing entry) chain that is either live-corroborated (ADR-0009) or
     /// model-promoted (ADR-0011), and not vetoed by the adjudicator (ADR-0008). A KEV
-    /// foothold is not required. The actuator requires this before any
-    /// auto-application.
+    /// foothold is not required, but an internet-facing entry is — the engine
+    /// auto-acts only on remote-exploitation paths, never on internal-only activity.
+    /// The actuator requires this before any auto-application.
     pub fn is_live_corroborated(&self) -> bool {
         self.justifications
             .iter()
-            .any(|j| (j.corroborated || j.promoted) && j.adjudicated)
+            .any(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
     }
 }
 
@@ -327,6 +333,46 @@ mod tests {
                 .any(|m| m.action == ProposedAction::DenyNetworkPath
                     || m.action == ProposedAction::RemoveSecretMount),
             "the web→db→secret cut is a network or mount action"
+        );
+    }
+
+    /// Auto-action requires an internet-facing entry: a corroborated, adjudicated
+    /// chain whose entry is internal-only is NOT live-actionable — the engine acts
+    /// on remote exploitation, not normal internal activity.
+    #[test]
+    fn auto_action_requires_a_breach_relevant_entry() {
+        use crate::engine::attack::CREDENTIAL_ACCESS;
+        use crate::engine::graph::NodeKey;
+
+        let justify = |breach_relevant: bool| Justification {
+            entry: "workload/app/Pod/x".into(),
+            objective: "secret/app/s".into(),
+            attack: CREDENTIAL_ACCESS,
+            foothold: false,
+            corroborated: true,
+            adjudicated: true,
+            promoted: false,
+            breach_relevant,
+        };
+        let mitigation = |breach_relevant: bool| Mitigation {
+            cut: Link {
+                from: NodeKey("workload/app/Pod/x".into()),
+                to: NodeKey("workload/app/Pod/y".into()),
+                relation: "reaches/Tcp".into(),
+                technique: None,
+                from_labels: Default::default(),
+                to_labels: Default::default(),
+            },
+            action: ProposedAction::DenyNetworkPath,
+            justifications: vec![justify(breach_relevant)],
+        };
+        assert!(
+            mitigation(true).is_live_corroborated(),
+            "internet-facing + corroborated ⇒ auto-actionable"
+        );
+        assert!(
+            !mitigation(false).is_live_corroborated(),
+            "internal-only corroborated ⇒ NOT auto-actionable (context, not a breach)"
         );
     }
 

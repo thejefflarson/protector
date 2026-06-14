@@ -130,12 +130,14 @@ impl ProvenChain {
         self.exposed_entry
     }
 
-    /// Whether the chain is **live-actionable**: either live runtime corroboration
-    /// (ADR-0009) or a positive model promotion (ADR-0011) raises a proven chain to
-    /// auto-eligible. Both are filtered by the adjudicator's veto and bounded by the
-    /// reversible, self-reverting action. This gates auto-action.
+    /// Whether the chain is **live-actionable**: a breach-relevant (internet-facing
+    /// entry) chain that is either live-corroborated (ADR-0009) or model-promoted
+    /// (ADR-0011). Both are filtered by the adjudicator's veto and bounded by the
+    /// reversible, self-reverting action. Auto-action is reserved for *remote*
+    /// exploitation paths, so an internal-only corroborated chain — normal cluster
+    /// activity, not a breach — never clears the bar. This gates auto-action.
     pub fn meets_action_bar(&self) -> bool {
-        self.corroborated || self.promoted
+        self.is_breach_relevant() && (self.corroborated || self.promoted)
     }
 
     /// Log the chain as a structured line, including the ATT&CK technique it

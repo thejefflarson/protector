@@ -649,6 +649,10 @@ mod tests {
             corroborated,
             adjudicated,
             promoted: false,
+            // These tests exercise the corroboration/foothold/reversibility axes;
+            // breach-relevance (internet-facing entry) is held true so it isn't the
+            // gating factor here. The breach-relevance gate is tested in response.rs.
+            breach_relevant: true,
         }
     }
 
