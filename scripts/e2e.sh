@@ -145,6 +145,7 @@ helm install protector "$CHART_PATH" \
   --set imagePullSecrets=null \
   --set signature.enforceNamespaces="" --set signature.enforceLabels="" \
   --set engine.enable="" --set engine.actuationRBAC=false \
+  --set engine.model.endpoint= \
   --wait --timeout 240s
 kubectl -n "$NS" rollout status deploy/protector --timeout=120s
 pf_reset
@@ -178,12 +179,12 @@ YAML
 kubectl -n "$APP_NS" wait --for=condition=Ready pod/web pod/store --timeout=120s
 
 step "6/12  SHADOW: chain proves structurally, then corroboration flips it auto-eligible — but NOTHING is applied"
-wait_until "structural chain web→session-key" 90 finding_is "structural — proposed"
+wait_until "structural chain web→session-key" 90 finding_is "structural — propose"
 pass "structural chain proven (no foothold, no corroboration)"
 
 post_falco
-wait_until "chain flips to live — auto-eligible after Falco alert" 60 finding_is "live — auto-eligible"
-pass "corroboration alone meets the asymmetric action bar (no vuln required)"
+wait_until "chain flips to auto-eligible after Falco alert" 60 finding_is "auto-eligible"
+pass "corroboration on an internet-facing entry meets the asymmetric action bar (no vuln required)"
 
 managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only was violated"
 pass "shadow mode applied nothing (propose-only honored)"
@@ -268,11 +269,12 @@ finding_foothold() {
   curl -fsS localhost:8080/findings 2>/dev/null \
     | jq -e --arg e "$ENTRY" --arg o "$OBJECTIVE" \
         '[.[] | select(.entry==$e and .objective==$o and .foothold==true and .promoted==true
-                       and .corroborated==false and .disposition=="foothold — auto-eligible")] | length > 0' \
+                       and .corroborated==false and .breach_relevant==true
+                       and .disposition=="auto-eligible")] | length > 0' \
         >/dev/null 2>&1
 }
 wait_until "dashboard classifies log4j as a promoted foothold" 30 finding_foothold
-pass "dashboard shows log4j as 'foothold — auto-eligible' (exposed + critical CVE, model-free)"
+pass "dashboard shows log4j foothold auto-eligible (exposed + critical CVE, promoted, model-free)"
 
 step "10/10  SELF-REVERT: remove the durable allow; the chain is no longer provable, engine reverts"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
