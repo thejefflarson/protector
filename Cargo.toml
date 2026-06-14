@@ -13,7 +13,7 @@ futures = "0.3.32"
 k8s-openapi = { version = "0.27.1", features = ["v1_33"] }
 kube = { version = "3.1.0", features = ["runtime", "client", "config", "derive", "admission"] }
 opentelemetry = "0.32.0"
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 petgraph = "0.8.3"
 regex = "1.12.4"
