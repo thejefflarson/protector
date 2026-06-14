@@ -242,19 +242,30 @@ pub fn build_judgment_prompt(
          1. ACTIVE EXPLOIT — a known-exploited/critical CVE or a runtime signal listed \
          above gives a concrete way in.\n\
          2. STRUCTURAL EXPOSURE — even with NO CVE and NO runtime signal, an objective \
-         may be something that should NOT be within direct internet reach at all (e.g. \
-         database credentials, cluster-admin, another component's secret). A \
-         misconfiguration that puts such an objective within direct internet reach is a \
-         real finding on its own — there is nothing to exploit because the topology IS \
-         the hole.\n\n\
+         this workload has NO legitimate business reaching: a secret belonging to a \
+         DIFFERENT application/tenant, or a broadly-privileged one (cluster-admin, \
+         another namespace's credentials). An internet-facing workload reaching THAT is \
+         a misconfiguration — the topology IS the hole.\n\n\
+         CRUCIAL — OWNERSHIP. A workload reaching ITS OWN application's secrets is \
+         NORMAL and legitimate, NOT a finding: an app's UI/API reaching its own database \
+         credentials, a service holding its own session key, components of the SAME app \
+         sharing a secret. The objective's name and namespace tell you whose it is — if \
+         it shares the entry's namespace or application name (e.g. entry \
+         workload/analytics/Pod/murmurify-ui reaching secret/analytics/murmurify-postgres \
+         credentials — same `analytics` namespace, same `murmurify` app, so it's the \
+         UI's OWN database), it belongs to this workload and you MUST refute it. The \
+         secret being a 'database credential' does NOT make it a finding — reaching \
+         your own database is the whole point of the app. Only flag a secret that \
+         clearly belongs to something ELSE or is plainly over-privileged.\n\n\
          Answer for the entry as a whole:\n\
          - \"exploitable\": at least one objective is a real breach risk — name WHICH and \
-         WHY (a specific CVE/runtime signal, or which objective is within direct internet \
-         reach when it should not be).\n\
-         - \"refuted\": ALL of this reachability is LEGITIMATE for this kind of workload \
-         (e.g. a web front end holding its own session key) with no exploit evidence. \
-         Empty CVE/runtime lists do NOT by themselves mean refuted; only refute if the \
-         reachability itself is appropriate.\n\
+         WHY (a specific CVE/runtime signal, or an objective that belongs to a different \
+         app/tenant or is over-privileged, reachable when it should not be).\n\
+         - \"refuted\": ALL reachable objectives are the workload's OWN or otherwise \
+         legitimate for this kind of workload (a UI reaching its own database \
+         credentials; a front end holding its own session key). Empty CVE/runtime lists \
+         do NOT by themselves mean a finding — default to refuted unless a secret \
+         clearly belongs to something else.\n\
          - \"confirmed\": a corroborated live attack that should stand (do not veto).\n\
          - \"uncertain\": only if you truly cannot tell.\n\
          Respond with ONLY this JSON, putting your reasoning in the reason field: \
