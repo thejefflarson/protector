@@ -76,10 +76,19 @@ pub fn init(service: &str, version: &str) -> Telemetry {
         ))
         .build();
 
+    // `OTEL_EXPORTER_OTLP_ENDPOINT` is the *base* URL; per the OTLP/HTTP spec each
+    // signal is posted to `{base}/v1/{signal}`. `with_endpoint()` sets the FULL
+    // per-signal URL and does NOT auto-append (that only happens when the SDK reads
+    // the env var itself), so without this we'd POST to the bare `:4318` root and the
+    // collector returns 404 — the "HTTP export failed" we saw. Append explicitly.
+    let base = endpoint.trim_end_matches('/');
+    let traces_endpoint = format!("{base}/v1/traces");
+    let metrics_endpoint = format!("{base}/v1/metrics");
+
     // Traces → OTLP/HTTP (protobuf). The collector listens on 4318 for HTTP.
     let span_exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(&endpoint)
+        .with_endpoint(&traces_endpoint)
         .with_protocol(Protocol::HttpBinary)
         .build()
         .expect("building OTLP span exporter");
@@ -91,7 +100,7 @@ pub fn init(service: &str, version: &str) -> Telemetry {
     // Metrics → OTLP/HTTP, pushed on a periodic reader.
     let metric_exporter = MetricExporter::builder()
         .with_http()
-        .with_endpoint(&endpoint)
+        .with_endpoint(&metrics_endpoint)
         .with_protocol(Protocol::HttpBinary)
         .build()
         .expect("building OTLP metric exporter");
