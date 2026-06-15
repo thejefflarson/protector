@@ -32,19 +32,22 @@
 #      rule's. (Skipped if no Ollama is reachable; see PROTECTOR_E2E_MODEL.)
 #   G. self-revert — the model-driven cut reverts when the chain stops proving.
 #
-# Requirements: docker, k3d, kubectl, helm, jq, curl. A reachable Ollama for E/F.
+# Requirements: docker, k3d, kubectl, jq, curl. A reachable Ollama for E/F.
 # Usage:        scripts/e2e.sh
-# Env knobs:    CHART_PATH (default ../cluster/charts/protector)
-#               IMAGE      (default protector:e2e — built from this repo)
+# Env knobs:    IMAGE      (default protector:e2e — built from this repo)
 #               CLUSTER    (default protector-e2e)
 #               PROTECTOR_E2E_MODEL / _NAME / _PROBE — the model-decides endpoint
 #               KEEP=1     leave the cluster up on exit for debugging
 #
+# Self-contained: protector is deployed from a minimal manifest rendered by
+# deploy_protector() below — NOT the production Helm chart (which lives in the
+# private cluster repo and is exercised by Argo on the real cluster). This e2e
+# validates the engine's cluster glue against a real API server; a purpose-built
+# test manifest keeps CI free of a cross-repo private checkout and a Helm dependency.
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-protector-e2e}"
 IMAGE="${IMAGE:-protector:e2e}"
-CHART_PATH="${CHART_PATH:-$(cd "$(dirname "$0")/../../cluster/charts/protector" 2>/dev/null && pwd || true)}"
 NS=protector
 APP_NS=app
 ENTRY="workload/${APP_NS}/Pod/web"
@@ -76,11 +79,9 @@ fail() { echo "${RED}FAIL${OFF} $*" >&2; exit 1; }
 step() { echo; echo "${DIM}────────────────────────────────────────────────────────${OFF}"; log "$*"; }
 
 # --- preflight ----------------------------------------------------------------
-for tool in docker k3d kubectl helm jq curl; do
+for tool in docker k3d kubectl jq curl; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing required tool: $tool"
 done
-[ -n "$CHART_PATH" ] && [ -d "$CHART_PATH" ] || fail "chart not found; set CHART_PATH (got '${CHART_PATH}')"
-log "chart: $CHART_PATH"
 
 # --- teardown -----------------------------------------------------------------
 PF_PIDS=()
@@ -149,10 +150,10 @@ managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
 # cert-manager's Deployment going Available does NOT mean its admission webhook is
-# actually serving (CA injection + endpoints lag), and protector's chart creates a
-# Certificate the moment helm runs — against a half-ready webhook that Certificate is
-# never issued, the serving-cert secret never lands, and the pod can't start. Gate on
-# the webhook truly admitting a (server dry-run) Certificate before deploying.
+# actually serving (CA injection + endpoints lag), and deploy_protector creates a
+# Certificate immediately — against a half-ready webhook that Certificate is never
+# issued, the serving-cert secret never lands, and the pod can't start. Gate on the
+# webhook truly admitting a (server dry-run) Certificate before deploying.
 cm_webhook_ready() {
   kubectl apply --dry-run=server -f - >/dev/null 2>&1 <<'YAML'
 apiVersion: cert-manager.io/v1
@@ -173,6 +174,154 @@ diagnose_protector() {
   kubectl -n "$NS" describe pod -l app.kubernetes.io/name=protector 2>&1 | grep -iE "state|reason|message|event|warn|mount|secret" | tail -25 | sed 's/^/    /' || true
   kubectl -n "$NS" get certificate,secret 2>&1 | sed 's/^/    /' || true
   kubectl -n "$NS" logs -l app.kubernetes.io/name=protector --tail=30 2>&1 | sed 's/^/    /' || true
+}
+
+# --- deploy protector (self-contained, no Helm) -------------------------------
+# Render + apply the minimal manifests protector needs to run against a real API
+# server: ServiceAccount + engine RBAC + a cert-manager serving cert + the
+# Deployment/Service. Idempotent (kubectl apply), so the hard-mode/judgement/model
+# phases just re-invoke it with new args and the env change triggers a rollout.
+#
+# This is a TEST manifest, deliberately not the production Helm chart — it mirrors
+# the chart's deployment + clusterrole faithfully (engine reads; NetworkPolicy write
+# only in hard mode) without depending on the private cluster repo. The webhook's
+# ValidatingWebhookConfiguration is intentionally omitted: this exercises the engine,
+# and an active admission webhook would needlessly gate the test pods.
+#
+# Args: <enable> <actuationRBAC:true|false> <model_endpoint> <model_name>
+deploy_protector() {
+  local enable="$1" actuation_rbac="$2" model_endpoint="$3" model_name="$4"
+
+  kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # Hard mode grants the actuator create/delete/patch on NetworkPolicies so it can
+  # apply (and self-revert) its default-deny isolation policy.
+  local np_write=""
+  if [ "$actuation_rbac" = "true" ]; then
+    np_write='
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "patch"]'
+  fi
+
+  # The model-decides env is added only when an endpoint is given (phases 10-11).
+  local model_env=""
+  if [ -n "$model_endpoint" ]; then
+    model_env="
+            - name: PROTECTOR_ENGINE_MODEL
+              value: \"$model_endpoint\"
+            - name: PROTECTOR_ENGINE_MODEL_NAME
+              value: \"$model_name\"
+            - name: PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS
+              value: \"600\""
+  fi
+
+  kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: protector, namespace: $NS }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: protector-engine }
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["aquasecurity.github.io"]
+    resources: ["vulnerabilityreports"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy.linkerd.io"]
+    resources: ["servers", "authorizationpolicies", "meshtlsauthentications"]
+    verbs: ["get", "list", "watch"]$np_write
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: protector-engine }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: protector-engine }
+subjects:
+  - { kind: ServiceAccount, name: protector, namespace: $NS }
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: { name: protector-selfsign, namespace: $NS }
+spec: { selfSigned: {} }
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: { name: protector-tls, namespace: $NS }
+spec:
+  secretName: protector-tls
+  # rustls loads PKCS#8 only; cert-manager defaults ECDSA to SEC1 (would crashloop).
+  privateKey: { algorithm: ECDSA, size: 256, encoding: PKCS8 }
+  usages: ["server auth"]
+  dnsNames:
+    - protector.$NS.svc
+    - protector.$NS.svc.cluster.local
+  issuerRef: { name: protector-selfsign, kind: Issuer, group: cert-manager.io }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: protector, namespace: $NS }
+spec:
+  selector: { app.kubernetes.io/name: protector }
+  ports: [{ name: https, port: 8443, targetPort: https }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: protector, namespace: $NS }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app.kubernetes.io/name: protector } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: protector } }
+    spec:
+      serviceAccountName: protector
+      securityContext: { runAsNonRoot: true }
+      containers:
+        - name: protector
+          image: "$IMAGE"
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: https, containerPort: 8443 }
+            - { name: dashboard, containerPort: 8080 }
+            - { name: falco-ingest, containerPort: 9999 }
+          livenessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS } }
+          readinessProbe: { httpGet: { path: /readyz, port: https, scheme: HTTPS } }
+          env:
+            - { name: PROTECTOR_ADDR, value: "0.0.0.0:8443" }
+            - { name: PROTECTOR_TLS_CERT, value: /etc/protector/tls/tls.crt }
+            - { name: PROTECTOR_TLS_KEY, value: /etc/protector/tls/tls.key }
+            - { name: PROTECTOR_TUF_CACHE, value: /tmp/sigstore }
+            - { name: PROTECTOR_GATED_PREFIXES, value: "ghcr.io/thejefflarson/" }
+            - { name: PROTECTOR_ENFORCE_NAMESPACES, value: "" }
+            - { name: PROTECTOR_ENFORCE_LABELS, value: "" }
+            - { name: PROTECTOR_MESH_ENFORCE_NAMESPACES, value: "" }
+            - { name: PROTECTOR_MESH_ENFORCE_LABELS, value: "" }
+            - { name: RUST_LOG, value: "protector=info,sigstore=error,warn" }
+            - { name: PROTECTOR_ENGINE, value: "on" }
+            - { name: PROTECTOR_ENGINE_ENABLE, value: "$enable" }
+            - { name: PROTECTOR_ENGINE_ACTUATOR, value: "networkpolicy" }
+            - { name: PROTECTOR_DASHBOARD_ADDR, value: "0.0.0.0:8080" }
+            - { name: PROTECTOR_FALCO_ADDR, value: "0.0.0.0:9999" }$model_env
+          volumeMounts:
+            - { name: tls, mountPath: /etc/protector/tls, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tls, secret: { secretName: protector-tls } }
+        - { name: tmp, emptyDir: {} }
+YAML
 }
 
 # ==============================================================================
@@ -202,18 +351,9 @@ kubectl wait --for=condition=Established crd/certificates.cert-manager.io --time
 wait_until "cert-manager webhook ready to issue" 120 cm_webhook_ready
 
 step "4/11  Deploy protector in SHADOW mode (engine on, no actions, no actuation RBAC)"
-helm install protector "$CHART_PATH" \
-  --namespace "$NS" --create-namespace \
-  --set replicaCount=1 \
-  --set image.repository="${IMAGE%:*}" --set image.tag="${IMAGE#*:}" --set image.pullPolicy=Never \
-  --set imagePullSecrets=null \
-  --set registryAuth.dockerconfigSecret="" \
-  --set signature.enforceNamespaces="" --set signature.enforceLabels="" \
-  --set engine.enable="" --set engine.actuationRBAC=false \
-  --set engine.model.endpoint= \
-  --wait --timeout 300s \
+deploy_protector "" false "" ""
+kubectl -n "$NS" rollout status deploy/protector --timeout=300s \
   || { diagnose_protector; fail "protector did not become ready in shadow mode"; }
-kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
 
 step "5/11  Create the attack path: exposed web ─reaches→ store ─can-read→ secret"
@@ -291,10 +431,8 @@ managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only 
 pass "shadow mode applied nothing (propose-only honored)"
 
 step "7/11  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
-helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
-  --set engine.enable=network --set engine.actuationRBAC=true \
-  --wait --timeout 180s
-kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+deploy_protector network true "" ""
+kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
 # The pod was replaced, so its runtime-evidence store reset — re-send the alert.
 post_falco
@@ -330,15 +468,12 @@ YAML
 # without an analyst to make the exploitability call, the engine must NOT auto-cut
 # on mere CVE presence — the foothold stays a propose-only latent finding.
 #
-# The helm upgrade replaces the pod, resetting its in-memory runtime store — so the
+# The redeploy replaces the pod, resetting its in-memory runtime store — so the
 # Falco corroboration from steps 6-7 is cleared. We recreate the `reaches` edge only
 # AFTER the fresh, uncorroborated pod is up, so the chain it proves carries ONLY the
 # CVE foothold (no lingering runtime signal that would auto-cut via the veto lane).
-helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
-  --set 'engine.enable=network\,judgement' \
-  --set engine.model.endpoint= \
-  --wait --timeout 180s
-kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+deploy_protector "network,judgement" true "" ""
+kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
 # Recreate the reaches edge (step 8 deleted it) so web → store → secret is provable.
 kubectl -n "$APP_NS" apply -f - <<'YAML'
@@ -369,11 +504,8 @@ if model_available; then
     -H 'content-type: application/json' \
     -d "$(jq -n --arg m "$MODEL_NAME" '{model:$m,messages:[{role:"user",content:"ready? reply ok"}],stream:false}')" \
     >/dev/null 2>&1 || true
-  helm upgrade protector "$CHART_PATH" --namespace "$NS" --reuse-values \
-    --set engine.model.endpoint="$MODEL_ENDPOINT" \
-    --set engine.model.name="$MODEL_NAME" \
-    --wait --timeout 180s
-  kubectl -n "$NS" rollout status deploy/protector --timeout=120s
+  deploy_protector "network,judgement" true "$MODEL_ENDPOINT" "$MODEL_NAME"
+  kubectl -n "$NS" rollout status deploy/protector --timeout=180s
   pf_reset
   wait_until "model promotes the exploitable log4shell foothold → engine quarantines web" 180 managed_np_present
   pass "the MODEL decided to cut — its 'exploitable' verdict promoted the foothold (ADR-0011)"
