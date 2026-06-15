@@ -285,11 +285,13 @@ impl Engine {
                 _ => {
                     let v = self.adjudicator.judge(&entry, &objectives, &graph).await;
                     // An Uncertain is usually a transient model outage (e.g. a CPU-model
-                    // timeout) — log it quietly and re-judge next pass rather than pin
-                    // the failure into the cache. Decisive verdicts are logged + cached.
+                    // timeout) — re-judge next pass rather than pin the failure into the
+                    // cache. Logged at info (not debug): on a slow CPU model nearly every
+                    // verdict lands here, and a silent inconclusive looks indistinguishable
+                    // from "the model never ran" — surface why (timeout vs unparseable).
                     let result = match &v {
                         adjudicate::Verdict::Uncertain(why) => {
-                            tracing::debug!(entry = %entry.0, %why, "adjudication inconclusive (will retry)");
+                            tracing::info!(entry = %entry.0, objectives = objectives.len(), %why, "adjudication inconclusive (will retry)");
                             "unavailable"
                         }
                         decisive => {
