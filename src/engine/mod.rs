@@ -133,6 +133,15 @@ pub struct Engine {
     /// misconfig that newly exposes something re-triggers it). Pruned to present
     /// entries each pass (ephemeral workloads, removed exposure).
     verdict_cache: HashMap<String, (String, adjudicate::Verdict)>,
+    /// The most recent verdict per internet-facing ENTRY, of *any* kind (decisive or
+    /// inconclusive) — distinct from [`verdict_cache`], which holds only decisive
+    /// verdicts and governs re-judging. This is the **display** memory: each pass
+    /// republishes findings with `verdict: None` *before* the (slow) judging loop runs,
+    /// so without carrying the last-known verdict forward the dashboard blanks every
+    /// pass. Seeded onto fresh chains at publish time so a judgement — even "uncertain
+    /// — model unavailable" — stays visible while the model re-judges. Pruned to present
+    /// entries each pass.
+    last_verdict: HashMap<String, adjudicate::Verdict>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -166,6 +175,7 @@ impl Engine {
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
             verdict_cache: HashMap::new(),
+            last_verdict: HashMap::new(),
             metrics: EngineMetrics::new(),
         }
     }
@@ -215,11 +225,24 @@ impl Engine {
             }
         }
 
+        // Carry the last-known verdict forward onto each breach-relevant chain so the
+        // dashboard shows the most recent judgement IMMEDIATELY — the judging loop below
+        // is slow on a CPU model, and publishing with verdict=None first would blank the
+        // UI every pass. Both decisive and inconclusive verdicts are carried (seeing
+        // "uncertain — model unavailable" is the point — it shows the model was asked).
+        for c in chains.iter_mut() {
+            if c.is_breach_relevant()
+                && let Some(v) = self.last_verdict.get(&c.entry.0)
+            {
+                c.verdict = Some(v.summary());
+            }
+        }
+
         // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
         // unreachable) adjudication. The dashboard must always reflect the current
         // graph even while the model is judging or down — model latency must never
         // blank the findings view. The judging loop below enriches verdicts and
-        // re-publishes; until it does, paths show as latent exposure (no verdict yet).
+        // re-publishes; until it does, paths show the carried-forward verdict above.
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
@@ -307,6 +330,9 @@ impl Engine {
                     v
                 }
             };
+            // Remember this entry's latest verdict (any kind) for the carry-forward
+            // display seed above, so the next pass shows it instead of blanking.
+            self.last_verdict.insert(entry_key.clone(), verdict.clone());
             // The entry's verdict applies to every chain from it. Keep the model's call
             // — positive *and* negative — on each so the dashboard shows why it acted.
             for &i in idxs {
@@ -324,6 +350,8 @@ impl Engine {
         // Drop verdicts for entries that no longer exist (ephemeral workloads, removed
         // exposure), so the cache tracks the live cluster rather than growing forever.
         self.verdict_cache
+            .retain(|entry, _| current_entries.contains(entry));
+        self.last_verdict
             .retain(|entry, _| current_entries.contains(entry));
         // Current verdict distribution over breach paths (per-label gauge).
         for (verdict, count) in &verdict_counts {
