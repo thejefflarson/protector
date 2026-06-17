@@ -22,6 +22,13 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
+    # The runners are small homelab Pis; parallel rustc codegen during the test
+    # build peaks high enough to OOM-kill the runner pod ("lost communication with
+    # the server"), which fails the job and — since `docker` needs it — ships no
+    # image. Bound the concurrency so peak memory stays under the pod limit. Slower,
+    # but it actually completes; a release that never builds is the worse trade.
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
     - name: Enable rust
       run: |
@@ -41,7 +48,9 @@ jobs:
         # decryption the attack targets, so it isn't an exposure here.
         cargo audit --ignore RUSTSEC-2023-0071
     - name: Run tests
-      run: cargo nextest run
+      # --test-threads bounds parallel test execution too (the build jobs are capped
+      # by CARGO_BUILD_JOBS at the job level), keeping peak memory under the pod limit.
+      run: cargo nextest run --test-threads 2
       env:
         RUST_BACKTRACE: 1
   docker:
