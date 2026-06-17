@@ -133,18 +133,19 @@ like Cilium/Calico).
 |-----|---------|---------|
 | `PROTECTOR_ADDR` | `0.0.0.0:8443` | listen address |
 | `PROTECTOR_TLS_CERT` / `PROTECTOR_TLS_KEY` | `/etc/protector/tls/tls.{crt,key}` | serving cert/key |
-| `PROTECTOR_IDENTITY_REGEXP` | `^https://github\.com/<your-org>/` | trusted keyless signing identity — set to your org |
+| `PROTECTOR_IDENTITY_REGEXP` | — | trusted keyless signing identity — set to your org (e.g. `^https://github\.com/your-org/`). Required once `PROTECTOR_GATED_PREFIXES` is set |
 | `PROTECTOR_OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | expected OIDC issuer |
-| `PROTECTOR_GATED_PREFIXES` | `ghcr.io/<your-org>/` | image-ref prefixes that must be signed — set to your registry/org |
+| `PROTECTOR_GATED_PREFIXES` | — | image-ref prefixes that must be signed (e.g. `ghcr.io/your-org/`); **empty = gating off**, no image is signature-checked |
 | `PROTECTOR_ENFORCE_NAMESPACES` / `PROTECTOR_ENFORCE_LABELS` | — | where signature enforcement *denies* vs only audits |
 | `PROTECTOR_MESH_ENFORCE_NAMESPACES` / `PROTECTOR_MESH_ENFORCE_LABELS` | — | where mesh enforcement *denies* (never your CI runner namespace) |
 | `PROTECTOR_REGISTRY_USERNAME` / `PROTECTOR_REGISTRY_PASSWORD` | — | registry auth for verifying signatures of private gated images |
 | `PROTECTOR_REGISTRY_AUTH_FILE` | — | path to a mounted dockerconfigjson (your pull secret); its registry creds are reused for signature verification when username/password aren't set. Without registry auth, private packages 401 |
 | `RUST_LOG` | — | tracing filter (e.g. `protector=info`) |
 
-> The signing identity/prefix defaults are placeholders — set them to your own GitHub
-> org and registry so the webhook gates *your* first-party images and trusts *your*
-> signers.
+> Signature gating ships **off**: with `PROTECTOR_GATED_PREFIXES` empty, no image is
+> checked. Set it to your registry/org *and* `PROTECTOR_IDENTITY_REGEXP` to your
+> trusted signer to turn it on — protector refuses to start if prefixes are set
+> without an identity (gating without a trusted signer would accept any signature).
 
 ### Endpoints
 

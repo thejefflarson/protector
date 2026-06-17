@@ -114,22 +114,37 @@ async fn main() -> Result<()> {
     let cert = PathBuf::from(env_or("PROTECTOR_TLS_CERT", "/etc/protector/tls/tls.crt"));
     let key = PathBuf::from(env_or("PROTECTOR_TLS_KEY", "/etc/protector/tls/tls.key"));
 
-    // Signature policy config. Defaults mirror the fleet-wide cosign incantation;
-    // it ships in audit mode (enforce=false) so it can be observed before it can
-    // reject a Pod.
-    let identity_regexp = env_or(
-        "PROTECTOR_IDENTITY_REGEXP",
-        r"^https://github\.com/thejefflarson/",
-    );
+    // Signature policy config. Unconfigured by default: with no gated prefixes the
+    // signing gate is inert (no image is checked), so an out-of-the-box deploy is
+    // safe and org-agnostic. Set PROTECTOR_GATED_PREFIXES to your registry/org to turn
+    // it on, together with PROTECTOR_IDENTITY_REGEXP for your trusted signer (the OIDC
+    // issuer defaults to GitHub Actions). It ships in audit mode (enforce=false) so it
+    // can be observed before it can reject a Pod.
+    let identity_regexp = env_or("PROTECTOR_IDENTITY_REGEXP", "");
     let oidc_issuer = env_or(
         "PROTECTOR_OIDC_ISSUER",
         "https://token.actions.githubusercontent.com",
     );
-    let gated_prefixes: Vec<String> = env_or("PROTECTOR_GATED_PREFIXES", "ghcr.io/thejefflarson/")
+    let gated_prefixes: Vec<String> = env_or("PROTECTOR_GATED_PREFIXES", "")
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    // Gating an image without a trusted-signer identity would accept ANY valid
+    // signature (an empty identity regexp matches every SAN). Refuse to start in that
+    // misconfiguration rather than silently trusting all signers.
+    if !gated_prefixes.is_empty() && identity_regexp.trim().is_empty() {
+        anyhow::bail!(
+            "PROTECTOR_GATED_PREFIXES is set but PROTECTOR_IDENTITY_REGEXP is empty — \
+             refusing to start: gating images without a trusted signer identity would accept \
+             any signature. Set PROTECTOR_IDENTITY_REGEXP (e.g. ^https://github\\.com/your-org/)."
+        );
+    }
+    if gated_prefixes.is_empty() {
+        tracing::info!(
+            "signature gating off (PROTECTOR_GATED_PREFIXES empty) — no images are signature-checked"
+        );
+    }
     let tuf_cache = PathBuf::from(env_or("PROTECTOR_TUF_CACHE", "/tmp/sigstore"));
     let verify_timeout = Duration::from_secs(env_parse("PROTECTOR_VERIFY_TIMEOUT", 5));
     let cache_ttl = Duration::from_secs(env_parse("PROTECTOR_CACHE_TTL", 300));
