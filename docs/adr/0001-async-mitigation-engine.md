@@ -20,7 +20,7 @@ The forces that rule out doing this in the admission path:
   reasoning — seconds to minutes. Admission webhooks are capped at 30s by the
   API server; we run 5s with `failurePolicy: Ignore`, so slow work just times
   out and fails open. Forcing it inline (`Fail` + 30s) would stall every Pod
-  creation cluster-wide — a self-inflicted outage on 4 Pis.
+  creation cluster-wide — a self-inflicted, cluster-wide outage.
 - **Scan-after-admit.** trivy-operator scans an image *after* it is admitted and
   running. At admission a fresh image has no report, and a CVE disclosed against
   an already-running workload never re-fires admission. Detection of *new*
@@ -29,7 +29,7 @@ The forces that rule out doing this in the admission path:
   adjudicate badly: hallucinated inflation of issues, sycophancy, and
   non-determinism. An LLM must never sit in the deploy hot path, and must never
   be the thing that decides to take a privileged action.
-- **Hardware.** 4 Raspberry Pi 4s, no GPU. In-cluster models (Ollama) are small
+- **Hardware.** Small, CPU-only nodes, no GPU. In-cluster models (e.g. Ollama) are small
   (~1–3B, quantized) and slow — weak reasoners, but free and private.
 - **Cost and data egress.** Cloud inference over the cluster's SBOMs, vuln map,
   topology, RBAC, and secret *names* is both a recurring cost and a security
@@ -61,7 +61,7 @@ and respond are separate layers, and only proofs move privilege.**
 
 3. **Proof layer (deterministic).** Every link a chain asserts is confirmed by a
    non-model check or dropped: reachability by a real graph query over
-   `charts/linkerd-policy` + NetworkPolicies; privilege by a real RBAC check
+   mesh authorization policy + NetworkPolicies; privilege by a real RBAC check
    (`can-i`); active exploitation by CISA KEV / EPSS lookup; vuln presence by
    trivy ∧ grype agreement; "now" by a corroborating Falco event. A chain's
    strength is exactly the number of deterministically-proven links. This is the
@@ -78,7 +78,7 @@ and respond are separate layers, and only proofs move privilege.**
    menu: sever the *one* proven-reachable edge via a scoped Linkerd
    `AuthorizationPolicy` / deny `NetworkPolicy`; revoke the one RBAC binding the
    chain rides; rotate the targeted secret; cordon/scale-to-zero only as last
-   resort. Every action is recorded, announced (→ falcosidekick), and carries a
+   resort. Every action is recorded, announced (to the runtime-alert pipeline), and carries a
    dead-man auto-revert timer so a false positive self-heals.
 
 **Model strategy is local-first, tiered:**
@@ -93,8 +93,8 @@ and respond are separate layers, and only proofs move privilege.**
   topology — offloading exactly what small models are worst at to real queries —
   and run at temperature 0 with constrained/JSON-schema decoding for
   reproducible, well-formed output. The engine uses a **dedicated, internal-only
-  model deployment** (not the public `ai.jeffl.es` persephone instance), with
-  its ServiceAccount added as a scoped Ollama client in `charts/linkerd-policy`.
+  model deployment** (not a public, internet-facing model instance), with its
+  ServiceAccount scoped as an authorized client of the in-cluster model.
 - **Tier 2 — selective escalation, rare.** Only a proven, high-severity,
   model-flagged-ambiguous chain escalates to a stronger model, **redacted first**
   (structured graph + CVE IDs, never raw secrets) and human-in-the-loop.
@@ -125,9 +125,9 @@ Harder / accepted downsides:
   zero-API-access property no longer holds engine-side; the webhook itself keeps it.
 - It is a **multi-component system** to build and operate, not a single webhook —
   weeks of work, phased behind the walking skeleton.
-- A **dedicated internal Ollama** instance plus authz wiring, with resource
-  contention to manage (low-priority, rate-limited, circuit-broken, off-peak) so
-  IR inference can't starve the public porcelain or the apps.
+- A **dedicated internal model** instance (e.g. Ollama) plus authz wiring, with
+  resource contention to manage (low-priority, rate-limited, circuit-broken,
+  off-peak) so IR inference can't starve the user-facing services or the apps.
 - **It does not scale** to large clusters; this is explicitly a small-cluster
   design. Accepted.
 - **"Provable" means preconditions, not exploitation.** We cannot prove RCE

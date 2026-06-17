@@ -7,9 +7,9 @@
 
 [ADR-0007](0007-live-cuts-via-adminnetworkpolicy.md) made the live network cut an
 additive `AdminNetworkPolicy` Deny rule — surgical (it severs one source→target
-edge) but dependent on a CNI that implements ANP (Cilium, Calico). The target
-cluster runs **K3s with flannel (WireGuard backend)**: its embedded kube-router
-enforces standard `NetworkPolicy` but **not** ANP, and Linkerd's authorization is
+edge) but dependent on a CNI that implements ANP (Cilium, Calico). A very common
+setup — **K3s with flannel** — ships an embedded **kube-router** that enforces
+standard `NetworkPolicy` but **not** ANP, and Linkerd's authorization is
 allow-list with no deny primitive (a `Server` only default-denies *meshed* L7
 ingress — it misses egress and non-meshed traffic). So ADR-0007's actuator can't
 run here, and propose-only would gut the product's reason to exist: automated
@@ -53,8 +53,8 @@ without labels, isolation is declined rather than widening to the whole namespac
 
 Easier:
 
-- **The product's whole point — automated remediation — works on the real
-  cluster**, with no CNI migration, using the NetworkPolicy controller k3s already
+- **The product's whole point — automated remediation — works on such
+  clusters**, with no CNI migration, using the NetworkPolicy controller k3s already
   runs.
 - One actuator port, three selectable mechanisms: blunt-but-portable
   (NetworkPolicy), surgical (ANP), and dry-run — the right tool per cluster.

@@ -28,7 +28,7 @@ talking past each other because of it.
 2. **The dashboard flagged every internal access path** — any workload that can read
    a secret or reach the database — as a finding. That is the normal shape of a
    Kubernetes cluster (assume-breach blast radius), not breach potential, and it
-   buried the signal under ~1000 rows on a four-Pi cluster.
+   buried the signal under ~1000 rows even on a small cluster.
 
 The architecture we actually want, stated plainly:
 

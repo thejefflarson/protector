@@ -80,10 +80,11 @@ role; it evolved through [`adr/0011`](adr/0011-positive-judgement.md).)
 
 ## Local-first, by conviction
 
-The reasoning runs **in-cluster, on local models** (Ollama), and that's a feature
-twice over. It makes inference free, which is what lets the loop run continuously
-on a homelab budget. And it keeps the cluster's vulnerability map, topology, and
-secret names — a literal blueprint for attacking us — **inside the cluster**,
+The reasoning runs **in-cluster, on local models** (e.g. Ollama), and that's a
+feature twice over. It makes inference free, which is what lets the loop run
+continuously on a modest hardware budget. And it keeps the cluster's vulnerability
+map, topology, and secret names — a literal blueprint for attacking it — **inside
+the cluster**,
 where security tooling's most sensitive data belongs. A weak local model is
 acceptable precisely because it's fenced in by proof; when a rare, high-stakes,
 genuinely ambiguous chain needs more horsepower, it escalates — redacted, and
