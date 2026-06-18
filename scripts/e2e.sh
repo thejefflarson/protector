@@ -305,7 +305,7 @@ spec:
             - { name: PROTECTOR_TLS_KEY, value: /etc/protector/tls/tls.key }
             - { name: PROTECTOR_TUF_CACHE, value: /tmp/sigstore }
             - { name: PROTECTOR_GATED_PREFIXES, value: "ghcr.io/thejefflarson/" }
-            - { name: PROTECTOR_IDENTITY_REGEXP, value: "^https://github\\.com/thejefflarson/" }
+            - { name: PROTECTOR_IDENTITY_REGEXP, value: '^https://github\.com/thejefflarson/' }
             - { name: PROTECTOR_ENFORCE_NAMESPACES, value: "" }
             - { name: PROTECTOR_ENFORCE_LABELS, value: "" }
             - { name: PROTECTOR_MESH_ENFORCE_NAMESPACES, value: "" }
