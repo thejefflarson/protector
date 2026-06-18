@@ -213,7 +213,21 @@ pub fn build_judgment_prompt(
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> String {
-    let (cves, runtime) = entry_evidence(graph, entry);
+    let (mut cves, runtime) = entry_evidence(graph, entry);
+    // Bound the CVE list in the prompt. A CVE-heavy image (e.g. a big control-plane
+    // component) can carry hundreds of critical/known-exploited IDs; dumping them all
+    // bloats the prompt enough to stall or time out a CPU-only model — the entry then
+    // never gets a verdict. A capped sample plus a remainder count is all the model
+    // needs to weigh "this image is vulnerable"; the full set still drives the cache
+    // fingerprint (entry_fingerprint), so correctness is unaffected.
+    const MAX_CVES_IN_PROMPT: usize = 25;
+    cves.sort();
+    cves.dedup();
+    if cves.len() > MAX_CVES_IN_PROMPT {
+        let extra = cves.len() - MAX_CVES_IN_PROMPT;
+        cves.truncate(MAX_CVES_IN_PROMPT);
+        cves.push(format!("(+{extra} more critical/known-exploited)"));
+    }
     let reachable: String = objectives
         .iter()
         .map(|(k, a)| {

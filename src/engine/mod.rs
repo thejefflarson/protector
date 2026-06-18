@@ -330,14 +330,26 @@ impl Engine {
                     v
                 }
             };
-            // Remember this entry's latest verdict (any kind) for the carry-forward
-            // display seed above, so the next pass shows it instead of blanking.
-            self.last_verdict.insert(entry_key.clone(), verdict.clone());
+            // Choose what to DISPLAY: if this pass came back inconclusive (a transient
+            // model timeout — "model unavailable") but we have a prior decisive verdict,
+            // keep showing the decisive one rather than regressing the dashboard to
+            // "uncertain". The action logic below still uses this pass's real `verdict`.
+            let display = match (&verdict, self.last_verdict.get(entry_key)) {
+                (adjudicate::Verdict::Uncertain(_), Some(prior))
+                    if !matches!(prior, adjudicate::Verdict::Uncertain(_)) =>
+                {
+                    prior.clone()
+                }
+                _ => verdict.clone(),
+            };
+            // Remember the displayed verdict for the carry-forward seed above, so the
+            // next pass shows it instead of blanking.
+            self.last_verdict.insert(entry_key.clone(), display.clone());
             // The entry's verdict applies to every chain from it. Keep the model's call
             // — positive *and* negative — on each so the dashboard shows why it acted.
             for &i in idxs {
                 *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
-                chains[i].verdict = Some(verdict.summary());
+                chains[i].verdict = Some(display.summary());
                 if chains[i].corroborated {
                     if !verdict.is_confirmed() {
                         chains[i].adjudicated = false;
