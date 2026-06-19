@@ -15,24 +15,13 @@ jobs:
   rust:
     permissions:
       contents: read
-    runs-on: protector-runners
-    # The runners are self-hosted and persistent, so never execute code from a
-    # forked pull request on them — that would be arbitrary code execution on
-    # the build infrastructure. Push events and same-repo PRs are fine.
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    # The runners are small homelab Pis; parallel rustc codegen during the test
-    # build peaks high enough to OOM-kill the runner pod ("lost communication with
-    # the server"), which fails the job and — since `docker` needs it — ships no
-    # image. Bound the concurrency so peak memory stays under the pod limit. Slower,
-    # but it actually completes; a release that never builds is the worse trade.
-    env:
-      CARGO_BUILD_JOBS: "2"
+    # GitHub-hosted, not the homelab runners: fmt/clippy/audit/test need no cluster
+    # resources, and the small Pi runners OOM-killed the test build ("lost
+    # communication with the server") even capped — an intermittent red that, since
+    # `docker` needs it, also blocked releases. A hosted runner is reliable and free.
+    # Only the `docker` job stays self-hosted (it needs the in-cluster buildkit).
+    runs-on: ubuntu-latest
     steps:
-    - name: Enable rust
-      run: |
-        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
     - name: Format
@@ -48,9 +37,9 @@ jobs:
         # decryption the attack targets, so it isn't an exposure here.
         cargo audit --ignore RUSTSEC-2023-0071
     - name: Run tests
-      # --test-threads bounds parallel test execution too (the build jobs are capped
-      # by CARGO_BUILD_JOBS at the job level), keeping peak memory under the pod limit.
-      run: cargo nextest run --test-threads 2
+      run: |
+        cargo install cargo-nextest --locked
+        cargo nextest run
       env:
         RUST_BACKTRACE: 1
   docker:
