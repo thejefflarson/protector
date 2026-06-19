@@ -1,0 +1,23 @@
+[package]
+name = "protector-agent-ebpf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "eBPF programs for protector-agent (ADR-0014). no_std; built for the bpf target with bpf-linker — see agent/README.md. Not part of the userspace cargo build."
+
+[dependencies]
+aya-ebpf = "0.1"
+
+[[bin]]
+name = "protector-agent"
+path = "src/main.rs"
+
+# eBPF objects must be small and panic=abort; built in release for the bpf target.
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[workspace]

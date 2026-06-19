@@ -1,4 +1,6 @@
 /target
+# Nested crate build dirs (e.g. agent/*/target) — match any target/ anywhere.
+target/
 
 # JS bundle build (vendored output in web/dist is committed)
 web/node_modules/
