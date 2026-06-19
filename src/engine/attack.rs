@@ -20,6 +20,7 @@ pub enum Tactic {
     CredentialAccess,
     Discovery,
     LateralMovement,
+    Collection,
     Exfiltration,
     Impact,
 }
@@ -35,6 +36,7 @@ impl Tactic {
             Tactic::CredentialAccess => "TA0006",
             Tactic::Discovery => "TA0007",
             Tactic::LateralMovement => "TA0008",
+            Tactic::Collection => "TA0009",
             Tactic::Exfiltration => "TA0010",
             Tactic::Impact => "TA0040",
         }
@@ -50,6 +52,7 @@ impl Tactic {
             Tactic::CredentialAccess => "Credential Access",
             Tactic::Discovery => "Discovery",
             Tactic::LateralMovement => "Lateral Movement",
+            Tactic::Collection => "Collection",
             Tactic::Exfiltration => "Exfiltration",
             Tactic::Impact => "Impact",
         }
@@ -94,6 +97,16 @@ pub const EXFILTRATION: AttackRef = AttackRef {
     tactic: Tactic::Exfiltration,
     technique_id: "T1041",
     technique: "Exfiltration Over C2 Channel",
+};
+
+/// Collection — Data from Information Repositories (T1213): reaching a data store (a
+/// workload with persistent storage — a database, object store, cache) lets an
+/// attacker mine the data it holds. The objective is the data store *workload*;
+/// reaching it from the internet is the data-access risk the model then judges.
+pub const DATA_FROM_REPOSITORY: AttackRef = AttackRef {
+    tactic: Tactic::Collection,
+    technique_id: "T1213",
+    technique: "Data from Information Repositories",
 };
 
 /// Execution — Deploy Container (T1610): create pods.

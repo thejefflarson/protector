@@ -57,6 +57,9 @@ door, named in [MITRE ATT&CK](https://attack.mitre.org/) terms:
 - **Execution** — Deploy Container (T1610), Container Admin Command (T1609).
 - **Persistence** — Container Orchestration Job (T1053.007).
 - **Impact** — Data Destruction (T1485).
+- **Collection** — Data from Information Repositories (T1213) — reaching a **data store**
+  (a workload mounting persistent storage: a database, cache, object store) so its data
+  could be mined.
 - **Exfiltration** (T1041) — a compromised workload with an internet-egress channel
   (declared, or an open `0.0.0.0/0` egress allow) can ship accessed data out.
 

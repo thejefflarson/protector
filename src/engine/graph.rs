@@ -128,6 +128,10 @@ pub struct Workload {
     pub exposure: Exposure,
     /// Live corroboration that something is happening *now* (RuntimeEvidence port).
     pub runtime: Vec<RuntimeSignal>,
+    /// Whether the workload mounts persistent storage (a PersistentVolumeClaim) — the
+    /// signal that it is a **data store** (database, cache, object store), i.e. an
+    /// information repository an attacker reaching it could mine (ATT&CK T1213).
+    pub persistent: bool,
 }
 
 /// An identity (ServiceAccount / RBAC subject) a workload acts as.
@@ -594,6 +598,7 @@ mod tests {
             meshed: true,
             exposure: Exposure::Internet,
             runtime: vec![],
+            persistent: false,
         }));
         g.add_edge(wl, img, proof_edge(Relation::RunsImage, "kube"));
         assert_eq!(g.node_count(), 2);

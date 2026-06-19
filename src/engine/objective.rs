@@ -11,12 +11,15 @@
 //! graph and marks nodes as objectives of a given technique; new objectives drop
 //! in without touching the proof walk.
 //!
-//! Scope (ADR-0005): this slice recognizes Credential Access (reach a Secret) and
-//! Escape to Host (reach a Host). Capability-shaped objectives (RBAC
-//! self-escalation, deploy/exec) arrive with the Capability-node work.
+//! Recognized objectives: Credential Access (reach a Secret), Escape to Host (reach a
+//! Host), the capability-shaped outcomes (RBAC self-escalation, Deploy/Exec,
+//! Persistence, Data Destruction — via the Capability node), Exfiltration (reach the
+//! `internet` egress endpoint, T1041), and Data from Information Repositories (reach a
+//! data-store workload, T1213).
 
 use super::attack::{
-    AttackRef, CREDENTIAL_ACCESS, ESCAPE_TO_HOST, EXFILTRATION, capability_technique,
+    AttackRef, CREDENTIAL_ACCESS, DATA_FROM_REPOSITORY, ESCAPE_TO_HOST, EXFILTRATION,
+    capability_technique,
 };
 use super::graph::{Node, NodeKey, SecurityGraph};
 
@@ -113,6 +116,27 @@ impl ObjectiveRecognizer for ExfiltrationObjective {
     }
 }
 
+/// Every data-store workload (one mounting persistent storage — a database, cache, or
+/// object store) is a Data-from-Information-Repositories objective (ATT&CK T1213):
+/// reaching it from the internet is a data-access risk. Whether that reach is a real
+/// breach or legitimate (an app reaching its OWN database) is the model's call — proof
+/// only establishes that the data store is reachable.
+pub struct DataStoreObjective;
+
+impl ObjectiveRecognizer for DataStoreObjective {
+    fn recognize(&self, graph: &SecurityGraph) -> Vec<Objective> {
+        graph
+            .inner()
+            .node_weights()
+            .filter(|n| matches!(n, Node::Workload(w) if w.persistent))
+            .map(|n| Objective {
+                node: n.key(),
+                attack: DATA_FROM_REPOSITORY,
+            })
+            .collect()
+    }
+}
+
 /// The default recognizer set for this slice.
 pub fn default_recognizers() -> Vec<Box<dyn ObjectiveRecognizer>> {
     vec![
@@ -120,5 +144,41 @@ pub fn default_recognizers() -> Vec<Box<dyn ObjectiveRecognizer>> {
         Box::new(HostObjective),
         Box::new(CapabilityObjective),
         Box::new(ExfiltrationObjective),
+        Box::new(DataStoreObjective),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::graph::{Exposure, SecurityGraph, Workload};
+
+    fn workload(name: &str, persistent: bool) -> Node {
+        Node::Workload(Workload {
+            namespace: "data".into(),
+            name: name.into(),
+            kind: "Pod".into(),
+            labels: Default::default(),
+            meshed: false,
+            exposure: Exposure::Internal,
+            runtime: vec![],
+            persistent,
+        })
+    }
+
+    #[test]
+    fn data_store_objective_marks_only_persistent_workloads() {
+        let mut g = SecurityGraph::new();
+        g.upsert_node(workload("db-0", true));
+        g.upsert_node(workload("stateless-api", false));
+
+        let objs = DataStoreObjective.recognize(&g);
+        assert_eq!(
+            objs.len(),
+            1,
+            "only the persistent workload is a data store"
+        );
+        assert_eq!(objs[0].node.0, "workload/data/Pod/db-0");
+        assert_eq!(objs[0].attack.technique_id, "T1213");
+    }
 }

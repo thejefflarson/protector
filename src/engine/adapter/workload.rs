@@ -23,6 +23,15 @@ impl Adapter for WorkloadAdapter {
                         .is_some_and(|ics| ics.iter().any(|c| c.name == MESH_PROXY))
             });
 
+            // A mounted PersistentVolumeClaim marks the workload as a data store (data
+            // at rest) — the signal the Data-from-Repositories objective (T1213) keys on.
+            let persistent = spec.is_some_and(|s| {
+                s.volumes
+                    .iter()
+                    .flatten()
+                    .any(|v| v.persistent_volume_claim.is_some())
+            });
+
             let wl = graph.upsert_node(Node::Workload(Workload {
                 namespace: namespace.clone(),
                 name: name.clone(),
@@ -33,6 +42,7 @@ impl Adapter for WorkloadAdapter {
                 // Internal is the honest default until that adapter lands.
                 exposure: Exposure::Internal,
                 runtime: vec![],
+                persistent,
             }));
 
             let sa = spec
@@ -100,7 +110,38 @@ mod tests {
         let wl_key = workload_node("app", "api").key();
         let wl = g.index_of(&wl_key).and_then(|i| g.node(i)).unwrap();
         match wl {
-            Node::Workload(w) => assert!(w.meshed, "linkerd-proxy container ⇒ meshed"),
+            Node::Workload(w) => {
+                assert!(w.meshed, "linkerd-proxy container ⇒ meshed");
+                assert!(!w.persistent, "no PVC ⇒ not a data store");
+            }
+            other => panic!("expected workload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pvc_mount_marks_the_workload_as_a_data_store() {
+        let snap = Snapshot {
+            pods: vec![pod(json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "db-0", "namespace": "data", "labels": {"app": "db"}},
+                "spec": {
+                    "containers": [{"name": "postgres", "image": "postgres:16"}],
+                    "volumes": [{
+                        "name": "pgdata",
+                        "persistentVolumeClaim": {"claimName": "pgdata-db-0"}
+                    }]
+                }
+            }))],
+            ..Default::default()
+        };
+        let g = build_graph(&snap, &default_adapters());
+        let wl = g
+            .index_of(&workload_node("data", "db-0").key())
+            .and_then(|i| g.node(i))
+            .unwrap();
+        match wl {
+            Node::Workload(w) => assert!(w.persistent, "a PVC volume ⇒ data store (T1213)"),
             other => panic!("expected workload, got {other:?}"),
         }
     }

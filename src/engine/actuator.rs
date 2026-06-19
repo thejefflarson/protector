@@ -687,6 +687,7 @@ mod tests {
             meshed: false,
             exposure: Exposure::Internal,
             runtime: vec![],
+            persistent: false,
         })
     }
 

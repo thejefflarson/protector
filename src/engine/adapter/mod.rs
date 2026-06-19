@@ -116,6 +116,7 @@ pub(super) fn workload_node(namespace: &str, name: &str) -> Node {
         meshed: false,
         exposure: Exposure::Internal,
         runtime: vec![],
+        persistent: false,
     })
 }
 
