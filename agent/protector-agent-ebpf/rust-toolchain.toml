@@ -1,0 +1,5 @@
+# eBPF programs build on nightly: the bpf target has no prebuilt core, so it's
+# compiled via -Z build-std=core (see .cargo/config.toml), which needs rust-src.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]

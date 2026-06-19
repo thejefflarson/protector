@@ -1,0 +1,12 @@
+# Build for the little-endian BPF target with bpf-linker, compiling core from source
+# (no prebuilt core for bpf). A plain `cargo build` in this crate then produces the
+# BPF object — architecture-neutral bytecode, CO-RE-relocated against the node's BTF
+# at load (ADR-0014).
+[build]
+target = "bpfel-unknown-none"
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"
+
+[unstable]
+build-std = ["core"]

@@ -62,6 +62,20 @@ jobs:
             cacert=/home/runner/buildkit-certs/ca.crt
             cert=/home/runner/buildkit-certs/tls.crt
             key=/home/runner/buildkit-certs/tls.key
+      # Compile-validate the eBPF probe on the buildkit (the runners OOM on LLVM
+      # builds). Non-blocking while the probe's kernel wiring is iterated — a failure
+      # here surfaces the compiler errors without blocking the (no-op) image build.
+      - name: Validate eBPF compiles
+        id: ebpf
+        continue-on-error: true
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: agent
+          file: agent/Dockerfile
+          target: ebpf
+          push: false
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ebpf-cache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ebpf-cache,mode=max
       - name: Build and push agent image
         id: build-and-push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7

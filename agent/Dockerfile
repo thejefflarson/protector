@@ -11,6 +11,33 @@
 # Until the probe's kernel wiring is done (agent/README.md), the shipped agent runs
 # the no-op observer rather than crash-looping a half-wired loader.
 
+# --- eBPF compile validation (ADR-0014) ---------------------------------------
+# Compiles the BPF probe to bytecode. Needs nightly (build-std for the bpf target,
+# which has no prebuilt core), rust-src, and bpf-linker — which links against an LLVM
+# matching nightly's (LLVM 19), installed from apt.llvm.org since bookworm's default is
+# older. The BPF object is architecture-neutral; the kernel CO-RE-relocates it at load.
+# Built as a CI validation stage (the userspace image below doesn't depend on it yet —
+# the loader is wired once this compiles green).
+FROM rust:1-bookworm AS ebpf
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+    && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main" > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends llvm-19-dev libclang-19-dev clang-19 \
+    && rm -rf /var/lib/apt/lists/*
+ENV LLVM_SYS_191_PREFIX=/usr/lib/llvm-19
+RUN rustup toolchain install nightly --component rust-src --profile minimal \
+    && cargo +nightly install bpf-linker --locked
+WORKDIR /app
+COPY protector-agent-ebpf/ protector-agent-ebpf/
+WORKDIR /app/protector-agent-ebpf
+RUN --mount=type=cache,target=/app/protector-agent-ebpf/target,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo +nightly build --release
+
+# --- userspace agent ----------------------------------------------------------
 # bookworm-based to match the bookworm-slim runtime's glibc 2.36.
 FROM rust:1-bookworm AS builder
 WORKDIR /app

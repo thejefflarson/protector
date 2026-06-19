@@ -1,33 +1,31 @@
-//! eBPF programs for protector-agent (ADR-0014). NODE-BUILT: `no_std`, compiled for
-//! the bpf target with bpf-linker (see agent/README.md), not by the userspace build.
+//! eBPF programs for protector-agent (ADR-0014). `no_std`, built for the bpf target
+//! with bpf-linker (see agent/README.md / the Dockerfile `ebpf` stage).
 //!
 //! Phase-2 first probe: outbound connections. A kprobe on `security_socket_connect`
-//! (an LSM hook present across kernels — stable, unlike raw syscall ABIs) reads the
-//! destination and emits a [`ConnEvent`] to a ring buffer the userspace agent drains,
-//! resolves to a pod, and turns into a `NetworkConnection` behavior. Secret-read
-//! (`security_file_open` under secret mounts) and library-load probes follow.
-//!
-//! Design constraints (ADR-0014): observe only (never modify), aggregate cheaply, fail
-//! safe (a missing hook = fewer signals, never a crash).
+//! (an LSM hook stable across kernels) reads the IPv4 destination and emits a
+//! [`ConnEvent`] to a ring buffer the userspace agent drains, resolves to a pod, and
+//! turns into a `NetworkConnection` behavior. Observe-only; fail safe (a bad read
+//! drops the event, never errors the probe).
 
 #![no_std]
 #![no_main]
 
 use aya_ebpf::{
-    helpers::bpf_get_current_pid_tgid,
+    helpers::gen::bpf_probe_read_kernel,
     macros::{kprobe, map},
     maps::RingBuf,
     programs::ProbeContext,
 };
 
-/// One observed connection. `repr(C)` so the userspace agent reads the same layout.
+/// One observed connection. `repr(C)` so userspace reads the same layout.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ConnEvent {
-    /// Origin pid — userspace maps it via /proc/<pid>/cgroup → pod (see `pod.rs`).
+    /// Origin pid (userspace maps it via /proc/<pid>/cgroup → pod).
     pub pid: u32,
-    /// IPv4 destination (network byte order); 0 for non-IPv4 (skipped userspace-side).
+    /// IPv4 destination, network byte order.
     pub daddr: u32,
-    /// Destination port (host byte order).
+    /// Destination port, host byte order.
     pub dport: u16,
 }
 
@@ -35,31 +33,68 @@ pub struct ConnEvent {
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
-/// kprobe on `security_socket_connect(struct socket*, struct sockaddr*, int)`.
+// Minimal kernel sockaddr layout for the IPv4 case. We only touch the family and the
+// `sockaddr_in` address/port; reads are bounds-checked by `bpf_probe_read_kernel`.
+const AF_INET: u16 = 2;
+
+#[repr(C)]
+struct SockAddr {
+    sa_family: u16,
+}
+
+#[repr(C)]
+struct SockAddrIn {
+    sin_family: u16,
+    sin_port: u16, // network byte order
+    sin_addr: u32, // network byte order
+}
+
+/// kprobe on `security_socket_connect(struct socket *, struct sockaddr *address, int)`.
 #[kprobe]
 pub fn connect(ctx: ProbeContext) -> u32 {
-    match try_connect(&ctx) {
-        Ok(()) => 0,
-        Err(_) => 0, // fail safe — drop this event, never error the probe
-    }
+    let _ = try_connect(&ctx);
+    0 // always 0 — observe-only, never perturb the syscall
 }
 
 fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
-    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    // 2nd arg is `struct sockaddr *address`.
+    let addr: *const SockAddr = ctx.arg(1).ok_or(1i64)?;
 
-    // NODE-BUILT: read the destination from the sockaddr (2nd arg) with CO-RE
-    // bpf_probe_read on `sockaddr_in.sin_addr` / `sin_port`, guarding `sin_family ==
-    // AF_INET`. Sketched here; completed + verified on a kernel.
-    //   let addr: *const sockaddr = ctx.arg(1).ok_or(1)?;
-    //   let family = bpf_probe_read_kernel(&(*addr).sa_family)?;
-    //   if family != AF_INET { return Ok(()); }
-    //   let sin: *const sockaddr_in = addr.cast();
-    //   let daddr = bpf_probe_read_kernel(&(*sin).sin_addr.s_addr)?;
-    //   let dport = u16::from_be(bpf_probe_read_kernel(&(*sin).sin_port)?);
-    let (daddr, dport) = (0u32, 0u16);
+    let mut family: u16 = 0;
+    let rc = unsafe {
+        bpf_probe_read_kernel(
+            &mut family as *mut u16 as *mut core::ffi::c_void,
+            core::mem::size_of::<u16>() as u32,
+            &(*addr).sa_family as *const u16 as *const core::ffi::c_void,
+        )
+    };
+    if rc != 0 || family != AF_INET {
+        return Ok(());
+    }
 
+    let sin = addr as *const SockAddrIn;
+    let mut daddr: u32 = 0;
+    let mut dport: u16 = 0;
+    unsafe {
+        bpf_probe_read_kernel(
+            &mut daddr as *mut u32 as *mut core::ffi::c_void,
+            core::mem::size_of::<u32>() as u32,
+            &(*sin).sin_addr as *const u32 as *const core::ffi::c_void,
+        );
+        bpf_probe_read_kernel(
+            &mut dport as *mut u16 as *mut core::ffi::c_void,
+            core::mem::size_of::<u16>() as u32,
+            &(*sin).sin_port as *const u16 as *const core::ffi::c_void,
+        );
+    }
+
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     if let Some(mut slot) = EVENTS.reserve::<ConnEvent>(0) {
-        slot.write(ConnEvent { pid, daddr, dport });
+        slot.write(ConnEvent {
+            pid,
+            daddr,
+            dport: u16::from_be(dport),
+        });
         slot.submit(0);
     }
     Ok(())
