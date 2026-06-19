@@ -49,7 +49,7 @@ impl Adapter for RuntimeAdapter {
             graph.update_node(&key, |node| {
                 if let Node::Workload(w) = node {
                     w.runtime.push(RuntimeSignal {
-                        rule: event.rule.clone(),
+                        behavior: event.behavior.clone(),
                         provenance: Provenance::new(self.name(), SystemTime::now()),
                     });
                 }

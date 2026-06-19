@@ -252,13 +252,70 @@ pub enum Severity {
     Critical,
 }
 
+/// An observed runtime **behavior** — what a workload actually did, from any sensor
+/// (the first-party eBPF agent, Falco, …) through the tool-agnostic behavioral port
+/// (ADR-0003/0014). Typed so the engine reasons about the *signal*, not the source.
+/// Serde-tagged for the normalized ingest contract (`{"kind": "...", ...}`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Behavior {
+    /// A sensor rule fired (e.g. a Falco alert) — "something alarming, now."
+    Alert { rule: String },
+    /// An outbound connection the workload made; `internet` if it left the cluster.
+    NetworkConnection { peer: String, internet: bool },
+    /// A read of a mounted secret's contents.
+    SecretRead { secret: String },
+    /// A load of a shared library / dependency artifact.
+    LibraryLoaded { name: String },
+}
+
+impl Behavior {
+    /// Whether this behavior **corroborates** the action bar (ADR-0009): only an
+    /// alerting signal means "an attack is happening now." Mundane behaviors
+    /// (connections, reads, loads) are *evidence for the model*, never blanket
+    /// corroboration — otherwise every workload, which all make connections, would
+    /// corroborate everything.
+    pub fn is_alert(&self) -> bool {
+        matches!(self, Behavior::Alert { .. })
+    }
+
+    /// A one-line, human summary for the adjudication prompt.
+    pub fn summary(&self) -> String {
+        match self {
+            Behavior::Alert { rule } => format!("alert: {rule}"),
+            Behavior::NetworkConnection { peer, internet } => format!(
+                "connects to {peer}{}",
+                if *internet { " (INTERNET egress)" } else { "" }
+            ),
+            Behavior::SecretRead { secret } => format!("reads secret {secret}"),
+            Behavior::LibraryLoaded { name } => format!("loaded library {name}"),
+        }
+    }
+
+    /// A COARSE, stable key for the verdict-cache fingerprint. Mundane per-peer
+    /// connection churn must NOT bust the cache (that would re-judge every pass on a
+    /// slow model), so connections collapse to a scope token; stable facts (alerts,
+    /// libs, which secret) are kept verbatim.
+    pub fn fingerprint_key(&self) -> String {
+        match self {
+            Behavior::Alert { rule } => format!("alert:{rule}"),
+            Behavior::NetworkConnection { internet: true, .. } => "egress:internet".to_string(),
+            Behavior::NetworkConnection {
+                internet: false, ..
+            } => "egress:cluster".to_string(),
+            Behavior::SecretRead { secret } => format!("read:{secret}"),
+            Behavior::LibraryLoaded { name } => format!("lib:{name}"),
+        }
+    }
+}
+
 /// A live runtime signal corroborating that activity is happening now
 /// (RuntimeEvidence port) — the difference between "theoretically vulnerable" and
 /// "something is happening."
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSignal {
-    /// Adapter-defined rule/event identifier (e.g. a Falco rule name).
-    pub rule: String,
+    /// The observed behavior, from any sensor via the behavioral port (ADR-0014).
+    pub behavior: Behavior,
     pub provenance: Provenance,
 }
 

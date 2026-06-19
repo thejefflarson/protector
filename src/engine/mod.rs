@@ -618,7 +618,7 @@ pub async fn run_watch(
     if let Some(addr) = falco_addr {
         let events = runtime_events.clone();
         tokio::spawn(async move {
-            if let Err(error) = runtime::serve_falco(addr, events, falco_tx).await {
+            if let Err(error) = runtime::serve_runtime(addr, events, falco_tx).await {
                 tracing::error!(%error, "falco ingest stopped");
             }
         });

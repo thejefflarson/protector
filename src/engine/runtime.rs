@@ -25,6 +25,7 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 
+use super::graph::Behavior;
 use super::observe::RuntimeObservation;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
@@ -105,10 +106,13 @@ pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
     let fields = event.get("output_fields")?;
     let namespace = fields.get("k8s.ns.name")?.as_str()?.to_string();
     let pod = fields.get("k8s.pod.name")?.as_str()?.to_string();
+    // Falco's rule-fired alert maps to the Alert behavior — the corroborating
+    // "something alarming now" signal. It's one adapter onto the behavioral port
+    // (ADR-0014); the first-party eBPF agent posts the richer behaviors directly.
     Some(RuntimeObservation {
         namespace,
         pod,
-        rule,
+        behavior: Behavior::Alert { rule },
     })
 }
 
@@ -130,21 +134,42 @@ async fn ingest(
     StatusCode::OK
 }
 
-/// Serve the Falco ingest endpoint (falcosidekick POSTs alerts here). This is the
-/// cluster-facing glue; the store and parser it drives are what the tests cover.
-pub async fn serve_falco(
+/// Receive a batch of normalized [`RuntimeObservation`]s on the tool-agnostic
+/// behavioral port (ADR-0014) — the shape the first-party eBPF agent (and any sensor
+/// with a translation adapter) POSTs. Each is recorded and the engine is woken once.
+async fn ingest_behavior(
+    State((events, notify)): State<IngestState>,
+    Json(observations): Json<Vec<RuntimeObservation>>,
+) -> StatusCode {
+    let any = !observations.is_empty();
+    for obs in observations {
+        events.record(obs);
+    }
+    if any {
+        let _ = notify.try_send(());
+    }
+    StatusCode::OK
+}
+
+/// Serve the runtime-evidence ingest. Two routes onto the same behavioral port
+/// (ADR-0014): `/` accepts a single Falco/falcosidekick alert (translated to an
+/// `Alert` behavior), and `/behavior` accepts a batch of normalized observations from
+/// the first-party eBPF agent or any sensor. This is the cluster-facing glue; the
+/// store and parser it drives are what the tests cover.
+pub async fn serve_runtime(
     addr: SocketAddr,
     events: Arc<RuntimeEvents>,
     notify: Sender<()>,
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", post(ingest))
-        // A real falcosidekick alert is small; cap the body so an unauthenticated
-        // client can't OOM the engine with a giant POST (mirrors the webhook server).
-        .layer(DefaultBodyLimit::max(64 * 1024))
+        .route("/behavior", post(ingest_behavior))
+        // A real alert/batch is small; cap the body so an unauthenticated client can't
+        // OOM the engine with a giant POST (mirrors the webhook server).
+        .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state((events, notify));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "falco ingest listening");
+    tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior)");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -158,7 +183,7 @@ mod tests {
         RuntimeObservation {
             namespace: "app".into(),
             pod: "web".into(),
-            rule: rule.into(),
+            behavior: Behavior::Alert { rule: rule.into() },
         }
     }
 
@@ -183,7 +208,7 @@ mod tests {
         store.record_at(t0 + Duration::from_secs(400), obs("new"));
         let current = store.current_at(t0 + Duration::from_secs(400));
         assert_eq!(current.len(), 1);
-        assert_eq!(current[0].rule, "new");
+        assert_eq!(current[0].behavior, Behavior::Alert { rule: "new".into() });
     }
 
     #[test]
@@ -200,7 +225,12 @@ mod tests {
         let parsed = parse_falco_event(&event).expect("parses");
         assert_eq!(parsed.namespace, "app");
         assert_eq!(parsed.pod, "web-7d8f");
-        assert_eq!(parsed.rule, "Terminal shell in container");
+        assert_eq!(
+            parsed.behavior,
+            Behavior::Alert {
+                rule: "Terminal shell in container".into()
+            }
+        );
     }
 
     #[test]
@@ -231,5 +261,52 @@ mod tests {
             "output_fields": {"proc.name": "bash"}
         });
         assert!(parse_falco_event(&event).is_none());
+    }
+
+    #[test]
+    fn normalized_behavior_batch_deserializes_from_the_wire_contract() {
+        // The shape the first-party eBPF agent (or any sensor) POSTs to /behavior.
+        let body = json!([
+            {"namespace": "app", "pod": "web",
+             "behavior": {"kind": "network_connection", "peer": "1.2.3.4:443", "internet": true}},
+            {"namespace": "app", "pod": "web",
+             "behavior": {"kind": "secret_read", "secret": "app/session-key"}},
+            {"namespace": "app", "pod": "web",
+             "behavior": {"kind": "library_loaded", "name": "log4j-core-2.14.jar"}}
+        ]);
+        let obs: Vec<RuntimeObservation> = serde_json::from_value(body).expect("deserializes");
+        assert_eq!(obs.len(), 3);
+        assert_eq!(
+            obs[0].behavior,
+            Behavior::NetworkConnection {
+                peer: "1.2.3.4:443".into(),
+                internet: true
+            }
+        );
+        // A mundane behavior must NOT corroborate — only alerts do (else everything,
+        // which all make connections, would fire the action bar).
+        assert!(!obs[0].behavior.is_alert());
+        assert!(!obs[1].behavior.is_alert());
+    }
+
+    #[test]
+    fn connection_fingerprints_are_coarse_so_peer_churn_does_not_rejudge() {
+        // Different peers collapse to the same coarse key, so mundane connection churn
+        // doesn't bust the verdict cache and re-judge every pass on the slow model.
+        let a = Behavior::NetworkConnection {
+            peer: "10.0.0.1:5432".into(),
+            internet: false,
+        };
+        let b = Behavior::NetworkConnection {
+            peer: "10.0.0.2:5432".into(),
+            internet: false,
+        };
+        assert_eq!(a.fingerprint_key(), b.fingerprint_key());
+        assert_eq!(a.fingerprint_key(), "egress:cluster");
+        // But a stable fact (a loaded library) keeps its identity in the fingerprint.
+        let lib = Behavior::LibraryLoaded {
+            name: "openssl".into(),
+        };
+        assert_eq!(lib.fingerprint_key(), "lib:openssl");
     }
 }

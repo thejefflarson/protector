@@ -210,12 +210,16 @@ fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     )
 }
 
-/// Whether `entry` has a live runtime signal — the `corroborated-now` predicate
-/// (RuntimeEvidence port). True when the entry workload carries any runtime signal.
+/// Whether `entry` has a live **alerting** runtime signal — the `corroborated-now`
+/// predicate (RuntimeEvidence port). Only alert behaviors (a Falco critical, etc.)
+/// corroborate: mundane behaviors (connections, secret reads, library loads) are
+/// evidence for the model, not "an attack is happening now" — every workload makes
+/// connections, so treating those as corroboration would fire the action bar on
+/// everything (ADR-0014).
 fn entry_corroborated(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     matches!(
         graph.inner().node_weight(entry),
-        Some(Node::Workload(w)) if !w.runtime.is_empty()
+        Some(Node::Workload(w)) if w.runtime.iter().any(|s| s.behavior.is_alert())
     )
 }
 
@@ -906,7 +910,9 @@ mod tests {
             runtime_events: vec![RuntimeObservation {
                 namespace: "app".into(),
                 pod: "web".into(),
-                rule: "Outbound connection to C2".into(),
+                behavior: crate::engine::graph::Behavior::Alert {
+                    rule: "Outbound connection to C2".into(),
+                },
             }],
             ..Default::default()
         };

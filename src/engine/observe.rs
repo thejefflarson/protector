@@ -37,15 +37,16 @@ pub struct ImageVulnerabilities {
     pub vulnerabilities: Vec<Vulnerability>,
 }
 
-/// A normalized live runtime event about a workload — the RuntimeEvidence port's
-/// input shape. A runtime adapter (Falco, Tetragon, …) maps its events into this;
-/// the graph sees only the normalized signal, not a vendor type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A normalized live runtime event about a workload — the behavioral port's input
+/// shape (ADR-0014). Any sensor (the first-party eBPF agent, Falco, Tetragon, …) maps
+/// its events into this; the graph sees only the normalized signal, not a vendor type.
+/// `Deserialize` so a sensor can POST it directly to the normalized ingest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeObservation {
     pub namespace: String,
     pub pod: String,
-    /// The rule/event identifier that fired (e.g. a Falco rule name).
-    pub rule: String,
+    /// What the workload actually did.
+    pub behavior: super::graph::Behavior,
 }
 
 /// A point-in-time view of the cluster objects this slice's adapters consume.
