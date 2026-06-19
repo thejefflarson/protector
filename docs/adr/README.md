@@ -21,5 +21,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0011](0011-positive-judgement.md) | The model corroborates positively; operator access is out of scope, defended in depth | Superseded in part by 0013 |
 | [0012](0012-exposure-observed-or-declared.md) | Exposure is observed where possible, declared (annotation) where it can't be — tunnels | Accepted |
 | [0013](0013-proof-winnows-model-decides.md) | Proof winnows the search space; the model makes the exploitability call (positive gate + breach-relevance) | Accepted |
+| [0014](0014-behavioral-telemetry-ebpf.md) | First-party behavioral telemetry via eBPF, behind a tool-agnostic port (potential vs actual) | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.
