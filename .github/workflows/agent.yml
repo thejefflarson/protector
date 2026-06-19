@@ -1,0 +1,89 @@
+name: Agent
+# Build (and on a tag, publish + sign) the protector-agent image — the first-party
+# eBPF behavioral collector (ADR-0014). Separate from the engine image: it's a
+# different binary with a different lifecycle. Only triggers on changes under agent/
+# so engine-only changes don't rebuild it. Like the engine image, push+sign happen
+# ONLY on a version tag; PRs do a build-only validation (no push).
+permissions:
+  contents: read
+on:
+  push:
+    branches: ["main"]
+    tags: ['v*.*.*']
+    paths: ["agent/**", ".github/workflows/agent.yml"]
+  pull_request:
+    branches: ["main"]
+    paths: ["agent/**", ".github/workflows/agent.yml"]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-agent
+# One agent build per ref; a newer push supersedes an in-flight one.
+concurrency:
+  group: agent-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    runs-on: protector-runners
+    # Never run forked-PR code on the self-hosted runners (arbitrary code execution on
+    # the build infra). Push events and same-repo PRs only — mirrors rust.yml.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Log into registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Bare semver (v0.3.30 -> 0.3.30) so the tag matches the chart's appVersion
+          # default — the agent versions in lockstep with the engine.
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+        with:
+          driver: remote
+          endpoint: tcp://buildkit.dev.svc.cluster.local:1234
+          driver-opts: |
+            cacert=/home/runner/buildkit-certs/ca.crt
+            cert=/home/runner/buildkit-certs/tls.crt
+            key=/home/runner/buildkit-certs/tls.key
+      - name: Build and push agent image
+        id: build-and-push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: agent
+          file: agent/Dockerfile
+          push: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache,mode=max
+          provenance: mode=max
+          sbom: true
+      - name: Install cosign
+        if: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the published image
+        if: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "missing/invalid build digest: '$DIGEST'" >&2; exit 1; }
+          echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}

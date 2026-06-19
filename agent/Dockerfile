@@ -1,0 +1,41 @@
+# protector-agent image (ADR-0014). Build context is `agent/`.
+#
+# Current build: the USERSPACE agent (default features = no-op observer). It's a
+# real, deployable arm64 image — useful for shadow bring-up: it validates scheduling,
+# the scoped caps, hostPID, and that the report path reaches the engine's /behavior.
+#
+# The eBPF builder stage lands with the completed probe: a stage with `bpf-linker`
+# + the `bpfel-unknown-none` target compiling `protector-agent-ebpf` to a BPF object
+# (CO-RE bytecode — architecture-neutral, relocated against the node's BTF at load),
+# then the userspace built `--features ebpf` with that object `include_bytes!`'d in.
+# Until the probe's kernel wiring is done (agent/README.md), the shipped agent runs
+# the no-op observer rather than crash-looping a half-wired loader.
+
+# bookworm-based to match the bookworm-slim runtime's glibc 2.36.
+FROM rust:1-bookworm AS builder
+WORKDIR /app
+# reqwest's rustls provider (aws-lc-rs → aws-lc-sys) is a C build needing cmake; pin
+# the C standard to gnu17 so a C23-defaulting gcc doesn't emit glibc-2.38 `__isoc23_*`
+# symbols that fail to link against the 2.36 runtime (same fix as the engine image).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
+ENV CFLAGS=-std=gnu17
+COPY protector-agent/ protector-agent/
+WORKDIR /app/protector-agent
+RUN --mount=type=cache,target=/app/protector-agent/target,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release && cp target/release/protector-agent /app/protector-agent-bin
+
+# Slim runtime. The image runs as non-root; the eBPF capabilities it will need are
+# granted at RUNTIME by the DaemonSet's securityContext (chart), not baked in.
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin nonroot
+COPY --from=builder --chown=65532:65532 /app/protector-agent-bin /app/protector-agent
+USER 65532:65532
+HEALTHCHECK NONE
+ENTRYPOINT ["/app/protector-agent"]
