@@ -22,29 +22,19 @@ concurrency:
   group: agent-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  # Compile the BPF programs to bytecode on a free hosted runner. BPF is its own ISA
-  # (architecture-neutral, CO-RE-relocated against the node's BTF at load), so x86_64
-  # CI produces the object the arm64 Pis JIT — no need to build on the cluster. Uses
-  # bpf-linker's PREBUILT binary: building it from source pulls LLVM, the heavy step
-  # that OOM'd the homelab. This is the eBPF compile gate.
+  # Compile the BPF programs to bytecode on the self-hosted runners — their image
+  # (../runner) bakes in nightly + rust-src + a prebuilt bpf-linker (ADR-0014), so the
+  # job is just the compile (the tiny eBPF crate; the LLVM-heavy bpf-linker build was
+  # done once at image-build time). BPF is architecture-neutral bytecode, CO-RE-
+  # relocated against the node's BTF at load.
   ebpf:
-    runs-on: ubuntu-latest
+    runs-on: protector-runners
+    # Self-hosted + persistent: never execute forked-PR code (mirrors the docker job).
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install eBPF toolchain
-        run: |
-          set -euxo pipefail
-          # nightly + rust-src: the bpf target has no prebuilt core (build-std).
-          rustup toolchain install nightly --profile minimal --component rust-src
-          # Prebuilt bpf-linker (sha256-pinned), not a source/LLVM build.
-          ver=0.10.4
-          sha=4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015
-          curl -fsSL -o /tmp/bl.tar.zst \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${ver}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
-          echo "${sha}  /tmp/bl.tar.zst" | sha256sum -c -
-          tar --zstd -xf /tmp/bl.tar.zst -C /tmp
-          install -m 0755 "$(find /tmp -maxdepth 2 -name bpf-linker -type f | head -1)" "$HOME/.cargo/bin/bpf-linker"
-          bpf-linker --version
       - name: Compile eBPF programs
         working-directory: agent/protector-agent-ebpf
         run: cargo +nightly build --release
