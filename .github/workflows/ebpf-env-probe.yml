@@ -2,11 +2,13 @@
 # vmlinux bindings (needed for the secret-read probe's bpf_d_path)? Manually triggered;
 # safe (read-only probe). Delete once the secret-read build approach is settled.
 name: ebpf-env-probe
-on: workflow_dispatch
+on:
+  push:
+    branches: ["feat/secret-read-probe-phase2"]
+    paths: [".github/workflows/ebpf-env-probe.yml"]
 jobs:
   probe:
     runs-on: protector-runners
-    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Probe eBPF build environment
         run: |
