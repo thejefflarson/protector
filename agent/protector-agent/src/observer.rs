@@ -38,8 +38,6 @@ mod ebpf {
     use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use aya::maps::RingBuf;
     use aya::programs::{FEntry, KProbe};
     use aya::{Btf, Ebpf};
@@ -49,16 +47,18 @@ mod ebpf {
     use crate::pod::parse_pod_uid;
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
-    use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT, KIND_FILE_OPEN};
+    use protector_agent_common::{
+        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, PATH_CAP,
+    };
     use protector_behavior::Behavior;
 
     /// This sensor's identity, carried into each observation's provenance so the engine
     /// can tell agent signals from Falco's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
 
-    /// Spike phase-1 counter: file-open events seen via the fentry probe, logged
-    /// periodically to prove it fires. Phase 2 turns secret-mount opens into SecretRead.
-    static FILE_OPENS: AtomicU64 = AtomicU64::new(0);
+    /// The kubelet's marker for a mounted Secret volume; the segment after it is the
+    /// secret name + key the workload read.
+    const SECRET_MARKER: &str = "kubernetes.io~secret/";
 
     /// The probes to load and attach: (program name in the object, kernel hook). Adding
     /// a probe is one row here plus a decode arm in `decode` — no new control flow.
@@ -149,16 +149,12 @@ mod ebpf {
                     Self::connect(&ev)
                 }
                 KIND_FILE_OPEN => {
-                    // Spike phase 1: count + periodically log to prove the fentry probe
-                    // fires; emit nothing to the engine until phase 2 adds the path.
-                    let n = FILE_OPENS.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n % 5000 == 0 {
-                        tracing::info!(
-                            file_opens = n,
-                            "fentry security_file_open firing (secret-read spike)"
-                        );
+                    if data.len() < std::mem::size_of::<FileEvent>() {
+                        return None;
                     }
-                    None
+                    // SAFETY: kind says this is a FileEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
+                    Self::secret_read(&ev)
                 }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
@@ -184,6 +180,37 @@ mod ebpf {
                     internet: !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
                 },
             })
+        }
+
+        /// Map a secret-mount file open to a SecretRead, attributed by pod UID. The eBPF
+        /// side already filtered to secret mounts, so every FileEvent is a secret read.
+        /// Drops events whose cgroup isn't a pod.
+        fn secret_read(ev: &FileEvent) -> Option<RuntimeObservation> {
+            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
+            let uid = parse_pod_uid(&cgroup)?;
+            let len = (ev.len as usize).min(PATH_CAP);
+            let raw = String::from_utf8_lossy(&ev.path[..len]);
+            let path = raw.trim_end_matches('\0');
+            Some(RuntimeObservation {
+                namespace: String::new(),
+                pod: String::new(),
+                pod_uid: Some(uid),
+                source: Some(SOURCE.into()),
+                observed_at_ms: now_ms(),
+                behavior: Behavior::SecretRead {
+                    secret: secret_name_from_path(path),
+                },
+            })
+        }
+    }
+
+    /// Reduce a kubelet secret-mount path to a readable id:
+    /// `…/kubernetes.io~secret/<name>/<key>` → `<name>/<key>`. Falls back to the full
+    /// path if the marker is absent (shouldn't happen — the probe filtered on it).
+    fn secret_name_from_path(path: &str) -> String {
+        match path.find(SECRET_MARKER) {
+            Some(i) => path[i + SECRET_MARKER.len()..].to_string(),
+            None => path.to_string(),
         }
     }
 
