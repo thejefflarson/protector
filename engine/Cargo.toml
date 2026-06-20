@@ -16,6 +16,7 @@ opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 petgraph = "0.8.3"
+protector-behavior = { path = "../behavior" }
 regex = "1.12.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 rustls = { version = "0.23.40", features = ["aws_lc_rs"] }

@@ -37,37 +37,11 @@ pub struct ImageVulnerabilities {
     pub vulnerabilities: Vec<Vulnerability>,
 }
 
-/// A normalized live runtime event about a workload — the behavioral port's input
-/// shape (ADR-0014). Any sensor (the first-party eBPF agent, Falco, Tetragon, …) maps
-/// its events into this; the graph sees only the normalized signal, not a vendor type.
-/// `Deserialize` so a sensor can POST it directly to the normalized ingest.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeObservation {
-    #[serde(default)]
-    pub namespace: String,
-    #[serde(default)]
-    pub pod: String,
-    /// The pod UID a sensor attributed the event to from the cgroup (the eBPF agent
-    /// sets this and leaves namespace/pod empty; Falco sets namespace/pod directly).
-    /// The engine resolves UID → namespace/pod via its own pod watch, so the agent
-    /// needs no cluster credentials and stays node-local (ADR-0014).
-    #[serde(default)]
-    pub pod_uid: Option<String>,
-    /// Which sensor observed this — `"protector-agent"`, `"falco"`, … Carried into the
-    /// signal's [`Provenance`](super::graph::Provenance) so two sensors observing the
-    /// same activity are corroboration, not one indistinguishable `"runtime"` source
-    /// (ADR-0003). Defaulted (older agents omit it) → the adapter falls back to its name.
-    #[serde(default)]
-    pub source: Option<String>,
-    /// When the sensor observed it, as Unix epoch milliseconds. Freshness is a
-    /// first-class correctness concern (ADR-0002), so we carry the *sensor's*
-    /// observation time rather than re-stamping at adapter-run time (which can lag the
-    /// real event by a batch interval + a judging pass). Defaulted → adapter uses now().
-    #[serde(default)]
-    pub observed_at_ms: Option<u64>,
-    /// What the workload actually did.
-    pub behavior: super::graph::Behavior,
-}
+/// The behavioral port's input shape (ADR-0014), defined in the shared
+/// [`protector_behavior`] crate so the engine and the first-party agent share one
+/// definition rather than a hand-synced duplicate. Re-exported here because the Observer
+/// and adapters refer to it as `observe::RuntimeObservation`.
+pub use protector_behavior::RuntimeObservation;
 
 /// A point-in-time view of the cluster objects this slice's adapters consume.
 #[derive(Debug, Default, Clone)]

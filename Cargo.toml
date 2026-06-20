@@ -5,4 +5,4 @@
 # path instead).
 [workspace]
 resolver = "2"
-members = ["engine"]
+members = ["engine", "behavior"]
