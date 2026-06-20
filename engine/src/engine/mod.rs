@@ -671,38 +671,21 @@ pub async fn run_watch(
     spawn_reflector!(clusterroles_w, ClusterRole);
     spawn_reflector!(clusterrolebindings_w, ClusterRoleBinding);
 
-    // A behavioral-only wake is debounced into at most one pass per this interval.
-    // Behavioral reports are TTL'd evidence (300s) and the model is fingerprint-cached,
-    // so processing each report the instant it lands just burns a graph rebuild + the
-    // synchronous CRD lists below for nothing — and the agent can emit a high volume.
-    // A cluster change (graph *shape* is urgent) is never debounced and cuts the wait
-    // short. Well under the evidence TTL, so freshness is unaffected.
-    const BEHAVIORAL_DEBOUNCE: Duration = Duration::from_secs(5);
     tracing::info!("engine: watching cluster (event-driven)");
     loop {
-        // Wake on either a cluster change or a behavioral report.
-        let woke_on_change = tokio::select! {
-            next = change_rx.recv() => { if next.is_none() { break } true }
-            _ = runtime_rx.recv() => false,
-        };
-        // Coalesce an already-queued burst (a Deployment rollout, a flurry of reports);
-        // remember whether any of it was a cluster change.
-        let mut cluster_changed = woke_on_change;
-        while change_rx.try_recv().is_ok() {
-            cluster_changed = true;
+        // Wake on either a cluster change or a behavioral report. The behavioral channel
+        // only fires when the ingest actually changed the evidence store (a new
+        // observation, not a repeat) — see `ingest_behavior`. So a report that tells us
+        // nothing new never reaches here, and we don't burn a graph rebuild + CRD lists
+        // for it; mundane churn (the same connections, again) is dropped at ingest.
+        tokio::select! {
+            next = change_rx.recv() => if next.is_none() { break },
+            _ = runtime_rx.recv() => {},
         }
+        // Coalesce an already-queued burst (a Deployment rollout, or several material
+        // reports) into one pass.
+        while change_rx.try_recv().is_ok() {}
         while runtime_rx.try_recv().is_ok() {}
-
-        // Behavioral-only wake: wait briefly so a flood collapses into one pass, but let
-        // a real cluster change interrupt the wait immediately.
-        if !cluster_changed {
-            tokio::select! {
-                next = change_rx.recv() => if next.is_none() { break },
-                _ = tokio::time::sleep(BEHAVIORAL_DEBOUNCE) => {},
-            }
-            while change_rx.try_recv().is_ok() {}
-            while runtime_rx.try_recv().is_ok() {}
-        }
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;
