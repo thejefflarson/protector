@@ -5,9 +5,9 @@
 
 use std::time::Duration;
 
-use crate::behavior::Observation;
+use protector_behavior::RuntimeObservation;
 
-/// POSTs batches of [`Observation`]s to `{base}/behavior`.
+/// POSTs batches of [`RuntimeObservation`]s to `{base}/behavior`.
 pub struct Reporter {
     client: reqwest::Client,
     url: String,
@@ -26,19 +26,28 @@ impl Reporter {
         })
     }
 
-    /// Send one batch. Best-effort: a failed POST is logged and dropped — behavioral
-    /// evidence is additive, so a lost batch costs a little freshness, never
-    /// correctness, and must never wedge the agent.
-    pub async fn send(&self, batch: &[Observation]) {
+    /// Send one batch; returns how many observations were accepted (0 on failure or an
+    /// empty batch). Best-effort: a failed POST is logged and dropped — behavioral
+    /// evidence is additive, so a lost batch costs a little freshness, never correctness,
+    /// and must never wedge the agent. The caller rolls the count into an interval
+    /// heartbeat; per-send detail stays at debug.
+    pub async fn send(&self, batch: &[RuntimeObservation]) -> usize {
         if batch.is_empty() {
-            return;
+            return 0;
         }
         match self.client.post(&self.url).json(batch).send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::debug!(n = batch.len(), "reported behavioral observations");
+                batch.len()
             }
-            Ok(resp) => tracing::warn!(status = %resp.status(), "behavior ingest rejected batch"),
-            Err(error) => tracing::warn!(%error, "behavior ingest unreachable"),
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "behavior ingest rejected batch");
+                0
+            }
+            Err(error) => {
+                tracing::warn!(%error, "behavior ingest unreachable");
+                0
+            }
         }
     }
 }

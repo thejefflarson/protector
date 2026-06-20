@@ -3,11 +3,11 @@
 //! Two builds. The default (no `ebpf` feature) is a no-op so the userspace skeleton —
 //! the report path, batching, pod resolution, the wire contract — compiles and unit-
 //! tests without a kernel or bpf-linker. With `--features ebpf` (built on a node) the
-//! [`EbpfObserver`] loads the real probes. Both drive the same `Sender<Observation>`.
+//! [`EbpfObserver`] loads the real probes. Both drive the same
+//! `Sender<RuntimeObservation>`.
 
+use protector_behavior::RuntimeObservation;
 use tokio::sync::mpsc::Sender;
-
-use crate::behavior::Observation;
 
 /// Default observer: collects nothing. The real collection is the eBPF probes; this
 /// keeps the binary runnable (healthy DaemonSet, exercisable report path) when built
@@ -15,7 +15,7 @@ use crate::behavior::Observation;
 pub struct NoopObserver;
 
 impl NoopObserver {
-    pub async fn run(self, _tx: Sender<Observation>) {
+    pub async fn run(self, _tx: Sender<RuntimeObservation>) {
         tracing::warn!(
             "built without the `ebpf` feature — no behavioral collection. Rebuild with \
              `--features ebpf` on a node (needs bpf-linker) to load the probes."
@@ -44,34 +44,15 @@ mod ebpf {
     use tokio::io::unix::AsyncFd;
 
     use super::*;
-    use crate::behavior::Behavior;
     use crate::pod::parse_pod_uid;
+    // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
+    // kernel↔userspace byte contract can't drift (ADR-0014).
+    use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT};
+    use protector_behavior::Behavior;
 
     /// This sensor's identity, carried into each observation's provenance so the engine
     /// can tell agent signals from Falco's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
-
-    // Mirror of the eBPF crate's wire constants/layouts (same `repr(C)`). Kept in sync
-    // by hand — the kernel↔userspace contract is the byte layout, like the JSON contract
-    // with the engine (see behavior.rs). KIND_* must match protector-agent-ebpf.
-    const KIND_CONNECT: u32 = 1;
-
-    /// Mirror of the eBPF `EventHeader` — the shared prefix at offset 0 of every event.
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct EventHeader {
-        kind: u32,
-        pid: u32,
-    }
-
-    /// Mirror of the eBPF `ConnEvent`.
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct ConnEvent {
-        header: EventHeader,
-        daddr: u32, // network byte order
-        dport: u16, // host byte order
-    }
 
     /// The probes to load and attach: (program name in the object, kernel hook). Adding
     /// a probe is one row here plus a decode arm in `decode` — no new control flow.
@@ -80,7 +61,7 @@ mod ebpf {
     pub struct EbpfObserver;
 
     impl EbpfObserver {
-        pub async fn run(self, tx: Sender<Observation>) -> anyhow::Result<()> {
+        pub async fn run(self, tx: Sender<RuntimeObservation>) -> anyhow::Result<()> {
             // The BPF object is compiled + embedded by build.rs under the `ebpf` feature.
             let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
                 env!("OUT_DIR"),
@@ -121,7 +102,7 @@ mod ebpf {
         /// Read an event's header, dispatch on its kind, and turn it into an observation.
         /// Returns `None` for a truncated event, an unknown kind, or a pid that doesn't
         /// resolve to a pod (host process) — all dropped, never fatal.
-        fn decode(data: &[u8]) -> Option<Observation> {
+        fn decode(data: &[u8]) -> Option<RuntimeObservation> {
             if data.len() < std::mem::size_of::<EventHeader>() {
                 return None;
             }
@@ -141,14 +122,17 @@ mod ebpf {
         }
 
         /// Map a connect event to an observation attributed by pod UID (the engine
-        /// resolves UID → namespace/pod). Drops events whose cgroup isn't a pod.
-        fn connect(ev: &ConnEvent) -> Option<Observation> {
+        /// resolves UID → namespace/pod, so namespace/pod are left empty here). Drops
+        /// events whose cgroup isn't a pod.
+        fn connect(ev: &ConnEvent) -> Option<RuntimeObservation> {
             let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
             let uid = parse_pod_uid(&cgroup)?;
             // daddr's bytes are the network-order octets; to_ne_bytes on LE gives them
             // in [a,b,c,d] order, which is what Ipv4Addr::from([u8;4]) wants.
             let ip = Ipv4Addr::from(ev.daddr.to_ne_bytes());
-            Some(Observation {
+            Some(RuntimeObservation {
+                namespace: String::new(),
+                pod: String::new(),
                 pod_uid: Some(uid),
                 source: Some(SOURCE.into()),
                 observed_at_ms: now_ms(),

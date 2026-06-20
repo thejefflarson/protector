@@ -1,0 +1,13 @@
+# The agent is its OWN workspace, separate from the engine's, so its eBPF toolchain
+# (nightly + the bpf target) can never reach the engine's stable build. The userspace
+# crates here build on stable+host. The shared behavioral wire types live in the engine
+# tree's `behavior` crate, referenced by path (../../behavior).
+[workspace]
+resolver = "2"
+members = ["protector-agent", "common"]
+# The eBPF crate is a standalone bpf-target build (nightly + build-std + bpf-linker),
+# compiled by protector-agent/build.rs under `--features ebpf`. It is EXCLUDED from the
+# workspace so (a) its bpf target/nightly never touch the userspace crates' stable build,
+# and (b) it keeps its own target dir, which build.rs reads. `cargo build`/`cargo test`
+# here operate on the userspace crates only.
+exclude = ["protector-agent-ebpf"]

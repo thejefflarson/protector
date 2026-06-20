@@ -163,10 +163,12 @@ mod tests {
     #[test]
     fn only_alert_corroborates() {
         assert!(Behavior::Alert { rule: "x".into() }.is_alert());
-        assert!(!Behavior::NetworkConnection {
-            peer: "p".into(),
-            internet: true
-        }
-        .is_alert());
+        assert!(
+            !Behavior::NetworkConnection {
+                peer: "p".into(),
+                internet: true
+            }
+            .is_alert()
+        );
     }
 }

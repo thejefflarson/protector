@@ -663,12 +663,23 @@ dependencies = [
  "anyhow",
  "aya",
  "aya-log",
+ "protector-agent-common",
+ "protector-behavior",
  "reqwest",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "protector-agent-common"
+version = "0.1.0"
+
+[[package]]
+name = "protector-behavior"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

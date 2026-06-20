@@ -21,33 +21,9 @@ use aya_ebpf::{
     maps::RingBuf,
     programs::ProbeContext,
 };
-
-/// Event-kind discriminators. Stable wire values shared with userspace (the userspace
-/// `observer` mirrors them); never renumber an existing one.
-pub const KIND_CONNECT: u32 = 1;
-// Next probes: KIND_SECRET_READ = 2, KIND_LIBRARY_LOAD = 3.
-
-/// The fixed prefix of every event in [`EVENTS`]. `repr(C)`, at offset 0 of each body,
-/// so userspace can read `kind` (and `pid`) before it knows which body follows. `pid`
-/// is common to every event (userspace maps it via /proc/<pid>/cgroup → pod).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EventHeader {
-    pub kind: u32,
-    pub pid: u32,
-}
-
-/// One observed connection (kind [`KIND_CONNECT`]). `repr(C)`; `header` first so the
-/// shared prefix is at offset 0.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ConnEvent {
-    pub header: EventHeader,
-    /// IPv4 destination, network byte order.
-    pub daddr: u32,
-    /// Destination port, host byte order.
-    pub dport: u16,
-}
+// The event layouts + kind discriminators are shared verbatim with the userspace loader
+// via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
+use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT};
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
 #[map]

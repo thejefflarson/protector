@@ -1,4 +1,6 @@
-# protector-agent image (ADR-0014). Build context is `agent/`.
+# protector-agent image (ADR-0014). Build context is the REPO ROOT — the agent's
+# userspace crate path-depends on ../../behavior (the shared wire crate, used by the
+# engine too), which lives outside agent/. Build with `-f agent/Dockerfile .`.
 #
 # Builds the agent WITH the eBPF probe (`--features ebpf`): the builder stage carries
 # the bpf toolchain (prebuilt bpf-linker + nightly + rust-src), and the userspace
@@ -28,15 +30,19 @@ RUN set -eux; \
     install -m 0755 "$(find /tmp -maxdepth 2 -name bpf-linker -type f | head -1)" /usr/local/bin/bpf-linker; \
     rm /tmp/bl.tar.zst
 RUN rustup toolchain install nightly --component rust-src --profile minimal
-# Both crates: build.rs compiles ../protector-agent-ebpf during the userspace build.
-COPY protector-agent/ protector-agent/
-COPY protector-agent-ebpf/ protector-agent-ebpf/
-WORKDIR /app/protector-agent
-RUN --mount=type=cache,target=/app/protector-agent/target,sharing=locked \
-    --mount=type=cache,target=/app/protector-agent-ebpf/target,sharing=locked \
+# The agent workspace (protector-agent + common + the excluded ebpf crate) and the shared
+# behavior crate it depends on. build.rs compiles agent/protector-agent-ebpf during the
+# userspace build.
+COPY agent/ agent/
+COPY behavior/ behavior/
+WORKDIR /app/agent
+# Workspace target is /app/agent/target; the excluded ebpf crate keeps its own.
+RUN --mount=type=cache,target=/app/agent/target,sharing=locked \
+    --mount=type=cache,target=/app/agent/protector-agent-ebpf/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release --features ebpf && cp target/release/protector-agent /app/protector-agent-bin
+    cargo build --release -p protector-agent --features ebpf \
+    && cp target/release/protector-agent /app/protector-agent-bin
 
 # Slim runtime. The image runs as non-root; the eBPF capabilities it needs are granted
 # at RUNTIME by the DaemonSet's securityContext (chart), not baked in.
