@@ -22,3 +22,11 @@ jobs:
           echo "== passwordless sudo (for apt installs)? =="
           (sudo -n true 2>/dev/null && echo "sudo: ok") || echo "sudo: NO"
           echo "== rust =="; cargo --version 2>&1 || true; rustc --version 2>&1 || true
+      - name: Stage node BTF for upload
+        run: cp /sys/kernel/btf/vmlinux "$RUNNER_TEMP/vmlinux" && ls -la "$RUNNER_TEMP/vmlinux"
+      - name: Upload node BTF
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-btf
+          path: ${{ runner.temp }}/vmlinux
+          retention-days: 1
