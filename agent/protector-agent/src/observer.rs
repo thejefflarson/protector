@@ -56,10 +56,6 @@ mod ebpf {
     /// can tell agent signals from Falco's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
 
-    /// The kubelet's marker for a mounted Secret volume; the segment after it is the
-    /// secret name + key the workload read.
-    const SECRET_MARKER: &str = "kubernetes.io~secret/";
-
     /// The probes to load and attach: (program name in the object, kernel hook). Adding
     /// a probe is one row here plus a decode arm in `decode` — no new control flow.
     const PROBES: &[(&str, &str)] = &[("connect", "security_socket_connect")];
@@ -154,7 +150,7 @@ mod ebpf {
                     }
                     // SAFETY: kind says this is a FileEvent of exactly this layout.
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
-                    Self::secret_read(&ev)
+                    Self::file_read(&ev)
                 }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
@@ -182,38 +178,28 @@ mod ebpf {
             })
         }
 
-        /// Map a secret-mount file open to a SecretRead, attributed by pod UID. The eBPF
-        /// side already filtered to secret mounts, so every FileEvent is a secret read.
-        /// Drops events whose cgroup isn't a pod.
-        fn secret_read(ev: &FileEvent) -> Option<RuntimeObservation> {
+        /// Map a tmpfs file open to a raw FileRead, attributed by pod UID. The agent
+        /// can't tell if it's a secret (bpf_d_path gives only the container path); the
+        /// engine refines FileRead → SecretRead via the pod's secret volumeMounts, or
+        /// drops it. Drops events whose cgroup isn't a pod, or with an empty path.
+        fn file_read(ev: &FileEvent) -> Option<RuntimeObservation> {
             let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
             let uid = parse_pod_uid(&cgroup)?;
             let len = (ev.len as usize).min(PATH_CAP);
-            let raw = String::from_utf8_lossy(&ev.path[..len]);
-            let path = raw.trim_end_matches('\0');
-            let secret = secret_name_from_path(path);
-            // Secret reads are sparse (real Secret volumes, mostly read at startup), so an
-            // info line per read is useful operability, not noise — and confirms the probe
-            // end-to-end. If this ever floods, that itself is a finding.
-            tracing::info!(secret = %secret, pod_uid = %uid, "captured secret read");
+            let path = String::from_utf8_lossy(&ev.path[..len])
+                .trim_end_matches('\0')
+                .to_string();
+            if path.is_empty() {
+                return None;
+            }
             Some(RuntimeObservation {
                 namespace: String::new(),
                 pod: String::new(),
                 pod_uid: Some(uid),
                 source: Some(SOURCE.into()),
                 observed_at_ms: now_ms(),
-                behavior: Behavior::SecretRead { secret },
+                behavior: Behavior::FileRead { path },
             })
-        }
-    }
-
-    /// Reduce a kubelet secret-mount path to a readable id:
-    /// `…/kubernetes.io~secret/<name>/<key>` → `<name>/<key>`. Falls back to the full
-    /// path if the marker is absent (shouldn't happen — the probe filtered on it).
-    fn secret_name_from_path(path: &str) -> String {
-        match path.find(SECRET_MARKER) {
-            Some(i) => path[i + SECRET_MARKER.len()..].to_string(),
-            None => path.to_string(),
         }
     }
 

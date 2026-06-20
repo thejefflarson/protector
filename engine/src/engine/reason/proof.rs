@@ -229,9 +229,12 @@ fn corroborates(behavior: &Behavior, _attack: &AttackRef) -> bool {
         Behavior::Alert { .. } => true,
         // Deferred (ADR-0014): NetworkConnection{internet:true} ⇒ attack is exfil;
         // LibraryLoaded ⇒ attack is the foothold. Keyed on `_attack` when they land.
+        // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
+        // drops it before it becomes graph state.
         Behavior::NetworkConnection { .. }
         | Behavior::SecretRead { .. }
-        | Behavior::LibraryLoaded { .. } => false,
+        | Behavior::LibraryLoaded { .. }
+        | Behavior::FileRead { .. } => false,
     }
 }
 
