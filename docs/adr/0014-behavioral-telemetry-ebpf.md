@@ -20,7 +20,7 @@ negatives live:
   it **actually does** — reach is not use.
 - A workload **mounts** a secret but we don't know if it ever **reads** it.
 
-Today the only behavioral input is the RuntimeEvidence port ([`runtime.rs`](../../src/engine/runtime.rs)):
+Today the only behavioral input is the RuntimeEvidence port ([`runtime.rs`](../../engine/src/engine/runtime.rs)):
 Falco critical alerts, POSTed via falcosidekick, normalized to a single
 `{namespace, pod, rule}` observation that supplies the action bar's `corroborated-now`
 predicate ([ADR-0009](0009-asymmetric-action-bar.md)). Two limits: it is **coarse** (a
@@ -94,7 +94,7 @@ telemetry without requiring any third-party sensor.
   yet promote the action bar — widening the flat predicate to admit them would corroborate
   everything (every workload connects). The per-objective relation belongs at
   objective/action-bar matching, not in that predicate; see the `entry_corroborated` NB in
-  `src/engine/proof.rs`. It lands only after the shadow bake (rollout step 3 below).
+  `engine/src/engine/proof.rs`. It lands only after the shadow bake (rollout step 3 below).
 
 Behavioral signals are **never graph structure**: they don't mint edges or nodes, so
 the proof layer's "reach is proven, not guessed" invariant is untouched. They are TTL'd

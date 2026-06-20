@@ -11,7 +11,7 @@ critical CVE ∧ reachable — the log4j case, ADR-0011). If a genuinely interne
 workload is not marked `Internet`, the foothold never forms and the headline
 auto-response never fires on it.
 
-The [`ExposureAdapter`](../../src/engine/adapter.rs) infers exposure from the
+The [`ExposureAdapter`](../../engine/src/engine/adapter/exposure.rs) infers exposure from the
 Services that select a pod: `LoadBalancer`/`NodePort`/`externalIPs` ⇒ `Internet`,
 any other selecting Service ⇒ `ClusterExposed`, none ⇒ `Internal`. That is correct
 for clusters that expose via the Service type — but **many clusters don't**.
