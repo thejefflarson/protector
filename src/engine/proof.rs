@@ -216,6 +216,12 @@ fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
 /// evidence for the model, not "an attack is happening now" — every workload makes
 /// connections, so treating those as corroboration would fire the action bar on
 /// everything (ADR-0014).
+///
+/// NB: ADR-0014's eventual non-shadow design corroborates *per objective* (actual
+/// internet egress corroborates an EXFIL chain; an actual vuln-library load corroborates
+/// a FOOTHOLD) — that is a `corroborates(behavior, objective)` decision and belongs at
+/// the objective/action-bar matching, NOT a widening of this flat `is_alert()` predicate
+/// (which is exactly the "everything corroborates everything" trap above).
 fn entry_corroborated(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     matches!(
         graph.inner().node_weight(entry),

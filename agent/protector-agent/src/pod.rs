@@ -66,5 +66,4 @@ mod tests {
         assert_eq!(parse_pod_uid("/system.slice/sshd.service"), None);
         assert_eq!(parse_pod_uid("/"), None);
     }
-
 }

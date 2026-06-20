@@ -8,9 +8,9 @@
 
 mod behavior;
 mod observer;
-mod reporter;
 #[cfg(any(feature = "ebpf", test))]
 mod pod;
+mod reporter;
 
 use std::time::Duration;
 

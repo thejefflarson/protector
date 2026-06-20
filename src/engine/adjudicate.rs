@@ -198,6 +198,18 @@ fn fence_list(values: &[String]) -> String {
     }
 }
 
+/// Cap a list to `max` entries for the prompt, appending a `more(extra)` remainder line
+/// when over — keeps the prompt small enough for the CPU model without hiding that
+/// there's more. Used for the CVE, objective, and behavior lists.
+fn cap_lines(mut lines: Vec<String>, max: usize, more: impl Fn(usize) -> String) -> Vec<String> {
+    if lines.len() > max {
+        let extra = lines.len() - max;
+        lines.truncate(max);
+        lines.push(more(extra));
+    }
+    lines
+}
+
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
 /// evidence is fenced as untrusted data so a malicious CVE id / rule name / node key
@@ -215,41 +227,29 @@ pub fn build_judgment_prompt(
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> String {
+    // Each of these lists is capped before going into the prompt: a CVE-heavy image,
+    // a broadly-privileged entry reaching hundreds of objectives, or a chatty workload
+    // can each bloat the prompt past what a CPU-only model answers in time, so the entry
+    // never gets a verdict. A capped sample + a remainder count conveys the posture; the
+    // FULL sets still drive the cache fingerprint (entry_fingerprint), so the cap never
+    // changes a verdict. (Behaviors/CVEs are sorted+deduped first; objectives keep their
+    // order.)
     let (mut cves, behaviors) = entry_evidence(graph, entry);
-    // Observed runtime behavior (ADR-0014) — what the workload ACTUALLY did, not just
-    // what it could: actual egress (hardens exfil), actual secret reads, loaded libs
-    // (a present CVE's lib actually loaded), alerts. Capped like the others; the coarse
-    // form drives the cache fingerprint.
-    const MAX_BEHAVIORS_IN_PROMPT: usize = 25;
+
     let mut behavior_lines: Vec<String> = behaviors.iter().map(Behavior::summary).collect();
     behavior_lines.sort();
     behavior_lines.dedup();
-    if behavior_lines.len() > MAX_BEHAVIORS_IN_PROMPT {
-        let extra = behavior_lines.len() - MAX_BEHAVIORS_IN_PROMPT;
-        behavior_lines.truncate(MAX_BEHAVIORS_IN_PROMPT);
-        behavior_lines.push(format!("(+{extra} more observed behaviors)"));
-    }
-    // Bound the CVE list in the prompt. A CVE-heavy image (e.g. a big control-plane
-    // component) can carry hundreds of critical/known-exploited IDs; dumping them all
-    // bloats the prompt enough to stall or time out a CPU-only model — the entry then
-    // never gets a verdict. A capped sample plus a remainder count is all the model
-    // needs to weigh "this image is vulnerable"; the full set still drives the cache
-    // fingerprint (entry_fingerprint), so correctness is unaffected.
-    const MAX_CVES_IN_PROMPT: usize = 25;
+    let behavior_lines = cap_lines(behavior_lines, 25, |n| {
+        format!("(+{n} more observed behaviors)")
+    });
+
     cves.sort();
     cves.dedup();
-    if cves.len() > MAX_CVES_IN_PROMPT {
-        let extra = cves.len() - MAX_CVES_IN_PROMPT;
-        cves.truncate(MAX_CVES_IN_PROMPT);
-        cves.push(format!("(+{extra} more critical/known-exploited)"));
-    }
-    // Bound the objective list too. A broadly-privileged entry (e.g. a GitOps
-    // controller) can reach hundreds of objectives; listing them all bloats the prompt
-    // past what a CPU-only model answers in time. A capped sample plus a remainder
-    // count conveys the posture ("this front door reaches a lot, including X/Y/Z");
-    // the full set still drives the cache fingerprint, so correctness is unaffected.
-    const MAX_OBJECTIVES_IN_PROMPT: usize = 40;
-    let mut lines: Vec<String> = objectives
+    let cves = cap_lines(cves, 25, |n| {
+        format!("(+{n} more critical/known-exploited)")
+    });
+
+    let objective_lines: Vec<String> = objectives
         .iter()
         .map(|(k, a)| {
             format!(
@@ -260,15 +260,10 @@ pub fn build_judgment_prompt(
             )
         })
         .collect();
-    if lines.len() > MAX_OBJECTIVES_IN_PROMPT {
-        let extra = lines.len() - MAX_OBJECTIVES_IN_PROMPT;
-        lines.truncate(MAX_OBJECTIVES_IN_PROMPT);
-        lines.push(format!(
-            "  - (+{extra} more reachable objectives — this front door reaches a very \
-             broad set, itself worth weighing)"
-        ));
-    }
-    let reachable: String = lines.join("\n");
+    let reachable = cap_lines(objective_lines, 40, |n| {
+        format!("  - (+{n} more reachable objectives — this front door reaches a very broad set, itself worth weighing)")
+    })
+    .join("\n");
     format!(
         "You are the on-call security analyst. A deterministic analysis has PROVED \
          that this INTERNET-FACING workload can reach every objective listed below — \

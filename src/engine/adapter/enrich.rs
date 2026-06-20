@@ -44,18 +44,27 @@ impl Adapter for RuntimeAdapter {
     }
 
     fn contribute(&self, snapshot: &Snapshot, graph: &mut SecurityGraph) {
+        if snapshot.runtime_events.is_empty() {
+            return;
+        }
         // UID → (namespace, name) from the pod watch, so events a sensor attributed by
         // cgroup UID (the eBPF agent) resolve to a workload without the agent ever
-        // touching the cluster API (ADR-0014). Falco events carry namespace/pod directly.
-        let by_uid: std::collections::HashMap<String, (String, String)> = snapshot
-            .pods
-            .iter()
-            .filter_map(|p| {
-                let uid = p.metadata.uid.clone()?;
-                let name = p.metadata.name.clone()?;
-                Some((uid, (pod_namespace(p), name)))
-            })
-            .collect();
+        // touching the cluster API (ADR-0014). Falco events carry namespace/pod directly,
+        // so only build the map when something actually needs UID resolution.
+        let by_uid: std::collections::HashMap<String, (String, String)> =
+            if snapshot.runtime_events.iter().any(|e| e.pod_uid.is_some()) {
+                snapshot
+                    .pods
+                    .iter()
+                    .filter_map(|p| {
+                        let uid = p.metadata.uid.clone()?;
+                        let name = p.metadata.name.clone()?;
+                        Some((uid, (pod_namespace(p), name)))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
 
         for event in &snapshot.runtime_events {
             let resolved = match &event.pod_uid {

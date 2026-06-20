@@ -87,7 +87,8 @@ mod ebpf {
                             continue;
                         }
                         // SAFETY: the kernel wrote a ConnEvent of exactly this layout.
-                        let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<ConnEvent>()) };
+                        let ev =
+                            unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<ConnEvent>()) };
                         if let Some(obs) = self.observe(&ev)
                             && tx.send(obs).await.is_err()
                         {

@@ -577,7 +577,7 @@ fn build_adjudicator() -> Box<dyn adjudicate::Adjudicator> {
 pub async fn run_watch(
     client: kube::Client,
     active: EnabledActions,
-    falco_addr: Option<std::net::SocketAddr>,
+    runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: exploit_intel::KevCatalog,
 ) -> anyhow::Result<()> {
@@ -606,7 +606,7 @@ pub async fn run_watch(
         });
     }
 
-    // Runtime evidence (Falco) is a stream, not a watched object: alerts land via
+    // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
     // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
     // the loop so a "happening now" signal is acted on immediately (it flips a
     // chain's corroboration without changing the graph's shape). Signals expire, so
@@ -614,12 +614,12 @@ pub async fn run_watch(
     let runtime_events = std::sync::Arc::new(runtime::RuntimeEvents::new(
         std::time::Duration::from_secs(300),
     ));
-    let (falco_tx, mut falco_rx) = tokio::sync::mpsc::channel::<()>(64);
-    if let Some(addr) = falco_addr {
+    let (runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
+    if let Some(addr) = runtime_addr {
         let events = runtime_events.clone();
         tokio::spawn(async move {
-            if let Err(error) = runtime::serve_runtime(addr, events, falco_tx).await {
-                tracing::error!(%error, "falco ingest stopped");
+            if let Err(error) = runtime::serve_runtime(addr, events, runtime_tx).await {
+                tracing::error!(%error, "runtime-evidence ingest stopped");
             }
         });
     }
@@ -678,11 +678,11 @@ pub async fn run_watch(
         // Wake on either a cluster change or a Falco alert.
         tokio::select! {
             next = change_rx.recv() => if next.is_none() { break },
-            _ = falco_rx.recv() => {},
+            _ = runtime_rx.recv() => {},
         }
         // Coalesce a burst (e.g. a Deployment rollout, or a flurry of alerts).
         while change_rx.try_recv().is_ok() {}
-        while falco_rx.try_recv().is_ok() {}
+        while runtime_rx.try_recv().is_ok() {}
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;
