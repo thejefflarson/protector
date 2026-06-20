@@ -1,0 +1,9 @@
+[package]
+name = "protector-agent-common"
+version = "0.1.0"
+edition = "2024"
+description = "repr(C) event layouts shared between the protector-agent eBPF programs (kernel) and the userspace loader. no_std so the eBPF crate can use it; the byte layout IS the kernel↔userspace contract (ADR-0014)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

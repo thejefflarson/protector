@@ -40,7 +40,7 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 
 use super::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
-use super::graph::{Exposure, Node, NodeKey, Relation, SecurityGraph, Severity};
+use super::graph::{Behavior, Exposure, Node, NodeKey, Relation, SecurityGraph, Severity};
 use super::objective::{ObjectiveRecognizer, default_recognizers};
 
 /// One proven edge on a chain: a proof-grade relation from one node to the next,
@@ -210,22 +210,39 @@ fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     )
 }
 
-/// Whether `entry` has a live **alerting** runtime signal — the `corroborated-now`
-/// predicate (RuntimeEvidence port). Only alert behaviors (a Falco critical, etc.)
-/// corroborate: mundane behaviors (connections, secret reads, library loads) are
-/// evidence for the model, not "an attack is happening now" — every workload makes
-/// connections, so treating those as corroboration would fire the action bar on
-/// everything (ADR-0014).
+/// Whether a runtime `behavior` corroborates a chain whose objective has technique
+/// `attack` — the `corroborates(behavior, objective)` relation (ADR-0014). This is the
+/// per-objective seam the ADR's non-shadow design is stated in terms of.
 ///
-/// NB: ADR-0014's eventual non-shadow design corroborates *per objective* (actual
-/// internet egress corroborates an EXFIL chain; an actual vuln-library load corroborates
-/// a FOOTHOLD) — that is a `corroborates(behavior, objective)` decision and belongs at
-/// the objective/action-bar matching, NOT a widening of this flat `is_alert()` predicate
-/// (which is exactly the "everything corroborates everything" trap above).
-fn entry_corroborated(graph: &SecurityGraph, entry: NodeIndex) -> bool {
+/// Today only an *alerting* signal corroborates, and it does so for **any** objective:
+/// a Falco critical means "an attack is happening now" regardless of which chain. The
+/// mundane behaviors (connection / secret-read / library-load) are evidence for the
+/// model, never blanket corroboration — every workload makes connections, so admitting
+/// them for any objective is the "everything corroborates everything" trap.
+///
+/// The empty arms below are where the per-objective corroboration lands once the shadow
+/// bake clears (ADR-0014 rollout step 3): actual internet egress corroborates an
+/// EXFILTRATION chain; an actual vuln-library load corroborates a FOOTHOLD. Each is one
+/// `attack`-keyed match arm, NOT a widening of the alert gate.
+fn corroborates(behavior: &Behavior, _attack: &AttackRef) -> bool {
+    match behavior {
+        Behavior::Alert { .. } => true,
+        // Deferred (ADR-0014): NetworkConnection{internet:true} ⇒ attack is exfil;
+        // LibraryLoaded ⇒ attack is the foothold. Keyed on `_attack` when they land.
+        Behavior::NetworkConnection { .. }
+        | Behavior::SecretRead { .. }
+        | Behavior::LibraryLoaded { .. } => false,
+    }
+}
+
+/// Whether `entry` has a live runtime signal that corroborates a chain to an objective
+/// with technique `attack` — the `corroborated-now` predicate, per objective. See
+/// [`corroborates`]. The signal is read from the entry workload (where the sensor
+/// attributed it), matching the prior entry-scoped semantics.
+fn corroborated_for(graph: &SecurityGraph, entry: NodeIndex, attack: &AttackRef) -> bool {
     matches!(
         graph.inner().node_weight(entry),
-        Some(Node::Workload(w)) if w.runtime.iter().any(|s| s.behavior.is_alert())
+        Some(Node::Workload(w)) if w.runtime.iter().any(|s| corroborates(&s.behavior, attack))
     )
 }
 
@@ -401,7 +418,7 @@ pub fn confirm(
         objective,
         attack,
         foothold: entry_foothold(graph, entry_idx),
-        corroborated: entry_corroborated(graph, entry_idx),
+        corroborated: corroborated_for(graph, entry_idx, &attack),
         adjudicated: true,
         promoted: false,
         exposed_entry: entry_exposed(graph, entry_idx),
@@ -442,12 +459,13 @@ pub fn prove_with(
     for &entry in &entries {
         let tree = movement_tree(graph, entry, None);
         let foothold = entry_foothold(graph, entry);
-        let corroborated = entry_corroborated(graph, entry);
         let exposed_entry = entry_exposed(graph, entry);
         for &(objective, attack) in &objectives {
             if objective == entry || !tree.contains_key(&objective) {
                 continue;
             }
+            // Per-objective: this objective's technique decides which behaviors corroborate.
+            let corroborated = corroborated_for(graph, entry, &attack);
             let steps = path_steps(&tree, entry, objective);
             let links = steps
                 .iter()
@@ -917,6 +935,8 @@ mod tests {
                 namespace: "app".into(),
                 pod: "web".into(),
                 pod_uid: None,
+                source: None,
+                observed_at_ms: None,
                 behavior: crate::engine::graph::Behavior::Alert {
                     rule: "Outbound connection to C2".into(),
                 },

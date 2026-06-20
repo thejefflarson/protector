@@ -1,11 +1,16 @@
 //! eBPF programs for protector-agent (ADR-0014). `no_std`, built for the bpf target
 //! with bpf-linker (see agent/README.md / the Dockerfile `ebpf` stage).
 //!
+//! All probes write into one ring buffer ([`EVENTS`]); every event begins with an
+//! [`EventHeader`] whose `kind` discriminates the body, so userspace can drain a
+//! single ring and dispatch by type. Adding a probe (secret-read, library-load) is a
+//! new `KIND_*`, a new body type, and a new userspace decode arm — not a new ring or a
+//! second drain loop.
+//!
 //! Phase-2 first probe: outbound connections. A kprobe on `security_socket_connect`
 //! (an LSM hook stable across kernels) reads the IPv4 destination and emits a
-//! [`ConnEvent`] to a ring buffer the userspace agent drains, resolves to a pod, and
-//! turns into a `NetworkConnection` behavior. Observe-only; fail safe (a bad read
-//! drops the event, never errors the probe).
+//! [`ConnEvent`] (kind [`KIND_CONNECT`]). Observe-only; fail safe (a bad read drops the
+//! event, never errors the probe).
 
 #![no_std]
 #![no_main]
@@ -16,20 +21,11 @@ use aya_ebpf::{
     maps::RingBuf,
     programs::ProbeContext,
 };
+// The event layouts + kind discriminators are shared verbatim with the userspace loader
+// via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
+use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT};
 
-/// One observed connection. `repr(C)` so userspace reads the same layout.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ConnEvent {
-    /// Origin pid (userspace maps it via /proc/<pid>/cgroup → pod).
-    pub pid: u32,
-    /// IPv4 destination, network byte order.
-    pub daddr: u32,
-    /// Destination port, host byte order.
-    pub dport: u16,
-}
-
-/// Ring buffer of connection events drained by userspace.
+/// Ring buffer of behavioral events (all kinds) drained by userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
@@ -91,7 +87,10 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     if let Some(mut slot) = EVENTS.reserve::<ConnEvent>(0) {
         slot.write(ConnEvent {
-            pid,
+            header: EventHeader {
+                kind: KIND_CONNECT,
+                pid,
+            },
             daddr,
             dport: u16::from_be(dport),
         });

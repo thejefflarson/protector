@@ -208,9 +208,11 @@ async fn main() -> Result<()> {
     // is gone — "Spans are being emitted even after Shutdown").
     let mut engine_task: Option<tokio::task::JoinHandle<()>> = None;
     if !engine_off {
-        // Hard mode is opt-in per action class: PROTECTOR_ENGINE_ENABLE is a
-        // comma-separated list (network,rbac,mount,identity). Empty = none
-        // (easy mode — proposals only). `escape` is intentionally not enableable.
+        // Hard mode is opt-in: PROTECTOR_ENGINE_ENABLE is a comma-separated list whose
+        // only live-actuatable class is `network` (an additive deny the engine can apply
+        // and self-revert); `judgement` separately opts into model promotion (ADR-0011).
+        // Empty = none (easy mode — proposals only). The subtractive classes (rbac, mount,
+        // identity) and irreversible `escape` are proposal-only and not enableable here.
         let enabled = env_or("PROTECTOR_ENGINE_ENABLE", "");
         let active =
             EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()));

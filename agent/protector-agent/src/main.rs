@@ -6,7 +6,6 @@
 //! observes, it never blocks, kills, or rewrites — enforcement stays the engine's
 //! reversible network cut.
 
-mod behavior;
 mod observer;
 #[cfg(any(feature = "ebpf", test))]
 mod pod;
@@ -14,9 +13,9 @@ mod reporter;
 
 use std::time::Duration;
 
+use protector_behavior::RuntimeObservation;
 use tokio::sync::mpsc;
 
-use behavior::Observation;
 use reporter::Reporter;
 
 /// Flush a batch at most this large, or every [`FLUSH_INTERVAL`], whichever first.
@@ -40,12 +39,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%endpoint, "protector-agent starting");
     let reporter = Reporter::new(&endpoint)?;
 
-    let (tx, mut rx) = mpsc::channel::<Observation>(4096);
+    let (tx, mut rx) = mpsc::channel::<RuntimeObservation>(4096);
 
     // Batching reporter task: flush on size or interval. Best-effort sends — a lost
-    // batch costs freshness, never correctness (behavioral evidence is additive).
+    // batch costs freshness, never correctness (behavioral evidence is additive). A
+    // running count is logged at info once per interval so an operator can confirm the
+    // agent is actually reporting (individual sends are debug — far too chatty here).
     let flusher = tokio::spawn(async move {
-        let mut batch: Vec<Observation> = Vec::with_capacity(MAX_BATCH);
+        let mut batch: Vec<RuntimeObservation> = Vec::with_capacity(MAX_BATCH);
+        let mut reported_since_tick: usize = 0;
         let mut tick = tokio::time::interval(FLUSH_INTERVAL);
         loop {
             tokio::select! {
@@ -53,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(obs) => {
                         batch.push(obs);
                         if batch.len() >= MAX_BATCH {
-                            reporter.send(&batch).await;
+                            reported_since_tick += reporter.send(&batch).await;
                             batch.clear();
                         }
                     }
@@ -63,8 +65,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
                 _ = tick.tick() => {
-                    reporter.send(&batch).await;
+                    reported_since_tick += reporter.send(&batch).await;
                     batch.clear();
+                    tracing::info!(
+                        reported = reported_since_tick,
+                        "behavioral observations reported (last {}s)",
+                        FLUSH_INTERVAL.as_secs(),
+                    );
+                    reported_since_tick = 0;
                 }
             }
         }

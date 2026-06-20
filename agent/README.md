@@ -13,35 +13,44 @@ engine can still ingest those tools through a translation adapter — depend on 
 
 ## Layout
 
+`agent/` is its **own Cargo workspace**, separate from the engine's, so its eBPF
+toolchain (nightly + the bpf target) never touches the engine's stable build.
+
 - `protector-agent/` — **userspace** (compiles + unit-tests without a kernel). The
-  report path, batching, cgroup→pod resolution, and the wire contract. The aya loader
-  is behind the `ebpf` feature; the default build uses a no-op observer so the skeleton
-  is verifiable in normal CI.
-- `protector-agent-ebpf/` — the **eBPF programs** (`no_std`, bpf target). Built
-  separately with bpf-linker; **not** part of the userspace `cargo build` or the engine
-  repo's CI.
+  report path, batching, cgroup→pod resolution. The aya loader is behind the `ebpf`
+  feature; the default build uses a no-op observer so the skeleton is verifiable in
+  normal CI. Emits the shared `RuntimeObservation` from the `behavior` crate.
+- `common/` — `protector-agent-common`, the `no_std` `repr(C)` **event layouts**
+  (`EventHeader`, `ConnEvent`, `KIND_*`) shared by the eBPF programs and the userspace
+  loader, so the kernel↔userspace byte contract can't drift.
+- `protector-agent-ebpf/` — the **eBPF programs** (`no_std`, bpf target). **Excluded**
+  from the workspace (its own workspace root); compiled only by `protector-agent`'s
+  `build.rs` under `--features ebpf`, never by a plain `cargo build`/`test`.
+- the behavioral **wire types** (`Behavior`, `RuntimeObservation`) live in
+  [`../behavior`](../behavior) (`protector-behavior`), shared with the engine so the two
+  can't drift — the agent depends on it by path.
 
 ## Build
 
 Userspace skeleton (no kernel needed — this is what's verified in this repo):
 
 ```sh
-cd agent/protector-agent
+cd agent
 cargo build          # no-op observer; report path + batcher + pod resolution
-cargo test           # wire-contract + cgroup→pod parsing tests
+cargo test           # cgroup→pod parsing (+ the wire-contract test in protector-behavior)
 ```
 
 Full agent with real probes (on a Linux node, ideally aarch64 to match the cluster):
 
 ```sh
-# one-time toolchain
-rustup toolchain install stable
+# one-time toolchain: nightly + rust-src for the bpf target's build-std, and bpf-linker
+rustup toolchain install nightly --component rust-src
 cargo install bpf-linker
-rustup target add bpfel-unknown-none      # little-endian bpf
 
-# build the eBPF object, then the userspace with the loader
-cd agent/protector-agent-ebpf && cargo build --release --target bpfel-unknown-none
-cd ../protector-agent          && cargo build --release --features ebpf
+# build.rs compiles the (excluded) protector-agent-ebpf crate to a BPF object and embeds
+# it in the loader — one command, run from the agent workspace root
+cd agent
+cargo build --release -p protector-agent --features ebpf
 ```
 
 The eBPF loader (`observer.rs`, `ebpf` feature) and the connection probe

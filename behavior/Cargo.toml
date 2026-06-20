@@ -1,0 +1,13 @@
+[package]
+name = "protector-behavior"
+version = "0.1.0"
+edition = "2024"
+description = "The behavioral-evidence wire contract (ADR-0014): the normalized Behavior / RuntimeObservation types shared by the engine and the first-party agent. A small std + serde crate; the JSON it (de)serializes is the actual port, this crate just guarantees both first-party sides agree on the shape."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

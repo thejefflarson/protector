@@ -39,14 +39,17 @@ use super::graph::{Node, Relation, SecurityGraph};
 use super::health::{Health, HealthReport};
 use super::response::{Mitigation, ProposedAction};
 
-/// Map an operator-facing active name to an action class. `escape` is intentionally
-/// absent — it's irreversible and can never be enabled.
+/// Map an operator-facing enable name to the action class it arms. Only `network` is
+/// accepted, because only a network deny is **live-actuatable**: an additive,
+/// engine-owned `NetworkPolicy`/`AuthorizationPolicy` the engine can apply and
+/// self-revert ([`ProposedAction::is_additive_live`], ADR-0002/0007). The other cut
+/// classes — `rbac`, `mount`, `identity` — are *subtractive* edits to GitOps-managed
+/// objects, so [`decide`] forbids live actuation of them regardless; and `escape` is
+/// irreversible. Accepting those names here would be a lie: the engine still *proposes*
+/// those cuts (routed to a human / durable-fix PR), you just can't "enable" them.
 fn action_from_name(name: &str) -> Option<ProposedAction> {
     match name.trim() {
         "network" => Some(ProposedAction::DenyNetworkPath),
-        "rbac" => Some(ProposedAction::RevokeRbacGrant),
-        "mount" => Some(ProposedAction::RemoveSecretMount),
-        "identity" => Some(ProposedAction::RebindIdentity),
         _ => None,
     }
 }
@@ -1035,11 +1038,15 @@ mod tests {
     }
 
     #[test]
-    fn from_names_arms_known_classes_and_ignores_escape() {
-        let policy = EnabledActions::from_names(["rbac", "escape", "bogus"]);
-        assert!(policy.is_enabled(ProposedAction::RevokeRbacGrant));
-        assert!(!policy.is_enabled(ProposedAction::DenyNetworkPath));
-        // escape maps to nothing (irreversible) — never enableable.
+    fn from_names_arms_only_network_and_ignores_non_actuatable_classes() {
+        // Only `network` is live-actuatable, so only it arms. The subtractive classes
+        // (rbac/mount/identity), irreversible `escape`, and unknown names are ignored —
+        // the engine still proposes those cuts, they just can't be enabled for actuation.
+        let policy = EnabledActions::from_names(["network", "rbac", "mount", "escape", "bogus"]);
+        assert!(policy.is_enabled(ProposedAction::DenyNetworkPath));
+        assert!(!policy.is_enabled(ProposedAction::RevokeRbacGrant));
+        assert!(!policy.is_enabled(ProposedAction::RemoveSecretMount));
+        assert!(!policy.is_enabled(ProposedAction::RebindIdentity));
         assert!(!policy.is_enabled(ProposedAction::RemoveEscapePrimitive));
     }
 

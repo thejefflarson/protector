@@ -2916,6 +2916,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "petgraph",
+ "protector-behavior",
  "regex",
  "reqwest",
  "rustls",
@@ -2927,6 +2928,14 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "protector-behavior"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

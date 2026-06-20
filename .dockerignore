@@ -1,2 +1,5 @@
-target
+# Both image builds use the repo root as context, so ignore build artifacts ANYWHERE
+# (a bare `target` would only match the top-level dir, missing engine/, agent/*, …).
+**/target
+**/node_modules
 .git

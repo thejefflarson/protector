@@ -79,12 +79,22 @@ impl Adapter for RuntimeAdapter {
                 },
                 None => (event.namespace.clone(), event.pod.clone()),
             };
+            // Carry the sensor's identity and observation time into the provenance:
+            // which sensor (so two sensors agreeing is corroboration, not one opaque
+            // "runtime" source) and *when it observed* (not when this pass ran, which
+            // lags by a batch interval + a judging pass). Both fall back gracefully for
+            // older agents that omit the fields (ADR-0014).
+            let source = event.source.as_deref().unwrap_or(self.name());
+            let observed_at = event
+                .observed_at_ms
+                .map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms))
+                .unwrap_or_else(SystemTime::now);
             let key = NodeKey::workload(&resolved.0, "Pod", &resolved.1);
             graph.update_node(&key, |node| {
                 if let Node::Workload(w) = node {
                     w.runtime.push(RuntimeSignal {
                         behavior: event.behavior.clone(),
-                        provenance: Provenance::new(self.name(), SystemTime::now()),
+                        provenance: Provenance::new(source, observed_at),
                     });
                     attached += 1;
                 }

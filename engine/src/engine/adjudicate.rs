@@ -470,6 +470,8 @@ mod tests {
                 namespace: "app".into(),
                 pod: "web".into(),
                 pod_uid: None,
+                source: None,
+                observed_at_ms: None,
                 behavior: crate::engine::graph::Behavior::Alert {
                     rule: "Terminal shell in container".into(),
                 },

@@ -7,6 +7,8 @@ description = "eBPF programs for protector-agent (ADR-0014). no_std; built for t
 
 [dependencies]
 aya-ebpf = "0.1"
+# Shared repr(C) event layouts (no_std), used verbatim by the userspace loader too.
+protector-agent-common = { path = "../common" }
 
 [[bin]]
 name = "protector-agent"

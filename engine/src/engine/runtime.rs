@@ -113,6 +113,10 @@ pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
         namespace,
         pod,
         pod_uid: None,
+        source: Some("falco".into()),
+        // Falco's wall-clock `time` could be parsed here; until then the adapter
+        // stamps ingest-time. Falco is the low-volume sensor, so the lag is minor.
+        observed_at_ms: None,
         behavior: Behavior::Alert { rule },
     })
 }
@@ -185,6 +189,8 @@ mod tests {
             namespace: "app".into(),
             pod: "web".into(),
             pod_uid: None,
+            source: None,
+            observed_at_ms: None,
             behavior: Behavior::Alert { rule: rule.into() },
         }
     }

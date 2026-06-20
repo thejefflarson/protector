@@ -128,10 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "protector-agent-common"
+version = "0.1.0"
+
+[[package]]
 name = "protector-agent-ebpf"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
+ "protector-agent-common",
 ]
 
 [[package]]

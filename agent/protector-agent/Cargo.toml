@@ -6,25 +6,22 @@ description = "protector's first-party eBPF behavioral collector — the default
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Standalone crate, deliberately NOT a member of the root `protector` package's
-# build: it cross-compiles for the node (aarch64) and the eBPF half needs the bpf
-# target + bpf-linker, neither of which should burden the engine's CI. Build it on
-# its own (see agent/README.md).
-
 [dependencies]
+# The behavioral wire types, shared with the engine so the two can't drift (ADR-0014).
+protector-behavior = { path = "../../behavior" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# The eBPF loader. Feature-gated so the default build (and its unit tests) compile
-# without the bpf toolchain; enable `--features ebpf` on a node to load real probes.
+# The eBPF loader + the shared repr(C) event layouts. Feature-gated so the default build
+# (and its unit tests) compile without the bpf toolchain; enable `--features ebpf` on a
+# node to load real probes.
 aya = { version = "0.13", optional = true }
 aya-log = { version = "0.2", optional = true }
+protector-agent-common = { path = "../common", optional = true }
 
 [features]
 default = []
-ebpf = ["dep:aya", "dep:aya-log"]
+ebpf = ["dep:aya", "dep:aya-log", "dep:protector-agent-common"]

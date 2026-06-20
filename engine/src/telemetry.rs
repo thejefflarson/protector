@@ -9,6 +9,7 @@
 //! [`crate::engine`]). When the endpoint is unset the global meter is a no-op, so the
 //! engine's `metrics.*.add(...)` calls cost nothing.
 
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use opentelemetry::trace::TracerProvider as _;
@@ -50,7 +51,10 @@ impl Telemetry {
 /// call once at startup. Returns a [`Telemetry`] guard to shut down on exit.
 pub fn init(service: &str, version: &str) -> Telemetry {
     let filter = EnvFilter::from_default_env();
-    let fmt_layer = fmt::layer();
+    // `fmt::layer()` defaults ANSI *on* and (unlike the `fmt()` builder) does no TTY
+    // detection, so piped/in-cluster logs get filled with escape codes that garble
+    // `kubectl logs` and `watch`. Enable colour only when stdout is a real terminal.
+    let fmt_layer = fmt::layer().with_ansi(std::io::stdout().is_terminal());
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .ok()
