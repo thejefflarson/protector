@@ -1,0 +1,22 @@
+# One-off diagnostic: what does the self-hosted Pi runner actually have for generating
+# vmlinux bindings (needed for the secret-read probe's bpf_d_path)? Manually triggered;
+# safe (read-only probe). Delete once the secret-read build approach is settled.
+name: ebpf-env-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: protector-runners
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Probe eBPF build environment
+        run: |
+          echo "== uname =="; uname -a
+          echo "== kernel BTF on the runner =="
+          ls -la /sys/kernel/btf/vmlinux 2>&1 || echo "NO /sys/kernel/btf/vmlinux on the runner"
+          echo "== tools present =="
+          for t in bpftool clang pahole cargo rustc git; do
+            printf "%s: " "$t"; command -v "$t" 2>/dev/null || echo "MISSING"
+          done
+          echo "== passwordless sudo (for apt installs)? =="
+          (sudo -n true 2>/dev/null && echo "sudo: ok") || echo "sudo: NO"
+          echo "== rust =="; cargo --version 2>&1 || true; rustc --version 2>&1 || true
