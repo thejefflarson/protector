@@ -1,18 +1,10 @@
-//! cgroup → pod attribution.
+//! cgroup → pod UID attribution.
 //!
-//! An eBPF event carries a kernel identity (pid / cgroup id), not a pod. The agent
-//! resolves it: the kernel cgroup path encodes the pod UID, and a [`PodResolver`]
-//! maps that UID to its namespace/name. Mis-resolution **drops** the signal rather
-//! than mislabeling it — a wrong attribution is worse than a missing one (ADR-0014).
-
-use std::collections::HashMap;
-
-/// A resolved pod identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodRef {
-    pub namespace: String,
-    pub name: String,
-}
+//! An eBPF event carries a kernel identity (pid), not a pod. The agent reads the
+//! process's cgroup and extracts the pod UID; the **engine** maps that UID to a
+//! namespace/pod from its pod watch (so the agent needs no cluster credentials,
+//! ADR-0014). A cgroup that isn't a pod's (a host process) yields `None` and the
+//! event is dropped — a missing signal beats a mis-attributed one.
 
 /// Extract the pod UID from a cgroup path. Handles the two common layouts:
 ///
@@ -45,29 +37,6 @@ pub fn parse_pod_uid(cgroup_path: &str) -> Option<String> {
     None
 }
 
-/// Resolves a pod UID to its namespace/name. The node deployment populates this from
-/// the kubelet's read-only pod list (`/pods`), refreshed periodically; the agent never
-/// calls the cluster API server (it has no kube credentials — see ADR-0014's scoping).
-#[derive(Default)]
-pub struct PodResolver {
-    by_uid: HashMap<String, PodRef>,
-}
-
-impl PodResolver {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Replace the UID→pod map (called after each kubelet `/pods` refresh).
-    pub fn replace(&mut self, mapping: HashMap<String, PodRef>) {
-        self.by_uid = mapping;
-    }
-
-    pub fn resolve(&self, uid: &str) -> Option<&PodRef> {
-        self.by_uid.get(uid)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,17 +67,4 @@ mod tests {
         assert_eq!(parse_pod_uid("/"), None);
     }
 
-    #[test]
-    fn resolver_maps_uid_to_pod() {
-        let mut r = PodResolver::new();
-        r.replace(HashMap::from([(
-            "uid-1".to_string(),
-            PodRef {
-                namespace: "app".into(),
-                name: "web".into(),
-            },
-        )]));
-        assert_eq!(r.resolve("uid-1").unwrap().name, "web");
-        assert!(r.resolve("missing").is_none());
-    }
 }

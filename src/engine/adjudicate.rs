@@ -474,6 +474,7 @@ mod tests {
             runtime_events: vec![RuntimeObservation {
                 namespace: "app".into(),
                 pod: "web".into(),
+                pod_uid: None,
                 behavior: crate::engine::graph::Behavior::Alert {
                     rule: "Terminal shell in container".into(),
                 },

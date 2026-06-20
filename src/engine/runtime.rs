@@ -112,6 +112,7 @@ pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
     Some(RuntimeObservation {
         namespace,
         pod,
+        pod_uid: None,
         behavior: Behavior::Alert { rule },
     })
 }
@@ -183,6 +184,7 @@ mod tests {
         RuntimeObservation {
             namespace: "app".into(),
             pod: "web".into(),
+            pod_uid: None,
             behavior: Behavior::Alert { rule: rule.into() },
         }
     }

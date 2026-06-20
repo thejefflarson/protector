@@ -44,7 +44,7 @@ mod ebpf {
 
     use super::*;
     use crate::behavior::Behavior;
-    use crate::pod::{PodResolver, parse_pod_uid};
+    use crate::pod::parse_pod_uid;
 
     /// Mirror of the eBPF crate's `ConnEvent` (same `repr(C)` layout).
     #[repr(C)]
@@ -55,15 +55,9 @@ mod ebpf {
         dport: u16, // host byte order
     }
 
-    pub struct EbpfObserver {
-        resolver: PodResolver,
-    }
+    pub struct EbpfObserver;
 
     impl EbpfObserver {
-        pub fn new(resolver: PodResolver) -> Self {
-            Self { resolver }
-        }
-
         pub async fn run(self, tx: Sender<Observation>) -> anyhow::Result<()> {
             // The BPF object is compiled + embedded by build.rs under the `ebpf` feature.
             let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
@@ -105,18 +99,16 @@ mod ebpf {
             }
         }
 
-        /// Map a raw event to an attributed observation, or drop it (mis-attribution is
-        /// worse than a missing signal — ADR-0014).
+        /// Map a raw event to an observation attributed by pod UID (the engine resolves
+        /// UID → namespace/pod). Drops events whose cgroup isn't a pod (host processes).
         fn observe(&self, ev: &ConnEvent) -> Option<Observation> {
             let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.pid)).ok()?;
             let uid = parse_pod_uid(&cgroup)?;
-            let pod = self.resolver.resolve(&uid)?;
             // daddr's bytes are the network-order octets; to_ne_bytes on LE gives them
             // in [a,b,c,d] order, which is what Ipv4Addr::from([u8;4]) wants.
             let ip = Ipv4Addr::from(ev.daddr.to_ne_bytes());
             Some(Observation {
-                namespace: pod.namespace.clone(),
-                pod: pod.name.clone(),
+                pod_uid: Some(uid),
                 behavior: Behavior::NetworkConnection {
                     peer: format!("{ip}:{}", ev.dport),
                     internet: !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),

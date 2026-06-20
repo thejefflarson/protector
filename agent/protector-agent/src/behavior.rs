@@ -23,12 +23,14 @@ pub enum Behavior {
     LibraryLoaded { name: String },
 }
 
-/// One normalized observation, attributed to a pod — the element of the batch POSTed
-/// to the engine's `/behavior` ingest. Matches the engine's `RuntimeObservation`.
+/// One normalized observation — the element of the batch POSTed to the engine's
+/// `/behavior` ingest. The agent attributes by **pod UID** (parsed from the cgroup);
+/// the engine resolves UID → namespace/pod via its pod watch, so the agent needs no
+/// cluster credentials (ADR-0014). Matches the engine's `RuntimeObservation` (whose
+/// namespace/pod are serde-defaulted, so omitting them here is fine).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
-    pub namespace: String,
-    pub pod: String,
+    pub pod_uid: Option<String>,
     pub behavior: Behavior,
 }
 
@@ -39,8 +41,7 @@ mod tests {
     #[test]
     fn observation_serializes_to_the_engine_contract() {
         let obs = Observation {
-            namespace: "app".into(),
-            pod: "web".into(),
+            pod_uid: Some("3f5e-uid".into()),
             behavior: Behavior::NetworkConnection {
                 peer: "1.2.3.4:443".into(),
                 internet: true,
@@ -50,8 +51,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({
-                "namespace": "app",
-                "pod": "web",
+                "pod_uid": "3f5e-uid",
                 "behavior": {"kind": "network_connection", "peer": "1.2.3.4:443", "internet": true}
             })
         );

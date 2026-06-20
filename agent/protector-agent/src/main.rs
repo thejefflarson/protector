@@ -73,11 +73,13 @@ async fn main() -> anyhow::Result<()> {
     observer::NoopObserver.run(tx).await;
     #[cfg(feature = "ebpf")]
     {
-        // The node deployment refreshes this from the kubelet's read-only /pods; the
-        // agent never talks to the cluster API server (ADR-0014 scoping).
-        let resolver = pod::PodResolver::new();
-        if let Err(error) = observer::EbpfObserver::new(resolver).run(tx).await {
-            tracing::error!(%error, "ebpf observer exited");
+        // Events are attributed by pod UID (from the cgroup); the engine resolves UID →
+        // namespace/pod via its watch, so the agent needs no cluster credentials.
+        if let Err(error) = observer::EbpfObserver.run(tx).await {
+            // Degrade, don't crashloop (ADR-0014): a missing hook / failed attach should
+            // leave the pod up for inspection, not hammer restarts.
+            tracing::error!(%error, "ebpf observer exited; idling (no collection)");
+            std::future::pending::<()>().await
         }
     }
 

@@ -43,8 +43,16 @@ pub struct ImageVulnerabilities {
 /// `Deserialize` so a sensor can POST it directly to the normalized ingest.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeObservation {
+    #[serde(default)]
     pub namespace: String,
+    #[serde(default)]
     pub pod: String,
+    /// The pod UID a sensor attributed the event to from the cgroup (the eBPF agent
+    /// sets this and leaves namespace/pod empty; Falco sets namespace/pod directly).
+    /// The engine resolves UID → namespace/pod via its own pod watch, so the agent
+    /// needs no cluster credentials and stays node-local (ADR-0014).
+    #[serde(default)]
+    pub pod_uid: Option<String>,
     /// What the workload actually did.
     pub behavior: super::graph::Behavior,
 }
