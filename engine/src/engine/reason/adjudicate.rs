@@ -18,13 +18,13 @@
 //! a wrong call costs at most a missed or a transient cut, never an irreversible one.
 //!
 //! The prompt-building and verdict-parsing are pure and tested; the model call is
-//! the shared glue in [`super::model`].
+//! the shared glue in [`crate::engine::model`].
 
 use petgraph::visit::EdgeRef;
 use serde_json::Value;
 
-use super::attack::AttackRef;
-use super::graph::{Behavior, Node, NodeKey, Relation, SecurityGraph, Severity};
+use crate::engine::graph::attack::AttackRef;
+use crate::engine::graph::{Behavior, Node, NodeKey, Relation, SecurityGraph, Severity};
 
 /// The model's judgement on a proven chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,7 +345,7 @@ pub fn parse_verdict(reply: &str) -> Verdict {
     }
 }
 
-/// A model-backed adjudicator (OpenAI-compatible endpoint via [`super::model`]).
+/// A model-backed adjudicator (OpenAI-compatible endpoint via [`crate::engine::model`]).
 pub struct ModelAdjudicator {
     endpoint: String,
     model: String,
@@ -357,7 +357,7 @@ impl ModelAdjudicator {
         Self {
             endpoint: endpoint.into(),
             model: model.into(),
-            client: super::model::client(),
+            client: crate::engine::model::client(),
         }
     }
 }
@@ -376,7 +376,7 @@ impl Adjudicator for ModelAdjudicator {
         graph: &SecurityGraph,
     ) -> Verdict {
         let prompt = build_judgment_prompt(entry, objectives, graph);
-        match super::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
+        match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
             Some(reply) => parse_verdict(&reply),
             // Model unavailable → skeptic: do not let an auto-action proceed.
             None => Verdict::Uncertain("model unavailable".to_string()),
@@ -387,11 +387,11 @@ impl Adjudicator for ModelAdjudicator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::{build_graph, default_adapters};
-    use crate::engine::attack::EXPLOIT_PUBLIC_FACING;
+    use crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING;
     use crate::engine::graph::{NodeKey, Provenance, Severity, Vulnerability};
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
     use crate::engine::observe::{ImageVulnerabilities, RuntimeObservation, Snapshot};
-    use crate::engine::proof::{ProvenChain, prove};
+    use crate::engine::reason::proof::{ProvenChain, prove};
 
     /// The (objective, technique) list for a chain — the shape `judge` now takes.
     fn objectives_of(chain: &ProvenChain) -> Vec<(NodeKey, AttackRef)> {

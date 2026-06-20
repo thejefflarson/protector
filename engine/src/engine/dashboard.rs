@@ -16,7 +16,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::proof::ProvenChain;
+use super::reason::proof::ProvenChain;
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
 /// does with it.
@@ -74,7 +74,7 @@ impl Finding {
         let action = chain
             .single_edge_cuts
             .first()
-            .map(super::response::ProposedAction::for_cut);
+            .map(super::respond::ProposedAction::for_cut);
         Finding {
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
@@ -90,7 +90,7 @@ impl Finding {
             cut: chain
                 .single_edge_cuts
                 .first()
-                .map(super::response::cut_signature),
+                .map(super::respond::cut_signature),
             breach_relevant: chain.is_breach_relevant(),
             killchain: killchain(chain),
             verdict: chain.verdict.clone(),
@@ -129,8 +129,8 @@ const AUTO_ELIGIBLE: &str = "auto-eligible";
 /// [`super::actuator::decide`] minus the runtime-only gates (enabled class, blast
 /// radius): only a network cut (`DenyNetworkPath`) auto-applies; subtractive cuts are
 /// durable GitOps fixes, an escape primitive is irreversible, no single edge is no-cut.
-fn classify(chain: &ProvenChain, action: Option<super::response::ProposedAction>) -> String {
-    use super::response::ProposedAction as A;
+fn classify(chain: &ProvenChain, action: Option<super::respond::ProposedAction>) -> String {
+    use super::respond::ProposedAction as A;
     match action {
         None => "no-cut",
         Some(A::RemoveEscapePrimitive) => "forbidden",
@@ -697,9 +697,9 @@ pub async fn serve_dashboard(addr: SocketAddr, findings: Arc<Findings>) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
     use crate::engine::graph::NodeKey;
-    use crate::engine::proof::Link;
+    use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
+    use crate::engine::reason::proof::Link;
 
     /// A chain with a single-edge cut on `cut_relation` (what the disposition now
     /// keys on), plus the evidence flags.

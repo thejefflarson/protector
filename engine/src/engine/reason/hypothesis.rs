@@ -22,9 +22,9 @@
 //! proposes nothing, so with no model wired the engine runs purely on the
 //! deterministic enumerator.
 
-use super::attack::Tactic;
-use super::graph::{NodeKey, SecurityGraph};
 use super::proof::{self, ProvenChain};
+use crate::engine::graph::attack::Tactic;
+use crate::engine::graph::{NodeKey, SecurityGraph};
 
 /// Which model tier produced or should adjudicate a hypothesis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,7 +175,7 @@ impl ModelHypothesizer {
             endpoint: endpoint.into(),
             model: model.into(),
             tier,
-            client: super::model::client(),
+            client: crate::engine::model::client(),
         }
     }
 }
@@ -184,7 +184,7 @@ impl ModelHypothesizer {
 impl HypothesisSource for ModelHypothesizer {
     async fn propose(&self, graph: &SecurityGraph) -> Vec<Hypothesis> {
         let prompt = build_prompt(graph);
-        match super::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
+        match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
             Some(reply) => {
                 let hypotheses = parse_hypotheses(&reply);
                 tracing::debug!(count = hypotheses.len(), tier = ?self.tier, "model proposed hypotheses");
@@ -227,10 +227,10 @@ pub fn escalation_tier(chain: &ProvenChain) -> Tier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::{build_graph, default_adapters};
-    use crate::engine::attack::{CREDENTIAL_ACCESS, ESCAPE_TO_HOST};
+    use crate::engine::graph::attack::{CREDENTIAL_ACCESS, ESCAPE_TO_HOST};
     use crate::engine::observe::Snapshot;
-    use crate::engine::proof::{Link, ProvenChain};
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
+    use crate::engine::reason::proof::{Link, ProvenChain};
     use serde_json::json;
 
     fn lateral_graph() -> crate::engine::graph::SecurityGraph {
@@ -324,7 +324,7 @@ mod tests {
         // Proven foothold into a privilege-escalation objective ⇒ frontier.
         assert_eq!(
             escalation_tier(&base(
-                Some(crate::engine::attack::EXPLOIT_PUBLIC_FACING),
+                Some(crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING),
                 ESCAPE_TO_HOST
             )),
             Tier::Frontier
@@ -334,7 +334,7 @@ mod tests {
         // Foothold but a low-consequence (credential-access) objective ⇒ local.
         assert_eq!(
             escalation_tier(&base(
-                Some(crate::engine::attack::EXPLOIT_PUBLIC_FACING),
+                Some(crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING),
                 CREDENTIAL_ACCESS
             )),
             Tier::Local

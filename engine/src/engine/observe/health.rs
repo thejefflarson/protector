@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::Pod;
 
-use super::graph::NodeKey;
-use super::observe::Snapshot;
+use super::Snapshot;
+use crate::engine::graph::NodeKey;
 
 /// A workload's serving state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -15,10 +15,12 @@
 //! engine-owned object) bolts onto this via the Actuator port; the ledger is its
 //! source of truth.
 
+pub mod actuator;
+
 use std::collections::BTreeMap;
 
-use super::attack::AttackRef;
-use super::proof::{Link, ProvenChain};
+use crate::engine::graph::attack::AttackRef;
+use crate::engine::reason::proof::{Link, ProvenChain};
 
 /// How a cut edge would be severed by an additive, engine-owned object (ADR-0002).
 /// Descriptive here — the Actuator port renders these into concrete objects in
@@ -288,9 +290,9 @@ impl MitigationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::{build_graph, default_adapters};
     use crate::engine::observe::Snapshot;
-    use crate::engine::proof::prove;
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
+    use crate::engine::reason::proof::prove;
     use serde_json::json;
 
     /// A lateral chain web →reaches→ db →can-read→ secret, whose first cut is the
@@ -353,8 +355,8 @@ mod tests {
     /// on remote exploitation, not normal internal activity.
     #[test]
     fn auto_action_requires_a_breach_relevant_entry() {
-        use crate::engine::attack::CREDENTIAL_ACCESS;
         use crate::engine::graph::NodeKey;
+        use crate::engine::graph::attack::CREDENTIAL_ACCESS;
 
         let justify = |breach_relevant: bool| Justification {
             entry: "workload/app/Pod/x".into(),

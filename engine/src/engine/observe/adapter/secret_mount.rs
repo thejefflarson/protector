@@ -72,7 +72,7 @@ impl Adapter for SecretMountAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::test_support::*;
+    use crate::engine::observe::adapter::test_support::*;
     use serde_json::json;
 
     #[test]

@@ -35,9 +35,9 @@ use std::collections::HashSet;
 
 use petgraph::visit::EdgeRef;
 
-use super::graph::{Node, Relation, SecurityGraph};
-use super::health::{Health, HealthReport};
-use super::response::{Mitigation, ProposedAction};
+use super::{Mitigation, ProposedAction};
+use crate::engine::graph::{Node, Relation, SecurityGraph};
+use crate::engine::observe::health::{Health, HealthReport};
 
 /// Map an operator-facing enable name to the action class it arms. Only `network` is
 /// accepted, because only a network deny is **live-actuatable**: an additive,
@@ -232,7 +232,7 @@ pub enum Verdict {
 /// *trustworthy*: it carries a pre-stated hypothesis and is checked against it.
 pub fn verify(predicted_alive: &[String], observed: &HealthReport) -> Verdict {
     for key in predicted_alive {
-        if observed.of(&super::graph::NodeKey(key.clone())) != Health::Alive {
+        if observed.of(&crate::engine::graph::NodeKey(key.clone())) != Health::Alive {
             return Verdict::Revert(format!(
                 "workload {key} is no longer alive after the action"
             ));
@@ -262,7 +262,7 @@ pub trait Actuator: Send + Sync {
 
 /// A human-readable signature of a mitigation's cut, for logs.
 fn cut_label(mitigation: &Mitigation) -> String {
-    super::response::cut_signature(&mitigation.cut)
+    super::cut_signature(&mitigation.cut)
 }
 
 /// The default, safe actuator: logs what it would do and changes nothing. The
@@ -620,12 +620,12 @@ impl Actuator for IsolationActuator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::attack::CREDENTIAL_ACCESS;
+    use crate::engine::graph::attack::CREDENTIAL_ACCESS;
     use crate::engine::graph::{
         Edge, Exposure, Grade, Node, NodeKey, Protocol, Provenance, Workload,
     };
-    use crate::engine::proof::Link;
-    use crate::engine::response::{Justification, ProposedAction};
+    use crate::engine::reason::proof::Link;
+    use crate::engine::respond::{Justification, ProposedAction};
     use std::time::SystemTime;
 
     fn mitigation(from: &str, relation: &str, to: &str, action: ProposedAction) -> Mitigation {

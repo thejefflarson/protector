@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use protector::engine::actuator::EnabledActions;
-use protector::engine::exploit_intel::KevCatalog;
+use protector::engine::observe::exploit_intel::KevCatalog;
+use protector::engine::respond::actuator::EnabledActions;
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{CosignChecker, SignaturePolicy};
