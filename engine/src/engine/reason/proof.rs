@@ -39,9 +39,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 
-use super::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
-use super::graph::{Behavior, Exposure, Node, NodeKey, Relation, SecurityGraph, Severity};
 use super::objective::{ObjectiveRecognizer, default_recognizers};
+use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
+use crate::engine::graph::{Behavior, Exposure, Node, NodeKey, Relation, SecurityGraph, Severity};
 
 /// One proven edge on a chain: a proof-grade relation from one node to the next,
 /// with the ATT&CK technique it realizes (if it is an attack step rather than
@@ -499,8 +499,8 @@ pub fn prove_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::{build_graph, default_adapters};
     use crate::engine::observe::Snapshot;
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
     use serde_json::{Value, json};
 
     fn pod(value: Value) -> k8s_openapi::api::core::v1::Pod {
@@ -697,7 +697,7 @@ mod tests {
     /// (T1611), tagged with the Privilege Escalation tactic.
     #[test]
     fn proves_escape_to_host_chain_tagged_with_attack() {
-        use crate::engine::attack::{ESCAPE_TO_HOST, Tactic};
+        use crate::engine::graph::attack::{ESCAPE_TO_HOST, Tactic};
 
         let privileged = pod(json!({
             "apiVersion": "v1", "kind": "Pod",
@@ -734,7 +734,7 @@ mod tests {
     /// models as `POD_CREATE`, here tagged in MITRE terms.
     #[test]
     fn proves_capability_chain_to_deploy_container() {
-        use crate::engine::attack::{DEPLOY_CONTAINER, Tactic};
+        use crate::engine::graph::attack::{DEPLOY_CONTAINER, Tactic};
         use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
 
         let deployer = pod(json!({
@@ -783,7 +783,7 @@ mod tests {
     /// is tagged with a proven foothold (T1190) and meets the structural action bar.
     #[test]
     fn proves_foothold_when_exposed_and_exploitable() {
-        use crate::engine::attack::EXPLOIT_PUBLIC_FACING;
+        use crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING;
         use crate::engine::graph::{Provenance, Severity, Vulnerability};
         use crate::engine::observe::{ImageVulnerabilities, SecretMeta};
         use std::time::SystemTime;

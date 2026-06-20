@@ -1,6 +1,6 @@
 //! Capability adapters (ADR-0003): the only code that knows about specific tools
 //! or object shapes. Each adapter answers one question by mapping a
-//! [`Snapshot`](super::observe::Snapshot) into the graph vocabulary — and nothing
+//! [`Snapshot`](super::Snapshot) into the graph vocabulary — and nothing
 //! else. The core never names a product; it iterates [`Adapter`]s.
 //!
 //! Every adapter in this slice is deterministic and therefore emits
@@ -29,13 +29,13 @@ use k8s_openapi::api::rbac::v1::{PolicyRule, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-use super::attack::{self, CAPABILITY_CATALOG};
-use super::graph::{
+use super::Snapshot;
+use crate::engine::graph::attack::{self, CAPABILITY_CATALOG};
+use crate::engine::graph::{
     Capability, Edge, Endpoint, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol,
     Provenance, Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload,
     canonical_image,
 };
-use super::observe::Snapshot;
 
 mod egress;
 mod enrich;

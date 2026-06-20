@@ -24,12 +24,15 @@
 //! and is always reconstructable from the live cluster, so it lives in memory and
 //! does not persist.
 
+pub mod attack;
+pub mod delta;
+
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-use super::attack::{self, AttackRef};
+use self::attack::AttackRef;
 
 /// A node in the cluster security graph.
 ///
@@ -669,11 +672,11 @@ mod tests {
                 via: "privileged".into()
             }
             .technique(),
-            Some(super::super::attack::ESCAPE_TO_HOST)
+            Some(super::attack::ESCAPE_TO_HOST)
         );
         assert_eq!(
             Relation::CanRead.technique(),
-            Some(super::super::attack::CREDENTIAL_ACCESS)
+            Some(super::attack::CREDENTIAL_ACCESS)
         );
         assert_eq!(
             Relation::CanDo {
@@ -681,7 +684,7 @@ mod tests {
                 resource: "secrets".into()
             }
             .technique(),
-            Some(super::super::attack::CREDENTIAL_ACCESS)
+            Some(super::attack::CREDENTIAL_ACCESS)
         );
         // ...structural substrate edges do not.
         assert_eq!(Relation::RunsAs.technique(), None);

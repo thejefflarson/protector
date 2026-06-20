@@ -6,6 +6,13 @@
 //! next, but a periodic full list is the resync path the ADR already calls the
 //! source of truth, so it is the honest v0.
 
+pub mod adapter;
+pub mod exploit_intel;
+pub mod health;
+pub mod linkerd;
+pub mod runtime;
+pub mod trivy;
+
 use k8s_openapi::api::core::v1::{Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
@@ -62,10 +69,10 @@ pub struct Snapshot {
     pub runtime_events: Vec<RuntimeObservation>,
     /// Linkerd authorization-policy inputs — the mesh-native reachability source
     /// (`Server` + `AuthorizationPolicy` + `MeshTLSAuthentication`). Empty when the
-    /// policy CRDs aren't present. See [`super::linkerd`].
-    pub linkerd_servers: Vec<super::linkerd::LinkerdServer>,
-    pub linkerd_authz_policies: Vec<super::linkerd::LinkerdAuthzPolicy>,
-    pub linkerd_mtls_auths: Vec<super::linkerd::LinkerdMeshTlsAuth>,
+    /// policy CRDs aren't present. See [`self::linkerd`].
+    pub linkerd_servers: Vec<self::linkerd::LinkerdServer>,
+    pub linkerd_authz_policies: Vec<self::linkerd::LinkerdAuthzPolicy>,
+    pub linkerd_mtls_auths: Vec<self::linkerd::LinkerdMeshTlsAuth>,
 }
 
 impl Snapshot {
@@ -176,7 +183,7 @@ impl Snapshot {
 
 /// Best-effort list of normalized image vulnerabilities from trivy-operator's
 /// `VulnerabilityReport` CRDs. Empty if the CRD isn't installed or unreadable. The
-/// report→graph mapping is unit-tested in [`super::trivy`]; this is the
+/// report→graph mapping is unit-tested in [`self::trivy`]; this is the
 /// cluster-facing list, shared by the poll observer and the watch assembler.
 pub async fn list_image_vulns(client: &kube::Client) -> Vec<ImageVulnerabilities> {
     let gvk = GroupVersionKind::gvk("aquasecurity.github.io", "v1alpha1", "VulnerabilityReport");
@@ -188,7 +195,7 @@ pub async fn list_image_vulns(client: &kube::Client) -> Vec<ImageVulnerabilities
         Ok(list) => list
             .items
             .iter()
-            .filter_map(super::trivy::parse_report)
+            .filter_map(self::trivy::parse_report)
             .collect(),
         Err(error) => {
             tracing::debug!(%error, "no VulnerabilityReports (trivy-operator absent?)");
@@ -200,28 +207,28 @@ pub async fn list_image_vulns(client: &kube::Client) -> Vec<ImageVulnerabilities
 /// Best-effort list of the Linkerd policy CRDs the reachability adapter consumes
 /// (`Server` v1beta3, `AuthorizationPolicy`/`MeshTLSAuthentication` v1alpha1). Empty
 /// if Linkerd's policy CRDs aren't installed. The CRD→input mapping is unit-tested in
-/// [`super::linkerd`]; this is the cluster-facing list, shared by the poll observer
+/// [`self::linkerd`]; this is the cluster-facing list, shared by the poll observer
 /// and the watch assembler.
 pub async fn list_linkerd_authz(
     client: &kube::Client,
 ) -> (
-    Vec<super::linkerd::LinkerdServer>,
-    Vec<super::linkerd::LinkerdAuthzPolicy>,
-    Vec<super::linkerd::LinkerdMeshTlsAuth>,
+    Vec<self::linkerd::LinkerdServer>,
+    Vec<self::linkerd::LinkerdAuthzPolicy>,
+    Vec<self::linkerd::LinkerdMeshTlsAuth>,
 ) {
-    let servers = list_dynamic(client, "v1beta3", "Server", super::linkerd::parse_server).await;
+    let servers = list_dynamic(client, "v1beta3", "Server", self::linkerd::parse_server).await;
     let policies = list_dynamic(
         client,
         "v1alpha1",
         "AuthorizationPolicy",
-        super::linkerd::parse_authz_policy,
+        self::linkerd::parse_authz_policy,
     )
     .await;
     let mtls = list_dynamic(
         client,
         "v1alpha1",
         "MeshTLSAuthentication",
-        super::linkerd::parse_mtls_auth,
+        self::linkerd::parse_mtls_auth,
     )
     .await;
     (servers, policies, mtls)

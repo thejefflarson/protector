@@ -1,0 +1,14 @@
+//! Reasoning: the propose / prove / judge core (ADR-0001, 0005, 0013).
+//!
+//! - [`objective`] — what an attacker would want to reach (the recognized goals).
+//! - [`proof`] — deterministic enumeration of proven chains to those objectives.
+//! - [`hypothesis`] — the model *proposes* a chain; a deterministic gate confirms it.
+//! - [`adjudicate`] — the model *decides* exploitability of a proven chain.
+//!
+//! Proof winnows, the model decides (ADR-0013): only deterministic proof moves
+//! privilege; the model judges and promotes, never invents reach.
+
+pub mod adjudicate;
+pub mod hypothesis;
+pub mod objective;
+pub mod proof;

@@ -1,7 +1,7 @@
 //! trivy-operator `VulnerabilityReport` → normalized [`ImageVulnerabilities`] (a
 //! Vulnerability-port adapter, ADR-0003).
 //!
-//! The cluster-facing list lives in [`super::observe`]; this module is the pure
+//! The cluster-facing list lives in [`super`]; this module is the pure
 //! mapping from a report's JSON into the graph's vocabulary, so it is unit-tested
 //! without a cluster. trivy reports vulnerability *presence and severity*;
 //! `exploited_in_wild` stays `false` here — that predicate is the ExploitIntel
@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-use super::graph::{Provenance, Severity, Vulnerability};
-use super::observe::ImageVulnerabilities;
+use super::ImageVulnerabilities;
+use crate::engine::graph::{Provenance, Severity, Vulnerability};
 
 /// Parse a trivy-operator `VulnerabilityReport` object. The report payload lives
 /// under the top-level `report` field.

@@ -17,11 +17,11 @@
 //! `internet` egress endpoint, T1041), and Data from Information Repositories (reach a
 //! data-store workload, T1213).
 
-use super::attack::{
+use crate::engine::graph::attack::{
     AttackRef, CREDENTIAL_ACCESS, DATA_FROM_REPOSITORY, ESCAPE_TO_HOST, EXFILTRATION,
     capability_technique,
 };
-use super::graph::{Node, NodeKey, SecurityGraph};
+use crate::engine::graph::{Node, NodeKey, SecurityGraph};
 
 /// A recognized objective: a graph node that is an adversary goal, with the
 /// technique reaching it realizes.

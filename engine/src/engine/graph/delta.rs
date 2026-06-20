@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
-use super::graph::SecurityGraph;
+use super::SecurityGraph;
 
 /// A canonical, comparable projection of a graph: the set of node keys and the set
 /// of edge signatures (`source -[label]-> target`). Diffing reduces to set
@@ -100,8 +100,8 @@ impl ThreatDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::{build_graph, default_adapters};
     use crate::engine::observe::Snapshot;
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
     use serde_json::json;
 
     fn snapshot_with_pod(name: &str) -> Snapshot {

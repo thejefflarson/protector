@@ -25,8 +25,8 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 
-use super::graph::Behavior;
-use super::observe::RuntimeObservation;
+use super::RuntimeObservation;
+use crate::engine::graph::Behavior;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
 /// ingest task and the engine loop can share it.

@@ -6,14 +6,14 @@
 //! mode — cuts them. See `docs/adr/0001`–`0004` for the decisions behind it.
 //!
 //! [`Engine::process`] runs the five-question pipeline against one observed
-//! snapshot: build the [`graph`], diff it (Q1, [`delta`]), assess health (Q3,
-//! [`health`]), prove ATT&CK-tagged chains and cuts (Q2, [`proof`]) — a model may
-//! [`hypothesis`]ize candidates the proof gate confirms, and [`adjudicate`] each
-//! breach-relevant chain — the model judges exploitability, vetoing a live chain or
-//! promoting an exposed one (ADR-0013) — reconcile proposed mitigations as
-//! self-retiring debt (Q4/Q5, [`response`]), and gate + (closed-loop) actuate them
-//! ([`actuator`]). [`run_watch`] drives it event-driven (the default); [`run`] is
-//! the poll fallback.
+//! snapshot: build the [`graph`], diff it (Q1, [`graph::delta`]), assess health (Q3,
+//! [`observe::health`]), prove ATT&CK-tagged chains and cuts (Q2, [`reason::proof`]) —
+//! a model may propose candidates ([`reason::hypothesis`]) the proof gate confirms, and
+//! [`reason::adjudicate`] each breach-relevant chain — the model judges exploitability,
+//! vetoing a live chain or promoting an exposed one (ADR-0013) — reconcile proposed
+//! mitigations as self-retiring debt (Q4/Q5, [`respond`]), and gate + (closed-loop)
+//! actuate them ([`respond::actuator`]). [`run_watch`] drives it event-driven (the
+//! default); [`run`] is the poll fallback.
 //!
 //! **Default posture is shadow mode**: with no action classes enabled and the
 //! dry-run actuator, every decision is propose/forbid and nothing reaches the
@@ -23,33 +23,27 @@
 
 use std::time::Duration;
 
-pub mod actuator;
-pub mod adapter;
-pub mod adjudicate;
-pub mod attack;
+// Modules are grouped by domain (see each group's mod.rs):
+//   graph/   — the stable vocabulary + its diff (ADR-0003/0004)
+//   observe/ — observed state + capability ports/adapters (ADR-0002/0003)
+//   reason/  — propose / prove / judge (ADR-0001/0005/0013)
+//   respond/ — proven chains → self-retiring controls, then apply (ADR-0002/0009)
+// model + dashboard are cross-cutting single files; this mod.rs is the orchestrator.
 pub mod dashboard;
-pub mod delta;
-pub mod exploit_intel;
 pub mod graph;
-pub mod health;
-pub mod hypothesis;
-pub mod linkerd;
 pub mod model;
-pub mod objective;
 pub mod observe;
-pub mod proof;
-pub mod response;
-pub mod runtime;
-pub mod trivy;
+pub mod reason;
+pub mod respond;
 
-use actuator::{
+use graph::delta::GraphSnapshot;
+use observe::Snapshot;
+use observe::adapter::Adapter;
+use observe::health::{Health, HealthProvider, PodStatusHealth};
+use respond::MitigationLedger;
+use respond::actuator::{
     ActionLog, Actuator, Decision, DryRunActuator, EnabledActions, decide, predict_blast_radius,
 };
-use adapter::Adapter;
-use delta::GraphSnapshot;
-use health::{Health, HealthProvider, PodStatusHealth};
-use observe::Snapshot;
-use response::MitigationLedger;
 use std::collections::{HashMap, HashSet};
 
 /// OTLP instruments for the engine, recorded against the global meter (see
@@ -119,8 +113,8 @@ pub struct Engine {
     adapters: Vec<Box<dyn Adapter>>,
     active: EnabledActions,
     actuator: Box<dyn Actuator>,
-    hypothesizer: Box<dyn hypothesis::HypothesisSource>,
-    adjudicator: Box<dyn adjudicate::Adjudicator>,
+    hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
+    adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     findings: std::sync::Arc<dashboard::Findings>,
     previous: GraphSnapshot,
     ledger: MitigationLedger,
@@ -132,7 +126,7 @@ pub struct Engine {
     /// its fingerprint changes (its CVEs/runtime OR its reachable-objective set — so a
     /// misconfig that newly exposes something re-triggers it). Pruned to present
     /// entries each pass (ephemeral workloads, removed exposure).
-    verdict_cache: HashMap<String, (String, adjudicate::Verdict)>,
+    verdict_cache: HashMap<String, (String, reason::adjudicate::Verdict)>,
     /// The most recent verdict per internet-facing ENTRY, of *any* kind (decisive or
     /// inconclusive) — distinct from [`verdict_cache`], which holds only decisive
     /// verdicts and governs re-judging. This is the **display** memory: each pass
@@ -141,7 +135,7 @@ pub struct Engine {
     /// pass. Seeded onto fresh chains at publish time so a judgement — even "uncertain
     /// — model unavailable" — stays visible while the model re-judges. Pruned to present
     /// entries each pass.
-    last_verdict: HashMap<String, adjudicate::Verdict>,
+    last_verdict: HashMap<String, reason::adjudicate::Verdict>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -154,8 +148,8 @@ impl Engine {
     pub fn new(
         active: EnabledActions,
         actuator: Box<dyn Actuator>,
-        hypothesizer: Box<dyn hypothesis::HypothesisSource>,
-        adjudicator: Box<dyn adjudicate::Adjudicator>,
+        hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
+        adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     ) -> Self {
         if active.is_empty() {
             tracing::info!("engine: no action classes enabled (easy mode — proposals only)");
@@ -165,7 +159,7 @@ impl Engine {
         let findings = std::sync::Arc::new(dashboard::Findings::new());
         findings.set_armed(!active.is_empty());
         Self {
-            adapters: adapter::default_adapters(),
+            adapters: observe::adapter::default_adapters(),
             active,
             actuator,
             hypothesizer,
@@ -197,11 +191,11 @@ impl Engine {
     #[tracing::instrument(name = "engine.process", skip_all)]
     pub async fn process(&mut self, snapshot: &Snapshot) {
         self.metrics.passes.add(1, &[]);
-        let graph = adapter::build_graph(snapshot, &self.adapters);
+        let graph = observe::adapter::build_graph(snapshot, &self.adapters);
         let current = GraphSnapshot::of(&graph);
         let health = PodStatusHealth.assess(snapshot);
 
-        let delta = delta::diff(&self.previous, &current);
+        let delta = graph::delta::diff(&self.previous, &current);
         let structurally_changed = !delta.is_empty();
         if structurally_changed {
             delta.emit();
@@ -214,9 +208,9 @@ impl Engine {
         // candidates, which the confirmation gate accepts only if every link is a
         // real proof-grade edge ("a model may propose; only proof moves
         // privilege"). Confirmed model chains are merged, deduped by endpoints.
-        let mut chains = proof::prove(&graph);
+        let mut chains = reason::proof::prove(&graph);
         let proposed = self.hypothesizer.propose(&graph).await;
-        for confirmed in hypothesis::confirm_all(&graph, &proposed) {
+        for confirmed in reason::hypothesis::confirm_all(&graph, &proposed) {
             if !chains
                 .iter()
                 .any(|c| c.entry == confirmed.entry && c.objective == confirmed.objective)
@@ -295,14 +289,14 @@ impl Engine {
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
             // The (objective, technique) set this entry reaches — what the model judges.
-            let mut objectives: Vec<(graph::NodeKey, attack::AttackRef)> = idxs
+            let mut objectives: Vec<(graph::NodeKey, graph::attack::AttackRef)> = idxs
                 .iter()
                 .map(|&i| (chains[i].objective.clone(), chains[i].attack))
                 .collect();
             objectives.sort_by(|a, b| a.0.0.cmp(&b.0.0));
             objectives.dedup_by(|a, b| a.0 == b.0);
 
-            let fingerprint = adjudicate::entry_fingerprint(&graph, &entry, &objectives);
+            let fingerprint = reason::adjudicate::entry_fingerprint(&graph, &entry, &objectives);
             let verdict = match self.verdict_cache.get(entry_key) {
                 Some((fp, v)) if *fp == fingerprint => v.clone(),
                 _ => {
@@ -313,7 +307,7 @@ impl Engine {
                     // verdict lands here, and a silent inconclusive looks indistinguishable
                     // from "the model never ran" — surface why (timeout vs unparseable).
                     let result = match &v {
-                        adjudicate::Verdict::Uncertain(why) => {
+                        reason::adjudicate::Verdict::Uncertain(why) => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), %why, "adjudication inconclusive (will retry)");
                             "unavailable"
                         }
@@ -335,8 +329,8 @@ impl Engine {
             // keep showing the decisive one rather than regressing the dashboard to
             // "uncertain". The action logic below still uses this pass's real `verdict`.
             let display = match (&verdict, self.last_verdict.get(entry_key)) {
-                (adjudicate::Verdict::Uncertain(_), Some(prior))
-                    if !matches!(prior, adjudicate::Verdict::Uncertain(_)) =>
+                (reason::adjudicate::Verdict::Uncertain(_), Some(prior))
+                    if !matches!(prior, reason::adjudicate::Verdict::Uncertain(_)) =>
                 {
                     prior.clone()
                 }
@@ -460,7 +454,7 @@ pub async fn run(
     client: kube::Client,
     interval: Duration,
     active: EnabledActions,
-    kev: exploit_intel::KevCatalog,
+    kev: observe::exploit_intel::KevCatalog,
 ) {
     let mut engine = Engine::new(
         active.clone(),
@@ -497,8 +491,12 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
         .unwrap_or_default()
         .trim()
     {
-        "networkpolicy" | "net" => Box::new(actuator::IsolationActuator::new(client.clone())),
-        "adminnetworkpolicy" | "anp" => Box::new(actuator::KubeActuator::new(client.clone())),
+        "networkpolicy" | "net" => {
+            Box::new(respond::actuator::IsolationActuator::new(client.clone()))
+        }
+        "adminnetworkpolicy" | "anp" => {
+            Box::new(respond::actuator::KubeActuator::new(client.clone()))
+        }
         "dryrun" => Box::new(DryRunActuator),
         other => {
             tracing::warn!(
@@ -528,7 +526,7 @@ fn model_config() -> Option<(String, String)> {
 /// Choose the hypothesis source: a model-backed one when a model is configured AND
 /// `PROTECTOR_ENGINE_HYPOTHESIS=model` opts it in, else the null source. Local-first:
 /// point it at an in-cluster model so the graph never leaves.
-fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
+fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
     // The model hypothesis source is OFF by default. The deterministic enumerator
     // already finds every structural chain at this cluster's scale (so model
     // proposals are redundant), and the hypothesis prompt sends the *whole graph* —
@@ -540,13 +538,13 @@ fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
     match model_config() {
         Some((endpoint, model)) if opt_in => {
             tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
-            Box::new(hypothesis::ModelHypothesizer::new(
+            Box::new(reason::hypothesis::ModelHypothesizer::new(
                 endpoint,
                 model,
-                hypothesis::Tier::Local,
+                reason::hypothesis::Tier::Local,
             ))
         }
-        _ => Box::new(hypothesis::NullHypothesizer),
+        _ => Box::new(reason::hypothesis::NullHypothesizer),
     }
 }
 
@@ -554,13 +552,13 @@ fn build_hypothesizer() -> Box<dyn hypothesis::HypothesisSource> {
 /// configured, else the null adjudicator (confirm everything — the deterministic bar
 /// governs). The model judges exploitability bidirectionally — vetoing a live chain
 /// the deterministic bar would act on, or promoting an exposed one it wouldn't.
-fn build_adjudicator() -> Box<dyn adjudicate::Adjudicator> {
+fn build_adjudicator() -> Box<dyn reason::adjudicate::Adjudicator> {
     match model_config() {
         Some((endpoint, model)) => {
             tracing::info!(%model, "adjudicator: model-backed (judges exploitability — promote/veto)");
-            Box::new(adjudicate::ModelAdjudicator::new(endpoint, model))
+            Box::new(reason::adjudicate::ModelAdjudicator::new(endpoint, model))
         }
-        None => Box::new(adjudicate::NullAdjudicator),
+        None => Box::new(reason::adjudicate::NullAdjudicator),
     }
 }
 
@@ -579,7 +577,7 @@ pub async fn run_watch(
     active: EnabledActions,
     runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
-    kev: exploit_intel::KevCatalog,
+    kev: observe::exploit_intel::KevCatalog,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
@@ -611,14 +609,14 @@ pub async fn run_watch(
     // the loop so a "happening now" signal is acted on immediately (it flips a
     // chain's corroboration without changing the graph's shape). Signals expire, so
     // corroboration stays live.
-    let runtime_events = std::sync::Arc::new(runtime::RuntimeEvents::new(
+    let runtime_events = std::sync::Arc::new(observe::runtime::RuntimeEvents::new(
         std::time::Duration::from_secs(300),
     ));
     let (runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
     if let Some(addr) = runtime_addr {
         let events = runtime_events.clone();
         tokio::spawn(async move {
-            if let Err(error) = runtime::serve_runtime(addr, events, runtime_tx).await {
+            if let Err(error) = observe::runtime::serve_runtime(addr, events, runtime_tx).await {
                 tracing::error!(%error, "runtime-evidence ingest stopped");
             }
         });
@@ -732,10 +730,10 @@ pub async fn run_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adjudicate::Verdict;
-    use crate::engine::attack::AttackRef;
+    use crate::engine::graph::attack::AttackRef;
     use crate::engine::graph::{NodeKey, SecurityGraph};
     use crate::engine::observe::{SecretMeta, Snapshot};
+    use crate::engine::reason::adjudicate::Verdict;
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -744,7 +742,7 @@ mod tests {
     struct CountingAdjudicator(Arc<AtomicUsize>);
 
     #[async_trait::async_trait]
-    impl adjudicate::Adjudicator for CountingAdjudicator {
+    impl reason::adjudicate::Adjudicator for CountingAdjudicator {
         async fn judge(
             &self,
             _entry: &NodeKey,
@@ -807,7 +805,7 @@ mod tests {
         Engine::new(
             EnabledActions::from_names(std::iter::empty::<&str>()),
             Box::new(DryRunActuator),
-            Box::new(hypothesis::NullHypothesizer),
+            Box::new(reason::hypothesis::NullHypothesizer),
             Box::new(CountingAdjudicator(counter)),
         )
     }

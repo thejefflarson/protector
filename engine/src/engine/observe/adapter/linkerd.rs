@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine::linkerd::AuthClient;
+use crate::engine::observe::linkerd::AuthClient;
 
 /// `reaches` edges granted by Linkerd authorization, the mesh-native counterpart to
 /// the `NetworkPolicy`-based [`ReachabilityAdapter`](super::ReachabilityAdapter). On
@@ -133,8 +133,8 @@ impl Adapter for LinkerdReachabilityAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapter::test_support::*;
-    use crate::engine::linkerd::{
+    use crate::engine::observe::adapter::test_support::*;
+    use crate::engine::observe::linkerd::{
         AuthClient, LinkerdAuthzPolicy, LinkerdMeshTlsAuth, LinkerdServer, ServiceAccountRef,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
