@@ -15,15 +15,21 @@
 #![no_std]
 #![no_main]
 
+// Kernel struct bindings (struct file/path/…), generated from the node BTF — needed so
+// bpf_d_path receives a BTF-typed `&file->f_path`. See docs/ebpf-testing-on-nodes.md.
+mod vmlinux;
+
 use aya_ebpf::{
-    helpers::gen::bpf_probe_read_kernel,
+    helpers::gen::{bpf_d_path, bpf_probe_read_kernel},
     macros::{fentry, kprobe, map},
     maps::RingBuf,
     programs::{FEntryContext, ProbeContext},
 };
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
-use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT, KIND_FILE_OPEN};
+use protector_agent_common::{
+    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, PATH_CAP,
+};
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
 #[map]
@@ -99,22 +105,86 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// fentry on `security_file_open(struct file *file)` — secret-read probe, **spike phase
-/// 1**: emit only the header (pid) to confirm fentry attaches and fires on the node
-/// kernel (6.8 arm64) before phase 2 adds path extraction (`bpf_d_path`) to recognize
-/// secret-mount reads. Observe-only; userspace counts these but emits nothing to the
-/// engine yet. fentry needs kernel BTF, which the agent has (mounts /sys/kernel/btf).
+/// `…/kubernetes.io~secret/…` is how the kubelet mounts a Secret volume; this marker in
+/// the opened path means the workload is reading a mounted secret.
+const SECRET_MARKER: [u8; 20] = *b"kubernetes.io~secret";
+
+/// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
+/// Reads the opened file's path via `bpf_d_path` and, **only if** it's under a secret
+/// mount, emits a [`FileEvent`] with the path. Filtering in-kernel keeps the (very high)
+/// file-open volume off the ring buffer. Observe-only; a bad read drops the event.
 #[fentry(function = "security_file_open")]
-pub fn file_open(_ctx: FEntryContext) -> u32 {
+pub fn file_open(ctx: FEntryContext) -> u32 {
+    let _ = try_file_open(&ctx);
+    0
+}
+
+fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
+    // security_file_open's first argument is `struct file *file`.
+    let file: *const vmlinux::file = unsafe { ctx.arg(0) };
+    if file.is_null() {
+        return Ok(());
+    }
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
-    if let Some(mut slot) = EVENTS.reserve::<EventHeader>(0) {
-        slot.write(EventHeader {
+    let mut ev = FileEvent {
+        header: EventHeader {
             kind: KIND_FILE_OPEN,
             pid,
-        });
+        },
+        len: 0,
+        path: [0u8; PATH_CAP],
+    };
+    // &file->f_path as a BTF-typed `struct path *` — what bpf_d_path requires.
+    let path_ptr = unsafe { core::ptr::addr_of!((*file).f_path) };
+    let n = unsafe {
+        bpf_d_path(
+            path_ptr as *mut _,
+            ev.path.as_mut_ptr() as *mut _,
+            PATH_CAP as u32,
+        )
+    };
+    if n <= 0 {
+        return Ok(());
+    }
+    let len = if (n as usize) < PATH_CAP {
+        n as usize
+    } else {
+        PATH_CAP
+    };
+    if !has_secret_marker(&ev.path, len) {
+        return Ok(());
+    }
+    ev.len = len as u32;
+    if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
+        slot.write(ev);
         slot.submit(0);
     }
-    0
+    Ok(())
+}
+
+/// Bounded substring search for [`SECRET_MARKER`] in `buf[..len]`. Indices are masked to
+/// `PATH_CAP` so the verifier sees every access provably in-bounds.
+fn has_secret_marker(buf: &[u8; PATH_CAP], len: usize) -> bool {
+    let n = if len > PATH_CAP { PATH_CAP } else { len };
+    let mut i = 0usize;
+    while i + SECRET_MARKER.len() <= n {
+        let mut j = 0usize;
+        let mut hit = true;
+        while j < SECRET_MARKER.len() {
+            let idx = (i + j) & (PATH_CAP - 1);
+            // SAFETY: idx is masked < PATH_CAP; j < SECRET_MARKER.len().
+            if unsafe { *buf.get_unchecked(idx) != *SECRET_MARKER.get_unchecked(j) } {
+                hit = false;
+                break;
+            }
+            j += 1;
+        }
+        if hit {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(not(test))]
