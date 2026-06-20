@@ -38,21 +38,27 @@ mod ebpf {
     use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use aya::Ebpf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use aya::maps::RingBuf;
-    use aya::programs::KProbe;
+    use aya::programs::{FEntry, KProbe};
+    use aya::{Btf, Ebpf};
     use tokio::io::unix::AsyncFd;
 
     use super::*;
     use crate::pod::parse_pod_uid;
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
-    use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT};
+    use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT, KIND_FILE_OPEN};
     use protector_behavior::Behavior;
 
     /// This sensor's identity, carried into each observation's provenance so the engine
     /// can tell agent signals from Falco's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
+
+    /// Spike phase-1 counter: file-open events seen via the fentry probe, logged
+    /// periodically to prove it fires. Phase 2 turns secret-mount opens into SecretRead.
+    static FILE_OPENS: AtomicU64 = AtomicU64::new(0);
 
     /// The probes to load and attach: (program name in the object, kernel hook). Adding
     /// a probe is one row here plus a decode arm in `decode` — no new control flow.
@@ -75,6 +81,17 @@ mod ebpf {
                 program.load()?;
                 program.attach(*hook, 0)?;
                 tracing::info!(probe = *name, hook = *hook, "attached probe");
+            }
+            // Secret-read spike (phase 1): best-effort fentry on security_file_open. NOT
+            // fatal — if it doesn't load/attach (no BTF/fentry), keep the connect probe
+            // running. Confirms fentry works on the node before phase 2 adds bpf_d_path.
+            match Self::attach_file_open(&mut ebpf) {
+                Ok(()) => {
+                    tracing::info!("attached fentry on security_file_open (secret-read spike)")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "fentry file_open did not attach; continuing without it")
+                }
             }
             tracing::info!("draining events");
 
@@ -99,6 +116,20 @@ mod ebpf {
             }
         }
 
+        /// Load kernel BTF and attach the fentry `file_open` program to
+        /// `security_file_open`. Separate from the kprobe table because fentry attaches
+        /// via BTF (no hook arg). Caller treats failure as non-fatal (spike).
+        fn attach_file_open(ebpf: &mut Ebpf) -> anyhow::Result<()> {
+            let btf = Btf::from_sys_fs()?;
+            let program: &mut FEntry = ebpf
+                .program_mut("file_open")
+                .ok_or_else(|| anyhow::anyhow!("file_open program missing from object"))?
+                .try_into()?;
+            program.load("security_file_open", &btf)?;
+            program.attach()?;
+            Ok(())
+        }
+
         /// Read an event's header, dispatch on its kind, and turn it into an observation.
         /// Returns `None` for a truncated event, an unknown kind, or a pid that doesn't
         /// resolve to a pod (host process) — all dropped, never fatal.
@@ -116,6 +147,18 @@ mod ebpf {
                     // SAFETY: kind says this is a ConnEvent of exactly this layout.
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<ConnEvent>()) };
                     Self::connect(&ev)
+                }
+                KIND_FILE_OPEN => {
+                    // Spike phase 1: count + periodically log to prove the fentry probe
+                    // fires; emit nothing to the engine until phase 2 adds the path.
+                    let n = FILE_OPENS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n % 5000 == 0 {
+                        tracing::info!(
+                            file_opens = n,
+                            "fentry security_file_open firing (secret-read spike)"
+                        );
+                    }
+                    None
                 }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }

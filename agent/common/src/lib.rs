@@ -12,7 +12,10 @@
 
 /// Event-kind discriminators. Stable wire values; never renumber an existing one.
 pub const KIND_CONNECT: u32 = 1;
-// Next probes: KIND_SECRET_READ = 2, KIND_LIBRARY_LOAD = 3.
+/// A file was opened (fentry on `security_file_open`). Spike phase 1 carries only the
+/// header (pid) to confirm the hook attaches/fires; phase 2 adds the path body so the
+/// userspace side can recognize secret-mount reads. Next: KIND_LIBRARY_LOAD = 3.
+pub const KIND_FILE_OPEN: u32 = 2;
 
 /// The fixed prefix of every event in the ring buffer. `repr(C)`, at offset 0 of each
 /// body, so userspace can read `kind` (and `pid`) before it knows which body follows.
