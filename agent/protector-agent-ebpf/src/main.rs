@@ -17,13 +17,13 @@
 
 use aya_ebpf::{
     helpers::gen::bpf_probe_read_kernel,
-    macros::{kprobe, map},
+    macros::{fentry, kprobe, map},
     maps::RingBuf,
-    programs::ProbeContext,
+    programs::{FEntryContext, ProbeContext},
 };
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
-use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT};
+use protector_agent_common::{ConnEvent, EventHeader, KIND_CONNECT, KIND_FILE_OPEN};
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
 #[map]
@@ -97,6 +97,24 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
         slot.submit(0);
     }
     Ok(())
+}
+
+/// fentry on `security_file_open(struct file *file)` — secret-read probe, **spike phase
+/// 1**: emit only the header (pid) to confirm fentry attaches and fires on the node
+/// kernel (6.8 arm64) before phase 2 adds path extraction (`bpf_d_path`) to recognize
+/// secret-mount reads. Observe-only; userspace counts these but emits nothing to the
+/// engine yet. fentry needs kernel BTF, which the agent has (mounts /sys/kernel/btf).
+#[fentry(function = "security_file_open")]
+pub fn file_open(_ctx: FEntryContext) -> u32 {
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    if let Some(mut slot) = EVENTS.reserve::<EventHeader>(0) {
+        slot.write(EventHeader {
+            kind: KIND_FILE_OPEN,
+            pid,
+        });
+        slot.submit(0);
+    }
+    0
 }
 
 #[cfg(not(test))]
