@@ -1,29 +1,8 @@
-[package]
-name = "protector"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-anyhow = "1.0.102"
-async-trait = "0.1.89"
-axum = "0.8.9"
-axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-base64 = "0.22.1"
-futures = "0.3.32"
-k8s-openapi = { version = "0.28.0", features = ["v1_33"] }
-kube = { version = "4.0.0", features = ["runtime", "client", "config", "derive", "admission"] }
-opentelemetry = "0.32.0"
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics"] }
-opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
-petgraph = "0.8.3"
-regex = "1.12.4"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
-rustls = { version = "0.23.40", features = ["aws_lc_rs"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-sigstore = { version = "0.14.0", default-features = false, features = ["cosign", "sigstore-trust-root", "rustls-tls"] }
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "process"] }
-tracing = "0.1.44"
-tracing-opentelemetry = "0.33.0"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std"] }
+# Virtual workspace root. The engine (and, from Stage B, the shared `behavior` crate it
+# and the agent both use) build on STABLE here. The agent is a SEPARATE workspace under
+# `agent/` — its eBPF crate needs nightly + the bpf target, which must never reach the
+# engine's build, so it is deliberately not a member here (it depends on `behavior` by
+# path instead).
+[workspace]
+resolver = "2"
+members = ["engine"]
