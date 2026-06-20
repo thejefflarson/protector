@@ -105,14 +105,18 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// `…/kubernetes.io~secret/…` is how the kubelet mounts a Secret volume; this marker in
-/// the opened path means the workload is reading a mounted secret.
-const SECRET_MARKER: [u8; 20] = *b"kubernetes.io~secret";
+/// tmpfs superblock magic. Kubernetes Secret / ConfigMap / projected volumes are all
+/// tmpfs, so this is the in-kernel filter. It's broad (also /tmp, /dev/shm, emptyDir-
+/// memory, SA tokens) but tmpfs *opens* are moderate volume — far below the full
+/// file-open firehose — and the ENGINE narrows to real Secret mounts. We can't filter to
+/// secrets precisely in-kernel: bpf_d_path returns the container-relative path, which has
+/// no universal secret marker (see docs/ebpf-testing-on-nodes.md).
+const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
-/// Reads the opened file's path via `bpf_d_path` and, **only if** it's under a secret
-/// mount, emits a [`FileEvent`] with the path. Filtering in-kernel keeps the (very high)
-/// file-open volume off the ring buffer. Observe-only; a bad read drops the event.
+/// For a tmpfs read, emits a [`FileEvent`] with the container-relative path via
+/// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
+/// in-kernel keeps the (very high) file-open volume off the ring buffer. Observe-only.
 #[fentry(function = "security_file_open")]
 pub fn file_open(ctx: FEntryContext) -> u32 {
     let _ = try_file_open(&ctx);
@@ -123,6 +127,9 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     // security_file_open's first argument is `struct file *file`.
     let file: *const vmlinux::file = unsafe { ctx.arg(0) };
     if file.is_null() {
+        return Ok(());
+    }
+    if !is_tmpfs(file) {
         return Ok(());
     }
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
@@ -146,15 +153,11 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     if n <= 0 {
         return Ok(());
     }
-    let len = if (n as usize) < PATH_CAP {
-        n as usize
+    ev.len = if (n as usize) < PATH_CAP {
+        n as u32
     } else {
-        PATH_CAP
+        PATH_CAP as u32
     };
-    if !has_secret_marker(&ev.path, len) {
-        return Ok(());
-    }
-    ev.len = len as u32;
     if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
         slot.write(ev);
         slot.submit(0);
@@ -162,29 +165,36 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// Bounded substring search for [`SECRET_MARKER`] in `buf[..len]`. Indices are masked to
-/// `PATH_CAP` so the verifier sees every access provably in-bounds.
-fn has_secret_marker(buf: &[u8; PATH_CAP], len: usize) -> bool {
-    let n = if len > PATH_CAP { PATH_CAP } else { len };
-    let mut i = 0usize;
-    while i + SECRET_MARKER.len() <= n {
-        let mut j = 0usize;
-        let mut hit = true;
-        while j < SECRET_MARKER.len() {
-            let idx = (i + j) & (PATH_CAP - 1);
-            // SAFETY: idx is masked < PATH_CAP; j < SECRET_MARKER.len().
-            if unsafe { *buf.get_unchecked(idx) != *SECRET_MARKER.get_unchecked(j) } {
-                hit = false;
-                break;
-            }
-            j += 1;
+/// Whether `file` lives on a tmpfs — `file->f_inode->i_sb->s_magic == TMPFS_MAGIC`. The
+/// pointer chase uses bpf_probe_read_kernel (fixed offsets from the node-BTF vmlinux),
+/// the same safe pattern as the connect probe. A failed read = "not tmpfs" (drop).
+fn is_tmpfs(file: *const vmlinux::file) -> bool {
+    unsafe {
+        let mut inode: *mut vmlinux::inode = core::ptr::null_mut();
+        if read_kernel(&mut inode, core::ptr::addr_of!((*file).f_inode)) != 0 || inode.is_null() {
+            return false;
         }
-        if hit {
-            return true;
+        let mut sb: *mut vmlinux::super_block = core::ptr::null_mut();
+        if read_kernel(&mut sb, core::ptr::addr_of!((*inode).i_sb)) != 0 || sb.is_null() {
+            return false;
         }
-        i += 1;
+        let mut magic: u64 = 0;
+        if read_kernel(&mut magic, core::ptr::addr_of!((*sb).s_magic).cast()) != 0 {
+            return false;
+        }
+        magic == TMPFS_MAGIC
     }
-    false
+}
+
+/// bpf_probe_read_kernel a `T` from kernel address `src` into `dst`. Returns 0 on success.
+unsafe fn read_kernel<T>(dst: &mut T, src: *const T) -> i64 {
+    unsafe {
+        bpf_probe_read_kernel(
+            dst as *mut T as *mut core::ffi::c_void,
+            core::mem::size_of::<T>() as u32,
+            src as *const core::ffi::c_void,
+        )
+    }
 }
 
 #[cfg(not(test))]

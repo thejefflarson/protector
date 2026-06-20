@@ -27,6 +27,14 @@ pub enum Behavior {
     SecretRead { secret: String },
     /// A load of a shared library / dependency artifact.
     LibraryLoaded { name: String },
+    /// A **transport-stage** signal: a file open the sensor couldn't classify on its own.
+    /// The eBPF agent emits this for reads on a tmpfs (where Secret/ConfigMap/projected
+    /// volumes live) carrying the *container-relative* path — it has no cluster access to
+    /// know if that path is a Secret. The engine refines it (in the RuntimeAdapter) into a
+    /// [`Behavior::SecretRead`] using the pod's secret `volumeMounts`, or drops it. It
+    /// never persists as graph state, so [`Self::summary`]/[`Self::fingerprint_key`] only
+    /// see it defensively.
+    FileRead { path: String },
 }
 
 impl Behavior {
@@ -49,6 +57,7 @@ impl Behavior {
             ),
             Behavior::SecretRead { secret } => format!("reads secret {secret}"),
             Behavior::LibraryLoaded { name } => format!("loaded library {name}"),
+            Behavior::FileRead { path } => format!("opened file {path}"),
         }
     }
 
@@ -65,6 +74,7 @@ impl Behavior {
             } => "egress:cluster".to_string(),
             Behavior::SecretRead { secret } => format!("read:{secret}"),
             Behavior::LibraryLoaded { name } => format!("lib:{name}"),
+            Behavior::FileRead { path } => format!("file:{path}"),
         }
     }
 }
