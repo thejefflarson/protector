@@ -102,7 +102,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache,mode=max
+          # Exporting cache pushes to the cache repo, which needs the registry login that
+          # is gated off for PRs — so only export on non-PR events (otherwise PR builds
+          # 403 on cache export even though the build itself succeeded).
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}-cache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
           provenance: mode=max
           sbom: true
       - name: Install cosign
