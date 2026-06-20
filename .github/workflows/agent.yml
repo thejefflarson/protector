@@ -38,9 +38,11 @@ jobs:
         # The runner image installs rust under ~/.cargo/bin but doesn't put it on PATH.
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Compile eBPF programs
-        working-directory: agent/protector-agent-ebpf
-        run: cargo +nightly build --release
+      - name: Compile agent with eBPF
+        # --features ebpf: build.rs compiles the BPF object (nightly + bpf-linker, baked
+        # into the runner image) and the userspace aya loader links it in. Full check.
+        working-directory: agent/protector-agent
+        run: cargo build --features ebpf
   image:
     runs-on: protector-runners
     # Never run forked-PR code on the self-hosted runners (arbitrary code execution on

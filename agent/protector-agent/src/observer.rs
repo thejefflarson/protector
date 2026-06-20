@@ -35,8 +35,25 @@ pub use ebpf::EbpfObserver;
 
 #[cfg(feature = "ebpf")]
 mod ebpf {
+    use std::net::Ipv4Addr;
+
+    use aya::Ebpf;
+    use aya::maps::RingBuf;
+    use aya::programs::KProbe;
+    use tokio::io::unix::AsyncFd;
+
     use super::*;
-    use crate::pod::PodResolver;
+    use crate::behavior::Behavior;
+    use crate::pod::{PodResolver, parse_pod_uid};
+
+    /// Mirror of the eBPF crate's `ConnEvent` (same `repr(C)` layout).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ConnEvent {
+        pid: u32,
+        daddr: u32, // network byte order
+        dport: u16, // host byte order
+    }
 
     pub struct EbpfObserver {
         resolver: PodResolver,
@@ -48,25 +65,63 @@ mod ebpf {
         }
 
         pub async fn run(self, tx: Sender<Observation>) -> anyhow::Result<()> {
-            // NODE-BUILT skeleton. The concrete aya wiring is completed and load-tested
-            // on a kernel (it can't be exercised in the engine's CI), but the shape is:
-            //
-            //   1. let mut ebpf = aya::Ebpf::load(EBPF_OBJECT)?;          // include_bytes! the built object
-            //   2. let prog: &mut aya::programs::KProbe =
-            //          ebpf.program_mut("connect").unwrap().try_into()?;
-            //      prog.load()?; prog.attach("security_socket_connect", 0)?;
-            //   3. let mut ring = aya::maps::RingBuf::try_from(ebpf.take_map("EVENTS").unwrap())?;
-            //   4. loop { for event in ring.next() { -> ConnEvent { cgroup_id/pid, daddr, dport } }
-            //         let uid = resolve cgroup -> pod uid (read /proc/<pid>/cgroup, parse_pod_uid)
-            //         if let Some(pod) = self.resolver.resolve(&uid) {
-            //             let internet = !is_cluster_cidr(daddr);
-            //             tx.send(Observation { namespace, pod, behavior:
-            //                 Behavior::NetworkConnection { peer: fmt(daddr,dport), internet } }).await?;
-            //         } }
-            //
-            // Until that lands, fail loudly rather than silently pretend to observe.
-            let _ = (&self.resolver, &tx);
-            anyhow::bail!("EbpfObserver loader not yet wired — complete on a node (see agent/README.md)")
+            // The BPF object is compiled + embedded by build.rs under the `ebpf` feature.
+            let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
+                env!("OUT_DIR"),
+                "/protector-agent.bpf.o"
+            )))?;
+            let program: &mut KProbe = ebpf
+                .program_mut("connect")
+                .ok_or_else(|| anyhow::anyhow!("connect program missing from object"))?
+                .try_into()?;
+            program.load()?;
+            program.attach("security_socket_connect", 0)?;
+            tracing::info!("attached connect probe; draining events");
+
+            let ring = RingBuf::try_from(
+                ebpf.take_map("EVENTS")
+                    .ok_or_else(|| anyhow::anyhow!("EVENTS map missing"))?,
+            )?;
+            let mut async_fd = AsyncFd::new(ring)?;
+            loop {
+                let mut guard = async_fd.readable_mut().await?;
+                {
+                    let ring = guard.get_inner_mut();
+                    while let Some(item) = ring.next() {
+                        let data: &[u8] = &item;
+                        if data.len() < std::mem::size_of::<ConnEvent>() {
+                            continue;
+                        }
+                        // SAFETY: the kernel wrote a ConnEvent of exactly this layout.
+                        let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<ConnEvent>()) };
+                        if let Some(obs) = self.observe(&ev)
+                            && tx.send(obs).await.is_err()
+                        {
+                            return Ok(()); // receiver gone — shut down
+                        }
+                    }
+                }
+                guard.clear_ready();
+            }
+        }
+
+        /// Map a raw event to an attributed observation, or drop it (mis-attribution is
+        /// worse than a missing signal — ADR-0014).
+        fn observe(&self, ev: &ConnEvent) -> Option<Observation> {
+            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.pid)).ok()?;
+            let uid = parse_pod_uid(&cgroup)?;
+            let pod = self.resolver.resolve(&uid)?;
+            // daddr's bytes are the network-order octets; to_ne_bytes on LE gives them
+            // in [a,b,c,d] order, which is what Ipv4Addr::from([u8;4]) wants.
+            let ip = Ipv4Addr::from(ev.daddr.to_ne_bytes());
+            Some(Observation {
+                namespace: pod.namespace.clone(),
+                pod: pod.name.clone(),
+                behavior: Behavior::NetworkConnection {
+                    peer: format!("{ip}:{}", ev.dport),
+                    internet: !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
+                },
+            })
         }
     }
 }

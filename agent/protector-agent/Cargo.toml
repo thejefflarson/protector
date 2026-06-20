@@ -12,7 +12,7 @@ publish = false
 # its own (see agent/README.md).
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
