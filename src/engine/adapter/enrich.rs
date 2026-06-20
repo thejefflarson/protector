@@ -66,11 +66,16 @@ impl Adapter for RuntimeAdapter {
                 std::collections::HashMap::new()
             };
 
+        let (mut attached, mut unresolved) = (0usize, 0usize);
         for event in &snapshot.runtime_events {
             let resolved = match &event.pod_uid {
                 Some(uid) => match by_uid.get(uid) {
                     Some(ns_name) => ns_name.clone(),
-                    None => continue, // unknown UID (pod gone / not yet observed) — drop
+                    None => {
+                        // Unknown UID (pod gone / not yet observed) — drop, don't guess.
+                        unresolved += 1;
+                        continue;
+                    }
                 },
                 None => (event.namespace.clone(), event.pod.clone()),
             };
@@ -81,8 +86,18 @@ impl Adapter for RuntimeAdapter {
                         behavior: event.behavior.clone(),
                         provenance: Provenance::new(self.name(), SystemTime::now()),
                     });
+                    attached += 1;
                 }
             });
         }
+        // One line per pass so the behavioral pipeline is observable: how many signals
+        // landed on a workload, and how many UIDs didn't resolve (a persistent nonzero
+        // `unresolved` means the agent's cgroup UIDs aren't matching pod metadata.uid).
+        tracing::info!(
+            attached,
+            unresolved,
+            events = snapshot.runtime_events.len(),
+            "runtime behavioral signals"
+        );
     }
 }

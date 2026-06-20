@@ -20,8 +20,10 @@ use behavior::Observation;
 use reporter::Reporter;
 
 /// Flush a batch at most this large, or every [`FLUSH_INTERVAL`], whichever first.
+/// 30s (well under the engine's 300s evidence TTL): each POST wakes the engine loop,
+/// so a tight interval would make it re-process every few seconds for mundane churn.
 const MAX_BATCH: usize = 512;
-const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
