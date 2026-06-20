@@ -6,7 +6,7 @@ WORKDIR /app
 
 FROM chef AS planner
 COPY . .
-RUN --mount=type=cache,target=/app/target,sharing=locked \
+RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
     cargo chef prepare --recipe-path recipe.json
@@ -27,19 +27,19 @@ RUN apt-get update \
 ENV CFLAGS=-std=gnu17
 COPY --from=planner /app/recipe.json recipe.json
 # Build dependencies - this is the caching Docker layer!
-RUN --mount=type=cache,target=/app/target,sharing=locked \
+RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
     cargo chef cook --release --recipe-path recipe.json
 
 # Build application
 COPY . .
-RUN --mount=type=cache,target=/app/target,sharing=locked \
+RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release
 
-RUN --mount=type=cache,target=/app/target,sharing=locked \
+RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     cp /app/target/release/protector ./protector
 
 # Slim runtime. Fixed-UID non-root user (65532) matches the chart's
