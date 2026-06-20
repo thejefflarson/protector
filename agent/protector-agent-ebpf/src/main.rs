@@ -107,7 +107,10 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
 
 /// `…/kubernetes.io~secret/…` is how the kubelet mounts a Secret volume; this marker in
 /// the opened path means the workload is reading a mounted secret.
-const SECRET_MARKER: [u8; 20] = *b"kubernetes.io~secret";
+// DIAGNOSTIC (temporary): match the canary so the userspace capture log prints the raw
+// path bpf_d_path returns, to confirm whether it's the container-relative or host path.
+// Reverts to "kubernetes.io~secret" (or a tmpfs filter) once the path format is known.
+const SECRET_MARKER: [u8; 6] = *b"canary";
 
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
 /// Reads the opened file's path via `bpf_d_path` and, **only if** it's under a secret
