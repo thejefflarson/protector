@@ -47,9 +47,10 @@ impl RuntimeEvents {
         }
     }
 
-    /// Record an observation as of now, pruning anything past the TTL.
-    pub fn record(&self, observation: RuntimeObservation) {
-        self.record_at(Instant::now(), observation);
+    /// Record an observation as of now, pruning anything past the TTL. Returns whether
+    /// it was a **change** — see [`Self::record_at`].
+    pub fn record(&self, observation: RuntimeObservation) -> bool {
+        self.record_at(Instant::now(), observation)
     }
 
     /// The observations still within the TTL window as of now.
@@ -57,9 +58,22 @@ impl RuntimeEvents {
         self.current_at(Instant::now())
     }
 
-    fn record_at(&self, now: Instant, observation: RuntimeObservation) {
+    /// Record an observation as of `now`, pruning expired entries. Returns whether the
+    /// store actually **changed** — i.e. this was a (workload, behavior) we weren't
+    /// already holding. A repeat of a signal we already have refreshes its freshness and
+    /// returns `false`, so the caller can skip waking the engine for activity that
+    /// wouldn't alter the graph (the same connections, again). This is what keeps the
+    /// agent's high-volume churn from churning a process pass per report.
+    fn record_at(&self, now: Instant, observation: RuntimeObservation) -> bool {
         let mut events = self.inner.lock().expect("runtime-events mutex poisoned");
         events.retain(|(at, _)| now.duration_since(*at) < self.ttl);
+        if let Some(slot) = events
+            .iter_mut()
+            .find(|(_, e)| same_signal(e, &observation))
+        {
+            slot.0 = now; // already known — refresh its TTL, but nothing new to react to
+            return false;
+        }
         events.push((now, observation));
         // Hard cap independent of the TTL: an ingest flood within one TTL window
         // would otherwise grow this unbounded. Drop the oldest beyond the cap.
@@ -67,6 +81,7 @@ impl RuntimeEvents {
             let excess = events.len() - Self::MAX_EVENTS;
             events.drain(0..excess);
         }
+        true
     }
 
     fn current_at(&self, now: Instant) -> Vec<RuntimeObservation> {
@@ -78,6 +93,16 @@ impl RuntimeEvents {
             .map(|(_, obs)| obs.clone())
             .collect()
     }
+}
+
+/// Two observations are the **same signal** when they attribute the same behavior to the
+/// same workload. The sensor identity and observation time are metadata, not identity — a
+/// repeat of the same behavior is not a new fact, so it shouldn't wake the engine.
+fn same_signal(a: &RuntimeObservation, b: &RuntimeObservation) -> bool {
+    a.behavior == b.behavior
+        && a.pod_uid == b.pod_uid
+        && a.namespace == b.namespace
+        && a.pod == b.pod
 }
 
 /// Whether a Falco priority is **critical or higher** (Critical/Alert/Emergency).
@@ -132,25 +157,31 @@ async fn ingest(
     Json(event): Json<Value>,
 ) -> StatusCode {
     if let Some(observation) = parse_falco_event(&event) {
-        events.record(observation);
-        // A full channel already has a pending wake — dropping this one is fine.
-        let _ = notify.try_send(());
+        // Only wake the engine if this alert is something we weren't already holding —
+        // a repeat of a still-live alert wouldn't change any verdict.
+        if events.record(observation) {
+            // A full channel already has a pending wake — dropping this one is fine.
+            let _ = notify.try_send(());
+        }
     }
     StatusCode::OK
 }
 
 /// Receive a batch of normalized [`RuntimeObservation`]s on the tool-agnostic
 /// behavioral port (ADR-0014) — the shape the first-party eBPF agent (and any sensor
-/// with a translation adapter) POSTs. Each is recorded and the engine is woken once.
+/// with a translation adapter) POSTs. Each is recorded; the engine is woken once, and
+/// only if the batch actually changed the store. The agent re-reports the same
+/// connections continuously, so most batches are pure repeats — those refresh TTLs but
+/// must not churn a process pass, which is the whole point of gating the wake here.
 async fn ingest_behavior(
     State((events, notify)): State<IngestState>,
     Json(observations): Json<Vec<RuntimeObservation>>,
 ) -> StatusCode {
-    let any = !observations.is_empty();
+    let mut changed = false;
     for obs in observations {
-        events.record(obs);
+        changed |= events.record(obs);
     }
-    if any {
+    if changed {
         let _ = notify.try_send(());
     }
     StatusCode::OK
@@ -217,6 +248,24 @@ mod tests {
         let current = store.current_at(t0 + Duration::from_secs(400));
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].behavior, Behavior::Alert { rule: "new".into() });
+    }
+
+    #[test]
+    fn repeat_signal_is_not_a_change_but_refreshes_ttl() {
+        let store = RuntimeEvents::new(Duration::from_secs(300));
+        let t0 = Instant::now();
+        // First sighting is a change — the engine should wake.
+        assert!(store.record_at(t0, obs("shell")));
+        // The same (workload, behavior) again is NOT a change — no wake — but it
+        // refreshes the entry's freshness.
+        assert!(!store.record_at(t0 + Duration::from_secs(290), obs("shell")));
+        // Past the ORIGINAL expiry (300) but within the TTL of the refresh → still held,
+        // and still just one entry (the repeat updated in place, didn't duplicate).
+        let current = store.current_at(t0 + Duration::from_secs(400));
+        assert_eq!(current.len(), 1);
+        // A different behavior on the same workload IS a change.
+        assert!(store.record_at(t0 + Duration::from_secs(400), obs("c2")));
+        assert_eq!(store.current_at(t0 + Duration::from_secs(400)).len(), 2);
     }
 
     #[test]
