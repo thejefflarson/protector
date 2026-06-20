@@ -191,15 +191,18 @@ mod ebpf {
             let len = (ev.len as usize).min(PATH_CAP);
             let raw = String::from_utf8_lossy(&ev.path[..len]);
             let path = raw.trim_end_matches('\0');
+            let secret = secret_name_from_path(path);
+            // Secret reads are sparse (real Secret volumes, mostly read at startup), so an
+            // info line per read is useful operability, not noise — and confirms the probe
+            // end-to-end. If this ever floods, that itself is a finding.
+            tracing::info!(secret = %secret, pod_uid = %uid, "captured secret read");
             Some(RuntimeObservation {
                 namespace: String::new(),
                 pod: String::new(),
                 pod_uid: Some(uid),
                 source: Some(SOURCE.into()),
                 observed_at_ms: now_ms(),
-                behavior: Behavior::SecretRead {
-                    secret: secret_name_from_path(path),
-                },
+                behavior: Behavior::SecretRead { secret },
             })
         }
     }
