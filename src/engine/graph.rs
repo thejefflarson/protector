@@ -602,6 +602,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fingerprint_key_collapses_connection_churn() {
+        // The verdict cache is keyed on fingerprint_key; a high-cardinality behavior arm
+        // would bust it every pass and starve the slow CPU model (ADR-0013). Connections
+        // are the churny case — many distinct peers must collapse to a bounded set of
+        // scope tokens, NOT one key per peer. This guards future arms from regressing it.
+        use std::collections::HashSet;
+        let keys: HashSet<String> = (0..1000)
+            .flat_map(|i| {
+                [
+                    Behavior::NetworkConnection {
+                        peer: format!("10.0.0.{i}"),
+                        internet: false,
+                    },
+                    Behavior::NetworkConnection {
+                        peer: format!("93.184.{}.{}", i / 256, i % 256),
+                        internet: true,
+                    },
+                ]
+            })
+            .map(|b| b.fingerprint_key())
+            .collect();
+        // 2000 distinct peers → exactly two scope tokens.
+        assert_eq!(
+            keys,
+            HashSet::from(["egress:cluster".into(), "egress:internet".into()])
+        );
+    }
+
     fn prov(source: &str) -> Provenance {
         Provenance::new(source, SystemTime::UNIX_EPOCH)
     }

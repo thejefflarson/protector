@@ -85,6 +85,17 @@ telemetry without requiring any third-party sensor.
   *promotes* toward action behind the existing reversible, self-reverting cut — never a
   new kind of action.
 
+  *Status (phase 1, shadow):* per-objective corroboration — the
+  `corroborates(behavior, objective)` relation described above (egress→exfil,
+  lib-load→foothold) — is **deferred**. What ships today is the flat,
+  `is_alert()`-gated corroboration: only an *alerting* signal (a Falco critical)
+  corroborates, and it does so for any chain on the workload. Mundane behaviors
+  (connections, secret reads, library loads) flow to the model as evidence but do **not**
+  yet promote the action bar — widening the flat predicate to admit them would corroborate
+  everything (every workload connects). The per-objective relation belongs at
+  objective/action-bar matching, not in that predicate; see the `entry_corroborated` NB in
+  `src/engine/proof.rs`. It lands only after the shadow bake (rollout step 3 below).
+
 Behavioral signals are **never graph structure**: they don't mint edges or nodes, so
 the proof layer's "reach is proven, not guessed" invariant is untouched. They are TTL'd
 corroboration/evidence layered onto chains the proof already winnowed.
