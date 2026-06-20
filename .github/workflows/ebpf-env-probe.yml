@@ -1,32 +1,32 @@
-# One-off diagnostic: what does the self-hosted Pi runner actually have for generating
-# vmlinux bindings (needed for the secret-read probe's bpf_d_path)? Manually triggered;
-# safe (read-only probe). Delete once the secret-read build approach is settled.
+# One-off: generate vmlinux.rs (struct file/path bindings) for the secret-read probe's
+# bpf_d_path. The runner has the node BTF but not bpftool/clang/aya-tool and can't apt;
+# it IS dind, so we run a container that has the tools and generate from the node BTF.
+# Manually scoped to this branch; delete once vmlinux.rs is committed.
 name: ebpf-env-probe
 on:
   push:
     branches: ["feat/secret-read-probe-phase2"]
     paths: [".github/workflows/ebpf-env-probe.yml"]
 jobs:
-  probe:
+  gen-vmlinux:
     runs-on: protector-runners
     steps:
-      - name: Probe eBPF build environment
+      - name: Stage node BTF
+        run: cp /sys/kernel/btf/vmlinux ./vmlinux && ls -la ./vmlinux
+      - name: Generate vmlinux.rs in a container (bpftool + clang + aya-tool)
         run: |
-          echo "== uname =="; uname -a
-          echo "== kernel BTF on the runner =="
-          ls -la /sys/kernel/btf/vmlinux 2>&1 || echo "NO /sys/kernel/btf/vmlinux on the runner"
-          echo "== tools present =="
-          for t in bpftool clang pahole cargo rustc git; do
-            printf "%s: " "$t"; command -v "$t" 2>/dev/null || echo "MISSING"
-          done
-          echo "== passwordless sudo (for apt installs)? =="
-          (sudo -n true 2>/dev/null && echo "sudo: ok") || echo "sudo: NO"
-          echo "== rust =="; cargo --version 2>&1 || true; rustc --version 2>&1 || true
-      - name: Stage node BTF for upload
-        run: cp /sys/kernel/btf/vmlinux "$RUNNER_TEMP/vmlinux" && ls -la "$RUNNER_TEMP/vmlinux"
-      - name: Upload node BTF
+          docker run --rm -v "$PWD:/work" -w /work rust:1-bookworm bash -euxc '
+            apt-get update
+            apt-get install -y --no-install-recommends bpftool clang libclang-dev
+            cargo install aya-tool
+            "$HOME/.cargo/bin/aya-tool" generate --btf /work/vmlinux file path > /work/vmlinux.rs
+            echo "=== generated vmlinux.rs ==="
+            wc -l /work/vmlinux.rs
+            head -40 /work/vmlinux.rs
+          '
+      - name: Upload vmlinux.rs
         uses: actions/upload-artifact@v4
         with:
-          name: node-btf
-          path: ${{ runner.temp }}/vmlinux
+          name: vmlinux-rs
+          path: vmlinux.rs
           retention-days: 1
