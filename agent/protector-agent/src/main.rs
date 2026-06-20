@@ -11,6 +11,7 @@ mod observer;
 mod pod;
 mod reporter;
 
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use protector_behavior::RuntimeObservation;
@@ -31,6 +32,8 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "protector_agent=info".into()),
         )
+        // ANSI only on a real terminal — otherwise kubectl logs are full of escape codes.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     // The engine's runtime-evidence ingest base URL (the agent appends `/behavior`).
