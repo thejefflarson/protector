@@ -31,6 +31,14 @@ pub enum Behavior {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
     pub pod_uid: Option<String>,
+    /// Which sensor observed this (`"protector-agent"`). The engine carries it into the
+    /// signal's provenance so sensors are distinguishable for corroboration (ADR-0003).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// When the agent observed it (Unix epoch millis) — the engine prefers this over its
+    /// own ingest/adapter time, since freshness is correctness (ADR-0002/0014).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<u64>,
     pub behavior: Behavior,
 }
 
@@ -42,6 +50,8 @@ mod tests {
     fn observation_serializes_to_the_engine_contract() {
         let obs = Observation {
             pod_uid: Some("3f5e-uid".into()),
+            source: Some("protector-agent".into()),
+            observed_at_ms: Some(1_710_000_000_000),
             behavior: Behavior::NetworkConnection {
                 peer: "1.2.3.4:443".into(),
                 internet: true,
@@ -52,11 +62,35 @@ mod tests {
             v,
             serde_json::json!({
                 "pod_uid": "3f5e-uid",
+                "source": "protector-agent",
+                "observed_at_ms": 1_710_000_000_000u64,
                 "behavior": {"kind": "network_connection", "peer": "1.2.3.4:443", "internet": true}
             })
         );
         // Round-trips back to the same value.
         let back: Observation = serde_json::from_value(v).unwrap();
         assert_eq!(back, obs);
+    }
+
+    #[test]
+    fn observation_omits_absent_optional_fields() {
+        // An older/minimal sensor that sets neither source nor observed_at_ms produces a
+        // wire shape the engine still accepts (both are serde-defaulted there too).
+        let obs = Observation {
+            pod_uid: Some("uid".into()),
+            source: None,
+            observed_at_ms: None,
+            behavior: Behavior::SecretRead {
+                secret: "app/session-key".into(),
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&obs).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "pod_uid": "uid",
+                "behavior": {"kind": "secret_read", "secret": "app/session-key"}
+            })
+        );
     }
 }

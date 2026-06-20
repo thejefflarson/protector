@@ -53,6 +53,18 @@ pub struct RuntimeObservation {
     /// needs no cluster credentials and stays node-local (ADR-0014).
     #[serde(default)]
     pub pod_uid: Option<String>,
+    /// Which sensor observed this — `"protector-agent"`, `"falco"`, … Carried into the
+    /// signal's [`Provenance`](super::graph::Provenance) so two sensors observing the
+    /// same activity are corroboration, not one indistinguishable `"runtime"` source
+    /// (ADR-0003). Defaulted (older agents omit it) → the adapter falls back to its name.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// When the sensor observed it, as Unix epoch milliseconds. Freshness is a
+    /// first-class correctness concern (ADR-0002), so we carry the *sensor's*
+    /// observation time rather than re-stamping at adapter-run time (which can lag the
+    /// real event by a batch interval + a judging pass). Defaulted → adapter uses now().
+    #[serde(default)]
+    pub observed_at_ms: Option<u64>,
     /// What the workload actually did.
     pub behavior: super::graph::Behavior,
 }
