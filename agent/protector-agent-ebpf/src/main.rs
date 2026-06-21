@@ -22,7 +22,7 @@ mod vmlinux;
 use aya_ebpf::{
     helpers::gen::{bpf_d_path, bpf_probe_read_kernel},
     macros::{fentry, kprobe, map},
-    maps::RingBuf,
+    maps::{PerCpuArray, RingBuf},
     programs::{FEntryContext, ProbeContext},
 };
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
@@ -34,6 +34,24 @@ use protector_agent_common::{
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+/// Count of events the kernel had to drop because [`EVENTS`] was full (a
+/// `reserve` returning `None`). Ring-buffer loss is otherwise silent — this makes
+/// it observable so userspace can surface it in the heartbeat (JEF-58). A
+/// `PerCpuArray` with one slot: each CPU bumps its own counter with no atomics or
+/// contention; userspace sums across CPUs for the cumulative total. Incremented
+/// only at the two `EVENTS.reserve` failure sites via [`record_drop`].
+#[map]
+static DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// Bump the per-CPU drop counter (slot 0). Called at every [`EVENTS`] reserve
+/// failure. Verifier-safe: a single bounded array lookup + in-place increment, no
+/// loops. A missing slot (can't happen for a 1-entry array) is a silent no-op.
+fn record_drop() {
+    if let Some(slot) = DROPS.get_ptr_mut(0) {
+        unsafe { *slot += 1 };
+    }
+}
 
 // Minimal kernel sockaddr layout for the IPv4 case. We only touch the family and the
 // `sockaddr_in` address/port; reads are bounds-checked by `bpf_probe_read_kernel`.
@@ -101,6 +119,8 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
             dport: u16::from_be(dport),
         });
         slot.submit(0);
+    } else {
+        record_drop(); // ring full — count the loss instead of silently skipping
     }
     Ok(())
 }
@@ -189,6 +209,8 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
     if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
         slot.write(ev);
         slot.submit(0);
+    } else {
+        record_drop(); // ring full — count the loss instead of silently skipping
     }
 }
 
