@@ -28,7 +28,7 @@ use aya_ebpf::{
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
 use protector_agent_common::{
-    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, PATH_CAP,
+    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -113,6 +113,10 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
 /// no universal secret marker (see docs/ebpf-testing-on-nodes.md).
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 
+/// `PROT_EXEC` — an executable memory mapping. The dynamic linker mmaps shared objects
+/// (and the main binary) executable, so this distinguishes a code load from a data mmap.
+const PROT_EXEC: u64 = 0x4;
+
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
 /// For a tmpfs read, emits a [`FileEvent`] with the container-relative path via
 /// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
@@ -126,18 +130,42 @@ pub fn file_open(ctx: FEntryContext) -> u32 {
 fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     // security_file_open's first argument is `struct file *file`.
     let file: *const vmlinux::file = unsafe { ctx.arg(0) };
+    if file.is_null() || !is_tmpfs(file) {
+        return Ok(());
+    }
+    emit_file_path(file, KIND_FILE_OPEN);
+    Ok(())
+}
+
+/// fentry on `security_mmap_file(struct file *file, unsigned long prot, unsigned long
+/// flags)` — the library-load probe (ADR-0014). An executable mmap of a file is the
+/// dynamic linker loading a shared object (or the main binary); emit its path so
+/// userspace can name the loaded library. Anonymous/non-exec mmaps are skipped.
+#[fentry(function = "security_mmap_file")]
+pub fn mmap_file(ctx: FEntryContext) -> u32 {
+    let _ = try_mmap_file(&ctx);
+    0
+}
+
+fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
+    let file: *const vmlinux::file = unsafe { ctx.arg(0) };
     if file.is_null() {
-        return Ok(());
+        return Ok(()); // anonymous mapping — not a file/code load
     }
-    if !is_tmpfs(file) {
-        return Ok(());
+    let prot: u64 = unsafe { ctx.arg(1) };
+    if prot & PROT_EXEC == 0 {
+        return Ok(()); // not executable — a data mapping, not a code load
     }
+    emit_file_path(file, KIND_LIBRARY_LOAD);
+    Ok(())
+}
+
+/// bpf_d_path the file's path into a [`FileEvent`] of `kind` and submit it. Shared by the
+/// secret-read (file_open) and library-load (mmap_file) probes.
+fn emit_file_path(file: *const vmlinux::file, kind: u32) {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let mut ev = FileEvent {
-        header: EventHeader {
-            kind: KIND_FILE_OPEN,
-            pid,
-        },
+        header: EventHeader { kind, pid },
         len: 0,
         path: [0u8; PATH_CAP],
     };
@@ -151,7 +179,7 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
         )
     };
     if n <= 0 {
-        return Ok(());
+        return;
     }
     ev.len = if (n as usize) < PATH_CAP {
         n as u32
@@ -162,7 +190,6 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
         slot.write(ev);
         slot.submit(0);
     }
-    Ok(())
 }
 
 /// Whether `file` lives on a tmpfs — `file->f_inode->i_sb->s_magic == TMPFS_MAGIC`. The

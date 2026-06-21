@@ -12,10 +12,13 @@
 
 /// Event-kind discriminators. Stable wire values; never renumber an existing one.
 pub const KIND_CONNECT: u32 = 1;
-/// A file was opened under a secret mount (fentry on `security_file_open`, filtered
-/// in-kernel to `…/kubernetes.io~secret/…`). Carries the path so userspace can emit a
-/// SecretRead. Next: KIND_LIBRARY_LOAD = 3.
+/// A tmpfs file was opened (fentry on `security_file_open`). Carries the container path;
+/// the engine maps it to a SecretRead via the pod's secret volumeMounts, or drops it.
 pub const KIND_FILE_OPEN: u32 = 2;
+/// An executable file was mmap'd — the dynamic linker loading a shared object / the main
+/// binary (fentry on `security_mmap_file`, PROT_EXEC). Carries the path; userspace emits
+/// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
+pub const KIND_LIBRARY_LOAD: u32 = 3;
 
 /// Max path bytes carried per [`FileEvent`]. Secret-mount paths are well under this; a
 /// longer path is truncated (the secret name still lands). Sized to keep the eBPF stack
