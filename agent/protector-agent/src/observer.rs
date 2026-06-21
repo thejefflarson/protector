@@ -36,9 +36,9 @@ pub use ebpf::EbpfObserver;
 #[cfg(feature = "ebpf")]
 mod ebpf {
     use std::net::Ipv4Addr;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use aya::maps::RingBuf;
+    use aya::maps::{PerCpuArray, RingBuf};
     use aya::programs::{FEntry, KProbe};
     use aya::{Btf, Ebpf};
     use tokio::io::unix::AsyncFd;
@@ -60,6 +60,11 @@ mod ebpf {
     /// The probes to load and attach: (program name in the object, kernel hook). Adding
     /// a probe is one row here plus a decode arm in `decode` — no new control flow.
     const PROBES: &[(&str, &str)] = &[("connect", "security_socket_connect")];
+
+    /// How often to read the kernel drop counter and (if it moved) log a heartbeat.
+    /// Drops are silent loss from a full ring; 30s keeps the signal visible without
+    /// spamming the log (JEF-58).
+    const HEARTBEAT: Duration = Duration::from_secs(30);
 
     pub struct EbpfObserver;
 
@@ -89,20 +94,62 @@ mod ebpf {
                 ebpf.take_map("EVENTS")
                     .ok_or_else(|| anyhow::anyhow!("EVENTS map missing"))?,
             )?;
+            // The kernel's cumulative drop counter (per-CPU, one slot). Taken like
+            // EVENTS so we own a stable handle for the heartbeat reads (JEF-58).
+            let drops: PerCpuArray<_, u64> = PerCpuArray::try_from(
+                ebpf.take_map("DROPS")
+                    .ok_or_else(|| anyhow::anyhow!("DROPS map missing"))?,
+            )?;
             let mut async_fd = AsyncFd::new(ring)?;
+            // Heartbeat ticker for the drop counter. The first tick fires immediately;
+            // skip it so the first *logged* heartbeat reflects a real interval.
+            let mut heartbeat = tokio::time::interval(HEARTBEAT);
+            heartbeat.tick().await;
+            let mut last_drops: u64 = 0;
+            // JEF-58 follow-up: this drain still does a blocking per-event
+            // /proc/<pid>/cgroup read in decode (attribution can back up the drain),
+            // and there is no in-kernel event aggregation — both are out of scope here.
             loop {
-                let mut guard = async_fd.readable_mut().await?;
-                {
-                    let ring = guard.get_inner_mut();
-                    while let Some(item) = ring.next() {
-                        if let Some(obs) = Self::decode(&item)
-                            && tx.send(obs).await.is_err()
+                tokio::select! {
+                    guard = async_fd.readable_mut() => {
+                        let mut guard = guard?;
                         {
-                            return Ok(()); // receiver gone — shut down
+                            let ring = guard.get_inner_mut();
+                            while let Some(item) = ring.next() {
+                                if let Some(obs) = Self::decode(&item)
+                                    && tx.send(obs).await.is_err()
+                                {
+                                    return Ok(()); // receiver gone — shut down
+                                }
+                            }
                         }
+                        guard.clear_ready();
+                    }
+                    _ = heartbeat.tick() => {
+                        let total = Self::read_drops(&drops);
+                        // Only log when there's loss and it's changed since last tick —
+                        // a quiet ring stays silent.
+                        if total > 0 && total != last_drops {
+                            tracing::info!(
+                                drops = total,
+                                "eBPF ring buffer dropped events (cumulative); buffer is full"
+                            );
+                        }
+                        last_drops = total;
                     }
                 }
-                guard.clear_ready();
+            }
+        }
+
+        /// Sum the per-CPU drop counter across all CPUs into the cumulative total.
+        /// A per-CPU read failure is treated as 0 for that read (best-effort
+        /// observability — never errors the drain).
+        fn read_drops(
+            drops: &PerCpuArray<impl std::borrow::Borrow<aya::maps::MapData>, u64>,
+        ) -> u64 {
+            match drops.get(&0, 0) {
+                Ok(values) => values.iter().copied().sum(),
+                Err(_) => 0,
             }
         }
 
