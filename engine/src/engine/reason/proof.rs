@@ -214,31 +214,43 @@ fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
 /// `attack` — the `corroborates(behavior, objective)` relation (ADR-0014). This is the
 /// per-objective seam the ADR's non-shadow design is stated in terms of.
 ///
-/// Today only an *alerting* signal corroborates, and it does so for **any** objective:
-/// a Falco critical means "an attack is happening now" regardless of which chain. The
-/// mundane behaviors (connection / secret-read / library-load) are evidence for the
-/// model, never blanket corroboration — every workload makes connections, so admitting
-/// them for any objective is the "everything corroborates everything" trap.
+/// An *alerting* signal corroborates **any** objective: a Falco critical means "an
+/// attack is happening now" regardless of which chain. The agent's own mundane behaviors
+/// (connection / secret-read / library-load) corroborate per objective — each only for
+/// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
+/// "everything corroborates everything" blanket the alert gate intentionally is.
 ///
-/// The empty arms below are where the per-objective corroboration lands once the shadow
-/// bake clears (ADR-0014 rollout step 3): actual internet egress corroborates an
-/// EXFILTRATION chain; an actual vuln-library load corroborates a FOOTHOLD. Each is one
-/// `attack`-keyed match arm, NOT a widening of the alert gate.
-fn corroborates(behavior: &Behavior, _attack: &AttackRef) -> bool {
+/// Matching on `attack.tactic` (not the precise technique) is the stable key: the
+/// recognizers tag a Secret-read chain CREDENTIAL_ACCESS (T1552), an internet-egress
+/// chain EXFILTRATION (T1041), and a proven foothold INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING
+/// (T1190).
+///
+/// **Shadow-gated (ADR-0014):** these arms only set `corroborated=true`; they are inert
+/// for *actuation*, which stays gated behind `engine.enable` (empty = shadow). They
+/// remain observe-only until the shadow bake clears and an operator sets `enable` — this
+/// change does NOT touch any default/enable config.
+fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
+    use crate::engine::graph::attack::Tactic;
     match behavior {
+        // Unchanged: an alerting signal corroborates any objective.
         Behavior::Alert { .. } => true,
-        // Deferred (ADR-0014): NetworkConnection{internet:true} ⇒ attack is exfil;
-        // LibraryLoaded ⇒ attack is the foothold. Keyed on `_attack` when they land.
-        // JEF-51 v2: this LibraryLoaded arm is where dynamic reachability will promote a
-        // foothold — when the loaded lib matches a CVE on the image (now annotated as
-        // Reachability::LoadedAtRuntime), this returns true. v1 only surfaces it as model
-        // evidence; promotion is gated on a shadow bake.
+        // Actual internet egress corroborates an EXFILTRATION objective (T1041): a
+        // compromised workload shipping data out of the cluster. An in-cluster
+        // connection (`internet: false`) is normal traffic and corroborates nothing.
+        Behavior::NetworkConnection { internet, .. } => {
+            *internet && attack.tactic == Tactic::Exfiltration
+        }
+        // A read of a mounted secret corroborates a CREDENTIAL_ACCESS objective (T1552):
+        // the workload is actually touching the credential the chain reaches.
+        Behavior::SecretRead { .. } => attack.tactic == Tactic::CredentialAccess,
+        // A library load corroborates a FOOTHOLD (Initial Access / Exploit Public-Facing,
+        // T1190): after JEF-75 a LibraryLoaded surviving on a workload is already pruned
+        // to a *vulnerable* library, so its presence is the runtime foothold signal.
+        // (JEF-51 v2: this is also where dynamic CVE reachability promotes a foothold.)
+        Behavior::LibraryLoaded { .. } => attack.tactic == Tactic::InitialAccess,
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
-        Behavior::NetworkConnection { .. }
-        | Behavior::SecretRead { .. }
-        | Behavior::LibraryLoaded { .. }
-        | Behavior::FileRead { .. } => false,
+        Behavior::FileRead { .. } => false,
     }
 }
 
@@ -968,6 +980,160 @@ mod tests {
         assert!(
             chain.meets_action_bar(),
             "foothold + corroboration = full bar"
+        );
+    }
+
+    // ── JEF-49: per-objective corroboration from the agent's own behaviors ──
+    // These exercise the `corroborates(behavior, attack)` seam directly (ADR-0014):
+    // each behavior corroborates only the objective class whose ATT&CK tactic it
+    // evidences. The mapping is keyed on `attack.tactic`.
+    use crate::engine::graph::attack::{
+        CREDENTIAL_ACCESS, ESCAPE_TO_HOST, EXFILTRATION, EXPLOIT_PUBLIC_FACING,
+    };
+
+    /// Internet egress corroborates an EXFILTRATION objective (T1041).
+    #[test]
+    fn network_internet_corroborates_exfiltration() {
+        let behavior = Behavior::NetworkConnection {
+            peer: "203.0.113.7:443".into(),
+            internet: true,
+        };
+        assert!(corroborates(&behavior, &EXFILTRATION));
+    }
+
+    /// A secret read corroborates a CREDENTIAL_ACCESS objective (T1552).
+    #[test]
+    fn secret_read_corroborates_credential_access() {
+        let behavior = Behavior::SecretRead {
+            secret: "db-creds".into(),
+        };
+        assert!(corroborates(&behavior, &CREDENTIAL_ACCESS));
+    }
+
+    /// A library load corroborates a FOOTHOLD (Initial Access / T1190): post-JEF-75 the
+    /// surviving LibraryLoaded is already pruned to a vulnerable library.
+    #[test]
+    fn library_load_corroborates_foothold() {
+        let behavior = Behavior::LibraryLoaded {
+            name: "libssl.so.1.1".into(),
+        };
+        assert!(corroborates(&behavior, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// NEGATIVE: a behavior whose tactic does not match the objective's technique does
+    /// NOT corroborate — internet egress is exfiltration evidence, not credential-access
+    /// evidence; an in-cluster connection is no evidence at all.
+    #[test]
+    fn behavior_does_not_corroborate_unrelated_objective() {
+        // Internet egress against a credential-access objective: wrong tactic.
+        assert!(!corroborates(
+            &Behavior::NetworkConnection {
+                peer: "203.0.113.7:443".into(),
+                internet: true,
+            },
+            &CREDENTIAL_ACCESS,
+        ));
+        // A secret read against an escape-to-host objective: wrong tactic.
+        assert!(!corroborates(
+            &Behavior::SecretRead {
+                secret: "db-creds".into(),
+            },
+            &ESCAPE_TO_HOST,
+        ));
+        // A library load against an exfiltration objective: wrong tactic.
+        assert!(!corroborates(
+            &Behavior::LibraryLoaded {
+                name: "libssl.so.1.1".into(),
+            },
+            &EXFILTRATION,
+        ));
+        // An in-cluster connection is normal traffic — never corroborates, even on the
+        // matching exfiltration objective.
+        assert!(!corroborates(
+            &Behavior::NetworkConnection {
+                peer: "10.0.0.5:5432".into(),
+                internet: false,
+            },
+            &EXFILTRATION,
+        ));
+    }
+
+    /// An *alert* still corroborates ANY objective — the broad gate must not regress.
+    #[test]
+    fn alert_still_corroborates_any_objective() {
+        let alert = Behavior::Alert {
+            rule: "Outbound connection to C2".into(),
+        };
+        assert!(corroborates(&alert, &CREDENTIAL_ACCESS));
+        assert!(corroborates(&alert, &EXFILTRATION));
+        assert!(corroborates(&alert, &ESCAPE_TO_HOST));
+        assert!(corroborates(&alert, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// Integration check through the full `prove` path: a secret-read runtime signal on
+    /// an exposed, exploitable entry corroborates its CREDENTIAL_ACCESS chain to the
+    /// secret — the per-objective seam wired end to end (still shadow-gated for action).
+    #[test]
+    fn secret_read_signal_corroborates_credential_chain_end_to_end() {
+        use crate::engine::graph::{Provenance, Severity, Vulnerability};
+        use crate::engine::observe::{
+            Attribution, ImageVulnerabilities, RuntimeObservation, SecretMeta,
+        };
+        use std::time::SystemTime;
+
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{
+                "name": "web", "image": "web:1",
+                "envFrom": [{"secretRef": {"name": "session-key"}}]
+            }]}
+        }));
+        let lb: k8s_openapi::api::core::v1::Service = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web-lb", "namespace": "app"},
+            "spec": {"type": "LoadBalancer", "selector": {"app": "web"}}
+        }))
+        .unwrap();
+        let snap = Snapshot {
+            pods: vec![web],
+            services: vec![lb],
+            secrets: vec![SecretMeta {
+                namespace: "app".into(),
+                name: "session-key".into(),
+            }],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2026-9999".into(),
+                    severity: Severity::Critical,
+                    exploited_in_wild: true,
+                    epss: None,
+                    sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "web"),
+                source: None,
+                observed_at_ms: None,
+                behavior: Behavior::SecretRead {
+                    secret: "session-key".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let chain = chains
+            .iter()
+            .find(|c| {
+                c.entry.0 == "workload/app/Pod/web" && c.objective.0 == "secret/app/session-key"
+            })
+            .expect("web → secret chain");
+        assert_eq!(chain.attack, CREDENTIAL_ACCESS);
+        assert!(
+            chain.corroborated,
+            "a secret-read signal corroborates the credential-access objective"
         );
     }
 }
