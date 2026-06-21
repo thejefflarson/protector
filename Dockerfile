@@ -1,7 +1,9 @@
 # Builder must match the runtime's glibc. debian:bookworm-slim ships glibc 2.36;
 # the -bookworm cargo-chef tag is built on bookworm so the two stay in sync and
 # the dynamically-linked binary loads on the slim runtime.
-FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
+# Pulled via mirror.gcr.io (Google's Docker Hub pull-through cache) — the homelab
+# buildkit's shared IP exhausts Docker Hub's anonymous quota → 429 (JEF-78).
+FROM mirror.gcr.io/lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
@@ -46,7 +48,7 @@ RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked 
 # securityContext.runAsUser/runAsGroup so the pod satisfies runAsNonRoot.
 # ca-certificates is needed for TLS to the API server (inbound), and to the
 # registry, Rekor, and the sigstore TUF root (outbound signature verification).
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
