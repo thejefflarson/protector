@@ -20,7 +20,7 @@
 mod vmlinux;
 
 use aya_ebpf::{
-    helpers::gen::{bpf_d_path, bpf_probe_read_kernel},
+    helpers::gen::{bpf_d_path, bpf_probe_read_kernel, bpf_probe_read_kernel_str},
     macros::{fentry, kprobe, map},
     maps::{PerCpuArray, RingBuf},
     programs::{FEntryContext, ProbeContext},
@@ -159,7 +159,7 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
 
 /// fentry on `security_mmap_file(struct file *file, unsigned long prot, unsigned long
 /// flags)` — the library-load probe (ADR-0014). An executable mmap of a file is the
-/// dynamic linker loading a shared object (or the main binary); emit its path so
+/// dynamic linker loading a shared object (or the main binary); emit its name so
 /// userspace can name the loaded library. Anonymous/non-exec mmaps are skipped.
 #[fentry(function = "security_mmap_file")]
 pub fn mmap_file(ctx: FEntryContext) -> u32 {
@@ -176,12 +176,17 @@ fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
     if prot & PROT_EXEC == 0 {
         return Ok(()); // not executable — a data mapping, not a code load
     }
-    emit_file_path(file, KIND_LIBRARY_LOAD);
+    // NOT emit_file_path: bpf_d_path is rejected by the verifier in security_mmap_file
+    // (security_mmap_file isn't on the kernel's d_path allowlist, unlike
+    // security_file_open — JEF-68). Userspace only needs the library *name*, which is the
+    // leaf basename, so read the dentry's d_name directly with bpf_probe_read_kernel.
+    emit_lib_name(file);
     Ok(())
 }
 
 /// bpf_d_path the file's path into a [`FileEvent`] of `kind` and submit it. Shared by the
-/// secret-read (file_open) and library-load (mmap_file) probes.
+/// secret-read (file_open) probe — it needs the full path so the engine can match it to a
+/// Secret mount. (Library-load uses [`emit_lib_name`]: bpf_d_path is disallowed in its hook.)
 fn emit_file_path(file: *const vmlinux::file, kind: u32) {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let mut ev = FileEvent {
@@ -211,6 +216,63 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
         slot.submit(0);
     } else {
         record_drop(); // ring full — count the loss instead of silently skipping
+    }
+}
+
+/// Emit the library *name* (leaf basename) of `file` as a [`KIND_LIBRARY_LOAD`] event.
+/// The library-load probe can't use `bpf_d_path` (the verifier rejects it in the
+/// security_mmap_file hook — not on the kernel's d_path allowlist; JEF-68). Userspace only
+/// needs the basename to name the library, which is the leaf dentry's `d_name`, so read it
+/// directly with bpf_probe_read_kernel(_str) — allowed in any program type.
+fn emit_lib_name(file: *const vmlinux::file) {
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    let mut ev = FileEvent {
+        header: EventHeader {
+            kind: KIND_LIBRARY_LOAD,
+            pid,
+        },
+        len: 0,
+        path: [0u8; PATH_CAP],
+    };
+    // file->f_path.dentry, then dentry->d_name.name (the basename byte pointer).
+    let mut dentry: *mut vmlinux::dentry = core::ptr::null_mut();
+    let mut name_ptr: *const u8 = core::ptr::null();
+    unsafe {
+        if read_kernel(&mut dentry, core::ptr::addr_of!((*file).f_path.dentry)) != 0
+            || dentry.is_null()
+        {
+            return;
+        }
+        if read_kernel(
+            &mut name_ptr,
+            core::ptr::addr_of!((*dentry).d_name.name).cast(),
+        ) != 0
+            || name_ptr.is_null()
+        {
+            return;
+        }
+    }
+    // Copy the NUL-terminated basename into the event buffer (returns bytes incl. NUL).
+    let n = unsafe {
+        bpf_probe_read_kernel_str(
+            ev.path.as_mut_ptr() as *mut core::ffi::c_void,
+            PATH_CAP as u32,
+            name_ptr as *const core::ffi::c_void,
+        )
+    };
+    if n <= 0 {
+        return;
+    }
+    ev.len = if (n as usize) < PATH_CAP {
+        n as u32
+    } else {
+        PATH_CAP as u32
+    };
+    if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
+        slot.write(ev);
+        slot.submit(0);
+    } else {
+        record_drop();
     }
 }
 
