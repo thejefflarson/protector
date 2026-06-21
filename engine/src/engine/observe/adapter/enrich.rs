@@ -223,6 +223,73 @@ impl Adapter for CveReachabilityAdapter {
                 }
             });
         }
+
+        // Prune library-load noise (JEF-75): a LibraryLoaded only matters if it's a
+        // *vulnerable* library — its name matches a CVE package on an image the workload
+        // runs. Drop the rest (libc, libpthread, …) so they don't bloat the model prompt
+        // or churn the verdict fingerprint (every process loads dozens of libraries, on a
+        // 300s TTL). Reachability is already set above from the same match, so this only
+        // removes loads that never contributed one.
+        let mut cve_pkgs_by_image: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut pkgs_by_workload: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        {
+            let g = graph.inner();
+            for idx in g.node_indices() {
+                if let Some(node @ Node::Image(img)) = g.node_weight(idx) {
+                    let pkgs: Vec<String> = img
+                        .vulnerabilities
+                        .iter()
+                        .filter_map(|v| v.pkg_name.clone())
+                        .collect();
+                    if !pkgs.is_empty() {
+                        cve_pkgs_by_image.insert(node.key().0, pkgs);
+                    }
+                }
+            }
+            // Each workload inherits the CVE packages of every image it runs.
+            for idx in g.node_indices() {
+                let Some(node @ Node::Workload(_)) = g.node_weight(idx) else {
+                    continue;
+                };
+                let mut pkgs: Vec<String> = Vec::new();
+                for edge in g.edges(idx) {
+                    if matches!(edge.weight().relation, Relation::RunsImage)
+                        && let Some(img_key) = g.node_weight(edge.target()).map(Node::key)
+                        && let Some(p) = cve_pkgs_by_image.get(&img_key.0)
+                    {
+                        pkgs.extend(p.iter().cloned());
+                    }
+                }
+                if !pkgs.is_empty() {
+                    pkgs_by_workload.insert(node.key().0, pkgs);
+                }
+            }
+        }
+        let workload_keys: Vec<NodeKey> = graph
+            .inner()
+            .node_indices()
+            .filter_map(|idx| match graph.inner().node_weight(idx) {
+                Some(node @ Node::Workload(_)) => Some(node.key()),
+                _ => None,
+            })
+            .collect();
+        for key in workload_keys {
+            graph.update_node(&key, |node| {
+                if let Node::Workload(w) = node {
+                    let pkgs = pkgs_by_workload.get(&key.0);
+                    // Keep every non-library behavior; keep a LibraryLoaded only if it
+                    // matches a CVE package the workload's images carry.
+                    w.runtime.retain(|obs| match &obs.behavior {
+                        Behavior::LibraryLoaded { name } => {
+                            pkgs.is_some_and(|ps| ps.iter().any(|pkg| library_matches(name, pkg)))
+                        }
+                        _ => true,
+                    });
+                }
+            });
+        }
     }
 }
 
@@ -608,6 +675,61 @@ mod tests {
         assert_eq!(
             reachability_for("log4j-core", Some("log4j-core-2.14.jar")),
             Reachability::LoadedAtRuntime
+        );
+    }
+
+    #[test]
+    fn non_cve_library_loads_are_pruned_from_runtime() {
+        // The workload loads two libraries: libssl (matches the openssl CVE) and
+        // libpthread (matches nothing). After the pipeline only the vulnerable-library
+        // load survives on the workload — the rest is dropped so it never reaches the
+        // prompt or the verdict fingerprint (JEF-75).
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let lib = |name: &str| RuntimeObservation {
+            attribution: Attribution::by_namespaced_name("app", "web"),
+            source: None,
+            observed_at_ms: None,
+            behavior: Behavior::LibraryLoaded { name: name.into() },
+        };
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2022-0001".into(),
+                    severity: crate::engine::graph::Severity::Critical,
+                    pkg_name: Some("openssl".into()),
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![lib("libssl.so.3"), lib("libpthread.so.0")],
+            ..Default::default()
+        };
+        let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+        let surviving: Vec<String> = graph
+            .inner()
+            .node_weights()
+            .find_map(|n| match n {
+                Node::Workload(w) => Some(
+                    w.runtime
+                        .iter()
+                        .filter_map(|o| match &o.behavior {
+                            Behavior::LibraryLoaded { name } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("workload node exists");
+        assert_eq!(
+            surviving,
+            vec!["libssl.so.3".to_string()],
+            "only the CVE-matching library load survives the prune"
         );
     }
 
