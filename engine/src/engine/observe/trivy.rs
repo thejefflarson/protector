@@ -84,6 +84,13 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
                         pkg_name: opt_str(v, "resource"),
                         installed_version: opt_str(v, "installedVersion"),
                         fixed_version: opt_str(v, "fixedVersion"),
+                        // Advisory free-text (JEF-66): trivy-operator's
+                        // `VulnerabilityReport` items carry a short `title` and a
+                        // `primaryLink` URL (it omits the full `description` to keep CRs
+                        // small). Both are UNTRUSTED third-party text — they are fenced
+                        // before they reach the model prompt, never trusted here.
+                        title: opt_str(v, "title"),
+                        primary_link: opt_str(v, "primaryLink"),
                         // Reachability is correlated later (ReachabilityAdapter); the
                         // scanner alone never asserts it.
                         reachability: Reachability::Unknown,
@@ -112,10 +119,13 @@ mod tests {
                 {
                     "vulnerabilityID": "CVE-2026-1", "severity": "CRITICAL",
                     "resource": "log4j-core",
-                    "installedVersion": "2.14.0", "fixedVersion": "2.17.0"
+                    "installedVersion": "2.14.0", "fixedVersion": "2.17.0",
+                    "title": "Remote code execution via JNDI lookup",
+                    "primaryLink": "https://nvd.nist.gov/vuln/detail/CVE-2026-1"
                 },
                 {"vulnerabilityID": "CVE-2026-2", "severity": "LOW",
-                 "resource": "zlib", "installedVersion": "1.2.11", "fixedVersion": ""},
+                 "resource": "zlib", "installedVersion": "1.2.11", "fixedVersion": "",
+                 "title": ""},
                 {"severity": "HIGH"}
             ]
         });
@@ -134,9 +144,22 @@ mod tests {
         assert_eq!(v0.fixed_version.as_deref(), Some("2.17.0"));
         // Reachability is not asserted by the scanner — it starts Unknown.
         assert_eq!(v0.reachability, Reachability::Unknown);
+        // Advisory free-text (JEF-66): title + primaryLink are now preserved.
+        assert_eq!(
+            v0.title.as_deref(),
+            Some("Remote code execution via JNDI lookup")
+        );
+        assert_eq!(
+            v0.primary_link.as_deref(),
+            Some("https://nvd.nist.gov/vuln/detail/CVE-2026-1")
+        );
         // An empty fixedVersion ("" = no fix yet) collapses to None.
         assert_eq!(parsed.vulnerabilities[1].fixed_version, None);
         assert_eq!(parsed.vulnerabilities[1].pkg_name.as_deref(), Some("zlib"));
+        // An empty title ("") collapses to None (opt_str discipline), and an absent
+        // primaryLink is None — both stay off the prompt rather than emitting blanks.
+        assert_eq!(parsed.vulnerabilities[1].title, None);
+        assert_eq!(parsed.vulnerabilities[1].primary_link, None);
     }
 
     #[test]
