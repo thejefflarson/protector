@@ -48,7 +48,8 @@ mod ebpf {
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
-        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, PATH_CAP,
+        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
+        PATH_CAP,
     };
     use protector_behavior::Behavior;
 
@@ -78,17 +79,10 @@ mod ebpf {
                 program.attach(*hook, 0)?;
                 tracing::info!(probe = *name, hook = *hook, "attached probe");
             }
-            // Secret-read spike (phase 1): best-effort fentry on security_file_open. NOT
-            // fatal — if it doesn't load/attach (no BTF/fentry), keep the connect probe
-            // running. Confirms fentry works on the node before phase 2 adds bpf_d_path.
-            match Self::attach_file_open(&mut ebpf) {
-                Ok(()) => {
-                    tracing::info!("attached fentry on security_file_open (secret-read spike)")
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "fentry file_open did not attach; continuing without it")
-                }
-            }
+            // Best-effort fentry probes (secret-read, library-load). NOT fatal — a probe
+            // that fails to load/attach (no BTF/fentry, verifier reject) is logged and
+            // skipped, leaving the others (and the connect kprobe) running.
+            Self::attach_fentry(&mut ebpf);
             tracing::info!("draining events");
 
             let ring = RingBuf::try_from(
@@ -112,16 +106,42 @@ mod ebpf {
             }
         }
 
-        /// Load kernel BTF and attach the fentry `file_open` program to
-        /// `security_file_open`. Separate from the kprobe table because fentry attaches
-        /// via BTF (no hook arg). Caller treats failure as non-fatal (spike).
-        fn attach_file_open(ebpf: &mut Ebpf) -> anyhow::Result<()> {
-            let btf = Btf::from_sys_fs()?;
+        /// Attach the fentry probes, each best-effort (a failure is logged, not fatal).
+        /// (program name in the object, kernel function it hooks). fentry attaches via
+        /// BTF, so it's separate from the kprobe table; the BTF is loaded once.
+        fn attach_fentry(ebpf: &mut Ebpf) {
+            const FENTRY_PROBES: &[(&str, &str)] = &[
+                ("file_open", "security_file_open"),
+                ("mmap_file", "security_mmap_file"),
+            ];
+            let btf = match Btf::from_sys_fs() {
+                Ok(btf) => btf,
+                Err(error) => {
+                    tracing::warn!(%error, "kernel BTF unavailable; fentry probes off");
+                    return;
+                }
+            };
+            for (name, func) in FENTRY_PROBES {
+                match Self::attach_one_fentry(ebpf, &btf, name, func) {
+                    Ok(()) => tracing::info!(probe = *name, func = *func, "attached fentry"),
+                    Err(error) => {
+                        tracing::warn!(%error, probe = *name, "fentry did not attach; continuing")
+                    }
+                }
+            }
+        }
+
+        fn attach_one_fentry(
+            ebpf: &mut Ebpf,
+            btf: &Btf,
+            name: &str,
+            func: &str,
+        ) -> anyhow::Result<()> {
             let program: &mut FEntry = ebpf
-                .program_mut("file_open")
-                .ok_or_else(|| anyhow::anyhow!("file_open program missing from object"))?
+                .program_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("{name} program missing from object"))?
                 .try_into()?;
-            program.load("security_file_open", &btf)?;
+            program.load(func, btf)?;
             program.attach()?;
             Ok(())
         }
@@ -151,6 +171,14 @@ mod ebpf {
                     // SAFETY: kind says this is a FileEvent of exactly this layout.
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
                     Self::file_read(&ev)
+                }
+                KIND_LIBRARY_LOAD => {
+                    if data.len() < std::mem::size_of::<FileEvent>() {
+                        return None;
+                    }
+                    // SAFETY: kind says this is a FileEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
+                    Self::library_load(&ev)
                 }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
@@ -199,6 +227,30 @@ mod ebpf {
                 source: Some(SOURCE.into()),
                 observed_at_ms: now_ms(),
                 behavior: Behavior::FileRead { path },
+            })
+        }
+
+        /// Map an executable mmap to a LibraryLoaded, attributed by pod UID. The library
+        /// name is the path basename (e.g. `libssl.so.3`) — the container path is fine
+        /// here, the engine reasons about the loaded library by name. Drops non-pod cgroups.
+        fn library_load(ev: &FileEvent) -> Option<RuntimeObservation> {
+            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
+            let uid = parse_pod_uid(&cgroup)?;
+            let len = (ev.len as usize).min(PATH_CAP);
+            let path = String::from_utf8_lossy(&ev.path[..len]);
+            let name = path.trim_end_matches('\0').rsplit('/').next().unwrap_or("");
+            if name.is_empty() {
+                return None;
+            }
+            Some(RuntimeObservation {
+                namespace: String::new(),
+                pod: String::new(),
+                pod_uid: Some(uid),
+                source: Some(SOURCE.into()),
+                observed_at_ms: now_ms(),
+                behavior: Behavior::LibraryLoaded {
+                    name: name.to_string(),
+                },
             })
         }
     }
