@@ -678,39 +678,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn non_cve_library_loads_are_pruned_from_runtime() {
-        // The workload loads two libraries: libssl (matches the openssl CVE) and
-        // libpthread (matches nothing). After the pipeline only the vulnerable-library
-        // load survives on the workload — the rest is dropped so it never reaches the
-        // prompt or the verdict fingerprint (JEF-75).
-        let web = pod(json!({
-            "apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
-            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
-        }));
-        let lib = |name: &str| RuntimeObservation {
+    /// A `LibraryLoaded` observation on pod app/web (the fixture these tests use).
+    fn lib(name: &str) -> RuntimeObservation {
+        RuntimeObservation {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
             behavior: Behavior::LibraryLoaded { name: name.into() },
-        };
-        let snap = Snapshot {
-            pods: vec![web],
-            image_vulns: vec![ImageVulnerabilities {
-                image: "web:1".into(),
-                vulnerabilities: vec![Vulnerability {
-                    id: "CVE-2022-0001".into(),
-                    severity: crate::engine::graph::Severity::Critical,
-                    pkg_name: Some("openssl".into()),
-                    ..Default::default()
-                }],
-            }],
-            runtime_events: vec![lib("libssl.so.3"), lib("libpthread.so.0")],
-            ..Default::default()
-        };
+        }
+    }
+
+    /// The `LibraryLoaded` names surviving on the (single) workload after the full
+    /// adapter pipeline — i.e. what's left after the JEF-75 prune.
+    fn surviving_libs(snap: Snapshot) -> Vec<String> {
         let graph = super::super::build_graph(&snap, &super::super::default_adapters());
-        let surviving: Vec<String> = graph
+        graph
             .inner()
             .node_weights()
             .find_map(|n| match n {
@@ -725,11 +707,110 @@ mod tests {
                 ),
                 _ => None,
             })
-            .expect("workload node exists");
+            .expect("workload node exists")
+    }
+
+    #[test]
+    fn non_cve_library_loads_are_pruned_from_runtime() {
+        // libssl matches the openssl CVE; libpthread matches nothing → only the
+        // vulnerable-library load survives, so the noise never reaches the prompt or the
+        // verdict fingerprint (JEF-75).
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2022-0001".into(),
+                    severity: crate::engine::graph::Severity::Critical,
+                    pkg_name: Some("openssl".into()),
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![lib("libssl.so.3"), lib("libpthread.so.0")],
+            ..Default::default()
+        };
+        assert_eq!(surviving_libs(snap), vec!["libssl.so.3".to_string()]);
+    }
+
+    #[test]
+    fn library_load_matching_any_of_a_workloads_images_survives() {
+        // Multi-image workload (app + sidecar): a load matching the SECOND image's CVE
+        // must survive even though the first image carries a different CVE — proving the
+        // prune unions CVE packages across ALL RunsImage edges before deciding (the
+        // false-drop path that would silently weaken reachability).
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [
+                {"name": "web", "image": "web:1"},
+                {"name": "sidecar", "image": "sidecar:1"}
+            ]}
+        }));
+        let cve = |id: &str, pkg: &str| Vulnerability {
+            id: id.into(),
+            severity: crate::engine::graph::Severity::Critical,
+            pkg_name: Some(pkg.into()),
+            ..Default::default()
+        };
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![
+                ImageVulnerabilities {
+                    image: "web:1".into(),
+                    vulnerabilities: vec![cve("CVE-A", "openssl")],
+                },
+                ImageVulnerabilities {
+                    image: "sidecar:1".into(),
+                    vulnerabilities: vec![cve("CVE-B", "log4j-core")],
+                },
+            ],
+            runtime_events: vec![
+                lib("libssl.so.3"),
+                lib("log4j-core-2.14.jar"),
+                lib("libpthread.so.0"),
+            ],
+            ..Default::default()
+        };
+        let mut got = surviving_libs(snap);
+        got.sort();
         assert_eq!(
-            surviving,
-            vec!["libssl.so.3".to_string()],
-            "only the CVE-matching library load survives the prune"
+            got,
+            vec!["libssl.so.3".to_string(), "log4j-core-2.14.jar".to_string()],
+            "loads matching EITHER image's CVE survive; the unrelated load is pruned"
+        );
+    }
+
+    #[test]
+    fn workload_with_no_cve_packages_drops_all_loads() {
+        // A CVE with no pkg_name can't be correlated → no load can match → all pruned
+        // (the `pkgs.is_none()` branch of the prune).
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2022-0002".into(),
+                    severity: crate::engine::graph::Severity::Critical,
+                    pkg_name: None,
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![lib("libssl.so.3")],
+            ..Default::default()
+        };
+        assert!(
+            surviving_libs(snap).is_empty(),
+            "no correlatable CVE package → every library load pruned"
         );
     }
 
