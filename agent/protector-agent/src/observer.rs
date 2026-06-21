@@ -52,7 +52,6 @@ mod ebpf {
     use protector_agent_common::{
         ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
         KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
-
     };
     use protector_behavior::{Attribution, Behavior};
 
@@ -319,7 +318,7 @@ mod ebpf {
                 ("file_open", "security_file_open"),
                 ("mmap_file", "security_mmap_file"),
                 ("fix_setuid", "security_task_fix_setuid"),
-                ("bprm_check", "bprm_check_security"),
+                ("bprm_check", "security_bprm_check"),
             ];
             let btf = match Btf::from_sys_fs() {
                 Ok(btf) => btf,

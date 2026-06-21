@@ -28,9 +28,8 @@ use aya_ebpf::{
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
 use protector_agent_common::{
-    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
-    KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
-
+    ConnEvent, EventHeader, FileEvent, PrivEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
+    KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -239,20 +238,21 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// fentry on `bprm_check_security(struct linux_binprm *bprm)` — the process-exec probe
+/// fentry on `security_bprm_check(struct linux_binprm *bprm)` — the process-exec probe
 /// (ADR-0014, JEF-53). This LSM hook fires on every `execve` once the new binary is
 /// resolved, so `bprm->filename` is the path the kernel is about to exec. Emits a
 /// [`FileEvent`] (kind [`KIND_EXEC`]) carrying that path; userspace turns it into a
-/// `ProcessExec`. Observe-only — `bprm_check_security` is the per-hook callback symbol on
-/// 6.8 (`security_bprm_check` is the wrapper alternative if the symbol isn't attachable).
-#[fentry(function = "bprm_check_security")]
+/// `ProcessExec`. Observe-only. NOTE: the attach point is `security_bprm_check` (the
+/// exported LSM call, in BTF — like the other `security_*` probes); the un-prefixed
+/// `bprm_check_security` is NOT a BTF function on 6.8 (verified on-node: JEF-53 deploy).
+#[fentry(function = "security_bprm_check")]
 pub fn bprm_check(ctx: FEntryContext) -> u32 {
     let _ = try_bprm_check(&ctx);
     0
 }
 
 fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
-    // bprm_check_security's first argument is `struct linux_binprm *bprm`.
+    // security_bprm_check's first argument is `struct linux_binprm *bprm`.
     let bprm: *const vmlinux::linux_binprm = unsafe { ctx.arg(0) };
     if bprm.is_null() {
         return Ok(());
@@ -263,7 +263,7 @@ fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
 
 /// Emit the exec'd binary's path as a [`KIND_EXEC`] event. `bprm->filename` is a kernel
 /// `char *` (the resolved exec path), so — like the library-load probe — read the string
-/// directly with `bpf_probe_read_kernel_str`. NOT `bpf_d_path`: `bprm_check_security`
+/// directly with `bpf_probe_read_kernel_str`. NOT `bpf_d_path`: `security_bprm_check`
 /// isn't on the kernel's d_path allowlist, so the verifier would reject it (JEF-68).
 fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;

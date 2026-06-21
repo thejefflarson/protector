@@ -19,7 +19,7 @@ pub const KIND_FILE_OPEN: u32 = 2;
 /// binary (fentry on `security_mmap_file`, PROT_EXEC). Carries the path; userspace emits
 /// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
 pub const KIND_LIBRARY_LOAD: u32 = 3;
-/// A process was exec'd (fentry on `bprm_check_security`). Carries the exec'd binary's
+/// A process was exec'd (fentry on `security_bprm_check`). Carries the exec'd binary's
 /// path, read from `linux_binprm->filename`; userspace emits a ProcessExec. Reuses
 /// [`FileEvent`] (kind discriminates) — the runtime signal for "unexpected process
 /// spawned" (Falco-rule parity, ADR-0014).
