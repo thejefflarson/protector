@@ -140,16 +140,39 @@ impl Adapter for RuntimeAdapter {
 /// read that merely happens to be on tmpfs). The longest matching mountPath wins, so a
 /// nested mount is attributed to the right volume.
 ///
-/// Only plain `.secret` volumes are recognized for now; projected volumes with secret
-/// sources are a follow-up.
+/// Two volume shapes expose secrets:
+///   * a plain `.secret` volume (`secretName`), and
+///   * a `.projected` volume whose `sources[]` include a `.secret` projection.
+///
+/// A projected volume merges several sources into one mountPath, so a filesystem read
+/// only sees the mount — we can't tell which source a sub-path came from. We attribute
+/// such reads to the *first* secret source's name (deterministic, and matching the
+/// existing "name the secret" idiom). Non-secret projected sources (configMap,
+/// serviceAccountToken, downwardAPI, clusterTrustBundle) are ignored, consistent with
+/// how plain ConfigMap volumes are already ignored.
 fn secret_for_path(pod: &Pod, path: &str) -> Option<String> {
     let spec = pod.spec.as_ref()?;
-    // volume name -> secret name, for plain Secret volumes.
+    // volume name -> secret name, for plain Secret volumes and projected volumes whose
+    // sources expose a secret (first secret source wins — see the attribution note above).
     let secret_vols: std::collections::HashMap<&str, &str> = spec
         .volumes
         .iter()
         .flatten()
-        .filter_map(|v| Some((v.name.as_str(), v.secret.as_ref()?.secret_name.as_deref()?)))
+        .filter_map(|v| {
+            let secret_name = v
+                .secret
+                .as_ref()
+                .and_then(|s| s.secret_name.as_deref())
+                .or_else(|| {
+                    v.projected
+                        .as_ref()?
+                        .sources
+                        .iter()
+                        .flatten()
+                        .find_map(|src| src.secret.as_ref().map(|s| s.name.as_str()))
+                })?;
+            Some((v.name.as_str(), secret_name))
+        })
         .collect();
     if secret_vols.is_empty() {
         return None;
@@ -264,5 +287,71 @@ mod tests {
             secret_for_path(&p, "/etc/creds/key"),
             Some("inner-sec/key".into())
         );
+    }
+
+    #[test]
+    fn secret_read_under_a_projected_secret_source_is_named() {
+        // A projected volume mounting a secret source (plus a non-secret SA-token source)
+        // at /var/run/secrets/proj. Reads under it map to the secret; the SA token does
+        // not contribute a name.
+        let p = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app"},
+            "spec": {
+                "containers": [{
+                    "name": "web", "image": "web:1",
+                    "volumeMounts": [
+                        {"name": "proj", "mountPath": "/var/run/secrets/proj", "readOnly": true}
+                    ]
+                }],
+                "volumes": [{
+                    "name": "proj",
+                    "projected": {
+                        "sources": [
+                            {"serviceAccountToken": {"path": "token"}},
+                            {"secret": {"name": "proj-sec"}}
+                        ]
+                    }
+                }]
+            }
+        }));
+        assert_eq!(
+            secret_for_path(&p, "/var/run/secrets/proj/api-key"),
+            Some("proj-sec/api-key".into())
+        );
+        // The mount path itself (no sub-key) → just the secret name.
+        assert_eq!(
+            secret_for_path(&p, "/var/run/secrets/proj"),
+            Some("proj-sec".into())
+        );
+    }
+
+    #[test]
+    fn projected_volume_without_a_secret_source_is_not_a_secret() {
+        // A projected volume whose only sources are a configMap and an SA token — no
+        // secret source, so reads under it must NOT be classified as a SecretRead.
+        let p = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app"},
+            "spec": {
+                "containers": [{
+                    "name": "web", "image": "web:1",
+                    "volumeMounts": [
+                        {"name": "proj", "mountPath": "/var/run/proj", "readOnly": true}
+                    ]
+                }],
+                "volumes": [{
+                    "name": "proj",
+                    "projected": {
+                        "sources": [
+                            {"configMap": {"name": "cfg"}},
+                            {"serviceAccountToken": {"path": "token"}}
+                        ]
+                    }
+                }]
+            }
+        }));
+        assert_eq!(secret_for_path(&p, "/var/run/proj/ca.crt"), None);
+        assert_eq!(secret_for_path(&p, "/var/run/proj/token"), None);
     }
 }
