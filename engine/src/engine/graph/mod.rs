@@ -255,6 +255,13 @@ pub struct Vulnerability {
     pub installed_version: Option<String>,
     /// The version that fixes the vulnerability, if a fix is available.
     pub fixed_version: Option<String>,
+    /// A short human title for the advisory (trivy's `title`), if reported. UNTRUSTED
+    /// free-text from a third-party feed — must be fenced/sanitized before it reaches
+    /// the model prompt (JEF-66).
+    pub title: Option<String>,
+    /// The advisory's primary reference URL (trivy's `primaryLink`), if reported. Also
+    /// untrusted third-party text — fenced before it reaches the prompt (JEF-66).
+    pub primary_link: Option<String>,
 }
 
 /// Whether a vulnerability's code is reachable (JEF-51). v1 populates only the
@@ -294,6 +301,18 @@ pub enum Severity {
     Medium,
     High,
     Critical,
+}
+
+impl Severity {
+    /// A stable, low-cardinality label for the prompt and metrics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+    }
 }
 
 /// The behavioral-port wire type, defined in the shared [`protector_behavior`] crate so

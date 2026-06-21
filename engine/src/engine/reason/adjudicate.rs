@@ -24,7 +24,9 @@ use petgraph::visit::EdgeRef;
 use serde_json::Value;
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{Behavior, Node, NodeKey, Relation, SecurityGraph, Severity};
+use crate::engine::graph::{
+    Behavior, Node, NodeKey, Relation, SecurityGraph, Severity, Vulnerability,
+};
 
 /// The model's judgement on a proven chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,42 @@ impl Adjudicator for NullAdjudicator {
     }
 }
 
+/// Cap untrusted free-text to keep the prompt small for the CPU-only model. The
+/// `entry_fingerprint` discipline means the (capped) string is what the cache keys
+/// on — fine, since the cap is deterministic, so the same advisory always yields the
+/// same string.
+const TITLE_CAP: usize = 120;
+
+/// Build one CVE's evidence line for the prompt and the verdict fingerprint (JEF-66):
+/// id, severity, runtime reachability, fix-availability, and the short advisory title
+/// when present. NOTHING volatile (no timestamps) — the whole list is fenced+sanitized
+/// by `fence_list` before it reaches the model, so the free-text title is data only.
+fn cve_evidence(v: &Vulnerability) -> String {
+    // Fix availability is the exploitability signal JEF-66 is after: a fix existing
+    // while the workload is still on the vulnerable version is a different posture from
+    // "no fix exists at all".
+    // Use "to" rather than an arrow: the prompt fences this text and `sanitize` strips
+    // `>` (a fence-closing char), which would mangle "->" into "-".
+    let fix = match (v.fixed_version.as_deref(), v.installed_version.as_deref()) {
+        (Some(fixed), Some(installed)) => format!("fix available: {installed} to {fixed}"),
+        (Some(fixed), None) => format!("fix available: {fixed}"),
+        (None, _) => "no fix available".to_string(),
+    };
+    let mut line = format!(
+        "{} [severity: {}] [reachability: {}] [{}]",
+        v.id,
+        v.severity.label(),
+        v.reachability.label(),
+        fix,
+    );
+    if let Some(title) = v.title.as_deref() {
+        let title: String = title.chars().take(TITLE_CAP).collect();
+        line.push_str(" — ");
+        line.push_str(&title);
+    }
+    line
+}
+
 /// The evidence behind an entry: the CVEs its image carries and the runtime signals
 /// observed on it — what the model needs to judge contextual realness.
 fn entry_evidence(graph: &SecurityGraph, entry_key: &NodeKey) -> (Vec<String>, Vec<Behavior>) {
@@ -134,12 +172,16 @@ fn entry_evidence(graph: &SecurityGraph, entry_key: &NodeKey) -> (Vec<String>, V
                     // (exploited-in-wild OR critical), so the model isn't told
                     // "no CVE" for a critical-but-not-KEV foothold.
                     .filter(|v| v.exploited_in_wild || v.severity == Severity::Critical)
-                    // Label each CVE with its reachability (JEF-51): the model sees which
-                    // CVEs are LOADED AT RUNTIME vs merely present. The label is part of
-                    // the string, so it flows verbatim into both the prompt and the verdict
-                    // fingerprint — a flip to loaded-at-runtime busts the cache and
-                    // re-judges that entry.
-                    .map(|v| format!("{} [reachability: {}]", v.id, v.reachability.label())),
+                    // Widen each CVE's evidence (JEF-51 + JEF-66): id, severity,
+                    // reachability, and a fix-availability indication so the model can
+                    // reason about exploitability — "a fix exists but the workload is
+                    // still on the vulnerable version" vs "no fix available". The short
+                    // advisory title (untrusted free-text) is appended when present; the
+                    // WHOLE string is fenced+sanitized by `fence_list` at prompt-build
+                    // time, so the title can't inject prompt structure. The string flows
+                    // verbatim into both the prompt and the verdict fingerprint, so any
+                    // of these fields changing busts the cache and re-judges that entry.
+                    .map(cve_evidence),
             );
         }
     }
@@ -472,6 +514,9 @@ mod tests {
                     severity: Severity::Critical,
                     exploited_in_wild: true,
                     epss: None,
+                    installed_version: Some("2.14.0".into()),
+                    fixed_version: Some("2.17.0".into()),
+                    title: Some("Remote code execution via JNDI lookup".into()),
                     sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
                     ..Default::default()
                 }],
@@ -507,6 +552,17 @@ mod tests {
         assert!(
             prompt.contains("reachability:"),
             "tags each CVE with its reachability"
+        );
+        // JEF-66: the CVE evidence carries severity, fix-availability, and the (fenced)
+        // advisory title so the model can weigh exploitability.
+        assert!(prompt.contains("severity: critical"), "tags CVE severity");
+        assert!(
+            prompt.contains("fix available: 2.14.0 to 2.17.0"),
+            "shows the fix is available but the workload is still on the vulnerable version"
+        );
+        assert!(
+            prompt.contains("Remote code execution via JNDI lookup"),
+            "includes the advisory title"
         );
     }
 
