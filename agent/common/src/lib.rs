@@ -19,6 +19,11 @@ pub const KIND_FILE_OPEN: u32 = 2;
 /// binary (fentry on `security_mmap_file`, PROT_EXEC). Carries the path; userspace emits
 /// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
 pub const KIND_LIBRARY_LOAD: u32 = 3;
+/// A process gained root (fentry on `security_task_fix_setuid`). The eBPF side filters to
+/// the escalation case (`new_uid == 0 && old_uid != 0`) so this is always a real
+/// privilege gain; the [`PrivEvent`] body carries the old and new real UIDs. Userspace
+/// emits a [`Behavior::PrivilegeChange`]. (Wire value `4` is intentionally skipped/reserved.)
+pub const KIND_PRIV_CHANGE: u32 = 5;
 
 /// Max path bytes carried per [`FileEvent`]. Secret-mount paths are well under this; a
 /// longer path is truncated (the secret name still lands). Sized to keep the eBPF stack
@@ -57,4 +62,17 @@ pub struct ConnEvent {
     pub daddr: u32,
     /// Destination port, host byte order.
     pub dport: u16,
+}
+
+/// One observed privilege escalation to root (kind [`KIND_PRIV_CHANGE`]). The eBPF side
+/// already filtered to the escalation case (`new_uid == 0 && old_uid != 0`), so every
+/// PrivEvent is a real gain of root. `header` first so the shared prefix is at offset 0.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PrivEvent {
+    pub header: EventHeader,
+    /// The process's real UID before the change (non-root).
+    pub old_uid: u32,
+    /// The process's real UID after the change (0 — root).
+    pub new_uid: u32,
 }

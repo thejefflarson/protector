@@ -51,7 +51,7 @@ mod ebpf {
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
         ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
-        PATH_CAP,
+        KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
     };
     use protector_behavior::{Attribution, Behavior};
 
@@ -93,6 +93,13 @@ mod ebpf {
         FileRead { pid: u32, path: String },
         /// Executable mmap: the library basename (e.g. `libssl.so.3`).
         LibraryLoad { pid: u32, name: String },
+        /// Privilege escalation to root: the pre/post real UIDs (the eBPF side already
+        /// filtered to `new_uid == 0 && old_uid != 0`).
+        PrivChange {
+            pid: u32,
+            old_uid: u32,
+            new_uid: u32,
+        },
     }
 
     impl RawEvent {
@@ -101,7 +108,8 @@ mod ebpf {
             match self {
                 RawEvent::Connect { pid, .. }
                 | RawEvent::FileRead { pid, .. }
-                | RawEvent::LibraryLoad { pid, .. } => *pid,
+                | RawEvent::LibraryLoad { pid, .. }
+                | RawEvent::PrivChange { pid, .. } => *pid,
             }
         }
 
@@ -120,6 +128,12 @@ mod ebpf {
                 }
                 RawEvent::FileRead { path, .. } => Behavior::FileRead { path },
                 RawEvent::LibraryLoad { name, .. } => Behavior::LibraryLoaded { name },
+                RawEvent::PrivChange {
+                    old_uid, new_uid, ..
+                } => Behavior::PrivilegeChange {
+                    from_uid: old_uid,
+                    to_uid: new_uid,
+                },
             }
         }
     }
@@ -299,6 +313,7 @@ mod ebpf {
             const FENTRY_PROBES: &[(&str, &str)] = &[
                 ("file_open", "security_file_open"),
                 ("mmap_file", "security_mmap_file"),
+                ("fix_setuid", "security_task_fix_setuid"),
             ];
             let btf = match Btf::from_sys_fs() {
                 Ok(btf) => btf,
@@ -369,6 +384,14 @@ mod ebpf {
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
                     Self::library_load(&ev)
                 }
+                KIND_PRIV_CHANGE => {
+                    if data.len() < std::mem::size_of::<PrivEvent>() {
+                        return None;
+                    }
+                    // SAFETY: kind says this is a PrivEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<PrivEvent>()) };
+                    Self::priv_change(&ev)
+                }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
         }
@@ -414,6 +437,17 @@ mod ebpf {
             Some(RawEvent::LibraryLoad {
                 pid: ev.header.pid,
                 name: name.to_string(),
+            })
+        }
+
+        /// Parse a privilege-change event into a raw PrivChange. The eBPF side already
+        /// filtered to the escalation-to-root case (`new_uid == 0 && old_uid != 0`), so
+        /// this just carries the UIDs through. Pure (no `/proc`).
+        fn priv_change(ev: &PrivEvent) -> Option<RawEvent> {
+            Some(RawEvent::PrivChange {
+                pid: ev.header.pid,
+                old_uid: ev.old_uid,
+                new_uid: ev.new_uid,
             })
         }
     }
@@ -528,6 +562,45 @@ mod ebpf {
                 }
                 other => panic!("expected Connect, got something else: {}", other.is_none()),
             }
+        }
+
+        #[test]
+        fn decode_priv_change_parses_uids() {
+            let ev = PrivEvent {
+                header: EventHeader {
+                    kind: KIND_PRIV_CHANGE,
+                    pid: 4321,
+                },
+                old_uid: 1000,
+                new_uid: 0,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&ev as *const PrivEvent).cast::<u8>(),
+                    std::mem::size_of::<PrivEvent>(),
+                )
+            };
+            match EbpfObserver::decode(bytes) {
+                Some(RawEvent::PrivChange {
+                    pid,
+                    old_uid,
+                    new_uid,
+                }) => {
+                    assert_eq!(pid, 4321);
+                    assert_eq!(old_uid, 1000);
+                    assert_eq!(new_uid, 0);
+                }
+                _ => panic!("expected PrivChange"),
+            }
+            // And the raw event maps to the PrivilegeChange behavior with from/to uids.
+            let raw = EbpfObserver::decode(bytes).unwrap();
+            assert_eq!(
+                raw.into_behavior(),
+                Behavior::PrivilegeChange {
+                    from_uid: 1000,
+                    to_uid: 0,
+                }
+            );
         }
     }
 }
