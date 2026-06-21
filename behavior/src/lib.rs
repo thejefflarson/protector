@@ -41,6 +41,11 @@ pub enum Behavior {
     /// legitimate workloads sometimes escalate (init/entrypoint), so wiring this to
     /// corroborate a specific attack is JEF-49's job.
     PrivilegeChange { from_uid: u32, to_uid: u32 },
+    /// A process was exec'd in the workload — the runtime signal for "unexpected process
+    /// spawned" (Falco-rule parity, ADR-0014). `path` is the exec'd binary's path as the
+    /// kernel saw it (`linux_binprm->filename`). Evidence for the model only today;
+    /// wiring exec → corroboration is JEF-49.
+    ProcessExec { path: String },
 }
 
 impl Behavior {
@@ -67,6 +72,7 @@ impl Behavior {
             Behavior::PrivilegeChange { from_uid, to_uid } => {
                 format!("privilege change uid {from_uid} -> {to_uid}")
             }
+            Behavior::ProcessExec { path } => format!("executed {path}"),
         }
     }
 
@@ -88,6 +94,12 @@ impl Behavior {
             // predicate widens): repeated escalations to the same UID collapse to one
             // fingerprint and don't bust the verdict cache.
             Behavior::PrivilegeChange { to_uid, .. } => format!("priv:{to_uid}"),
+            // Coarsen to the basename so repeated execs of the same binary from different
+            // absolute paths collapse to one stable key (mirrors how LibraryLoaded keys on
+            // the lib name, not the full path) — keeps exec churn from busting the cache.
+            Behavior::ProcessExec { path } => {
+                format!("exec:{}", path.rsplit('/').next().unwrap_or(path))
+            }
         }
     }
 }
@@ -213,6 +225,21 @@ mod tests {
             Attribution::by_namespaced_name("app", "web")
         );
         assert!(obs.behavior.is_alert());
+    }
+
+    #[test]
+    fn process_exec_fingerprint_coarsens_to_basename() {
+        // Different absolute paths to the same binary must collapse to one stable key so
+        // exec churn doesn't bust the verdict cache (mirrors LibraryLoaded's basename key).
+        let a = Behavior::ProcessExec {
+            path: "/usr/bin/bash".into(),
+        };
+        let b = Behavior::ProcessExec {
+            path: "/bin/bash".into(),
+        };
+        assert_eq!(a.fingerprint_key(), "exec:bash");
+        assert_eq!(a.fingerprint_key(), b.fingerprint_key());
+        assert_eq!(a.summary(), "executed /usr/bin/bash");
     }
 
     #[test]
