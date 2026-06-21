@@ -47,8 +47,9 @@ pub struct ImageVulnerabilities {
 /// The behavioral port's input shape (ADR-0014), defined in the shared
 /// [`protector_behavior`] crate so the engine and the first-party agent share one
 /// definition rather than a hand-synced duplicate. Re-exported here because the Observer
-/// and adapters refer to it as `observe::RuntimeObservation`.
-pub use protector_behavior::RuntimeObservation;
+/// and adapters refer to it as `observe::RuntimeObservation`. [`Attribution`] (how an
+/// observation is attributed to a workload) is re-exported alongside it for the same reason.
+pub use protector_behavior::{Attribution, RuntimeObservation};
 
 /// A point-in-time view of the cluster objects this slice's adapters consume.
 #[derive(Debug, Default, Clone)]

@@ -2,6 +2,7 @@ use petgraph::visit::EdgeRef;
 
 use super::*;
 use crate::engine::graph::{Behavior, Reachability};
+use crate::engine::observe::Attribution;
 
 /// Annotates Image nodes with vulnerability findings (Vulnerability port). Like
 /// [`ExposureAdapter`], it enriches existing Image nodes, so it runs after the
@@ -55,21 +56,24 @@ impl Adapter for RuntimeAdapter {
         // API (ADR-0014). The full Pod (not just ns/name) is needed to refine a raw
         // FileRead into a SecretRead via its volumeMounts. Falco events carry namespace/
         // pod directly, so only build the map when something needs UID resolution.
-        let by_uid: std::collections::HashMap<String, &Pod> =
-            if snapshot.runtime_events.iter().any(|e| e.pod_uid.is_some()) {
-                snapshot
-                    .pods
-                    .iter()
-                    .filter_map(|p| Some((p.metadata.uid.clone()?, p)))
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
+        let by_uid: std::collections::HashMap<String, &Pod> = if snapshot
+            .runtime_events
+            .iter()
+            .any(|e| matches!(e.attribution, Attribution::ByPodUid { .. }))
+        {
+            snapshot
+                .pods
+                .iter()
+                .filter_map(|p| Some((p.metadata.uid.clone()?, p)))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
 
         let (mut attached, mut unresolved, mut filtered) = (0usize, 0usize, 0usize);
         for event in &snapshot.runtime_events {
-            let (ns, name, pod): (String, String, Option<&Pod>) = match &event.pod_uid {
-                Some(uid) => match by_uid.get(uid) {
+            let (ns, name, pod): (String, String, Option<&Pod>) = match &event.attribution {
+                Attribution::ByPodUid { pod_uid } => match by_uid.get(pod_uid) {
                     Some(p) => (
                         pod_namespace(p),
                         p.metadata.name.clone().unwrap_or_default(),
@@ -81,7 +85,9 @@ impl Adapter for RuntimeAdapter {
                         continue;
                     }
                 },
-                None => (event.namespace.clone(), event.pod.clone(), None),
+                Attribution::ByNamespacedName { namespace, pod } => {
+                    (namespace.clone(), pod.clone(), None)
+                }
             };
             // Refine a raw FileRead (a tmpfs open the credential-free agent couldn't
             // classify) into a SecretRead using the pod's secret volumeMounts — or drop
@@ -560,9 +566,7 @@ mod tests {
         let runtime_events = loaded_lib
             .map(|name| {
                 vec![RuntimeObservation {
-                    namespace: "app".into(),
-                    pod: "web".into(),
-                    pod_uid: None,
+                    attribution: Attribution::by_namespaced_name("app", "web"),
                     source: None,
                     observed_at_ms: None,
                     behavior: Behavior::LibraryLoaded { name: name.into() },
@@ -644,9 +648,7 @@ mod tests {
                 }],
             }],
             runtime_events: vec![RuntimeObservation {
-                namespace: "app".into(),
-                pod: "web".into(),
-                pod_uid: None,
+                attribution: Attribution::by_namespaced_name("app", "web"),
                 source: None,
                 observed_at_ms: None,
                 behavior: Behavior::LibraryLoaded {

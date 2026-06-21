@@ -53,7 +53,7 @@ mod ebpf {
         ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
         PATH_CAP,
     };
-    use protector_behavior::Behavior;
+    use protector_behavior::{Attribution, Behavior};
 
     /// This sensor's identity, carried into each observation's provenance so the engine
     /// can tell agent signals from Falco's (ADR-0003 corroboration).
@@ -247,9 +247,7 @@ mod ebpf {
                     continue; // host process / unreadable cgroup — drop, never fatal
                 };
                 let obs = RuntimeObservation {
-                    namespace: String::new(),
-                    pod: String::new(),
-                    pod_uid: Some(uid),
+                    attribution: Attribution::by_pod_uid(uid),
                     source: Some(SOURCE.into()),
                     observed_at_ms: now_ms(),
                     behavior: raw.into_behavior(),

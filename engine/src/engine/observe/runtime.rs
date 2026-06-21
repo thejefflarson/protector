@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 
-use super::RuntimeObservation;
+use super::{Attribution, RuntimeObservation};
 use crate::engine::graph::Behavior;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
@@ -99,10 +99,7 @@ impl RuntimeEvents {
 /// same workload. The sensor identity and observation time are metadata, not identity — a
 /// repeat of the same behavior is not a new fact, so it shouldn't wake the engine.
 fn same_signal(a: &RuntimeObservation, b: &RuntimeObservation) -> bool {
-    a.behavior == b.behavior
-        && a.pod_uid == b.pod_uid
-        && a.namespace == b.namespace
-        && a.pod == b.pod
+    a.behavior == b.behavior && a.attribution == b.attribution
 }
 
 /// Whether a Falco priority is **critical or higher** (Critical/Alert/Emergency).
@@ -135,9 +132,7 @@ pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
     // "something alarming now" signal. It's one adapter onto the behavioral port
     // (ADR-0014); the first-party eBPF agent posts the richer behaviors directly.
     Some(RuntimeObservation {
-        namespace,
-        pod,
-        pod_uid: None,
+        attribution: Attribution::by_namespaced_name(namespace, pod),
         source: Some("falco".into()),
         // Falco's wall-clock `time` could be parsed here; until then the adapter
         // stamps ingest-time. Falco is the low-volume sensor, so the lag is minor.
@@ -217,9 +212,7 @@ mod tests {
 
     fn obs(rule: &str) -> RuntimeObservation {
         RuntimeObservation {
-            namespace: "app".into(),
-            pod: "web".into(),
-            pod_uid: None,
+            attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
             behavior: Behavior::Alert { rule: rule.into() },
@@ -280,8 +273,10 @@ mod tests {
             }
         });
         let parsed = parse_falco_event(&event).expect("parses");
-        assert_eq!(parsed.namespace, "app");
-        assert_eq!(parsed.pod, "web-7d8f");
+        assert_eq!(
+            parsed.attribution,
+            Attribution::by_namespaced_name("app", "web-7d8f")
+        );
         assert_eq!(
             parsed.behavior,
             Behavior::Alert {
