@@ -258,13 +258,14 @@ impl Engine {
         // path to something sensitive is a finding on its own. Defense in depth —
         // every path is evaluated, every time the facts behind it change.
         //
-        // Judged ONCE PER PATH (entry → objective) and cached across passes. The cache
-        // is keyed by the path and invalidated by an evidence fingerprint (the entry's
-        // CVEs/runtime/exposure), so a path is re-judged when a scan lands a new CVE —
-        // and a brand-new path (e.g. a misconfig that newly exposes a secret) is judged
-        // because it's a new key. A local CPU model is slow, so this caching is what
-        // keeps steady state quiet; the findings were already published above, so a
-        // slow or unavailable model never blocks the dashboard.
+        // Judged ONCE PER ENTRY — one model call per internet-facing front door, made
+        // holistically over EVERY objective it reaches (NOT per path, and NOT one call for
+        // the whole graph). Cached across passes: keyed by the entry and invalidated by
+        // its evidence fingerprint (the entry's CVEs/runtime + its reachable-objective
+        // set), so it's re-judged when a scan lands a new CVE or a misconfig newly exposes
+        // an objective. A local CPU model is slow, so this caching is what keeps steady
+        // state quiet; the findings were already published above, so a slow or unavailable
+        // model never blocks the dashboard.
         //
         // Two consequences follow from the verdict:
         // - Corroborated chain (live runtime signal): a non-confirming verdict
@@ -286,6 +287,10 @@ impl Engine {
         }
         let current_entries: HashSet<String> = by_entry.keys().cloned().collect();
         let mut verdict_counts: HashMap<&'static str, u64> = HashMap::new();
+        // How often we actually call the (slow, CPU-bound) model this pass vs reuse a
+        // cached verdict. A persistently high `judged` means the verdict-cache fingerprint
+        // is churning (re-judging unchanged entries) — the thing to watch for model load.
+        let (mut judged, mut cached) = (0u64, 0u64);
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
             // The (objective, technique) set this entry reaches — what the model judges.
@@ -298,8 +303,12 @@ impl Engine {
 
             let fingerprint = reason::adjudicate::entry_fingerprint(&graph, &entry, &objectives);
             let verdict = match self.verdict_cache.get(entry_key) {
-                Some((fp, v)) if *fp == fingerprint => v.clone(),
+                Some((fp, v)) if *fp == fingerprint => {
+                    cached += 1;
+                    v.clone()
+                }
                 _ => {
+                    judged += 1;
                     let v = self.adjudicator.judge(&entry, &objectives, &graph).await;
                     // An Uncertain is usually a transient model outage (e.g. a CPU-model
                     // timeout) — re-judge next pass rather than pin the failure into the
@@ -364,6 +373,21 @@ impl Engine {
             self.metrics
                 .verdicts
                 .record(*count, &[opentelemetry::KeyValue::new("verdict", *verdict)]);
+        }
+        // How much judging this pass did. One line per pass so model-call frequency is
+        // visible: `judged` = fresh model calls (cache misses), `cached` = reused verdicts.
+        // Steady state should be judged≈0; a sustained nonzero means fingerprint churn.
+        self.metrics.verdicts.record(
+            judged,
+            &[opentelemetry::KeyValue::new("verdict", "judged_this_pass")],
+        );
+        if !by_entry.is_empty() {
+            tracing::info!(
+                entries = by_entry.len(),
+                judged,
+                cached,
+                "adjudication pass (model calls = judged)"
+            );
         }
         // Re-publish with the model's verdicts now attached — the enriched view
         // (promotions move into remediations; judged paths show the model's words).
