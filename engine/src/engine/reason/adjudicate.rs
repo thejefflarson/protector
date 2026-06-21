@@ -399,7 +399,7 @@ mod tests {
     use crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING;
     use crate::engine::graph::{NodeKey, Provenance, Severity, Vulnerability};
     use crate::engine::observe::adapter::{build_graph, default_adapters};
-    use crate::engine::observe::{ImageVulnerabilities, RuntimeObservation, Snapshot};
+    use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
     use crate::engine::reason::proof::{ProvenChain, prove};
 
     /// The (objective, technique) list for a chain — the shape `judge` now takes.
@@ -477,9 +477,7 @@ mod tests {
                 }],
             }],
             runtime_events: vec![RuntimeObservation {
-                namespace: "app".into(),
-                pod: "web".into(),
-                pod_uid: None,
+                attribution: Attribution::by_namespaced_name("app", "web"),
                 source: None,
                 observed_at_ms: None,
                 behavior: crate::engine::graph::Behavior::Alert {

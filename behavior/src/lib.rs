@@ -79,22 +79,54 @@ impl Behavior {
     }
 }
 
+/// How a sensor **attributed** an observation to a workload — a type distinction, not an
+/// empty-string convention (JEF-59). A sensor either knows the pod's cgroup UID (the
+/// first-party eBPF agent, which stays node-local and can't resolve names itself) or it
+/// already has the namespace/name (Falco, which reads k8s metadata). The engine resolves
+/// [`Self::ByPodUid`] → namespace/pod via its own pod watch (ADR-0014); the agent needs no
+/// cluster credentials.
+///
+/// Serialized **untagged + flattened** onto [`RuntimeObservation`], so the JSON stays the
+/// same flat shape as before — `{"pod_uid": "..."}` or `{"namespace": "...", "pod": "..."}`
+/// — and serde picks the variant by which fields are present. The contract is the JSON
+/// (ADR-0003); this keeps that contract identical while making the Rust type honest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Attribution {
+    /// The eBPF agent: a pod UID read from the cgroup; the engine resolves UID → pod.
+    ByPodUid { pod_uid: String },
+    /// Falco (and any sensor with cluster metadata): the namespace/name directly.
+    ByNamespacedName { namespace: String, pod: String },
+}
+
+impl Attribution {
+    /// Attribute by pod UID (the eBPF agent's path).
+    pub fn by_pod_uid(uid: impl Into<String>) -> Self {
+        Attribution::ByPodUid {
+            pod_uid: uid.into(),
+        }
+    }
+
+    /// Attribute by namespace + pod name (Falco's path).
+    pub fn by_namespaced_name(namespace: impl Into<String>, pod: impl Into<String>) -> Self {
+        Attribution::ByNamespacedName {
+            namespace: namespace.into(),
+            pod: pod.into(),
+        }
+    }
+}
+
 /// A normalized live runtime observation about a workload — the behavioral port's input
 /// shape (ADR-0014). Any sensor (the first-party eBPF agent, Falco, Tetragon, …) maps
 /// its events into this; the graph sees only the normalized signal, not a vendor type.
 /// `Deserialize` so a sensor can POST it directly to the normalized ingest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeObservation {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub namespace: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pod: String,
-    /// The pod UID a sensor attributed the event to from the cgroup (the eBPF agent
-    /// sets this and leaves namespace/pod empty; Falco sets namespace/pod directly).
-    /// The engine resolves UID → namespace/pod via its own pod watch, so the agent
-    /// needs no cluster credentials and stays node-local (ADR-0014).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pod_uid: Option<String>,
+    /// How this observation is attributed to a workload — by cgroup UID (eBPF agent) or by
+    /// namespace/name (Falco). Flattened so its fields sit at the JSON top level, preserving
+    /// the original flat wire shape.
+    #[serde(flatten)]
+    pub attribution: Attribution,
     /// Which sensor observed this — `"protector-agent"`, `"falco"`, … Carried into the
     /// signal's provenance so two sensors observing the same activity are corroboration,
     /// not one indistinguishable source (ADR-0003). Defaulted (older agents omit it) →
@@ -130,11 +162,9 @@ mod tests {
 
     #[test]
     fn observation_roundtrips_and_omits_absent_optionals() {
-        // An eBPF-agent observation: attributed by uid, ns/pod empty, source + time set.
+        // An eBPF-agent observation: attributed by uid, source + time set.
         let obs = RuntimeObservation {
-            namespace: String::new(),
-            pod: String::new(),
-            pod_uid: Some("uid".into()),
+            attribution: Attribution::by_pod_uid("uid"),
             source: Some("protector-agent".into()),
             observed_at_ms: Some(1_710_000_000_000),
             behavior: Behavior::SecretRead {
@@ -165,8 +195,10 @@ mod tests {
             "behavior": {"kind": "alert", "rule": "Terminal shell in container"}
         }))
         .unwrap();
-        assert_eq!(obs.namespace, "app");
-        assert_eq!(obs.pod, "web");
+        assert_eq!(
+            obs.attribution,
+            Attribution::by_namespaced_name("app", "web")
+        );
         assert!(obs.behavior.is_alert());
     }
 

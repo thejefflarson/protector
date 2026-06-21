@@ -907,7 +907,9 @@ mod tests {
     #[test]
     fn runtime_signal_completes_the_action_bar() {
         use crate::engine::graph::{Provenance, Severity, Vulnerability};
-        use crate::engine::observe::{ImageVulnerabilities, RuntimeObservation, SecretMeta};
+        use crate::engine::observe::{
+            Attribution, ImageVulnerabilities, RuntimeObservation, SecretMeta,
+        };
         use std::time::SystemTime;
 
         let web = pod(json!({
@@ -943,9 +945,7 @@ mod tests {
                 }],
             }],
             runtime_events: vec![RuntimeObservation {
-                namespace: "app".into(),
-                pod: "web".into(),
-                pod_uid: None,
+                attribution: Attribution::by_namespaced_name("app", "web"),
                 source: None,
                 observed_at_ms: None,
                 behavior: crate::engine::graph::Behavior::Alert {
