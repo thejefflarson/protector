@@ -13,12 +13,22 @@ use kube::core::DynamicObject;
 use serde_json::Value;
 
 use super::ImageVulnerabilities;
-use crate::engine::graph::{Provenance, Severity, Vulnerability};
+use crate::engine::graph::{Provenance, Reachability, Severity, Vulnerability};
 
 /// Parse a trivy-operator `VulnerabilityReport` object. The report payload lives
 /// under the top-level `report` field.
 pub fn parse_report(object: &DynamicObject) -> Option<ImageVulnerabilities> {
     from_report(object.data.get("report")?)
+}
+
+/// A non-empty string field from a report entry, or `None`. Empty strings (trivy
+/// omits a fix by emitting `""`, not by dropping the key) collapse to `None`.
+fn opt_str(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn severity(label: &str) -> Severity {
@@ -68,6 +78,15 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
                         exploited_in_wild: false,
                         epss: None,
                         sources: vec![Provenance::new("trivy", SystemTime::now())],
+                        // Package coordinates (trivy-operator field names): `resource`
+                        // is the package name, `installedVersion`/`fixedVersion` the
+                        // versions. `pkg_name` drives the JEF-51 runtime correlation.
+                        pkg_name: opt_str(v, "resource"),
+                        installed_version: opt_str(v, "installedVersion"),
+                        fixed_version: opt_str(v, "fixedVersion"),
+                        // Reachability is correlated later (ReachabilityAdapter); the
+                        // scanner alone never asserts it.
+                        reachability: Reachability::Unknown,
                     })
                 })
                 .collect()
@@ -90,8 +109,13 @@ mod tests {
             "registry": {"server": "ghcr.io"},
             "artifact": {"repository": "thejefflarson/api", "tag": "1.2.3"},
             "vulnerabilities": [
-                {"vulnerabilityID": "CVE-2026-1", "severity": "CRITICAL"},
-                {"vulnerabilityID": "CVE-2026-2", "severity": "LOW"},
+                {
+                    "vulnerabilityID": "CVE-2026-1", "severity": "CRITICAL",
+                    "resource": "log4j-core",
+                    "installedVersion": "2.14.0", "fixedVersion": "2.17.0"
+                },
+                {"vulnerabilityID": "CVE-2026-2", "severity": "LOW",
+                 "resource": "zlib", "installedVersion": "1.2.11", "fixedVersion": ""},
                 {"severity": "HIGH"}
             ]
         });
@@ -99,10 +123,20 @@ mod tests {
         assert_eq!(parsed.image, "ghcr.io/thejefflarson/api:1.2.3");
         // The entry missing a vulnerabilityID is skipped.
         assert_eq!(parsed.vulnerabilities.len(), 2);
-        assert_eq!(parsed.vulnerabilities[0].id, "CVE-2026-1");
-        assert_eq!(parsed.vulnerabilities[0].severity, Severity::Critical);
+        let v0 = &parsed.vulnerabilities[0];
+        assert_eq!(v0.id, "CVE-2026-1");
+        assert_eq!(v0.severity, Severity::Critical);
         // trivy alone never asserts active exploitation.
-        assert!(!parsed.vulnerabilities[0].exploited_in_wild);
+        assert!(!v0.exploited_in_wild);
+        // Package coordinates are now preserved (JEF-51).
+        assert_eq!(v0.pkg_name.as_deref(), Some("log4j-core"));
+        assert_eq!(v0.installed_version.as_deref(), Some("2.14.0"));
+        assert_eq!(v0.fixed_version.as_deref(), Some("2.17.0"));
+        // Reachability is not asserted by the scanner — it starts Unknown.
+        assert_eq!(v0.reachability, Reachability::Unknown);
+        // An empty fixedVersion ("" = no fix yet) collapses to None.
+        assert_eq!(parsed.vulnerabilities[1].fixed_version, None);
+        assert_eq!(parsed.vulnerabilities[1].pkg_name.as_deref(), Some("zlib"));
     }
 
     #[test]

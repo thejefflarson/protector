@@ -231,8 +231,9 @@ pub enum Trust {
 
 /// A vulnerability fact on an [`Image`]. The fields are exactly the predicates the
 /// proof bar tests: presence (with corroborating `sources`), severity, and
-/// active exploitation in the wild.
-#[derive(Debug, Clone, PartialEq)]
+/// active exploitation in the wild — plus the package coordinates and a
+/// [`Reachability`] annotation (JEF-51) used as model evidence.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Vulnerability {
     /// CVE (or other advisory) identifier.
     pub id: String,
@@ -244,11 +245,51 @@ pub struct Vulnerability {
     /// Which Vulnerability adapters reported this; >1 distinct source is
     /// cross-scanner corroboration.
     pub sources: Vec<Provenance>,
+    /// Whether the vulnerable code is reachable at runtime (JEF-51) — evidence for
+    /// the model, never a gate in v1.
+    pub reachability: Reachability,
+    /// The vulnerable package's name (e.g. `log4j-core`, `openssl`), if the scanner
+    /// reported it. Drives the runtime library-load correlation (JEF-51).
+    pub pkg_name: Option<String>,
+    /// The installed (vulnerable) package version, if reported.
+    pub installed_version: Option<String>,
+    /// The version that fixes the vulnerability, if a fix is available.
+    pub fixed_version: Option<String>,
+}
+
+/// Whether a vulnerability's code is reachable (JEF-51). v1 populates only the
+/// *dynamic* variants by correlating CVEs against the agent's runtime
+/// [`Behavior::LibraryLoaded`] signal; `Unknown` is the default (no signal yet).
+///
+/// v3 will add `StaticReachable`/`StaticUnreachable` from a scanner's static
+/// call-graph reachability analysis — orthogonal to the runtime signal here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Reachability {
+    /// Not yet evaluated — no correlation pass has run, or no runtime evidence exists.
+    #[default]
+    Unknown,
+    /// The vulnerable package was observed loaded at runtime (a `LibraryLoaded`
+    /// signal matched its package name) — the strongest dynamic-reachability signal.
+    LoadedAtRuntime,
+    /// The correlation pass ran but no matching runtime load was observed.
+    NotObserved,
+}
+
+impl Reachability {
+    /// A stable, low-cardinality label for the prompt, fingerprint, and metrics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Reachability::Unknown => "unknown",
+            Reachability::LoadedAtRuntime => "loaded-at-runtime",
+            Reachability::NotObserved => "not-observed",
+        }
+    }
 }
 
 /// Severity band of a vulnerability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Severity {
+    #[default]
     Low,
     Medium,
     High,
@@ -613,6 +654,7 @@ mod tests {
                 exploited_in_wild: true,
                 epss: Some(0.9),
                 sources: vec![prov("trivy"), prov("grype")],
+                ..Default::default()
             }],
         });
         // Identity (digest) drives the key; facts (trust, vulns) do not.
@@ -653,6 +695,7 @@ mod tests {
                 exploited_in_wild: false,
                 epss: None,
                 sources: vec![prov("trivy")],
+                ..Default::default()
             }],
         }));
         assert_eq!(img2, img, "upsert keeps the same index");

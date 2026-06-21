@@ -229,6 +229,10 @@ fn corroborates(behavior: &Behavior, _attack: &AttackRef) -> bool {
         Behavior::Alert { .. } => true,
         // Deferred (ADR-0014): NetworkConnection{internet:true} ⇒ attack is exfil;
         // LibraryLoaded ⇒ attack is the foothold. Keyed on `_attack` when they land.
+        // JEF-51 v2: this LibraryLoaded arm is where dynamic reachability will promote a
+        // foothold — when the loaded lib matches a CVE on the image (now annotated as
+        // Reachability::LoadedAtRuntime), this returns true. v1 only surfaces it as model
+        // evidence; promotion is gated on a shadow bake.
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::NetworkConnection { .. }
@@ -535,6 +539,7 @@ mod tests {
                 exploited_in_wild: false,
                 epss: None,
                 sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                ..Default::default()
             }],
         }
     }
@@ -813,6 +818,7 @@ mod tests {
             exploited_in_wild: true,
             epss: Some(0.97),
             sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+            ..Default::default()
         };
 
         let snap = Snapshot {
@@ -881,6 +887,7 @@ mod tests {
                     exploited_in_wild: false,
                     epss: None,
                     sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    ..Default::default()
                 }],
             }],
             ..Default::default()
@@ -932,6 +939,7 @@ mod tests {
                     exploited_in_wild: true,
                     epss: None,
                     sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    ..Default::default()
                 }],
             }],
             runtime_events: vec![RuntimeObservation {

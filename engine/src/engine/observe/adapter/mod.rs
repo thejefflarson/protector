@@ -48,7 +48,7 @@ mod secret_mount;
 mod workload;
 
 pub use self::egress::EgressAdapter;
-pub use self::enrich::{RuntimeAdapter, VulnerabilityAdapter};
+pub use self::enrich::{CveReachabilityAdapter, RuntimeAdapter, VulnerabilityAdapter};
 pub use self::escape::HostEscapeAdapter;
 pub use self::exposure::ExposureAdapter;
 pub use self::linkerd::LinkerdReachabilityAdapter;
@@ -171,6 +171,10 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(ExposureAdapter),
         Box::new(VulnerabilityAdapter),
         Box::new(RuntimeAdapter),
+        // CVE↔runtime-load correlation (JEF-51): reads the CVEs the VulnerabilityAdapter
+        // put on Images and the loads the RuntimeAdapter put on Workloads, so it runs
+        // after both.
+        Box::new(CveReachabilityAdapter),
     ]
 }
 
