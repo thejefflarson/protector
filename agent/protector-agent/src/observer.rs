@@ -35,6 +35,7 @@ pub use ebpf::EbpfObserver;
 
 #[cfg(feature = "ebpf")]
 mod ebpf {
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -42,6 +43,7 @@ mod ebpf {
     use aya::programs::{FEntry, KProbe};
     use aya::{Btf, Ebpf};
     use tokio::io::unix::AsyncFd;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::pod::parse_pod_uid;
@@ -65,6 +67,62 @@ mod ebpf {
     /// Drops are silent loss from a full ring; 30s keeps the signal visible without
     /// spamming the log (JEF-58).
     const HEARTBEAT: Duration = Duration::from_secs(30);
+
+    /// Depth of the drain→attribution hand-off channel. The drain parses ring bytes
+    /// (cheap) and pushes a [`RawEvent`] here; the attribution worker drains it doing the
+    /// blocking `/proc/<pid>/cgroup` read (slow). The buffer absorbs short bursts so a
+    /// momentarily-slow `/proc` doesn't immediately stall the ring drain. Sized to a few
+    /// thousand events: large enough to ride out a spike, small enough to bound memory.
+    const ATTRIB_QUEUE: usize = 4096;
+
+    /// Cap on the pid→pod_uid attribution cache. Repeated events from the same pid (the
+    /// common case — a chatty process) skip the `/proc` read entirely. pids are recycled
+    /// by the kernel, so an entry can go stale; the cache is best-effort and bounded, and
+    /// a wrong-but-same-pod attribution under recycling is harmless to the additive model.
+    /// When full we clear it wholesale (cheap, rare) rather than track per-entry LRU.
+    const PID_CACHE_CAP: usize = 8192;
+
+    /// A ring event parsed into typed fields but **not yet attributed** to a pod. This is
+    /// the unit handed across the drain→worker boundary (JEF-64): the cheap `repr(C)`
+    /// decode stays on the drain, the expensive cgroup read happens in the worker. One
+    /// variant per probe — mirrors the `decode` dispatch.
+    enum RawEvent {
+        /// Outbound connect: destination IPv4 (network order) + port (host order).
+        Connect { pid: u32, daddr: u32, dport: u16 },
+        /// tmpfs file open: the (already-truncated, NUL-trimmed) container path.
+        FileRead { pid: u32, path: String },
+        /// Executable mmap: the library basename (e.g. `libssl.so.3`).
+        LibraryLoad { pid: u32, name: String },
+    }
+
+    impl RawEvent {
+        /// The pid this event is attributed by — the key for the cgroup read and cache.
+        fn pid(&self) -> u32 {
+            match self {
+                RawEvent::Connect { pid, .. }
+                | RawEvent::FileRead { pid, .. }
+                | RawEvent::LibraryLoad { pid, .. } => *pid,
+            }
+        }
+
+        /// Build the behavior body for this event. Pure (no I/O) — the pod_uid is supplied
+        /// by the caller after attribution.
+        fn into_behavior(self) -> Behavior {
+            match self {
+                RawEvent::Connect { daddr, dport, .. } => {
+                    // daddr's bytes are the network-order octets; to_ne_bytes on LE gives
+                    // them in [a,b,c,d] order, which is what Ipv4Addr::from([u8;4]) wants.
+                    let ip = Ipv4Addr::from(daddr.to_ne_bytes());
+                    Behavior::NetworkConnection {
+                        peer: format!("{ip}:{dport}"),
+                        internet: !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
+                    }
+                }
+                RawEvent::FileRead { path, .. } => Behavior::FileRead { path },
+                RawEvent::LibraryLoad { name, .. } => Behavior::LibraryLoaded { name },
+            }
+        }
+    }
 
     pub struct EbpfObserver;
 
@@ -106,24 +164,51 @@ mod ebpf {
             let mut heartbeat = tokio::time::interval(HEARTBEAT);
             heartbeat.tick().await;
             let mut last_drops: u64 = 0;
-            // JEF-58 follow-up: this drain still does a blocking per-event
-            // /proc/<pid>/cgroup read in decode (attribution can back up the drain),
-            // and there is no in-kernel event aggregation — both are out of scope here.
-            loop {
+
+            // JEF-64: attribution is OFF the drain path. The drain only parses ring bytes
+            // into `RawEvent`s (cheap) and hands them to this bounded channel; a separate
+            // worker task does the blocking `/proc/<pid>/cgroup` read, builds the
+            // `RuntimeObservation`, and forwards it to `tx`. A slow `/proc` can no longer
+            // back the ring up — at worst the channel fills and we drop new raw events
+            // (see `try_send` below), which the additive-evidence model tolerates.
+            //
+            // JEF-58 follow-up: in-kernel event aggregation (BPF-map dedup of
+            // high-frequency repeats) is still not done — out of scope here, see JEF-64.
+            let (raw_tx, raw_rx) = mpsc::channel::<RawEvent>(ATTRIB_QUEUE);
+            let worker = tokio::spawn(Self::attribution_worker(raw_rx, tx));
+
+            let result = loop {
                 tokio::select! {
                     guard = async_fd.readable_mut() => {
-                        let mut guard = guard?;
+                        let mut guard = match guard {
+                            Ok(guard) => guard,
+                            Err(error) => break Err(error.into()),
+                        };
                         {
                             let ring = guard.get_inner_mut();
                             while let Some(item) = ring.next() {
-                                if let Some(obs) = Self::decode(&item)
-                                    && tx.send(obs).await.is_err()
-                                {
-                                    return Ok(()); // receiver gone — shut down
+                                let Some(raw) = Self::decode(&item) else { continue };
+                                // Bounded, non-blocking hand-off. `try_send` returns
+                                // immediately so draining stays fast: a full queue means
+                                // attribution is behind, and we deliberately drop this
+                                // raw event rather than block the drain (which would
+                                // re-introduce the very ring-buffer backpressure JEF-64
+                                // removes). A closed channel means the worker exited
+                                // (receiver gone) — shut the drain down too.
+                                match raw_tx.try_send(raw) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {}
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        break;
+                                    }
                                 }
                             }
                         }
                         guard.clear_ready();
+                        // If the worker is gone, stop draining (clean shutdown).
+                        if raw_tx.is_closed() {
+                            break Ok(());
+                        }
                     }
                     _ = heartbeat.tick() => {
                         let total = Self::read_drops(&drops);
@@ -138,7 +223,63 @@ mod ebpf {
                         last_drops = total;
                     }
                 }
+            };
+            // Drop our sender so the worker's `recv` returns `None` and it exits, then
+            // wait for it so attribution-in-flight isn't cut off mid-send on shutdown.
+            drop(raw_tx);
+            let _ = worker.await;
+            result
+        }
+
+        /// The attribution worker: the slow half of the split, off the drain path
+        /// (JEF-64). Receives parsed-but-unattributed [`RawEvent`]s, resolves each pid to
+        /// a pod UID via `/proc/<pid>/cgroup` (cached by pid), builds the
+        /// `RuntimeObservation`, and forwards it to `tx`. Exits when the drain drops its
+        /// sender (`recv` → `None`) or the report receiver is gone (`tx.send` errors) —
+        /// either way a clean shutdown.
+        async fn attribution_worker(
+            mut raw_rx: mpsc::Receiver<RawEvent>,
+            tx: Sender<RuntimeObservation>,
+        ) {
+            let mut cache: HashMap<u32, Option<String>> = HashMap::new();
+            while let Some(raw) = raw_rx.recv().await {
+                let Some(uid) = Self::attribute(&mut cache, raw.pid(), read_cgroup) else {
+                    continue; // host process / unreadable cgroup — drop, never fatal
+                };
+                let obs = RuntimeObservation {
+                    namespace: String::new(),
+                    pod: String::new(),
+                    pod_uid: Some(uid),
+                    source: Some(SOURCE.into()),
+                    observed_at_ms: now_ms(),
+                    behavior: raw.into_behavior(),
+                };
+                if tx.send(obs).await.is_err() {
+                    return; // report receiver gone — shut down
+                }
             }
+        }
+
+        /// Resolve a pid to its pod UID, memoized in `cache` so repeated events from the
+        /// same pid skip the `/proc` read. The `read` closure yields the pid's cgroup text
+        /// (injected so this is unit-testable without a real `/proc`). A `None` result
+        /// (host process / unreadable) is cached too, so a flood from one host pid doesn't
+        /// re-read `/proc` per event. Bounded: at `PID_CACHE_CAP` entries the cache is
+        /// cleared wholesale before inserting (cheap, rare; pids churn anyway).
+        fn attribute(
+            cache: &mut HashMap<u32, Option<String>>,
+            pid: u32,
+            read: impl Fn(u32) -> Option<String>,
+        ) -> Option<String> {
+            if let Some(cached) = cache.get(&pid) {
+                return cached.clone();
+            }
+            let uid = read(pid).as_deref().and_then(parse_pod_uid);
+            if cache.len() >= PID_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(pid, uid.clone());
+            uid
         }
 
         /// Sum the per-CPU drop counter across all CPUs into the cumulative total.
@@ -193,10 +334,13 @@ mod ebpf {
             Ok(())
         }
 
-        /// Read an event's header, dispatch on its kind, and turn it into an observation.
-        /// Returns `None` for a truncated event, an unknown kind, or a pid that doesn't
-        /// resolve to a pod (host process) — all dropped, never fatal.
-        fn decode(data: &[u8]) -> Option<RuntimeObservation> {
+        /// Read an event's header, dispatch on its kind, and parse it into a typed but
+        /// **unattributed** [`RawEvent`]. This is the cheap half, and it stays on the
+        /// drain path: only the `repr(C)` byte parse (no `/proc`, no allocation beyond the
+        /// path string). Returns `None` for a truncated event, an unknown kind, or an
+        /// empty path — all dropped, never fatal. Attribution (the cgroup read) happens
+        /// later in the worker (JEF-64).
+        fn decode(data: &[u8]) -> Option<RawEvent> {
             if data.len() < std::mem::size_of::<EventHeader>() {
                 return None;
             }
@@ -231,35 +375,21 @@ mod ebpf {
             }
         }
 
-        /// Map a connect event to an observation attributed by pod UID (the engine
-        /// resolves UID → namespace/pod, so namespace/pod are left empty here). Drops
-        /// events whose cgroup isn't a pod.
-        fn connect(ev: &ConnEvent) -> Option<RuntimeObservation> {
-            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
-            let uid = parse_pod_uid(&cgroup)?;
-            // daddr's bytes are the network-order octets; to_ne_bytes on LE gives them
-            // in [a,b,c,d] order, which is what Ipv4Addr::from([u8;4]) wants.
-            let ip = Ipv4Addr::from(ev.daddr.to_ne_bytes());
-            Some(RuntimeObservation {
-                namespace: String::new(),
-                pod: String::new(),
-                pod_uid: Some(uid),
-                source: Some(SOURCE.into()),
-                observed_at_ms: now_ms(),
-                behavior: Behavior::NetworkConnection {
-                    peer: format!("{ip}:{}", ev.dport),
-                    internet: !(ip.is_private() || ip.is_loopback() || ip.is_link_local()),
-                },
+        /// Parse a connect event into a [`RawEvent`]. Pure (no `/proc`) — the engine
+        /// resolves UID → namespace/pod later, after the worker attributes the pid.
+        fn connect(ev: &ConnEvent) -> Option<RawEvent> {
+            Some(RawEvent::Connect {
+                pid: ev.header.pid,
+                daddr: ev.daddr,
+                dport: ev.dport,
             })
         }
 
-        /// Map a tmpfs file open to a raw FileRead, attributed by pod UID. The agent
-        /// can't tell if it's a secret (bpf_d_path gives only the container path); the
-        /// engine refines FileRead → SecretRead via the pod's secret volumeMounts, or
-        /// drops it. Drops events whose cgroup isn't a pod, or with an empty path.
-        fn file_read(ev: &FileEvent) -> Option<RuntimeObservation> {
-            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
-            let uid = parse_pod_uid(&cgroup)?;
+        /// Parse a tmpfs file open into a raw FileRead. The agent can't tell if it's a
+        /// secret (bpf_d_path gives only the container path); the engine refines
+        /// FileRead → SecretRead via the pod's secret volumeMounts, or drops it. Drops
+        /// events with an empty path. Pure (no `/proc`).
+        fn file_read(ev: &FileEvent) -> Option<RawEvent> {
             let len = (ev.len as usize).min(PATH_CAP);
             let path = String::from_utf8_lossy(&ev.path[..len])
                 .trim_end_matches('\0')
@@ -267,39 +397,35 @@ mod ebpf {
             if path.is_empty() {
                 return None;
             }
-            Some(RuntimeObservation {
-                namespace: String::new(),
-                pod: String::new(),
-                pod_uid: Some(uid),
-                source: Some(SOURCE.into()),
-                observed_at_ms: now_ms(),
-                behavior: Behavior::FileRead { path },
+            Some(RawEvent::FileRead {
+                pid: ev.header.pid,
+                path,
             })
         }
 
-        /// Map an executable mmap to a LibraryLoaded, attributed by pod UID. The library
-        /// name is the path basename (e.g. `libssl.so.3`) — the container path is fine
-        /// here, the engine reasons about the loaded library by name. Drops non-pod cgroups.
-        fn library_load(ev: &FileEvent) -> Option<RuntimeObservation> {
-            let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", ev.header.pid)).ok()?;
-            let uid = parse_pod_uid(&cgroup)?;
+        /// Parse an executable mmap into a LibraryLoad. The library name is the path
+        /// basename (e.g. `libssl.so.3`) — the container path is fine here, the engine
+        /// reasons about the loaded library by name. Drops empty names. Pure (no `/proc`).
+        fn library_load(ev: &FileEvent) -> Option<RawEvent> {
             let len = (ev.len as usize).min(PATH_CAP);
             let path = String::from_utf8_lossy(&ev.path[..len]);
             let name = path.trim_end_matches('\0').rsplit('/').next().unwrap_or("");
             if name.is_empty() {
                 return None;
             }
-            Some(RuntimeObservation {
-                namespace: String::new(),
-                pod: String::new(),
-                pod_uid: Some(uid),
-                source: Some(SOURCE.into()),
-                observed_at_ms: now_ms(),
-                behavior: Behavior::LibraryLoaded {
-                    name: name.to_string(),
-                },
+            Some(RawEvent::LibraryLoad {
+                pid: ev.header.pid,
+                name: name.to_string(),
             })
         }
+    }
+
+    /// Read a pid's cgroup membership text (`/proc/<pid>/cgroup`). The blocking read kept
+    /// off the drain path (JEF-64): called only from the attribution worker. `None` if the
+    /// process is gone or unreadable (a host process or an exited pid) — the event is then
+    /// dropped, never fatal.
+    fn read_cgroup(pid: u32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
     }
 
     /// Wall-clock now as Unix epoch millis, for the observation's freshness stamp. `None`
@@ -310,5 +436,100 @@ mod ebpf {
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|d| d.as_millis() as u64)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::cell::Cell;
+
+        use super::*;
+
+        const POD_CGROUP: &str =
+            "/kubepods/besteffort/pod3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b/abc123";
+
+        #[test]
+        fn attribute_resolves_and_memoizes_by_pid() {
+            let mut cache = HashMap::new();
+            let reads = Cell::new(0);
+            let read = |_pid: u32| {
+                reads.set(reads.get() + 1);
+                Some(POD_CGROUP.to_string())
+            };
+
+            let first = EbpfObserver::attribute(&mut cache, 42, &read);
+            let second = EbpfObserver::attribute(&mut cache, 42, &read);
+
+            assert_eq!(
+                first.as_deref(),
+                Some("3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b")
+            );
+            assert_eq!(first, second);
+            // The second call must hit the cache, not re-read `/proc`.
+            assert_eq!(reads.get(), 1, "repeated pid should skip the cgroup read");
+        }
+
+        #[test]
+        fn attribute_caches_negative_result() {
+            let mut cache = HashMap::new();
+            let reads = Cell::new(0);
+            // A host process: readable cgroup, but not a pod's.
+            let read = |_pid: u32| {
+                reads.set(reads.get() + 1);
+                Some("/system.slice/sshd.service".to_string())
+            };
+
+            assert_eq!(EbpfObserver::attribute(&mut cache, 7, &read), None);
+            assert_eq!(EbpfObserver::attribute(&mut cache, 7, &read), None);
+            // A flood from one host pid must not re-read `/proc` per event.
+            assert_eq!(reads.get(), 1, "negative result should be cached too");
+        }
+
+        #[test]
+        fn attribute_caches_unreadable_cgroup() {
+            let mut cache = HashMap::new();
+            // An exited / unreadable pid yields `None` from the reader.
+            let read = |_pid: u32| None;
+            assert_eq!(EbpfObserver::attribute(&mut cache, 99, &read), None);
+            assert!(cache.contains_key(&99), "missing cgroup should be cached");
+        }
+
+        #[test]
+        fn attribute_clears_cache_at_cap() {
+            let mut cache = HashMap::new();
+            let read = |_pid: u32| Some(POD_CGROUP.to_string());
+            // Fill to capacity, then one more insert trips the wholesale clear.
+            for pid in 0..PID_CACHE_CAP as u32 {
+                EbpfObserver::attribute(&mut cache, pid, &read);
+            }
+            assert_eq!(cache.len(), PID_CACHE_CAP);
+            EbpfObserver::attribute(&mut cache, PID_CACHE_CAP as u32, &read);
+            assert_eq!(cache.len(), 1, "cache should clear wholesale at the cap");
+        }
+
+        #[test]
+        fn decode_connect_parses_without_proc() {
+            let ev = ConnEvent {
+                header: EventHeader {
+                    kind: KIND_CONNECT,
+                    pid: 1234,
+                },
+                daddr: u32::from_ne_bytes([8, 8, 8, 8]),
+                dport: 443,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&ev as *const ConnEvent).cast::<u8>(),
+                    std::mem::size_of::<ConnEvent>(),
+                )
+            };
+            match EbpfObserver::decode(bytes) {
+                Some(RawEvent::Connect { pid, daddr, dport }) => {
+                    assert_eq!(pid, 1234);
+                    assert_eq!(daddr, ev.daddr);
+                    assert_eq!(dport, 443);
+                }
+                other => panic!("expected Connect, got something else: {}", other.is_none()),
+            }
+        }
     }
 }
