@@ -251,6 +251,10 @@ fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
+        // PrivilegeChange is NON-corroborating here: it's model evidence, not a per-
+        // objective "now" signal (legit entrypoints escalate too). Wiring it into a
+        // specific attack chain would be a JEF-49-style follow-up.
+        Behavior::PrivilegeChange { .. } => false,
     }
 }
 

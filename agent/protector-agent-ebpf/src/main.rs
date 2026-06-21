@@ -28,7 +28,8 @@ use aya_ebpf::{
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
 use protector_agent_common::{
-    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, PATH_CAP,
+    ConnEvent, EventHeader, FileEvent, PrivEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
+    KIND_PRIV_CHANGE, PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -181,6 +182,59 @@ fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
     // security_file_open — JEF-68). Userspace only needs the library *name*, which is the
     // leaf basename, so read the dentry's d_name directly with bpf_probe_read_kernel.
     emit_lib_name(file);
+    Ok(())
+}
+
+/// fentry on `security_task_fix_setuid(struct cred *new, const struct cred *old, int flags)`
+/// — the privilege-change probe (ADR-0014, Falco privilege-escalation parity). This LSM hook
+/// runs on every credential change (setuid/setresuid/…), so we filter IN-KERNEL to the only
+/// case worth a signal: a process *gaining* root (`new->uid.val == 0 && old->uid.val != 0`).
+/// That keeps ring volume tiny and the signal meaningful — a non-root process becoming root.
+/// Reads the cred `uid.val` fields with `bpf_probe_read_kernel` (never bpf_d_path — JEF-68).
+/// Observe-only; a failed read drops the event, never errors the probe.
+#[fentry(function = "security_task_fix_setuid")]
+pub fn fix_setuid(ctx: FEntryContext) -> u32 {
+    let _ = try_fix_setuid(&ctx);
+    0
+}
+
+fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
+    // arg0 = `struct cred *new`, arg1 = `const struct cred *old`.
+    let new: *const vmlinux::cred = unsafe { ctx.arg(0) };
+    let old: *const vmlinux::cred = unsafe { ctx.arg(1) };
+    if new.is_null() || old.is_null() {
+        return Ok(());
+    }
+    // cred->uid is a kuid_t { val: u32 } — chase to the u32 with bpf_probe_read_kernel.
+    let mut new_uid: u32 = 0;
+    let mut old_uid: u32 = 0;
+    unsafe {
+        if read_kernel(&mut new_uid, core::ptr::addr_of!((*new).uid.val)) != 0 {
+            return Ok(());
+        }
+        if read_kernel(&mut old_uid, core::ptr::addr_of!((*old).uid.val)) != 0 {
+            return Ok(());
+        }
+    }
+    // Emit ONLY on escalation to root: a non-root process becoming root. Lateral or
+    // de-escalating credential changes (the bulk of setuid traffic) are dropped here.
+    if !(new_uid == 0 && old_uid != 0) {
+        return Ok(());
+    }
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    if let Some(mut slot) = EVENTS.reserve::<PrivEvent>(0) {
+        slot.write(PrivEvent {
+            header: EventHeader {
+                kind: KIND_PRIV_CHANGE,
+                pid,
+            },
+            old_uid,
+            new_uid,
+        });
+        slot.submit(0);
+    } else {
+        record_drop(); // ring full — count the loss instead of silently skipping
+    }
     Ok(())
 }
 

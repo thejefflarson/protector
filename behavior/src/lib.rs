@@ -35,6 +35,12 @@ pub enum Behavior {
     /// never persists as graph state, so [`Self::summary`]/[`Self::fingerprint_key`] only
     /// see it defensively.
     FileRead { path: String },
+    /// A process gained root — its real UID changed to 0 from a non-root UID (the eBPF
+    /// agent's privilege-change probe, fentry on `security_task_fix_setuid`; Falco
+    /// privilege-escalation-rule parity). Model evidence, not blanket corroboration:
+    /// legitimate workloads sometimes escalate (init/entrypoint), so wiring this to
+    /// corroborate a specific attack is JEF-49's job.
+    PrivilegeChange { from_uid: u32, to_uid: u32 },
 }
 
 impl Behavior {
@@ -58,6 +64,9 @@ impl Behavior {
             Behavior::SecretRead { secret } => format!("reads secret {secret}"),
             Behavior::LibraryLoaded { name } => format!("loaded library {name}"),
             Behavior::FileRead { path } => format!("opened file {path}"),
+            Behavior::PrivilegeChange { from_uid, to_uid } => {
+                format!("privilege change uid {from_uid} -> {to_uid}")
+            }
         }
     }
 
@@ -75,6 +84,10 @@ impl Behavior {
             Behavior::SecretRead { secret } => format!("read:{secret}"),
             Behavior::LibraryLoaded { name } => format!("lib:{name}"),
             Behavior::FileRead { path } => format!("file:{path}"),
+            // Keyed on the gained UID only (always 0 today, but stable if the escalation
+            // predicate widens): repeated escalations to the same UID collapse to one
+            // fingerprint and don't bust the verdict cache.
+            Behavior::PrivilegeChange { to_uid, .. } => format!("priv:{to_uid}"),
         }
     }
 }
