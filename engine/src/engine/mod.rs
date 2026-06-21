@@ -797,6 +797,7 @@ mod tests {
                         exploited_in_wild: true,
                         epss: None,
                         sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                        ..Default::default()
                     }],
                 }]
             } else {

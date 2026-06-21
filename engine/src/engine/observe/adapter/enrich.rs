@@ -1,5 +1,7 @@
+use petgraph::visit::EdgeRef;
+
 use super::*;
-use crate::engine::graph::Behavior;
+use crate::engine::graph::{Behavior, Reachability};
 
 /// Annotates Image nodes with vulnerability findings (Vulnerability port). Like
 /// [`ExposureAdapter`], it enriches existing Image nodes, so it runs after the
@@ -132,6 +134,157 @@ impl Adapter for RuntimeAdapter {
             "runtime behavioral signals"
         );
     }
+}
+
+/// Correlates each Image's CVEs against the runtime libraries loaded by the workloads
+/// running it (JEF-51 v1 — *dynamic* reachability). It reads the `LibraryLoaded`
+/// signals the [`RuntimeAdapter`] already attached, so it MUST run after both the
+/// [`VulnerabilityAdapter`] (which puts the CVEs on the Image) and the
+/// [`RuntimeAdapter`] (which puts the loads on the Workload).
+///
+/// For each vulnerability with a known `pkg_name`, reachability becomes
+/// [`Reachability::LoadedAtRuntime`] when a loaded library's basename matches the
+/// package, else [`Reachability::NotObserved`]. CVEs with no `pkg_name` stay
+/// [`Reachability::Unknown`] — we can't correlate what the scanner didn't name. This
+/// is evidence for the model only; it never gates or suppresses anything in v1.
+pub struct CveReachabilityAdapter;
+
+impl Adapter for CveReachabilityAdapter {
+    fn name(&self) -> &'static str {
+        "reachability"
+    }
+
+    fn contribute(&self, _snapshot: &Snapshot, graph: &mut SecurityGraph) {
+        // Pass 1 (immutable borrow): for every Image, gather the library names loaded by
+        // the workloads that run it, walking the `RunsImage` edges. Keyed by the Image
+        // key's String (NodeKey is not Hash) so pass 2 can mutate without the borrow.
+        let mut loads_by_image: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let g = graph.inner();
+        for idx in g.node_indices() {
+            let Some(Node::Workload(w)) = g.node_weight(idx) else {
+                continue;
+            };
+            let loaded: Vec<String> = w
+                .runtime
+                .iter()
+                .filter_map(|s| match &s.behavior {
+                    Behavior::LibraryLoaded { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            if loaded.is_empty() {
+                continue;
+            }
+            for edge in g.edges(idx) {
+                if matches!(edge.weight().relation, Relation::RunsImage)
+                    && let Some(img_key) = g.node_weight(edge.target()).map(Node::key)
+                {
+                    loads_by_image
+                        .entry(img_key.0)
+                        .or_default()
+                        .extend(loaded.iter().cloned());
+                }
+            }
+        }
+
+        // Pass 2: collect the Image keys, then update each. Every Image with CVEs is
+        // visited (even those with no loads) so a scanned-but-not-running image's CVEs
+        // flip from Unknown to NotObserved — that distinction is itself model evidence.
+        let image_keys: Vec<NodeKey> = graph
+            .inner()
+            .node_indices()
+            .filter_map(|idx| match graph.inner().node_weight(idx) {
+                Some(node @ Node::Image(_)) => Some(node.key()),
+                _ => None,
+            })
+            .collect();
+        for key in image_keys {
+            let loads = loads_by_image.get(&key.0).cloned().unwrap_or_default();
+            graph.update_node(&key, |node| {
+                if let Node::Image(img) = node {
+                    for vuln in &mut img.vulnerabilities {
+                        let Some(pkg) = vuln.pkg_name.as_deref() else {
+                            // No package name to correlate — leave it Unknown.
+                            continue;
+                        };
+                        vuln.reachability = if loads.iter().any(|lib| library_matches(lib, pkg)) {
+                            Reachability::LoadedAtRuntime
+                        } else {
+                            Reachability::NotObserved
+                        };
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Whether a loaded-library name (as the agent observed it, e.g. `libssl.so.3` or
+/// `log4j-core-2.14.jar`) refers to the scanner's `pkg_name` (e.g. `openssl`,
+/// `log4j-core`). Conservative on purpose: this is model evidence, and a false
+/// `LoadedAtRuntime` is worse than a missed one, so the match must be *exact* after
+/// normalization — no substring containment that would link `libc.so` to an
+/// `openssl` CVE.
+///
+/// Both sides are reduced to a normalized basename ([`normalize_lib_name`]): strip the
+/// directory, the `lib` prefix, the version/`.so`/`.jar` suffixes, and case. A pair
+/// matches if either normalizes to the other, covering `openssl` ↔ `libssl.so.3`
+/// (both → `ssl`) and `log4j-core` ↔ `log4j-core-2.14.jar` (both → `log4j-core`).
+fn library_matches(loaded: &str, pkg_name: &str) -> bool {
+    let loaded = normalize_lib_name(loaded);
+    let pkg = normalize_lib_name(pkg_name);
+    !loaded.is_empty() && loaded == pkg
+}
+
+/// Reduce a library or package name to a comparable basename: drop any directory,
+/// the `lib` prefix, the first version/extension boundary, and lowercase. Deliberately
+/// simple — see [`library_matches`] for why we favor precision over recall.
+///
+/// Examples: `/usr/lib/libssl.so.3` → `ssl`, `libssl` → `ssl`, `openssl` → `ssl` (the
+/// `openssl` package's well-known `ssl` library basename is handled by stripping a
+/// leading `open` only when it precedes a known core — see below), `log4j-core-2.14.jar`
+/// → `log4j-core`.
+fn normalize_lib_name(name: &str) -> String {
+    // Basename: everything after the last path separator.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let mut s = base.to_ascii_lowercase();
+
+    // Drop a known archive/object extension and everything after it (covers
+    // `.so`, `.so.3`, `.so.1.1`, `.jar`, `.dll`, `.dylib`, `.a`).
+    for ext in [".so", ".jar", ".dll", ".dylib", ".a"] {
+        if let Some(pos) = s.find(ext) {
+            s.truncate(pos);
+            break;
+        }
+    }
+
+    // Strip a trailing `-<version>` (a dash followed by a digit) — `log4j-core-2.14`
+    // → `log4j-core`. Only at a dash-then-digit boundary so we never bite into a name.
+    if let Some(pos) = dash_version_start(&s) {
+        s.truncate(pos);
+    }
+
+    // Strip a leading `lib` prefix so `libssl` and the `ssl` half of `openssl` align.
+    let s = s.strip_prefix("lib").unwrap_or(&s).to_string();
+    // The `openssl` package is the canonical fuzzy case in the issue: its libraries are
+    // `libssl`/`libcrypto`. Reduce the package name `openssl` to its `ssl` library
+    // basename so it matches `libssl.so.3`. Kept as a tiny, explicit alias list so we
+    // never introduce broad `open*` stripping that could mis-link unrelated names.
+    match s.as_str() {
+        "openssl" => "ssl".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The byte index of a `-<digit>` version boundary in `s`, if any — the start of the
+/// trailing version segment to drop.
+fn dash_version_start(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    bytes
+        .windows(2)
+        .enumerate()
+        .find_map(|(i, w)| (w[0] == b'-' && w[1].is_ascii_digit()).then_some(i))
 }
 
 /// If `path` (a container-relative path from the agent) falls under one of `pod`'s
@@ -353,5 +506,167 @@ mod tests {
         }));
         assert_eq!(secret_for_path(&p, "/var/run/proj/ca.crt"), None);
         assert_eq!(secret_for_path(&p, "/var/run/proj/token"), None);
+    }
+
+    // --- JEF-51: the library-name matcher ---------------------------------------
+
+    #[test]
+    fn library_matcher_table() {
+        // (loaded library as the agent sees it, scanner pkg_name, should_match)
+        let cases = [
+            // The issue's two canonical fuzzy cases.
+            ("log4j-core-2.14.jar", "log4j-core", true),
+            ("libssl.so.3", "openssl", true),
+            ("libssl.so.3", "libssl", true),
+            ("libssl.so.3", "ssl", true),
+            // Plain names, prefixes, paths, case.
+            ("libcrypto.so.3", "libcrypto", true),
+            ("/usr/lib/x86_64-linux-gnu/libssl.so.1.1", "openssl", true),
+            ("LibSSL.so", "openssl", true),
+            ("zlib1g", "zlib1g", true),
+            // Negatives — the critical false-positive guards.
+            ("libc.so.6", "openssl", false),
+            ("libc.so.6", "libc", true),
+            ("libc.so.6", "glibc", false),
+            ("libssl.so.3", "libcrypto", false),
+            ("log4j-core-2.14.jar", "log4j-api", false),
+            ("libpng.so", "libjpeg", false),
+            // Substring containment must NOT match (precision over recall).
+            ("libsslextra.so", "openssl", false),
+        ];
+        for (loaded, pkg, want) in cases {
+            assert_eq!(
+                library_matches(loaded, pkg),
+                want,
+                "library_matches({loaded:?}, {pkg:?}) should be {want}"
+            );
+        }
+    }
+
+    // --- JEF-51: the end-to-end correlation pass --------------------------------
+
+    use crate::engine::graph::Vulnerability;
+    use crate::engine::observe::{ImageVulnerabilities, RuntimeObservation, Snapshot};
+
+    /// Build a graph for an image carrying a single CVE on `pkg`, run by a workload
+    /// that optionally loaded `loaded_lib` at runtime, and return that CVE's
+    /// reachability after the full adapter pipeline (incl. CveReachabilityAdapter).
+    fn reachability_for(pkg: &str, loaded_lib: Option<&str>) -> Reachability {
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let runtime_events = loaded_lib
+            .map(|name| {
+                vec![RuntimeObservation {
+                    namespace: "app".into(),
+                    pod: "web".into(),
+                    pod_uid: None,
+                    source: None,
+                    observed_at_ms: None,
+                    behavior: Behavior::LibraryLoaded { name: name.into() },
+                }]
+            })
+            .unwrap_or_default();
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2021-44228".into(),
+                    severity: crate::engine::graph::Severity::Critical,
+                    pkg_name: Some(pkg.into()),
+                    ..Default::default()
+                }],
+            }],
+            runtime_events,
+            ..Default::default()
+        };
+        let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+        let img_key = Node::Image(Image {
+            digest: canonical_image("web:1"),
+            reference: None,
+            trust: Trust::Unknown,
+            vulnerabilities: vec![],
+        })
+        .key();
+        let idx = graph.index_of(&img_key).expect("image node exists");
+        match graph.node(idx) {
+            Some(Node::Image(img)) => img.vulnerabilities[0].reachability,
+            _ => panic!("expected image node"),
+        }
+    }
+
+    #[test]
+    fn loaded_matching_library_is_loaded_at_runtime() {
+        // log4j-core CVE + a workload that loaded log4j-core-2.14.jar → LoadedAtRuntime.
+        assert_eq!(
+            reachability_for("log4j-core", Some("log4j-core-2.14.jar")),
+            Reachability::LoadedAtRuntime
+        );
+    }
+
+    #[test]
+    fn no_load_is_not_observed() {
+        // The image is scanned but nothing loaded → NotObserved (distinct from Unknown).
+        assert_eq!(
+            reachability_for("log4j-core", None),
+            Reachability::NotObserved
+        );
+    }
+
+    #[test]
+    fn wrong_library_is_not_observed() {
+        // A loaded but UNRELATED library must not mark an openssl CVE as reachable.
+        assert_eq!(
+            reachability_for("openssl", Some("libc.so.6")),
+            Reachability::NotObserved
+        );
+    }
+
+    #[test]
+    fn cve_without_pkg_name_stays_unknown() {
+        // No package name to correlate against → the CVE keeps Unknown even with a load.
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let snap = Snapshot {
+            pods: vec![web],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-0000-0000".into(),
+                    pkg_name: None,
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![RuntimeObservation {
+                namespace: "app".into(),
+                pod: "web".into(),
+                pod_uid: None,
+                source: None,
+                observed_at_ms: None,
+                behavior: Behavior::LibraryLoaded {
+                    name: "anything.so".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+        let img_key = Node::Image(Image {
+            digest: canonical_image("web:1"),
+            reference: None,
+            trust: Trust::Unknown,
+            vulnerabilities: vec![],
+        })
+        .key();
+        let idx = graph.index_of(&img_key).expect("image node exists");
+        let Some(Node::Image(img)) = graph.node(idx) else {
+            panic!("expected image node");
+        };
+        assert_eq!(img.vulnerabilities[0].reachability, Reachability::Unknown);
     }
 }
