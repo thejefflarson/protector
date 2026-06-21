@@ -10,7 +10,8 @@
 # DaemonSet's securityContext, never baked into the image.
 
 # bookworm-based to match the bookworm-slim runtime's glibc 2.36.
-FROM rust:1-bookworm AS builder
+# Via mirror.gcr.io (Docker Hub pull-through) to dodge the anonymous 429 (JEF-78).
+FROM mirror.gcr.io/library/rust:1-bookworm AS builder
 WORKDIR /app
 # cmake: reqwest's rustls provider (aws-lc-rs → aws-lc-sys) is a C build. zstd: unpacks
 # the bpf-linker release. CFLAGS=gnu17 keeps aws-lc-sys' emitted libc symbols in step
@@ -46,7 +47,7 @@ RUN --mount=type=cache,target=/app/agent/target,sharing=locked \
 
 # Slim runtime. The image runs as non-root; the eBPF capabilities it needs are granted
 # at RUNTIME by the DaemonSet's securityContext (chart), not baked in.
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
