@@ -50,8 +50,9 @@ mod ebpf {
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
-        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
-        KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
+        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
+        KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
+
     };
     use protector_behavior::{Attribution, Behavior};
 
@@ -100,6 +101,8 @@ mod ebpf {
             old_uid: u32,
             new_uid: u32,
         },
+        /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed.
+        Exec { pid: u32, path: String },
     }
 
     impl RawEvent {
@@ -109,7 +112,8 @@ mod ebpf {
                 RawEvent::Connect { pid, .. }
                 | RawEvent::FileRead { pid, .. }
                 | RawEvent::LibraryLoad { pid, .. }
-                | RawEvent::PrivChange { pid, .. } => *pid,
+                | RawEvent::PrivChange { pid, .. }
+                | RawEvent::Exec { pid, .. } => *pid,
             }
         }
 
@@ -134,6 +138,7 @@ mod ebpf {
                     from_uid: old_uid,
                     to_uid: new_uid,
                 },
+                RawEvent::Exec { path, .. } => Behavior::ProcessExec { path },
             }
         }
     }
@@ -314,6 +319,7 @@ mod ebpf {
                 ("file_open", "security_file_open"),
                 ("mmap_file", "security_mmap_file"),
                 ("fix_setuid", "security_task_fix_setuid"),
+                ("bprm_check", "bprm_check_security"),
             ];
             let btf = match Btf::from_sys_fs() {
                 Ok(btf) => btf,
@@ -392,6 +398,14 @@ mod ebpf {
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<PrivEvent>()) };
                     Self::priv_change(&ev)
                 }
+                KIND_EXEC => {
+                    if data.len() < std::mem::size_of::<FileEvent>() {
+                        return None;
+                    }
+                    // SAFETY: kind says this is a FileEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
+                    Self::exec(&ev)
+                }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
         }
@@ -448,6 +462,24 @@ mod ebpf {
                 pid: ev.header.pid,
                 old_uid: ev.old_uid,
                 new_uid: ev.new_uid,
+            })
+        }
+
+        /// Parse a process-exec event into a raw Exec. `path` is the exec'd binary path as
+        /// the kernel saw it (`linux_binprm->filename`), NUL-trimmed; the behavior crate
+        /// coarsens it to the basename for the fingerprint. Drops empty paths. Pure (no
+        /// `/proc`).
+        fn exec(ev: &FileEvent) -> Option<RawEvent> {
+            let len = (ev.len as usize).min(PATH_CAP);
+            let path = String::from_utf8_lossy(&ev.path[..len])
+                .trim_end_matches('\0')
+                .to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some(RawEvent::Exec {
+                pid: ev.header.pid,
+                path,
             })
         }
     }
@@ -601,6 +633,49 @@ mod ebpf {
                     to_uid: 0,
                 }
             );
+        }
+
+        #[test]
+        fn decode_exec_parses_path_and_maps_to_process_exec() {
+            // A KIND_EXEC FileEvent carrying a NUL-terminated exec path must decode to a
+            // RawEvent::Exec, and into_behavior must map it to Behavior::ProcessExec whose
+            // fingerprint coarsens to the basename (JEF-53).
+            let mut path = [0u8; PATH_CAP];
+            let bin = b"/usr/bin/bash\0";
+            path[..bin.len()].copy_from_slice(bin);
+            let ev = FileEvent {
+                header: EventHeader {
+                    kind: KIND_EXEC,
+                    pid: 4321,
+                },
+                len: bin.len() as u32,
+                path,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&ev as *const FileEvent).cast::<u8>(),
+                    std::mem::size_of::<FileEvent>(),
+                )
+            };
+            let raw = EbpfObserver::decode(bytes).expect("KIND_EXEC should decode");
+            match &raw {
+                RawEvent::Exec { pid, path } => {
+                    assert_eq!(*pid, 4321);
+                    assert_eq!(path, "/usr/bin/bash");
+                }
+                _ => panic!("expected RawEvent::Exec"),
+            }
+            assert_eq!(raw.pid(), 4321);
+            match raw.into_behavior() {
+                Behavior::ProcessExec { path } => {
+                    assert_eq!(path, "/usr/bin/bash");
+                    assert_eq!(
+                        Behavior::ProcessExec { path }.fingerprint_key(),
+                        "exec:bash"
+                    );
+                }
+                other => panic!("expected ProcessExec, got {other:?}"),
+            }
         }
     }
 }

@@ -28,8 +28,9 @@ use aya_ebpf::{
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
 use protector_agent_common::{
-    ConnEvent, EventHeader, FileEvent, PrivEvent, KIND_CONNECT, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
-    KIND_PRIV_CHANGE, PATH_CAP,
+    ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD,
+    KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
+
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -236,6 +237,74 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
         record_drop(); // ring full — count the loss instead of silently skipping
     }
     Ok(())
+}
+
+/// fentry on `bprm_check_security(struct linux_binprm *bprm)` — the process-exec probe
+/// (ADR-0014, JEF-53). This LSM hook fires on every `execve` once the new binary is
+/// resolved, so `bprm->filename` is the path the kernel is about to exec. Emits a
+/// [`FileEvent`] (kind [`KIND_EXEC`]) carrying that path; userspace turns it into a
+/// `ProcessExec`. Observe-only — `bprm_check_security` is the per-hook callback symbol on
+/// 6.8 (`security_bprm_check` is the wrapper alternative if the symbol isn't attachable).
+#[fentry(function = "bprm_check_security")]
+pub fn bprm_check(ctx: FEntryContext) -> u32 {
+    let _ = try_bprm_check(&ctx);
+    0
+}
+
+fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
+    // bprm_check_security's first argument is `struct linux_binprm *bprm`.
+    let bprm: *const vmlinux::linux_binprm = unsafe { ctx.arg(0) };
+    if bprm.is_null() {
+        return Ok(());
+    }
+    emit_exec_path(bprm);
+    Ok(())
+}
+
+/// Emit the exec'd binary's path as a [`KIND_EXEC`] event. `bprm->filename` is a kernel
+/// `char *` (the resolved exec path), so — like the library-load probe — read the string
+/// directly with `bpf_probe_read_kernel_str`. NOT `bpf_d_path`: `bprm_check_security`
+/// isn't on the kernel's d_path allowlist, so the verifier would reject it (JEF-68).
+fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    let mut ev = FileEvent {
+        header: EventHeader {
+            kind: KIND_EXEC,
+            pid,
+        },
+        len: 0,
+        path: [0u8; PATH_CAP],
+    };
+    // Read the `char *filename` pointer out of the binprm, then the string it points to.
+    let mut name_ptr: *const u8 = core::ptr::null();
+    unsafe {
+        if read_kernel(&mut name_ptr, core::ptr::addr_of!((*bprm).filename).cast()) != 0
+            || name_ptr.is_null()
+        {
+            return;
+        }
+    }
+    let n = unsafe {
+        bpf_probe_read_kernel_str(
+            ev.path.as_mut_ptr() as *mut core::ffi::c_void,
+            PATH_CAP as u32,
+            name_ptr as *const core::ffi::c_void,
+        )
+    };
+    if n <= 0 {
+        return;
+    }
+    ev.len = if (n as usize) < PATH_CAP {
+        n as u32
+    } else {
+        PATH_CAP as u32
+    };
+    if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
+        slot.write(ev);
+        slot.submit(0);
+    } else {
+        record_drop(); // ring full — count the loss instead of silently skipping
+    }
 }
 
 /// bpf_d_path the file's path into a [`FileEvent`] of `kind` and submit it. Shared by the

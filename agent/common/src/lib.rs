@@ -19,10 +19,15 @@ pub const KIND_FILE_OPEN: u32 = 2;
 /// binary (fentry on `security_mmap_file`, PROT_EXEC). Carries the path; userspace emits
 /// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
 pub const KIND_LIBRARY_LOAD: u32 = 3;
+/// A process was exec'd (fentry on `bprm_check_security`). Carries the exec'd binary's
+/// path, read from `linux_binprm->filename`; userspace emits a ProcessExec. Reuses
+/// [`FileEvent`] (kind discriminates) — the runtime signal for "unexpected process
+/// spawned" (Falco-rule parity, ADR-0014).
+pub const KIND_EXEC: u32 = 4;
 /// A process gained root (fentry on `security_task_fix_setuid`). The eBPF side filters to
 /// the escalation case (`new_uid == 0 && old_uid != 0`) so this is always a real
 /// privilege gain; the [`PrivEvent`] body carries the old and new real UIDs. Userspace
-/// emits a [`Behavior::PrivilegeChange`]. (Wire value `4` is intentionally skipped/reserved.)
+/// emits a [`Behavior::PrivilegeChange`].
 pub const KIND_PRIV_CHANGE: u32 = 5;
 
 /// Max path bytes carried per [`FileEvent`]. Secret-mount paths are well under this; a
