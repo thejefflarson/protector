@@ -785,7 +785,7 @@ mod tests {
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 4: cross-tenant network reach".into()),
             &entry_key,
-            &vec![(other_db_key, DATA_FROM_REPOSITORY)],
+            &[(other_db_key, DATA_FROM_REPOSITORY)],
             &g,
         );
         assert!(
@@ -824,7 +824,7 @@ mod tests {
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 4: lateral movement (model misread)".into()),
             &entry_key,
-            &vec![(own_db_key, DATA_FROM_REPOSITORY)],
+            &[(own_db_key, DATA_FROM_REPOSITORY)],
             &g,
         );
         assert!(
@@ -852,7 +852,7 @@ mod tests {
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 3: escape to host".into()),
             &entry_key,
-            &vec![(host_key, ESCAPE_TO_HOST)],
+            &[(host_key, ESCAPE_TO_HOST)],
             &g,
         );
         assert!(
@@ -885,7 +885,7 @@ mod tests {
             guard_unjustified_exploitable(
                 Verdict::Confirmed,
                 &entry_key,
-                &vec![(NodeKey("secret/app/s".into()), CREDENTIAL_ACCESS)],
+                &[(NodeKey("secret/app/s".into()), CREDENTIAL_ACCESS)],
                 &g,
             ),
             Verdict::Confirmed
