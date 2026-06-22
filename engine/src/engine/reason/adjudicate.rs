@@ -391,24 +391,15 @@ fn objective_reach(graph: &SecurityGraph, objective: &NodeKey) -> &'static str {
     if rbac { "RBAC-GRANTED" } else { "NETWORK" }
 }
 
-/// The namespace segment of a node key (`workload/<ns>/...`, `secret/<ns>/...`,
-/// `identity/<ns>/...`). `None` for cluster-scoped keys (`host/...`, `internet`).
-fn namespace_of(key: &NodeKey) -> Option<&str> {
-    let mut parts = key.0.split('/');
-    match parts.next()? {
-        "workload" | "secret" | "identity" | "capability" => parts.next(),
-        _ => None,
-    }
-}
-
 /// JEF-79 — whether an objective sits in the SAME namespace as the entry. The model
 /// cannot reliably infer namespace-equality from raw keys (granite4:1b-h misread a
 /// same-namespace DB as cross-tenant and falsely promoted it), so we state it explicitly:
 /// `same-ns` (the entry's own tenant — a [NETWORK] reach here is normal app topology) vs
 /// `cross-ns` (a different tenant — a [NETWORK] reach here is unauthorized lateral
 /// movement). Cluster-scoped objectives (host) have no namespace ⇒ `cross-ns`.
+/// The namespace seam itself is owned by [`NodeKey::namespace`] (one parser, all consumers).
 fn ns_marker(entry: &NodeKey, objective: &NodeKey) -> &'static str {
-    match (namespace_of(entry), namespace_of(objective)) {
+    match (entry.namespace(), objective.namespace()) {
         (Some(a), Some(b)) if a == b => "same-ns",
         _ => "cross-ns",
     }
@@ -1078,8 +1069,9 @@ mod tests {
         assert_eq!(ns_marker(&entry, &k("secret/finance/stripe")), "cross-ns");
         // Cluster-scoped objectives have no namespace ⇒ cross-ns.
         assert_eq!(ns_marker(&entry, &k("host/node-3")), "cross-ns");
-        assert_eq!(namespace_of(&k("workload/ns/Pod/x")), Some("ns"));
-        assert_eq!(namespace_of(&k("host/node")), None);
+        // The namespace seam `ns_marker` reads now lives on `NodeKey::namespace`.
+        assert_eq!(k("workload/ns/Pod/x").namespace(), Some("ns"));
+        assert_eq!(k("host/node").namespace(), None);
     }
 
     /// JEF-51: reachability is part of the verdict fingerprint, so a flip to

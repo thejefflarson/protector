@@ -112,6 +112,56 @@ impl NodeKey {
     pub fn workload(namespace: &str, kind: &str, name: &str) -> NodeKey {
         NodeKey(format!("workload/{namespace}/{kind}/{name}"))
     }
+
+    /// The leading path segment that names the node's kind — the discriminant every
+    /// key shape carries first: `workload`, `identity`, `secret`, `endpoint`, `image`,
+    /// `host`, `capability` (see [`Node::key`] for the constructors). Always present:
+    /// keys are never empty, so this is the substring up to the first `/` (or the whole
+    /// key when there is no `/`). The single source of truth for the kind seam that
+    /// consumers used to re-derive by hand-splitting.
+    pub fn kind(&self) -> &str {
+        self.0.split('/').next().unwrap_or(&self.0)
+    }
+
+    /// The namespace segment, for the namespace-scoped key shapes only. Workload
+    /// (`workload/<ns>/<kind>/<name>`), secret (`secret/<ns>/<name>`), and identity
+    /// (`identity/<ns>/<name>`) carry their namespace as the second segment. A
+    /// `capability` key's second segment is its [`Scope::label`] (`cluster` or
+    /// `ns:<ns>`), not a bare namespace — it is included here to preserve the historical
+    /// behavior of the adjudicator's `namespace_of`, which treated that label as the
+    /// namespace. Cluster-scoped shapes (`host/<name>`, `endpoint/<addr>`,
+    /// `image/<digest>`) have no namespace and return `None`.
+    pub fn namespace(&self) -> Option<&str> {
+        let mut parts = self.0.split('/');
+        match parts.next()? {
+            "workload" | "secret" | "identity" | "capability" => parts.next(),
+            _ => None,
+        }
+    }
+
+    /// The object name — the final segment of a namespace-scoped key: the workload /
+    /// secret / identity name. `None` for kinds whose tail is not a single bare name
+    /// (`host`, `endpoint`, `image`, `capability`) or when the expected segment count is
+    /// not met. Workload is `workload/<ns>/<kind>/<name>` (4 segments); secret and
+    /// identity are `<kind>/<ns>/<name>` (3 segments).
+    pub fn name(&self) -> Option<&str> {
+        let parts: Vec<&str> = self.0.split('/').collect();
+        match *parts.first()? {
+            "workload" if parts.len() == 4 => Some(parts[3]),
+            "secret" | "identity" if parts.len() == 3 => Some(parts[2]),
+            _ => None,
+        }
+    }
+
+    /// Everything after the kind prefix — the human-facing remainder of the key with the
+    /// leading `<kind>/` stripped (e.g. `app/Pod/web` for `workload/app/Pod/web`). Falls
+    /// back to the whole key when there is no `/`. Used for compact labels (the dashboard)
+    /// where the kind is conveyed by node shape rather than by text.
+    pub fn short(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map_or(self.0.as_str(), |(_, rest)| rest)
+    }
 }
 
 /// A running workload. Carries the runtime/exposure facts a workload-scoped port
