@@ -188,6 +188,57 @@ fn entry_evidence(graph: &SecurityGraph, entry_key: &NodeKey) -> (Vec<String>, V
     (cves, behaviors)
 }
 
+/// The set of CVE ids in an entry's actual evidence — the ground truth the model's
+/// citations are checked against by [`guard_fabricated_cve`]. The first token of each
+/// `cve_evidence` line is the id (e.g. `CVE-2021-44228 [severity: ...]`).
+fn entry_cve_ids(graph: &SecurityGraph, entry: &NodeKey) -> std::collections::HashSet<String> {
+    entry_evidence(graph, entry)
+        .0
+        .iter()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+/// Extract CVE ids (`CVE-<4-digit year>-<4+ digit sequence>`) mentioned in free text,
+/// used to check the model's `reason` against the real evidence. Endpoints are ASCII so
+/// byte slicing is safe.
+fn extract_cve_ids(text: &str) -> Vec<String> {
+    let digits = |s: &str| s.bytes().take_while(|b| b.is_ascii_digit()).count();
+    let mut ids = Vec::new();
+    for (i, _) in text.match_indices("CVE-") {
+        let rest = &text[i + 4..];
+        if digits(rest) == 4 && rest[4..].starts_with('-') {
+            let n = digits(&rest[5..]);
+            if n >= 4 {
+                ids.push(format!("CVE-{}", &rest[..5 + n]));
+            }
+        }
+    }
+    ids
+}
+
+/// Hallucination guard (JEF-79): a small CPU model can copy a CVE id from the prompt's
+/// worked examples onto a workload that has none. If it PROMOTES (`Exploitable`) while
+/// citing a CVE absent from the entry's real evidence, the citation is fabricated — so
+/// downgrade to the skeptic verdict. A hallucinated CVE can then never promote an action;
+/// the entry is re-judged next pass. A legitimate `Exploitable` via a non-CVE step (host
+/// escape, cross-tenant network) cites no CVE and passes through untouched.
+fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<String>) -> Verdict {
+    if let Verdict::Exploitable(reason) = &verdict {
+        let fabricated: Vec<String> = extract_cve_ids(reason)
+            .into_iter()
+            .filter(|c| !real_ids.contains(c))
+            .collect();
+        if !fabricated.is_empty() {
+            return Verdict::Uncertain(format!(
+                "model cited CVE(s) not in the evidence (possible hallucination): {}",
+                fabricated.join(", ")
+            ));
+        }
+    }
+    verdict
+}
+
 /// A stable fingerprint of the evidence a verdict depends on — the entry's
 /// exposure, its exploited/critical CVEs, and its runtime behavior. The cross-pass
 /// verdict cache keys on this so an entry is re-judged only when the facts that
@@ -368,7 +419,7 @@ Reachable objectives (each states the OUTCOME an attacker achieves by reaching i
 {objectives}
 
 DECISION PROCEDURE — apply in order, STOP at the first match:
-1. Does the CVE list above contain a CVE (i.e. it is not "(none)") that is loaded-at-runtime or unknown? -> "exploitable". A live known-exploited CVE is a concrete way in.
+1. Does the CVE list above contain a CVE (i.e. it is not "(none)") that is loaded-at-runtime or unknown? -> "exploitable", naming that exact CVE. CRITICAL: cite ONLY a CVE id that appears VERBATIM in the CVE list above. If that list is "(none)", step 1 does NOT apply — never invent, recall, or copy a CVE id (including any from these instructions); move to the next step.
 2. Does the runtime behavior contain an ALERT? -> "exploitable".
 3. Is any objective's outcome Privilege Escalation, Execution, Persistence, or Impact? -> "exploitable". Reaching host-root, code execution, or destruction from an internet front door is a breach regardless of who owns it — you do not "own" host-root.
 4. Is any objective tagged [NETWORK] whose namespace/app DIFFERS from the entry's? -> "exploitable". An internet-facing workload with a network path into ANOTHER tenant's workload is unauthorized lateral movement — the topology is the hole.
@@ -377,8 +428,8 @@ DECISION PROCEDURE — apply in order, STOP at the first match:
 WORKED EXAMPLES (different workloads; learn the procedure, then apply it):
 Ex1 — Entry workload/shop/Pod/store-api; CVEs (none); behavior connects 10.42.1.2:5432 (cluster); objective: secret/shop/store-db.creds [MOUNTED] (Credential Access; same shop app).
   -> {{"verdict":"refuted","reason":"Step 5: a [MOUNTED] secret is the workload's own; no CVE, no alert, no high-severity outcome, no cross-tenant [NETWORK] reach."}}
-Ex2 — Entry workload/edge/Pod/gateway; CVEs CVE-2023-9999 [reachability: loaded-at-runtime]; objective: secret/edge/gw.creds [MOUNTED] (Credential Access; own app).
-  -> {{"verdict":"exploitable","reason":"Step 1: a known-exploited CVE is loaded at runtime — a concrete way in."}}
+Ex2 — Entry workload/edge/Pod/gateway; CVEs CVE-2021-44228 [reachability: loaded-at-runtime]; objective: secret/edge/gw.creds [MOUNTED] (Credential Access; own app).
+  -> {{"verdict":"exploitable","reason":"Step 1: CVE-2021-44228 from the list above is loaded at runtime — a concrete way in."}} (cite the id from the list; if there were no CVE list, this step would not apply.)
 Ex3 — Entry workload/kube-system/Pod/controller; CVEs (none); objectives: 80 secrets across many namespaces, ALL [RBAC-GRANTED] (Credential Access) by its ClusterRole.
   -> {{"verdict":"refuted","reason":"Step 5: every objective is RBAC-granted to a controller doing its job; breadth is not a finding."}}
 Ex4 — Entry workload/public/Pod/frontend; CVEs (none); objective: workload/billing/Pod/ledger-db [NETWORK] (Collection; DIFFERENT app billing).
@@ -386,7 +437,7 @@ Ex4 — Entry workload/public/Pod/frontend; CVEs (none); objective: workload/bil
 Ex5 — Entry workload/public/Pod/api; CVEs (none); objective: host/node-3 [NETWORK] (Privilege Escalation: Escape to Host).
   -> {{"verdict":"exploitable","reason":"Step 3: the objective is host escape (privilege escalation) — a breach regardless of ownership."}}
 
-Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence citing the matched step"}} ("confirmed" only for an already-corroborated live attack that should stand.)"#,
+Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence citing the matched step"}} ("confirmed" only for an already-corroborated live attack that should stand.) Never put a CVE id in the reason unless it appears verbatim in the CVE list above."#,
         entry = fence(&entry.0),
         cves = fence_list(&cves),
         runtime = fence_list(&behavior_lines),
@@ -446,7 +497,11 @@ impl Adjudicator for ModelAdjudicator {
     ) -> Verdict {
         let prompt = build_judgment_prompt(entry, objectives, graph);
         match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
-            Some(reply) => parse_verdict(&reply),
+            // Guard against a small model promoting on a CVE it invented (JEF-79): a
+            // fabricated citation can never auto-promote — it is downgraded to skeptic.
+            Some(reply) => {
+                guard_fabricated_cve(parse_verdict(&reply), &entry_cve_ids(graph, entry))
+            }
             // Model unavailable → skeptic: do not let an auto-action proceed.
             None => Verdict::Uncertain("model unavailable".to_string()),
         }
@@ -498,6 +553,53 @@ mod tests {
         assert!(v.promotes() && v.is_confirmed());
         // Only `exploitable` promotes; a plain confirm does not.
         assert!(!parse_verdict(r#"{"verdict":"confirmed"}"#).promotes());
+    }
+
+    /// JEF-79 hallucination guard: a small model that promotes citing a CVE absent from
+    /// the entry's evidence (parroting a prompt example) must be downgraded so it can
+    /// never auto-promote; a CVE that IS in evidence, and non-CVE exploitable reasons,
+    /// pass through.
+    #[test]
+    fn hallucination_guard_downgrades_fabricated_cve_citations() {
+        use std::collections::HashSet;
+        // Extraction tolerates prose and ignores non-ids (too-short year/sequence).
+        assert_eq!(
+            extract_cve_ids("Step 1: CVE-2021-44228 loaded; not CVE-bad nor CVE-12-3."),
+            vec!["CVE-2021-44228".to_string()]
+        );
+        let real: HashSet<String> = ["CVE-2021-44228".to_string()].into_iter().collect();
+        let none: HashSet<String> = HashSet::new();
+
+        // Exploitable citing a CVE NOT in evidence (the example-parroting bug) → skeptic.
+        let v = guard_fabricated_cve(
+            Verdict::Exploitable("Step 1: CVE-2023-9999 is loaded at runtime".into()),
+            &none,
+        );
+        assert!(matches!(v, Verdict::Uncertain(_)) && !v.promotes());
+
+        // Exploitable citing a CVE that IS in evidence → preserved.
+        assert!(matches!(
+            guard_fabricated_cve(
+                Verdict::Exploitable("Step 1: CVE-2021-44228 is loaded".into()),
+                &real,
+            ),
+            Verdict::Exploitable(_)
+        ));
+
+        // Exploitable via a non-CVE step (no CVE cited) → preserved even with no evidence.
+        assert!(matches!(
+            guard_fabricated_cve(
+                Verdict::Exploitable("Step 4: cross-tenant [NETWORK] lateral movement".into()),
+                &none,
+            ),
+            Verdict::Exploitable(_)
+        ));
+
+        // Refuted is never touched.
+        assert!(matches!(
+            guard_fabricated_cve(Verdict::Refuted("own [MOUNTED] secret".into()), &none),
+            Verdict::Refuted(_)
+        ));
     }
 
     #[test]
