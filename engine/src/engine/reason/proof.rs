@@ -259,14 +259,31 @@ fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
     }
 }
 
-/// Whether `entry` has a live runtime signal that corroborates a chain to an objective
-/// with technique `attack` — the `corroborated-now` predicate, per objective. See
-/// [`corroborates`]. The signal is read from the entry workload (where the sensor
-/// attributed it), matching the prior entry-scoped semantics.
-fn corroborated_for(graph: &SecurityGraph, entry: NodeIndex, attack: &AttackRef) -> bool {
+/// Whether `entry` has a live runtime signal that corroborates a chain whose objective
+/// has technique `attack` and whose entry is the proven foothold `foothold` — the
+/// `corroborated-now` predicate. See [`corroborates`]. The signal is read from the entry
+/// workload (where the sensor attributed it), matching the prior entry-scoped semantics.
+///
+/// A behavior corroborates if it evidences **either** the objective's tactic **or** the
+/// foothold's tactic (JEF-77). The objective side is the per-objective seam (a SecretRead
+/// corroborates the CredentialAccess objective, an internet egress the Exfiltration one);
+/// the foothold side closes the gap that left the `LibraryLoaded → InitialAccess` arm
+/// dormant — a vuln-matched library load (already pruned by JEF-75) on an internet-facing
+/// entry evidences the *entry* foothold (T1190), never an objective's `attack`. With no
+/// foothold (`None`) only the objective side applies, so an assume-breach chain is
+/// unaffected. This stays shadow-gated like the rest: it only sets `corroborated`.
+fn corroborated_for(
+    graph: &SecurityGraph,
+    entry: NodeIndex,
+    attack: &AttackRef,
+    foothold: Option<&AttackRef>,
+) -> bool {
     matches!(
         graph.inner().node_weight(entry),
-        Some(Node::Workload(w)) if w.runtime.iter().any(|s| corroborates(&s.behavior, attack))
+        Some(Node::Workload(w)) if w.runtime.iter().any(|s| {
+            corroborates(&s.behavior, attack)
+                || foothold.is_some_and(|f| corroborates(&s.behavior, f))
+        })
     )
 }
 
@@ -437,12 +454,13 @@ pub fn confirm(
         })
         .map(|&(u, v, e)| link_of(graph, u, v, e))
         .collect();
+    let foothold = entry_foothold(graph, entry_idx);
     Some(ProvenChain {
         entry: entry.clone(),
         objective,
         attack,
-        foothold: entry_foothold(graph, entry_idx),
-        corroborated: corroborated_for(graph, entry_idx, &attack),
+        foothold,
+        corroborated: corroborated_for(graph, entry_idx, &attack, foothold.as_ref()),
         adjudicated: true,
         promoted: false,
         exposed_entry: entry_exposed(graph, entry_idx),
@@ -488,8 +506,11 @@ pub fn prove_with(
             if objective == entry || !tree.contains_key(&objective) {
                 continue;
             }
-            // Per-objective: this objective's technique decides which behaviors corroborate.
-            let corroborated = corroborated_for(graph, entry, &attack);
+            // Per-objective: this objective's technique decides which behaviors corroborate
+            // — plus the entry's foothold tactic, when it has one (JEF-77), so a vuln-matched
+            // library load on the front door corroborates the foothold even though no
+            // objective is ever tagged INITIAL_ACCESS.
+            let corroborated = corroborated_for(graph, entry, &attack, foothold.as_ref());
             let steps = path_steps(&tree, entry, objective);
             let links = steps
                 .iter()
@@ -1139,6 +1160,145 @@ mod tests {
         assert!(
             chain.corroborated,
             "a secret-read signal corroborates the credential-access objective"
+        );
+    }
+
+    /// JEF-77, the gap this issue closes: a `LibraryLoaded` (vuln-matched by JEF-75) on an
+    /// internet-facing, exploitable entry corroborates the chain through the *foothold*
+    /// tactic (INITIAL_ACCESS / T1190), even though the objective itself is tagged
+    /// CREDENTIAL_ACCESS. Before the foothold-aware path this arm was dormant end-to-end.
+    #[test]
+    fn library_load_signal_corroborates_through_foothold_end_to_end() {
+        use crate::engine::graph::{Provenance, Severity, Vulnerability};
+        use crate::engine::observe::{
+            Attribution, ImageVulnerabilities, RuntimeObservation, SecretMeta,
+        };
+        use std::time::SystemTime;
+
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{
+                "name": "web", "image": "web:1",
+                "envFrom": [{"secretRef": {"name": "session-key"}}]
+            }]}
+        }));
+        let lb: k8s_openapi::api::core::v1::Service = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web-lb", "namespace": "app"},
+            "spec": {"type": "LoadBalancer", "selector": {"app": "web"}}
+        }))
+        .unwrap();
+        let snap = Snapshot {
+            pods: vec![web],
+            services: vec![lb],
+            secrets: vec![SecretMeta {
+                namespace: "app".into(),
+                name: "session-key".into(),
+            }],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "web:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2026-9999".into(),
+                    severity: Severity::Critical,
+                    exploited_in_wild: true,
+                    epss: None,
+                    // The loaded library below must match a CVE package so JEF-75 keeps it
+                    // (`libssl.so.1.1` and `openssl` both normalize to `ssl`).
+                    pkg_name: Some("openssl".into()),
+                    sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    ..Default::default()
+                }],
+            }],
+            runtime_events: vec![RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "web"),
+                source: None,
+                observed_at_ms: None,
+                behavior: Behavior::LibraryLoaded {
+                    name: "libssl.so.1.1".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let chain = chains
+            .iter()
+            .find(|c| {
+                c.entry.0 == "workload/app/Pod/web" && c.objective.0 == "secret/app/session-key"
+            })
+            .expect("web → secret chain");
+        assert_eq!(chain.attack, CREDENTIAL_ACCESS);
+        assert_eq!(chain.foothold, Some(EXPLOIT_PUBLIC_FACING));
+        assert!(
+            chain.corroborated,
+            "a vuln-matched library load corroborates the entry's foothold (T1190)"
+        );
+        assert!(
+            chain.meets_action_bar(),
+            "foothold + foothold-corroboration = full bar"
+        );
+    }
+
+    /// NEGATIVE (JEF-77): a chain with **no** foothold — an internal, non-exploitable
+    /// entry, the assume-breach case — is unaffected by the foothold-aware path. A library
+    /// load corroborates nothing, because the objective is CREDENTIAL_ACCESS and there is
+    /// no INITIAL_ACCESS foothold tactic to match against.
+    #[test]
+    fn library_load_does_not_corroborate_without_foothold() {
+        use crate::engine::observe::{Attribution, RuntimeObservation, SecretMeta};
+        use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
+
+        // Internal pod (no internet exposure, no vuln image) reaching a secret via RBAC —
+        // a chain that proves but carries no foothold.
+        let app = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "app", "namespace": "app"},
+            "spec": {
+                "serviceAccountName": "app-sa",
+                "containers": [{"name": "app", "image": "app:1"}]
+            }
+        }));
+        let role: Role = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+            "metadata": {"name": "reader", "namespace": "app"},
+            "rules": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]
+        }))
+        .unwrap();
+        let binding: RoleBinding = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+            "metadata": {"name": "reader-binding", "namespace": "app"},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "reader"},
+            "subjects": [{"kind": "ServiceAccount", "name": "app-sa", "namespace": "app"}]
+        }))
+        .unwrap();
+
+        let snap = Snapshot {
+            pods: vec![app],
+            secrets: vec![SecretMeta {
+                namespace: "app".into(),
+                name: "api-key".into(),
+            }],
+            roles: vec![role],
+            role_bindings: vec![binding],
+            runtime_events: vec![RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "app"),
+                source: None,
+                observed_at_ms: None,
+                behavior: Behavior::LibraryLoaded {
+                    name: "libssl.so.1.1".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let chain = chains
+            .iter()
+            .find(|c| c.entry.0.contains("/app") && c.objective.0 == "secret/app/api-key")
+            .expect("app → identity → secret chain");
+        assert_eq!(chain.foothold, None);
+        assert!(
+            !chain.corroborated,
+            "with no foothold, a library load corroborates nothing"
         );
     }
 }
