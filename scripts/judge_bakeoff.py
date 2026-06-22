@@ -58,7 +58,7 @@ Reachable objectives:
 Each objective also states the OUTCOME an attacker achieves by reaching it (in parentheses).
 
 DECISION PROCEDURE — apply in order, STOP at the first match:
-1. Does the CVE list above contain a CVE (i.e. it is not "(none)") that is loaded-at-runtime or unknown? → "exploitable". A live known-exploited CVE is a concrete way in.
+1. Does the CVE list above contain a CVE (i.e. it is not "(none)") that is loaded-at-runtime or unknown? → "exploitable", naming that exact CVE. CRITICAL: cite ONLY a CVE id that appears VERBATIM in the CVE list above. If that list is "(none)", step 1 does NOT apply — never invent, recall, or copy a CVE id (including any from these instructions); move to the next step.
 2. Does the runtime behavior contain an ALERT? → "exploitable".
 3. Is any objective's outcome PRIVILEGE ESCALATION, EXECUTION, PERSISTENCE, or IMPACT? → "exploitable". Reaching host-root, code execution, or destruction from an internet front door is a breach regardless of who owns it — you do not "own" host-root.
 4. Is any objective tagged [NETWORK] whose namespace/app DIFFERS from the entry's? → "exploitable". An internet-facing workload with a network path into ANOTHER tenant's workload is unauthorized lateral movement — the topology is the hole.
@@ -67,8 +67,8 @@ DECISION PROCEDURE — apply in order, STOP at the first match:
 WORKED EXAMPLES (different workloads; learn the procedure, then apply it):
 Ex1 — Entry <<<workload/shop/Pod/store-api>>>; CVEs (none); behavior <<<connects 10.42.1.2:5432 (cluster)>>>; objective: secret/shop/store-db.creds [MOUNTED] (Credential Access; same `shop` app).
   -> {{"verdict":"refuted","reason":"Step 5: a [MOUNTED] secret is the workload's own; no CVE, no alert, no high-severity outcome, no cross-tenant [NETWORK] reach."}}
-Ex2 — Entry <<<workload/edge/Pod/gateway>>>; CVEs <<<CVE-2023-9999 [reachability: loaded-at-runtime]>>>; behavior (none); objective: secret/edge/gw.creds [MOUNTED] (Credential Access; own app).
-  -> {{"verdict":"exploitable","reason":"Step 1: a known-exploited CVE is loaded at runtime — a concrete way in."}}
+Ex2 — Entry <<<workload/edge/Pod/gateway>>>; CVEs <<<CVE-2021-44228 [reachability: loaded-at-runtime]>>>; behavior (none); objective: secret/edge/gw.creds [MOUNTED] (Credential Access; own app).
+  -> {{"verdict":"exploitable","reason":"Step 1: CVE-2021-44228 from the list above is loaded at runtime — a concrete way in."}} (cite the id from the list; if there were no CVE list, this step would not apply.)
 Ex3 — Entry <<<workload/kube-system/Pod/controller>>>; CVEs (none); behavior <<<connects 10.42.0.1:443 (cluster)>>>; objectives: 80 secrets across many namespaces, ALL [RBAC-GRANTED] (Credential Access) by its ClusterRole.
   -> {{"verdict":"refuted","reason":"Step 5: every objective is RBAC-granted to a controller doing its job; breadth is not a finding."}}
 Ex4 — Entry <<<workload/public/Pod/frontend>>>; CVEs (none); behavior <<<connects 10.42.9.9:5432 (cluster)>>>; objective: workload/billing/Pod/ledger-db [NETWORK] (Collection; DIFFERENT app `billing`).
@@ -76,7 +76,7 @@ Ex4 — Entry <<<workload/public/Pod/frontend>>>; CVEs (none); behavior <<<conne
 Ex5 — Entry <<<workload/public/Pod/api>>>; CVEs (none); behavior (none); objective: host/node-3 [NETWORK] (Privilege Escalation: escape to host).
   -> {{"verdict":"exploitable","reason":"Step 3: the objective is host escape (privilege escalation) — a breach regardless of ownership."}}
 
-Output ONLY this JSON: {{"verdict":"exploitable"|"refuted"|"uncertain","reason":"one sentence citing the matched step"}}"""
+Output ONLY this JSON: {{"verdict":"exploitable"|"refuted"|"uncertain","reason":"one sentence citing the matched step"}} Never put a CVE id in the reason unless it appears verbatim in the CVE list above."""
 
 # (name, expected_verdict, entry, cves, runtime, objectives) — one case per procedure branch.
 CASES = [
@@ -108,6 +108,18 @@ CASES = [
      "<<<connects to 10.42.3.5:8080 (cluster)>>>",
      "  - host/node-2 [NETWORK] (Privilege Escalation: escape to host)\n"
      "  - secret/public/web-session.key [MOUNTED] (Credential Access; its own session key)"),
+    # Regression: prod false positives where granite4:1b-h parroted the example CVE
+    # (CVE-2023-9999) onto a NO-CVE workload. Both must refute and must NOT cite a CVE.
+    ("broad_rbac_no_cve", "refuted",  # protector-shaped: broad [RBAC-GRANTED], no CVE
+     "workload/protector/Pod/protector-5949fd9689", "(none)",
+     "<<<connects to 10.42.0.1:443 (cluster)>>>",
+     "  - secret/analytics/murmurify-postgres.credentials [RBAC-GRANTED] (Credential Access; other app, granted by its ClusterRole for cluster reads)\n"
+     "  - secret/argocd/argocd-redis [RBAC-GRANTED] (Credential Access; other app, granted cluster-wide)\n"
+     "  - (+112 more reachable objectives, all [RBAC-GRANTED] by its read ClusterRole)"),
+    ("single_obj_no_cve", "refuted",  # oprf-shaped: one own [MOUNTED] objective, no CVE
+     "workload/analytics/Pod/murmurify-oprf-7d5b64f6d7", "(none)",
+     "<<<connects to 10.42.3.5:5432 (cluster)>>>",
+     "  - secret/analytics/murmurify-oprf.key [MOUNTED] (Credential Access; same `analytics` app)"),
 ]
 
 # Fast-field candidates, ordered roughly small->large. Goal: the FASTEST model that scores 3/3.
