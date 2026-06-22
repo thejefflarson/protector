@@ -67,8 +67,8 @@ DECISION PROCEDURE — apply in order, STOP at the first match:
 WORKED EXAMPLES (different workloads; learn the procedure, then apply it):
 Ex1 — Entry <<<workload/shop/Pod/store-api>>>; CVEs (none); behavior <<<connects 10.42.1.2:5432 (cluster)>>>; objective: secret/shop/store-db.creds [MOUNTED] (Credential Access; same `shop` app).
   -> {{"verdict":"refuted","reason":"Step 5: a [MOUNTED] secret is the workload's own; no CVE, no alert, no high-severity outcome, no cross-tenant [NETWORK] reach."}}
-Ex2 — Entry <<<workload/edge/Pod/gateway>>>; CVEs <<<CVE-2021-44228 [reachability: loaded-at-runtime]>>>; behavior (none); objective: secret/edge/gw.creds [MOUNTED] (Credential Access; own app).
-  -> {{"verdict":"exploitable","reason":"Step 1: CVE-2021-44228 from the list above is loaded at runtime — a concrete way in."}} (cite the id from the list; if there were no CVE list, this step would not apply.)
+Ex2 — Entry <<<workload/api/Pod/svc>>>; CVEs (none); behavior <<<connects 10.42.2.2:5432 (cluster)>>>; objective: secret/api/svc.creds [MOUNTED] (Credential Access; own app).
+  -> {{"verdict":"refuted","reason":"Step 5: the CVE list is (none), so step 1 does not apply — I will not invent a CVE; the only objective is the workload's own [MOUNTED] secret."}}
 Ex3 — Entry <<<workload/kube-system/Pod/controller>>>; CVEs (none); behavior <<<connects 10.42.0.1:443 (cluster)>>>; objectives: 80 secrets across many namespaces, ALL [RBAC-GRANTED] (Credential Access) by its ClusterRole.
   -> {{"verdict":"refuted","reason":"Step 5: every objective is RBAC-granted to a controller doing its job; breadth is not a finding."}}
 Ex4 — Entry <<<workload/public/Pod/frontend>>>; CVEs (none); behavior <<<connects 10.42.9.9:5432 (cluster)>>>; objective: workload/billing/Pod/ledger-db [NETWORK] (Collection; DIFFERENT app `billing`).
