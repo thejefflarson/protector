@@ -25,6 +25,22 @@ impl NoopObserver {
     }
 }
 
+/// Signals-per-second over a heartbeat interval: the count of successfully attributed
+/// and forwarded observations divided by the elapsed wall-clock seconds (JEF-101). Pure
+/// and kernel-free so it's unit-testable in the default build. Guards a zero/sub-tick
+/// elapsed (returns 0.0 rather than dividing by ~0 and reporting a nonsense spike).
+///
+/// Only the `ebpf` build's heartbeat calls this; gate it to that build (plus `test`,
+/// which exercises it directly) so the default no-op build doesn't warn it unused.
+#[cfg(any(feature = "ebpf", test))]
+fn signal_rate(delta_signals: u64, elapsed: std::time::Duration) -> f64 {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        return 0.0;
+    }
+    delta_signals as f64 / secs
+}
+
 /// The real, eBPF-backed observer. Feature-gated: only built on a node with the bpf
 /// toolchain, where it can be compiled and load-tested. It loads the compiled eBPF
 /// object (from the `protector-agent-ebpf` crate), attaches the connection probe,
@@ -37,7 +53,9 @@ pub use ebpf::EbpfObserver;
 mod ebpf {
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use aya::maps::{PerCpuArray, RingBuf};
     use aya::programs::{FEntry, KProbe};
@@ -193,7 +211,22 @@ mod ebpf {
             // JEF-58 follow-up: in-kernel event aggregation (BPF-map dedup of
             // high-frequency repeats) is still not done — out of scope here, see JEF-64.
             let (raw_tx, raw_rx) = mpsc::channel::<RawEvent>(ATTRIB_QUEUE);
-            let worker = tokio::spawn(Self::attribution_worker(raw_rx, tx));
+            // Per-node counters shared with the attribution worker (JEF-101). Both are
+            // cumulative; the heartbeat snapshots them to surface the three numbers
+            // JEF-48's exit criteria need measurable per node: ring-buffer drops,
+            // attribution-unresolved count, and a signal rate. `Relaxed` is fine — these
+            // are monotonic counters read for observability, not a synchronization gate.
+            let unresolved = Arc::new(AtomicU64::new(0));
+            let signals = Arc::new(AtomicU64::new(0));
+            let worker = tokio::spawn(Self::attribution_worker(
+                raw_rx,
+                tx,
+                Arc::clone(&unresolved),
+                Arc::clone(&signals),
+            ));
+            // Snapshots from the previous heartbeat, for the per-interval rate.
+            let mut last_signals: u64 = 0;
+            let mut last_tick = Instant::now();
 
             let result = loop {
                 tokio::select! {
@@ -230,8 +263,8 @@ mod ebpf {
                     }
                     _ = heartbeat.tick() => {
                         let total = Self::read_drops(&drops);
-                        // Only log when there's loss and it's changed since last tick —
-                        // a quiet ring stays silent.
+                        // Only log the loud drop warning when there's loss and it's
+                        // changed since last tick — a quiet ring stays silent.
                         if total > 0 && total != last_drops {
                             tracing::info!(
                                 drops = total,
@@ -239,6 +272,28 @@ mod ebpf {
                             );
                         }
                         last_drops = total;
+
+                        // JEF-101: emit the three per-node numbers JEF-48 needs measurable
+                        // — cumulative ring drops, cumulative attribution-unresolved, and
+                        // the signal rate over this interval — as a structured stat line
+                        // (greppable/scrapeable per node, no new deps, wire payload
+                        // unchanged). Unlike the drop warning above this fires every tick
+                        // so "zero drops" is observable as a present-and-zero datapoint.
+                        let unresolved_total = unresolved.load(Ordering::Relaxed);
+                        let signals_total = signals.load(Ordering::Relaxed);
+                        let now = Instant::now();
+                        let rate = signal_rate(
+                            signals_total.saturating_sub(last_signals),
+                            now.duration_since(last_tick),
+                        );
+                        last_signals = signals_total;
+                        last_tick = now;
+                        tracing::info!(
+                            ring_drops = total,
+                            attribution_unresolved = unresolved_total,
+                            signals_per_s = rate,
+                            "agent stats"
+                        );
                     }
                 }
             };
@@ -258,11 +313,16 @@ mod ebpf {
         async fn attribution_worker(
             mut raw_rx: mpsc::Receiver<RawEvent>,
             tx: Sender<RuntimeObservation>,
+            unresolved: Arc<AtomicU64>,
+            signals: Arc<AtomicU64>,
         ) {
             let mut cache: HashMap<u32, Option<String>> = HashMap::new();
             while let Some(raw) = raw_rx.recv().await {
                 let Some(uid) = Self::attribute(&mut cache, raw.pid(), read_cgroup) else {
-                    continue; // host process / unreadable cgroup — drop, never fatal
+                    // Host process / unreadable cgroup — dropped (never fatal). Count it
+                    // so JEF-48's "low unresolved attribution" is measurable per node.
+                    unresolved.fetch_add(1, Ordering::Relaxed);
+                    continue;
                 };
                 let obs = RuntimeObservation {
                     attribution: Attribution::by_pod_uid(uid),
@@ -273,6 +333,8 @@ mod ebpf {
                 if tx.send(obs).await.is_err() {
                     return; // report receiver gone — shut down
                 }
+                // A signal successfully attributed and forwarded — the rate numerator.
+                signals.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -676,5 +738,43 @@ mod ebpf {
                 other => panic!("expected ProcessExec, got {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use std::time::Duration;
+
+    use super::signal_rate;
+
+    #[test]
+    fn computes_per_second_over_the_interval() {
+        // 300 signals over a 30s heartbeat → 10/s.
+        assert_eq!(signal_rate(300, Duration::from_secs(30)), 10.0);
+    }
+
+    #[test]
+    fn fractional_rate() {
+        // 15 signals over 30s → 0.5/s.
+        assert_eq!(signal_rate(15, Duration::from_secs(30)), 0.5);
+    }
+
+    #[test]
+    fn zero_signals_is_zero_rate() {
+        // A quiet interval must report 0.0, not absence — present-and-zero is the
+        // "no drops / no traffic" datapoint JEF-48 needs.
+        assert_eq!(signal_rate(0, Duration::from_secs(30)), 0.0);
+    }
+
+    #[test]
+    fn zero_elapsed_does_not_divide_by_zero() {
+        // A coincident / sub-tick interval must not produce a nonsense spike.
+        assert_eq!(signal_rate(100, Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn sub_second_interval_scales_up() {
+        // 5 signals over 500ms → 10/s (rate is normalized, not raw count).
+        assert_eq!(signal_rate(5, Duration::from_millis(500)), 10.0);
     }
 }
