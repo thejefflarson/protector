@@ -466,10 +466,7 @@ mod tests {
                 "connection",
             ),
             (Behavior::SecretRead { secret: "s".into() }, "secret-read"),
-            (
-                Behavior::LibraryLoaded { name: "l".into() },
-                "library-load",
-            ),
+            (Behavior::LibraryLoaded { name: "l".into() }, "library-load"),
             (Behavior::FileRead { path: "/p".into() }, "file-read"),
             (
                 Behavior::PrivilegeChange {
