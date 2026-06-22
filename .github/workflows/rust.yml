@@ -15,15 +15,26 @@ jobs:
   rust:
     permissions:
       contents: read
-    # GitHub-hosted, not the homelab runners: fmt/clippy/audit/test need no cluster
-    # resources, and the small Pi runners OOM-killed the test build ("lost
-    # communication with the server") even capped — an intermittent red that, since
-    # `docker` needs it, also blocked releases. A hosted runner is reliable and free.
-    # Only the `docker` job stays self-hosted (it needs the in-cluster buildkit).
-    runs-on: ubuntu-latest
+    # Self-hosted protector-runners (meshed) so cargo uses the shared in-cluster
+    # sccache redis. Moved off ubuntu-latest now that the runner has the memory it
+    # needs (cluster repo: charts/actions/runners/values-protector.yaml — 6Gi/8Gi +
+    # anti-affinity onto the 16GB nodes); the base 3Gi runner OOM-killed this before.
+    runs-on: protector-runners
+    env:
+      # sccache → shared in-cluster redis (cluster repo: charts/sccache). Reachable
+      # only through Linkerd mTLS (the protector runner identity is admitted); it
+      # carries no credentials, so it lives here. CARGO_INCREMENTAL=0 — sccache needs it off.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
+      CARGO_INCREMENTAL: "0"
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+    - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+      with:
+        components: clippy, rustfmt
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+    - name: Install sccache
+      run: cargo binstall --no-confirm sccache
     - name: Format
       run: cargo fmt --check
     - name: Clippy
@@ -42,6 +53,10 @@ jobs:
         cargo nextest run
       env:
         RUST_BACKTRACE: 1
+    - name: sccache stats
+      if: always()
+      run: sccache --show-stats
+
   docker:
     runs-on: protector-runners
     # Build + push + sign ONLY on a version tag. The deployable image is consumed
