@@ -117,6 +117,24 @@ impl Behavior {
         }
     }
 
+    /// A stable, **low-cardinality** label naming this behavior's variant — one of a
+    /// fixed, small set (`alert`/`connection`/`secret-read`/`library-load`/`file-read`/
+    /// `priv-change`/`exec`). Used as a metric label for behavioral-signal counters
+    /// (JEF-100): it must never carry per-instance payload (a peer, a path, a secret
+    /// name), which would explode metric cardinality — only the variant name. Distinct
+    /// from [`Self::summary`] (human prose) and [`Self::fingerprint_key`] (cache key).
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Behavior::Alert { .. } => "alert",
+            Behavior::NetworkConnection { .. } => "connection",
+            Behavior::SecretRead { .. } => "secret-read",
+            Behavior::LibraryLoaded { .. } => "library-load",
+            Behavior::FileRead { .. } => "file-read",
+            Behavior::PrivilegeChange { .. } => "priv-change",
+            Behavior::ProcessExec { .. } => "exec",
+        }
+    }
+
     /// A short, human label for a *notable* runtime exec — a shell or package manager run
     /// inside the container (JEF-55) — or `None` for an unremarkable behavior. Surfaced in
     /// [`Self::summary`] so the adjudication prompt sees "executed /bin/bash (interactive
@@ -432,6 +450,44 @@ mod tests {
         assert_eq!(shell.notable_exec(), Some("interactive shell in container"));
         assert_eq!(pkg.notable_exec(), Some("package manager in container"));
         assert_eq!(normal.notable_exec(), None);
+    }
+
+    #[test]
+    fn variant_label_is_a_stable_low_cardinality_token() {
+        // Each variant maps to a fixed token carrying NO per-instance payload (no peer,
+        // path, or secret name) — so it's safe as a metric label without cardinality blow-up.
+        let cases: [(Behavior, &str); 7] = [
+            (Behavior::Alert { rule: "x".into() }, "alert"),
+            (
+                Behavior::NetworkConnection {
+                    peer: "1.2.3.4:443".into(),
+                    internet: true,
+                },
+                "connection",
+            ),
+            (Behavior::SecretRead { secret: "s".into() }, "secret-read"),
+            (
+                Behavior::LibraryLoaded { name: "l".into() },
+                "library-load",
+            ),
+            (Behavior::FileRead { path: "/p".into() }, "file-read"),
+            (
+                Behavior::PrivilegeChange {
+                    from_uid: 1000,
+                    to_uid: 0,
+                },
+                "priv-change",
+            ),
+            (
+                Behavior::ProcessExec {
+                    path: "/bin/bash".into(),
+                },
+                "exec",
+            ),
+        ];
+        for (behavior, want) in cases {
+            assert_eq!(behavior.variant_label(), want, "{behavior:?}");
+        }
     }
 
     #[test]

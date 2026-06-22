@@ -65,6 +65,33 @@ struct EngineMetrics {
     active_mitigations: opentelemetry::metrics::Gauge<u64>,
     /// Breach-path count by model `verdict` (the current judgement distribution).
     verdicts: opentelemetry::metrics::Gauge<u64>,
+    /// Behavioral signals ingested this pass, by `behavior` variant (alert/connection/
+    /// secret-read/library-load/file-read/priv-change/exec) — the shadow-bake (JEF-48)
+    /// view of *what* the behavioral port is seeing, labeled low-cardinality (variant
+    /// names only, never per-pod).
+    signals: opentelemetry::metrics::Counter<u64>,
+    /// Signal attribution outcome, by `outcome` (`resolved`/`unresolved`): how many
+    /// ingested signals the runtime adapter could attribute to a live workload vs drop as
+    /// an unknown cgroup UID. A sustained `unresolved` means the agent's UIDs aren't
+    /// matching pod metadata.
+    attribution: opentelemetry::metrics::Counter<u64>,
+    /// `RuntimeEvents` store cardinality (distinct live observations) as of this pass —
+    /// a gauge so the TTL'd store's working-set size is observable.
+    runtime_store: opentelemetry::metrics::Gauge<u64>,
+    /// Corroborations fired this pass: proven breach-relevant chains whose `corroborated`
+    /// predicate is set (ADR-0009). In shadow this is the countable answer to "would this
+    /// have promoted?" without any behavior change.
+    corroborations: opentelemetry::metrics::Counter<u64>,
+    /// Per-pass adjudications that issued a fresh model call (verdict-cache miss). A
+    /// proper cumulative counter (replaces the prior `verdicts{verdict="judged_this_pass"}`
+    /// gauge hack) so model-call frequency is rate-able.
+    judged: opentelemetry::metrics::Counter<u64>,
+    /// Per-pass adjudications served from the verdict cache (cache hit). Cumulative
+    /// counter, the companion to [`Self::judged`].
+    cached: opentelemetry::metrics::Counter<u64>,
+    /// Adjudicator model-call latency in milliseconds (histogram), recorded around each
+    /// fresh `judge` call so the slow CPU model's tail is visible.
+    model_latency_ms: opentelemetry::metrics::Histogram<f64>,
 }
 
 impl EngineMetrics {
@@ -99,7 +126,51 @@ impl EngineMetrics {
                 .u64_gauge("protector.engine.verdicts")
                 .with_description("Breach paths by model verdict (current distribution).")
                 .build(),
+            signals: m
+                .u64_counter("protector.engine.signals")
+                .with_description("Behavioral signals ingested by variant.")
+                .build(),
+            attribution: m
+                .u64_counter("protector.engine.attribution")
+                .with_description("Signal attribution outcome (resolved/unresolved).")
+                .build(),
+            runtime_store: m
+                .u64_gauge("protector.engine.runtime_store")
+                .with_description("RuntimeEvents store cardinality (live observations).")
+                .build(),
+            corroborations: m
+                .u64_counter("protector.engine.corroborations")
+                .with_description("Corroborations fired (corroborated breach chains) per pass.")
+                .build(),
+            judged: m
+                .u64_counter("protector.engine.judged")
+                .with_description("Adjudications that issued a fresh model call (cache miss).")
+                .build(),
+            cached: m
+                .u64_counter("protector.engine.cached")
+                .with_description("Adjudications served from the verdict cache (cache hit).")
+                .build(),
+            model_latency_ms: m
+                .f64_histogram("protector.engine.model_latency_ms")
+                .with_description("Adjudicator model-call latency in milliseconds.")
+                .build(),
         }
+    }
+}
+
+/// Whether an ingested signal's [`Attribution`] resolves to a live workload, mirroring
+/// the [`observe::adapter::RuntimeAdapter`]'s resolution rule (JEF-100, for the
+/// attribution-outcome metric — pure, no graph mutation). A namespace/name attribution
+/// (Falco) is always resolvable; a cgroup-UID attribution (the eBPF agent) resolves only
+/// if a pod with that UID is in the snapshot, exactly as the adapter's `by_uid` lookup
+/// does — an unknown UID (pod gone / not yet observed) is dropped as `unresolved`.
+fn attribution_resolves(attribution: &observe::Attribution, snapshot: &Snapshot) -> bool {
+    match attribution {
+        observe::Attribution::ByNamespacedName { .. } => true,
+        observe::Attribution::ByPodUid { pod_uid } => snapshot
+            .pods
+            .iter()
+            .any(|p| p.metadata.uid.as_deref() == Some(pod_uid.as_str())),
     }
 }
 
@@ -191,6 +262,34 @@ impl Engine {
     #[tracing::instrument(name = "engine.process", skip_all)]
     pub async fn process(&mut self, snapshot: &Snapshot) {
         self.metrics.passes.add(1, &[]);
+        // Behavioral-port instrumentation (JEF-100, pure observe): count what the
+        // behavioral port saw this pass, by variant and attribution outcome, plus the
+        // live store cardinality. Labels are low-cardinality (variant names, resolved/
+        // unresolved) — never per-pod. `runtime_events` is the TTL'd store's snapshot
+        // (`RuntimeEvents::current()`), so its length is the store cardinality.
+        self.metrics
+            .runtime_store
+            .record(snapshot.runtime_events.len() as u64, &[]);
+        for event in &snapshot.runtime_events {
+            self.metrics.signals.add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "behavior",
+                    event.behavior.variant_label(),
+                )],
+            );
+            // Mirror the RuntimeAdapter's resolution rule: a namespace/name attribution is
+            // always resolvable; a cgroup-UID one resolves iff a pod with that UID is in
+            // the snapshot (the adapter drops the rest as unknown UIDs).
+            let outcome = if attribution_resolves(&event.attribution, snapshot) {
+                "resolved"
+            } else {
+                "unresolved"
+            };
+            self.metrics
+                .attribution
+                .add(1, &[opentelemetry::KeyValue::new("outcome", outcome)]);
+        }
         let graph = observe::adapter::build_graph(snapshot, &self.adapters);
         let current = GraphSnapshot::of(&graph);
         let health = PodStatusHealth.assess(snapshot);
@@ -246,6 +345,17 @@ impl Engine {
             chains.iter().filter(|c| c.is_breach_relevant()).count() as u64,
             &[],
         );
+        // Corroborations fired this pass (JEF-100): breach-relevant chains the proof layer
+        // marked `corroborated` (a live runtime signal completing the action bar, ADR-0009).
+        // In shadow this counts "would this have promoted?" without changing any behavior —
+        // promotion still stays gated behind `judgement_enabled()` below.
+        let corroborations = chains
+            .iter()
+            .filter(|c| c.is_breach_relevant() && c.corroborated)
+            .count() as u64;
+        if corroborations > 0 {
+            self.metrics.corroborations.add(corroborations, &[]);
+        }
 
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant PATH,
         // always. The deterministic proof winnows to the paths an internet-facing
@@ -309,7 +419,14 @@ impl Engine {
                 }
                 _ => {
                     judged += 1;
+                    // Time the (slow, CPU-bound) model call so its latency tail is
+                    // observable in shadow (JEF-100). Recorded for every fresh call,
+                    // success or timeout — the `result` label below distinguishes them.
+                    let started = std::time::Instant::now();
                     let v = self.adjudicator.judge(&entry, &objectives, &graph).await;
+                    self.metrics
+                        .model_latency_ms
+                        .record(started.elapsed().as_secs_f64() * 1000.0, &[]);
                     // An Uncertain is usually a transient model outage (e.g. a CPU-model
                     // timeout) — re-judge next pass rather than pin the failure into the
                     // cache. Logged at info (not debug): on a slow CPU model nearly every
@@ -374,13 +491,17 @@ impl Engine {
                 .verdicts
                 .record(*count, &[opentelemetry::KeyValue::new("verdict", *verdict)]);
         }
-        // How much judging this pass did. One line per pass so model-call frequency is
-        // visible: `judged` = fresh model calls (cache misses), `cached` = reused verdicts.
-        // Steady state should be judged≈0; a sustained nonzero means fingerprint churn.
-        self.metrics.verdicts.record(
-            judged,
-            &[opentelemetry::KeyValue::new("verdict", "judged_this_pass")],
-        );
+        // How much judging this pass did, as proper cumulative counters (JEF-100, replacing
+        // the prior `verdicts{verdict="judged_this_pass"}` gauge hack): `judged` = fresh
+        // model calls (cache misses), `cached` = reused verdicts. Steady state should be
+        // judged≈0; a sustained nonzero rate means fingerprint churn — the thing to watch
+        // for model load. Counters (not a gauge) so the rate is computable in the collector.
+        if judged > 0 {
+            self.metrics.judged.add(judged, &[]);
+        }
+        if cached > 0 {
+            self.metrics.cached.add(cached, &[]);
+        }
         if !by_entry.is_empty() {
             tracing::info!(
                 entries = by_entry.len(),
@@ -887,6 +1008,75 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.breach_relevant),
             "the breach-relevant finding is published regardless of the verdict"
+        );
+    }
+
+    /// The attribution-outcome metric (JEF-100) must mirror the RuntimeAdapter's
+    /// resolution rule: a namespace/name attribution always resolves; a cgroup-UID one
+    /// resolves only when a pod with that UID is in the snapshot (an unknown UID is
+    /// `unresolved`).
+    #[test]
+    fn attribution_resolves_mirrors_the_adapter_rule() {
+        use crate::engine::observe::Attribution;
+
+        // A pod whose metadata.uid is "uid-1".
+        let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "uid": "uid-1"}
+        }))
+        .unwrap();
+        let snapshot = Snapshot {
+            pods: vec![pod],
+            ..Default::default()
+        };
+
+        // namespace/name (Falco) always resolves, even against an empty snapshot.
+        assert!(attribution_resolves(
+            &Attribution::by_namespaced_name("app", "web"),
+            &snapshot
+        ));
+        assert!(attribution_resolves(
+            &Attribution::by_namespaced_name("ghost", "nobody"),
+            &Snapshot::default()
+        ));
+        // A cgroup UID resolves iff a pod with that UID is present.
+        assert!(attribution_resolves(
+            &Attribution::by_pod_uid("uid-1"),
+            &snapshot
+        ));
+        assert!(!attribution_resolves(
+            &Attribution::by_pod_uid("uid-unknown"),
+            &snapshot
+        ));
+    }
+
+    /// A live alert on a breach-relevant entry sets `corroborated` — the source the
+    /// corroborations-fired counter reads (JEF-100). Pure instrumentation: this asserts
+    /// the predicate the metric counts, and that recording it doesn't disturb processing.
+    #[tokio::test]
+    async fn corroboration_predicate_fires_on_a_live_alert() {
+        use crate::engine::observe::{Attribution, RuntimeObservation};
+        use protector_behavior::Behavior;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with(calls.clone());
+
+        // The exposed foothold snapshot plus a live critical alert on the entry pod.
+        let mut snapshot = exposed_snapshot(true);
+        snapshot.runtime_events = vec![RuntimeObservation {
+            attribution: Attribution::by_namespaced_name("app", "web"),
+            source: Some("falco".into()),
+            observed_at_ms: None,
+            behavior: Behavior::Alert {
+                rule: "Terminal shell in container".into(),
+            },
+        }];
+        engine.process(&snapshot).await;
+
+        let findings = engine.findings().snapshot();
+        assert!(
+            findings.iter().any(|f| f.breach_relevant && f.corroborated),
+            "a live alert on the entry must corroborate a breach-relevant chain"
         );
     }
 }
