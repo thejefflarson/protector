@@ -239,6 +239,58 @@ fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<S
     verdict
 }
 
+/// Tenancy backstop (JEF-111): the adjudication PROCEDURE only ever yields
+/// `exploitable` via one of four deterministic preconditions — (1) a CVE present
+/// (loaded-at-runtime/unknown), (2) an Alert in the runtime behavior, (3) an objective
+/// whose ATT&CK tactic is PrivilegeEscalation/Execution/Persistence/Impact, or (4) a
+/// `[NETWORK]` objective tagged `[cross-ns]`. The engine knows all four deterministically.
+/// granite4:3b-h was observed promoting `Exploitable` citing "lateral movement to another
+/// tenant's database" for a workload reaching its OWN same-namespace database — it ignored
+/// the `[same-ns]` marker and misread tenancy. So if the model returns `Exploitable` while
+/// NONE of the four preconditions actually hold, the verdict is unjustified (almost always
+/// that step-4 tenancy misread) and we downgrade it. Unlike the CVE-hallucination guard
+/// (which downgrades to the skeptic `Uncertain`), here the engine is CERTAIN none of the
+/// promotion grounds exist, so we downgrade to `Refuted` with a clear reason. A genuine
+/// `Exploitable` that meets ANY precondition passes through untouched.
+fn guard_unjustified_exploitable(
+    verdict: Verdict,
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+) -> Verdict {
+    use crate::engine::graph::attack::Tactic;
+    if !matches!(verdict, Verdict::Exploitable(_)) {
+        return verdict;
+    }
+    let (cves, behaviors) = entry_evidence(graph, entry);
+    // (1) a CVE present in the entry's real evidence (exploited-in-wild / critical).
+    let cve_present = !cves.is_empty();
+    // (2) an alerting runtime signal observed on the entry.
+    let alert_present = behaviors.iter().any(Behavior::is_alert);
+    // (3) any objective whose tactic is a high-severity outcome (host-root, code
+    // execution, persistence, destruction) — a breach regardless of ownership.
+    let high_sev_outcome = objectives.iter().any(|(_, a)| {
+        matches!(
+            a.tactic,
+            Tactic::PrivilegeEscalation | Tactic::Execution | Tactic::Persistence | Tactic::Impact
+        )
+    });
+    // (4) any objective reached BOTH over the network AND in a different tenant —
+    // unauthorized lateral movement (the only tenancy case that is a finding).
+    let cross_ns_network = objectives
+        .iter()
+        .any(|(k, _)| objective_reach(graph, k) == "NETWORK" && ns_marker(entry, k) == "cross-ns");
+    if cve_present || alert_present || high_sev_outcome || cross_ns_network {
+        return verdict;
+    }
+    Verdict::Refuted(
+        "no promotion ground holds (no CVE, no alert, no high-severity outcome, no \
+         [NETWORK] [cross-ns] objective) — likely a tenancy misread of a same-namespace \
+         path; the engine knows tenancy deterministically"
+            .to_string(),
+    )
+}
+
 /// A stable fingerprint of the evidence a verdict depends on — the entry's
 /// exposure, its exploited/critical CVEs, and its runtime behavior. The cross-pass
 /// verdict cache keys on this so an entry is re-judged only when the facts that
@@ -538,10 +590,16 @@ impl Adjudicator for ModelAdjudicator {
     ) -> Verdict {
         let prompt = build_judgment_prompt(entry, objectives, graph);
         match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
-            // Guard against a small model promoting on a CVE it invented (JEF-79): a
-            // fabricated citation can never auto-promote — it is downgraded to skeptic.
+            // Two deterministic backstops on a promotion, in order:
+            //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic);
+            //   - JEF-111: an `Exploitable` meeting NONE of the procedure's four
+            //     deterministic promotion grounds is unjustified (almost always a step-4
+            //     tenancy misread of a same-ns path) → `Refuted`, since the engine is
+            //     certain here. A genuine `Exploitable` passes both untouched.
             Some(reply) => {
-                guard_fabricated_cve(parse_verdict(&reply), &entry_cve_ids(graph, entry))
+                let verdict =
+                    guard_fabricated_cve(parse_verdict(&reply), &entry_cve_ids(graph, entry));
+                guard_unjustified_exploitable(verdict, entry, objectives, graph)
             }
             // Model unavailable → skeptic: do not let an auto-action proceed.
             None => Verdict::Uncertain("model unavailable".to_string()),
@@ -640,6 +698,197 @@ mod tests {
         assert!(matches!(
             guard_fabricated_cve(Verdict::Refuted("own [MOUNTED] secret".into()), &none),
             Verdict::Refuted(_)
+        ));
+    }
+
+    /// JEF-111 tenancy backstop: an `Exploitable` that meets NONE of the procedure's four
+    /// deterministic promotion grounds is unjustified (the granite4:3b-h step-4 tenancy
+    /// misread of a same-ns DB) and is downgraded to `Refuted`; one that meets ANY ground
+    /// — a CVE, a cross-ns NETWORK objective, or a high-severity tactic — is preserved.
+    #[test]
+    fn unjustified_exploitable_downgraded_to_refuted() {
+        use crate::engine::graph::attack::{
+            CREDENTIAL_ACCESS, DATA_FROM_REPOSITORY, ESCAPE_TO_HOST,
+        };
+        use crate::engine::graph::{
+            Edge, Exposure, Grade, Image, Node, Protocol, Relation, SecurityGraph, Trust, Workload,
+        };
+
+        let proof = |relation| Edge {
+            relation,
+            provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+            grade: Grade::Proof,
+        };
+        let workload = |ns: &str, name: &str| {
+            Node::Workload(Workload {
+                namespace: ns.into(),
+                name: name.into(),
+                kind: "Pod".into(),
+                labels: Default::default(),
+                meshed: false,
+                exposure: Exposure::Internet,
+                runtime: Vec::new(),
+                persistent: false,
+            })
+        };
+        // The entry: an internet-facing workload in namespace `app`, no CVE, no alert.
+        let entry_key = NodeKey("workload/app/Pod/web".into());
+
+        // (a) Exploitable reaching its OWN same-ns DB over the network, no CVE/alert, the
+        // objective's tactic is Collection (not high-severity) → NONE of the four grounds
+        // hold → downgraded to Refuted (the observed step-4 tenancy misread).
+        let mut g = SecurityGraph::new();
+        let e = g.upsert_node(workload("app", "web"));
+        let own_db = workload("app", "postgres-0");
+        let own_db_key = own_db.key();
+        let d = g.upsert_node(own_db);
+        g.add_edge(
+            e,
+            d,
+            proof(Relation::Reaches {
+                port: Some(5432),
+                protocol: Protocol::Tcp,
+            }),
+        );
+        let objs = vec![(own_db_key.clone(), DATA_FROM_REPOSITORY)];
+        // Sanity: this objective really is [NETWORK] [same-ns] (the misread case).
+        assert_eq!(objective_reach(&g, &own_db_key), "NETWORK");
+        assert_eq!(ns_marker(&entry_key, &own_db_key), "same-ns");
+        let v = guard_unjustified_exploitable(
+            Verdict::Exploitable("Step 4: lateral movement to another tenant's database".into()),
+            &entry_key,
+            &objs,
+            &g,
+        );
+        assert!(
+            matches!(v, Verdict::Refuted(_)) && !v.promotes(),
+            "no promotion ground holds → downgraded to Refuted, got {v:?}"
+        );
+
+        // (b) Same shape, but the DB lives in a DIFFERENT namespace → [NETWORK] [cross-ns]
+        // → ground (4) holds → Exploitable preserved (genuine lateral movement).
+        let mut g = SecurityGraph::new();
+        let e = g.upsert_node(workload("app", "web"));
+        let other_db = workload("billing", "ledger-db");
+        let other_db_key = other_db.key();
+        let d = g.upsert_node(other_db);
+        g.add_edge(
+            e,
+            d,
+            proof(Relation::Reaches {
+                port: Some(5432),
+                protocol: Protocol::Tcp,
+            }),
+        );
+        assert_eq!(objective_reach(&g, &other_db_key), "NETWORK");
+        assert_eq!(ns_marker(&entry_key, &other_db_key), "cross-ns");
+        let v = guard_unjustified_exploitable(
+            Verdict::Exploitable("Step 4: cross-tenant network reach".into()),
+            &entry_key,
+            &[(other_db_key, DATA_FROM_REPOSITORY)],
+            &g,
+        );
+        assert!(
+            matches!(v, Verdict::Exploitable(_)) && v.promotes(),
+            "a [NETWORK] [cross-ns] objective preserves Exploitable, got {v:?}"
+        );
+
+        // (c) Same same-ns DB (no cross-ns ground), but the entry's image carries a
+        // critical CVE → ground (1) holds → Exploitable preserved.
+        let mut g = SecurityGraph::new();
+        let e = g.upsert_node(workload("app", "web"));
+        let img = Node::Image(Image {
+            digest: "sha256:abc".into(),
+            reference: Some("web:1".into()),
+            trust: Trust::Unknown,
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2021-44228".into(),
+                severity: Severity::Critical,
+                exploited_in_wild: true,
+                ..Default::default()
+            }],
+        });
+        let i = g.upsert_node(img);
+        g.add_edge(e, i, proof(Relation::RunsImage));
+        let own_db = workload("app", "postgres-0");
+        let own_db_key = own_db.key();
+        let d = g.upsert_node(own_db);
+        g.add_edge(
+            e,
+            d,
+            proof(Relation::Reaches {
+                port: Some(5432),
+                protocol: Protocol::Tcp,
+            }),
+        );
+        let v = guard_unjustified_exploitable(
+            Verdict::Exploitable("Step 4: lateral movement (model misread)".into()),
+            &entry_key,
+            &[(own_db_key, DATA_FROM_REPOSITORY)],
+            &g,
+        );
+        assert!(
+            matches!(v, Verdict::Exploitable(_)) && v.promotes(),
+            "a CVE in the entry's evidence preserves Exploitable, got {v:?}"
+        );
+
+        // (d) Same same-ns reach, no CVE, but the objective's tactic is Privilege
+        // Escalation (host escape) → ground (3) holds → Exploitable preserved.
+        let mut g = SecurityGraph::new();
+        let e = g.upsert_node(workload("app", "web"));
+        let host = Node::Host(crate::engine::graph::Host {
+            name: "node-3".into(),
+        });
+        let host_key = host.key();
+        let h = g.upsert_node(host);
+        g.add_edge(
+            e,
+            h,
+            proof(Relation::Reaches {
+                port: None,
+                protocol: Protocol::Tcp,
+            }),
+        );
+        let v = guard_unjustified_exploitable(
+            Verdict::Exploitable("Step 3: escape to host".into()),
+            &entry_key,
+            &[(host_key, ESCAPE_TO_HOST)],
+            &g,
+        );
+        assert!(
+            matches!(v, Verdict::Exploitable(_)) && v.promotes(),
+            "a PrivEsc objective preserves Exploitable, got {v:?}"
+        );
+
+        // (e) Non-Exploitable verdicts are NEVER touched, even with no grounds at all.
+        let g = SecurityGraph::new();
+        let none_objs: Vec<(NodeKey, AttackRef)> = vec![];
+        assert!(matches!(
+            guard_unjustified_exploitable(
+                Verdict::Refuted("own [MOUNTED] secret".into()),
+                &entry_key,
+                &none_objs,
+                &g,
+            ),
+            Verdict::Refuted(_)
+        ));
+        assert!(matches!(
+            guard_unjustified_exploitable(
+                Verdict::Uncertain("model unavailable".into()),
+                &entry_key,
+                &none_objs,
+                &g,
+            ),
+            Verdict::Uncertain(_)
+        ));
+        assert!(matches!(
+            guard_unjustified_exploitable(
+                Verdict::Confirmed,
+                &entry_key,
+                &[(NodeKey("secret/app/s".into()), CREDENTIAL_ACCESS)],
+                &g,
+            ),
+            Verdict::Confirmed
         ));
     }
 
