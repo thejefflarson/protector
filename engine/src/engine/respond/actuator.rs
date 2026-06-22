@@ -36,7 +36,7 @@ use std::collections::HashSet;
 use petgraph::visit::EdgeRef;
 
 use super::{Mitigation, ProposedAction};
-use crate::engine::graph::{Node, Relation, SecurityGraph};
+use crate::engine::graph::{Node, NodeKey, Relation, SecurityGraph};
 use crate::engine::observe::health::{Health, HealthReport};
 
 /// Map an operator-facing enable name to the action class it arms. Only `network` is
@@ -286,9 +286,11 @@ impl Actuator for DryRunActuator {
     }
 }
 
-/// The namespace component of a `workload/<ns>/<kind>/<name>` node key.
-fn workload_namespace(key: &str) -> Option<&str> {
-    key.strip_prefix("workload/")?.split('/').next()
+/// The namespace component of a `workload/<ns>/<kind>/<name>` node key — `None` for any
+/// non-workload key. The key seam (kind discriminant + namespace segment) is owned by
+/// [`NodeKey`]; this is the workload-only wrapper the actuator needs for ANP selectors.
+fn workload_namespace(key: &NodeKey) -> Option<&str> {
+    (key.kind() == "workload").then(|| key.namespace())?
 }
 
 /// A deterministic, DNS-safe object name (`<prefix>-<hash of cut>`) so re-apply is
@@ -330,8 +332,8 @@ pub fn render_deny(mitigation: &Mitigation) -> Option<serde_json::Value> {
     if mitigation.action != ProposedAction::DenyNetworkPath {
         return None;
     }
-    let source_ns = workload_namespace(&mitigation.cut.from.0)?;
-    let target_ns = workload_namespace(&mitigation.cut.to.0)?;
+    let source_ns = workload_namespace(&mitigation.cut.from)?;
+    let target_ns = workload_namespace(&mitigation.cut.to)?;
     Some(serde_json::json!({
         "apiVersion": "policy.networking.k8s.io/v1alpha1",
         "kind": "AdminNetworkPolicy",
@@ -522,7 +524,7 @@ pub fn render_isolation(mitigation: &Mitigation) -> Option<serde_json::Value> {
     if mitigation.action != ProposedAction::DenyNetworkPath {
         return None;
     }
-    let source_ns = workload_namespace(&mitigation.cut.from.0)?;
+    let source_ns = workload_namespace(&mitigation.cut.from)?;
     if mitigation.cut.from_labels.is_empty() {
         return None;
     }
@@ -568,7 +570,7 @@ impl Actuator for IsolationActuator {
     async fn apply(&self, mitigation: &Mitigation) -> Actuation {
         let (Some(manifest), Some(ns)) = (
             render_isolation(mitigation),
-            workload_namespace(&mitigation.cut.from.0),
+            workload_namespace(&mitigation.cut.from),
         ) else {
             tracing::warn!(cut = %cut_label(mitigation), "no isolation NetworkPolicy to apply");
             return Actuation::DryRun;
@@ -599,7 +601,7 @@ impl Actuator for IsolationActuator {
     }
 
     async fn revert(&self, mitigation: &Mitigation) -> Actuation {
-        let Some(ns) = workload_namespace(&mitigation.cut.from.0) else {
+        let Some(ns) = workload_namespace(&mitigation.cut.from) else {
             return Actuation::DryRun;
         };
         let name = object_name("protector-isolate", mitigation);
