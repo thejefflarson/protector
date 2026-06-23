@@ -190,11 +190,11 @@ fn entry_evidence(graph: &SecurityGraph, entry_key: &NodeKey) -> (Vec<String>, V
 
 /// The set of CVE ids in an entry's actual evidence — the ground truth the model's
 /// citations are checked against by [`guard_fabricated_cve`]. The first token of each
-/// `cve_evidence` line is the id (e.g. `CVE-2021-44228 [severity: ...]`).
-fn entry_cve_ids(graph: &SecurityGraph, entry: &NodeKey) -> std::collections::HashSet<String> {
-    entry_evidence(graph, entry)
-        .0
-        .iter()
+/// `cve_evidence` line is the id (e.g. `CVE-2021-44228 [severity: ...]`). Takes the
+/// already-fetched evidence lines (from a single `entry_evidence` call in `judge`)
+/// rather than re-fetching them.
+fn cve_ids_of(cves: &[String]) -> std::collections::HashSet<String> {
+    cves.iter()
         .filter_map(|line| line.split_whitespace().next().map(str::to_string))
         .collect()
 }
@@ -217,6 +217,19 @@ fn extract_cve_ids(text: &str) -> Vec<String> {
     ids
 }
 
+/// Shared gate for the two promotion backstops: both act ONLY on an `Exploitable`
+/// verdict, leaving every other verdict untouched. `check` is handed the model's
+/// `Exploitable` reason and returns `Some(downgrade)` to override the verdict, or
+/// `None` to let it stand. Factors out the "only act on Exploitable" boilerplate so the
+/// two guards differ only in their check (one downgrades to `Uncertain`, the other to
+/// `Refuted`).
+fn guard_exploitable(verdict: Verdict, check: impl FnOnce(&str) -> Option<Verdict>) -> Verdict {
+    match &verdict {
+        Verdict::Exploitable(reason) => check(reason).unwrap_or(verdict),
+        _ => verdict,
+    }
+}
+
 /// Hallucination guard (JEF-79): a small CPU model can copy a CVE id from the prompt's
 /// worked examples onto a workload that has none. If it PROMOTES (`Exploitable`) while
 /// citing a CVE absent from the entry's real evidence, the citation is fabricated — so
@@ -224,19 +237,18 @@ fn extract_cve_ids(text: &str) -> Vec<String> {
 /// the entry is re-judged next pass. A legitimate `Exploitable` via a non-CVE step (host
 /// escape, cross-tenant network) cites no CVE and passes through untouched.
 fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<String>) -> Verdict {
-    if let Verdict::Exploitable(reason) = &verdict {
+    guard_exploitable(verdict, |reason| {
         let fabricated: Vec<String> = extract_cve_ids(reason)
             .into_iter()
             .filter(|c| !real_ids.contains(c))
             .collect();
-        if !fabricated.is_empty() {
-            return Verdict::Uncertain(format!(
+        (!fabricated.is_empty()).then(|| {
+            Verdict::Uncertain(format!(
                 "model cited CVE(s) not in the evidence (possible hallucination): {}",
                 fabricated.join(", ")
-            ));
-        }
-    }
-    verdict
+            ))
+        })
+    })
 }
 
 /// Tenancy backstop (JEF-111): the adjudication PROCEDURE only ever yields
@@ -252,43 +264,45 @@ fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<S
 /// (which downgrades to the skeptic `Uncertain`), here the engine is CERTAIN none of the
 /// promotion grounds exist, so we downgrade to `Refuted` with a clear reason. A genuine
 /// `Exploitable` that meets ANY precondition passes through untouched.
+/// `cve_present`/`alert_present` are the entry's evidence-derived booleans, precomputed
+/// once by `judge` (from the single `entry_evidence` call) rather than re-fetched here.
 fn guard_unjustified_exploitable(
     verdict: Verdict,
+    cve_present: bool,
+    alert_present: bool,
     entry: &NodeKey,
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> Verdict {
     use crate::engine::graph::attack::Tactic;
-    if !matches!(verdict, Verdict::Exploitable(_)) {
-        return verdict;
-    }
-    let (cves, behaviors) = entry_evidence(graph, entry);
-    // (1) a CVE present in the entry's real evidence (exploited-in-wild / critical).
-    let cve_present = !cves.is_empty();
-    // (2) an alerting runtime signal observed on the entry.
-    let alert_present = behaviors.iter().any(Behavior::is_alert);
-    // (3) any objective whose tactic is a high-severity outcome (host-root, code
-    // execution, persistence, destruction) — a breach regardless of ownership.
-    let high_sev_outcome = objectives.iter().any(|(_, a)| {
-        matches!(
-            a.tactic,
-            Tactic::PrivilegeEscalation | Tactic::Execution | Tactic::Persistence | Tactic::Impact
-        )
-    });
-    // (4) any objective reached BOTH over the network AND in a different tenant —
-    // unauthorized lateral movement (the only tenancy case that is a finding).
-    let cross_ns_network = objectives
-        .iter()
-        .any(|(k, _)| objective_reach(graph, k) == "NETWORK" && ns_marker(entry, k) == "cross-ns");
-    if cve_present || alert_present || high_sev_outcome || cross_ns_network {
-        return verdict;
-    }
-    Verdict::Refuted(
-        "no promotion ground holds (no CVE, no alert, no high-severity outcome, no \
-         [NETWORK] [cross-ns] objective) — likely a tenancy misread of a same-namespace \
-         path; the engine knows tenancy deterministically"
-            .to_string(),
-    )
+    guard_exploitable(verdict, |_reason| {
+        // (3) any objective whose tactic is a high-severity outcome (host-root, code
+        // execution, persistence, destruction) — a breach regardless of ownership.
+        let high_sev_outcome = objectives.iter().any(|(_, a)| {
+            matches!(
+                a.tactic,
+                Tactic::PrivilegeEscalation
+                    | Tactic::Execution
+                    | Tactic::Persistence
+                    | Tactic::Impact
+            )
+        });
+        // (4) any objective reached BOTH over the network AND in a different tenant —
+        // unauthorized lateral movement (the only tenancy case that is a finding).
+        let cross_ns_network = objectives.iter().any(|(k, _)| {
+            objective_reach(graph, k) == "NETWORK" && ns_marker(entry, k) == "cross-ns"
+        });
+        // (1) a CVE present and (2) an alerting runtime signal are the precomputed grounds.
+        if cve_present || alert_present || high_sev_outcome || cross_ns_network {
+            return None;
+        }
+        Some(Verdict::Refuted(
+            "no promotion ground holds (no CVE, no alert, no high-severity outcome, no \
+             [NETWORK] [cross-ns] objective) — likely a tenancy misread of a same-namespace \
+             path; the engine knows tenancy deterministically"
+                .to_string(),
+        ))
+    })
 }
 
 /// A stable fingerprint of the evidence a verdict depends on — the entry's
@@ -422,6 +436,20 @@ pub fn build_judgment_prompt(
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> String {
+    let (cves, behaviors) = entry_evidence(graph, entry);
+    build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors)
+}
+
+/// As [`build_judgment_prompt`], but with the entry's evidence already fetched — so
+/// `ModelAdjudicator::judge` runs `entry_evidence` once and shares it with the two
+/// backstops. The rendered prompt is identical to `build_judgment_prompt`'s.
+fn build_judgment_prompt_with(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    cves: &[String],
+    behaviors: &[Behavior],
+) -> String {
     // Each of these lists is capped before going into the prompt: a CVE-heavy image,
     // a broadly-privileged entry reaching hundreds of objectives, or a chatty workload
     // can each bloat the prompt past what a CPU-only model answers in time, so the entry
@@ -429,7 +457,7 @@ pub fn build_judgment_prompt(
     // FULL sets still drive the cache fingerprint (entry_fingerprint), so the cap never
     // changes a verdict. (Behaviors/CVEs are sorted+deduped first; objectives keep their
     // order.)
-    let (mut cves, behaviors) = entry_evidence(graph, entry);
+    let mut cves = cves.to_vec();
 
     let mut behavior_lines: Vec<String> = behaviors.iter().map(Behavior::summary).collect();
     behavior_lines.sort();
@@ -579,7 +607,9 @@ impl Adjudicator for ModelAdjudicator {
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
     ) -> Verdict {
-        let prompt = build_judgment_prompt(entry, objectives, graph);
+        // Fetch the entry's evidence ONCE; both the prompt and the two backstops share it.
+        let (cves, behaviors) = entry_evidence(graph, entry);
+        let prompt = build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors);
         match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
             // Two deterministic backstops on a promotion, in order:
             //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic);
@@ -588,9 +618,18 @@ impl Adjudicator for ModelAdjudicator {
             //     tenancy misread of a same-ns path) → `Refuted`, since the engine is
             //     certain here. A genuine `Exploitable` passes both untouched.
             Some(reply) => {
-                let verdict =
-                    guard_fabricated_cve(parse_verdict(&reply), &entry_cve_ids(graph, entry));
-                guard_unjustified_exploitable(verdict, entry, objectives, graph)
+                let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
+                // (1) a CVE present in the entry's real evidence; (2) an alerting signal.
+                let cve_present = !cves.is_empty();
+                let alert_present = behaviors.iter().any(Behavior::is_alert);
+                guard_unjustified_exploitable(
+                    verdict,
+                    cve_present,
+                    alert_present,
+                    entry,
+                    objectives,
+                    graph,
+                )
             }
             // Model unavailable → skeptic: do not let an auto-action proceed.
             None => Verdict::Uncertain("model unavailable".to_string()),
@@ -610,6 +649,14 @@ mod tests {
     /// The (objective, technique) list for a chain — the shape `judge` now takes.
     fn objectives_of(chain: &ProvenChain) -> Vec<(NodeKey, AttackRef)> {
         vec![(chain.objective.clone(), chain.attack)]
+    }
+
+    /// The `(cve_present, alert_present)` booleans `judge` precomputes from a single
+    /// `entry_evidence` call and threads into [`guard_unjustified_exploitable`]. The
+    /// tests derive them the same way so they exercise the same inputs.
+    fn evidence_grounds(graph: &SecurityGraph, entry: &NodeKey) -> (bool, bool) {
+        let (cves, behaviors) = entry_evidence(graph, entry);
+        (!cves.is_empty(), behaviors.iter().any(Behavior::is_alert))
     }
     use serde_json::json;
     use std::time::SystemTime;
@@ -745,8 +792,11 @@ mod tests {
         // Sanity: this objective really is [NETWORK] [same-ns] (the misread case).
         assert_eq!(objective_reach(&g, &own_db_key), "NETWORK");
         assert_eq!(ns_marker(&entry_key, &own_db_key), "same-ns");
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry_key);
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 4: lateral movement to another tenant's database".into()),
+            cve_present,
+            alert_present,
             &entry_key,
             &objs,
             &g,
@@ -773,8 +823,11 @@ mod tests {
         );
         assert_eq!(objective_reach(&g, &other_db_key), "NETWORK");
         assert_eq!(ns_marker(&entry_key, &other_db_key), "cross-ns");
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry_key);
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 4: cross-tenant network reach".into()),
+            cve_present,
+            alert_present,
             &entry_key,
             &[(other_db_key, DATA_FROM_REPOSITORY)],
             &g,
@@ -812,8 +865,11 @@ mod tests {
                 protocol: Protocol::Tcp,
             }),
         );
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry_key);
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 4: lateral movement (model misread)".into()),
+            cve_present,
+            alert_present,
             &entry_key,
             &[(own_db_key, DATA_FROM_REPOSITORY)],
             &g,
@@ -840,8 +896,11 @@ mod tests {
                 protocol: Protocol::Tcp,
             }),
         );
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry_key);
         let v = guard_unjustified_exploitable(
             Verdict::Exploitable("Step 3: escape to host".into()),
+            cve_present,
+            alert_present,
             &entry_key,
             &[(host_key, ESCAPE_TO_HOST)],
             &g,
@@ -857,6 +916,8 @@ mod tests {
         assert!(matches!(
             guard_unjustified_exploitable(
                 Verdict::Refuted("own [MOUNTED] secret".into()),
+                false,
+                false,
                 &entry_key,
                 &none_objs,
                 &g,
@@ -866,6 +927,8 @@ mod tests {
         assert!(matches!(
             guard_unjustified_exploitable(
                 Verdict::Uncertain("model unavailable".into()),
+                false,
+                false,
                 &entry_key,
                 &none_objs,
                 &g,
@@ -875,6 +938,8 @@ mod tests {
         assert!(matches!(
             guard_unjustified_exploitable(
                 Verdict::Confirmed,
+                false,
+                false,
                 &entry_key,
                 &[(NodeKey("secret/app/s".into()), CREDENTIAL_ACCESS)],
                 &g,

@@ -164,13 +164,10 @@ impl EngineMetrics {
 /// (Falco) is always resolvable; a cgroup-UID attribution (the eBPF agent) resolves only
 /// if a pod with that UID is in the snapshot, exactly as the adapter's `by_uid` lookup
 /// does — an unknown UID (pod gone / not yet observed) is dropped as `unresolved`.
-fn attribution_resolves(attribution: &observe::Attribution, snapshot: &Snapshot) -> bool {
+fn attribution_resolves(attribution: &observe::Attribution, pod_uids: &HashSet<&str>) -> bool {
     match attribution {
         observe::Attribution::ByNamespacedName { .. } => true,
-        observe::Attribution::ByPodUid { pod_uid } => snapshot
-            .pods
-            .iter()
-            .any(|p| p.metadata.uid.as_deref() == Some(pod_uid.as_str())),
+        observe::Attribution::ByPodUid { pod_uid } => pod_uids.contains(pod_uid.as_str()),
     }
 }
 
@@ -270,6 +267,13 @@ impl Engine {
         self.metrics
             .runtime_store
             .record(snapshot.runtime_events.len() as u64, &[]);
+        // The live pod UIDs, built once so the per-event ByPodUid attribution check below
+        // is an O(1) set lookup rather than an O(pods) scan per runtime event.
+        let pod_uids: HashSet<&str> = snapshot
+            .pods
+            .iter()
+            .filter_map(|p| p.metadata.uid.as_deref())
+            .collect();
         for event in &snapshot.runtime_events {
             self.metrics.signals.add(
                 1,
@@ -281,7 +285,7 @@ impl Engine {
             // Mirror the RuntimeAdapter's resolution rule: a namespace/name attribution is
             // always resolvable; a cgroup-UID one resolves iff a pod with that UID is in
             // the snapshot (the adapter drops the rest as unknown UIDs).
-            let outcome = if attribution_resolves(&event.attribution, snapshot) {
+            let outcome = if attribution_resolves(&event.attribution, &pod_uids) {
                 "resolved"
             } else {
                 "unresolved"
@@ -341,18 +345,18 @@ impl Engine {
 
         // Snapshot gauges for this pass.
         self.metrics.chains.record(chains.len() as u64, &[]);
-        self.metrics.breach_paths.record(
-            chains.iter().filter(|c| c.is_breach_relevant()).count() as u64,
-            &[],
-        );
-        // Corroborations fired this pass (JEF-100): breach-relevant chains the proof layer
-        // marked `corroborated` (a live runtime signal completing the action bar, ADR-0009).
-        // In shadow this counts "would this have promoted?" without changing any behavior —
+        // One pass over the chains for both breach-relevant counts: the breach-path gauge
+        // and the corroborations metric (JEF-100) — the latter the subset also marked
+        // `corroborated` (a live runtime signal completing the action bar, ADR-0009). In
+        // shadow this counts "would this have promoted?" without changing any behavior —
         // promotion still stays gated behind `judgement_enabled()` below.
-        let corroborations = chains
+        let (breach_paths, corroborations) = chains
             .iter()
-            .filter(|c| c.is_breach_relevant() && c.corroborated)
-            .count() as u64;
+            .filter(|c| c.is_breach_relevant())
+            .fold((0u64, 0u64), |(breach, corr), c| {
+                (breach + 1, corr + u64::from(c.corroborated))
+            });
+        self.metrics.breach_paths.record(breach_paths, &[]);
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
         }
@@ -1096,24 +1100,34 @@ mod tests {
             pods: vec![pod],
             ..Default::default()
         };
+        // The live pod-UID set the metric loop builds once per pass.
+        let uids = |snap: &Snapshot| -> HashSet<String> {
+            snap.pods
+                .iter()
+                .filter_map(|p| p.metadata.uid.clone())
+                .collect()
+        };
+        let present = uids(&snapshot);
+        let present: HashSet<&str> = present.iter().map(String::as_str).collect();
+        let empty: HashSet<&str> = HashSet::new();
 
         // namespace/name (Falco) always resolves, even against an empty snapshot.
         assert!(attribution_resolves(
             &Attribution::by_namespaced_name("app", "web"),
-            &snapshot
+            &present
         ));
         assert!(attribution_resolves(
             &Attribution::by_namespaced_name("ghost", "nobody"),
-            &Snapshot::default()
+            &empty
         ));
         // A cgroup UID resolves iff a pod with that UID is present.
         assert!(attribution_resolves(
             &Attribution::by_pod_uid("uid-1"),
-            &snapshot
+            &present
         ));
         assert!(!attribution_resolves(
             &Attribution::by_pod_uid("uid-unknown"),
-            &snapshot
+            &present
         ));
     }
 

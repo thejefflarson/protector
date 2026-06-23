@@ -273,18 +273,26 @@ fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// foothold (`None`) only the objective side applies, so an assume-breach chain is
 /// unaffected. This stays shadow-gated like the rest: it only sets `corroborated`.
 fn corroborated_for(
-    graph: &SecurityGraph,
-    entry: NodeIndex,
+    runtime: &[crate::engine::graph::RuntimeSignal],
     attack: &AttackRef,
     foothold: Option<&AttackRef>,
 ) -> bool {
-    matches!(
-        graph.inner().node_weight(entry),
-        Some(Node::Workload(w)) if w.runtime.iter().any(|s| {
-            corroborates(&s.behavior, attack)
-                || foothold.is_some_and(|f| corroborates(&s.behavior, f))
-        })
-    )
+    runtime.iter().any(|s| {
+        corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
+    })
+}
+
+/// The entry workload's runtime signals (empty for a non-workload node), resolved once
+/// per entry so [`corroborated_for`] doesn't re-look-up the constant entry node on every
+/// objective in the per-objective loop.
+fn entry_runtime(
+    graph: &SecurityGraph,
+    entry: NodeIndex,
+) -> &[crate::engine::graph::RuntimeSignal] {
+    match graph.inner().node_weight(entry) {
+        Some(Node::Workload(w)) => &w.runtime,
+        _ => &[],
+    }
 }
 
 /// BFS over proof-grade movement edges from `start`. Returns, for every reachable
@@ -460,7 +468,7 @@ pub fn confirm(
         objective,
         attack,
         foothold,
-        corroborated: corroborated_for(graph, entry_idx, &attack, foothold.as_ref()),
+        corroborated: corroborated_for(entry_runtime(graph, entry_idx), &attack, foothold.as_ref()),
         adjudicated: true,
         promoted: false,
         exposed_entry: entry_exposed(graph, entry_idx),
@@ -502,6 +510,10 @@ pub fn prove_with(
         let tree = movement_tree(graph, entry, None);
         let foothold = entry_foothold(graph, entry);
         let exposed_entry = entry_exposed(graph, entry);
+        // The entry node is constant across objectives, so resolve its runtime signals
+        // once here rather than re-looking-up the node inside `corroborated_for` per
+        // objective.
+        let runtime = entry_runtime(graph, entry);
         for &(objective, attack) in &objectives {
             if objective == entry || !tree.contains_key(&objective) {
                 continue;
@@ -510,7 +522,7 @@ pub fn prove_with(
             // — plus the entry's foothold tactic, when it has one (JEF-77), so a vuln-matched
             // library load on the front door corroborates the foothold even though no
             // objective is ever tagged INITIAL_ACCESS.
-            let corroborated = corroborated_for(graph, entry, &attack, foothold.as_ref());
+            let corroborated = corroborated_for(runtime, &attack, foothold.as_ref());
             let steps = path_steps(&tree, entry, objective);
             let links = steps
                 .iter()
