@@ -251,21 +251,56 @@ fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<S
     })
 }
 
-/// Tenancy backstop (JEF-111): the adjudication PROCEDURE only ever yields
-/// `exploitable` via one of four deterministic preconditions — (1) a CVE present
-/// (loaded-at-runtime/unknown), (2) an Alert in the runtime behavior, (3) an objective
-/// whose ATT&CK tactic is PrivilegeEscalation/Execution/Persistence/Impact, or (4) a
-/// `[NETWORK]` objective tagged `[cross-ns]`. The engine knows all four deterministically.
-/// granite4:3b-h was observed promoting `Exploitable` citing "lateral movement to another
-/// tenant's database" for a workload reaching its OWN same-namespace database — it ignored
-/// the `[same-ns]` marker and misread tenancy. So if the model returns `Exploitable` while
-/// NONE of the four preconditions actually hold, the verdict is unjustified (almost always
-/// that step-4 tenancy misread) and we downgrade it. Unlike the CVE-hallucination guard
-/// (which downgrades to the skeptic `Uncertain`), here the engine is CERTAIN none of the
-/// promotion grounds exist, so we downgrade to `Refuted` with a clear reason. A genuine
-/// `Exploitable` that meets ANY precondition passes through untouched.
-/// `cve_present`/`alert_present` are the entry's evidence-derived booleans, precomputed
-/// once by `judge` (from the single `entry_evidence` call) rather than re-fetched here.
+/// The deterministic promotion grounds (JEF-111/JEF-112): the adjudication PROCEDURE only
+/// ever yields `exploitable` via one of four preconditions — (1) a CVE present
+/// (loaded-at-runtime/unknown), (2) an Alert in the runtime behavior, (3) an objective whose
+/// ATT&CK tactic is PrivilegeEscalation/Execution/Persistence/Impact, or (4) a `[NETWORK]`
+/// objective tagged `[cross-ns]`. All four are a pure, deterministic property of
+/// `(entry, objectives, graph)` plus the entry's evidence — the engine knows them BEFORE the
+/// model is ever asked. `judge` uses this BOTH as a pre-call filter (no ground ⇒ skip the
+/// CPU-bound model call and refute directly) AND, defensively, behind the post-call
+/// [`guard_unjustified_exploitable`]. `cve_present`/`alert_present` are the entry's
+/// evidence-derived booleans, computed once by `judge` from the single `entry_evidence` call.
+fn any_promotion_ground(
+    cve_present: bool,
+    alert_present: bool,
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    // (3) any objective whose tactic is a high-severity outcome (host-root, code
+    // execution, persistence, destruction) — a breach regardless of ownership.
+    let high_sev_outcome = objectives.iter().any(|(_, a)| {
+        matches!(
+            a.tactic,
+            Tactic::PrivilegeEscalation | Tactic::Execution | Tactic::Persistence | Tactic::Impact
+        )
+    });
+    // (4) any objective reached BOTH over the network AND in a different tenant —
+    // unauthorized lateral movement (the only tenancy case that is a finding).
+    let cross_ns_network = objectives
+        .iter()
+        .any(|(k, _)| objective_reach(graph, k) == "NETWORK" && ns_marker(entry, k) == "cross-ns");
+    // (1) a CVE present and (2) an alerting runtime signal are the precomputed grounds.
+    cve_present || alert_present || high_sev_outcome || cross_ns_network
+}
+
+/// The deterministic reason recorded when no promotion ground holds. Shared by the pre-call
+/// filter (JEF-112) and the post-call backstop (JEF-111) so the recorded text is identical
+/// whichever path refutes.
+const NO_PROMOTION_GROUND_REASON: &str = "no promotion ground holds (no CVE, no alert, no high-severity outcome, no \
+     [NETWORK] [cross-ns] objective) — likely a tenancy misread of a same-namespace \
+     path; the engine knows tenancy deterministically";
+
+/// Tenancy backstop (JEF-111): defense-in-depth behind the JEF-112 pre-call filter. The
+/// model is only asked at all when [`any_promotion_ground`] already holds, so an
+/// `Exploitable` reply should always have a ground — but should that ever not be the case,
+/// the verdict is unjustified (almost always a step-4 tenancy misread of a same-namespace
+/// path) and is downgraded. Unlike the CVE-hallucination guard (which downgrades to the
+/// skeptic `Uncertain`), here the engine is CERTAIN none of the promotion grounds exist, so
+/// we downgrade to `Refuted` with a clear reason. A genuine `Exploitable` that meets ANY
+/// precondition passes through untouched.
 fn guard_unjustified_exploitable(
     verdict: Verdict,
     cve_present: bool,
@@ -274,34 +309,11 @@ fn guard_unjustified_exploitable(
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> Verdict {
-    use crate::engine::graph::attack::Tactic;
     guard_exploitable(verdict, |_reason| {
-        // (3) any objective whose tactic is a high-severity outcome (host-root, code
-        // execution, persistence, destruction) — a breach regardless of ownership.
-        let high_sev_outcome = objectives.iter().any(|(_, a)| {
-            matches!(
-                a.tactic,
-                Tactic::PrivilegeEscalation
-                    | Tactic::Execution
-                    | Tactic::Persistence
-                    | Tactic::Impact
-            )
-        });
-        // (4) any objective reached BOTH over the network AND in a different tenant —
-        // unauthorized lateral movement (the only tenancy case that is a finding).
-        let cross_ns_network = objectives.iter().any(|(k, _)| {
-            objective_reach(graph, k) == "NETWORK" && ns_marker(entry, k) == "cross-ns"
-        });
-        // (1) a CVE present and (2) an alerting runtime signal are the precomputed grounds.
-        if cve_present || alert_present || high_sev_outcome || cross_ns_network {
+        if any_promotion_ground(cve_present, alert_present, entry, objectives, graph) {
             return None;
         }
-        Some(Verdict::Refuted(
-            "no promotion ground holds (no CVE, no alert, no high-severity outcome, no \
-             [NETWORK] [cross-ns] objective) — likely a tenancy misread of a same-namespace \
-             path; the engine knows tenancy deterministically"
-                .to_string(),
-        ))
+        Some(Verdict::Refuted(NO_PROMOTION_GROUND_REASON.to_string()))
     })
 }
 
@@ -607,21 +619,36 @@ impl Adjudicator for ModelAdjudicator {
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
     ) -> Verdict {
-        // Fetch the entry's evidence ONCE; both the prompt and the two backstops share it.
+        // Fetch the entry's evidence ONCE; the pre-call filter, the prompt, and the
+        // backstops all share it.
         let (cves, behaviors) = entry_evidence(graph, entry);
+        // (1) a CVE present in the entry's real evidence; (2) an alerting runtime signal.
+        let cve_present = !cves.is_empty();
+        let alert_present = behaviors.iter().any(Behavior::is_alert);
+
+        // JEF-112 pre-call filter: the four promotion grounds are a pure, deterministic
+        // property of (entry, objectives, graph) knowable BEFORE the model is asked. On an
+        // entry where NONE hold, no model reply could legitimately promote — the post-call
+        // backstop would downgrade any `Exploitable` to `Refuted` anyway — so refute
+        // directly and SKIP the CPU-bound (minutes-long on a Pi) model call entirely. This
+        // is outcome-equivalent to the post-call guard for zero-ground entries.
+        if !any_promotion_ground(cve_present, alert_present, entry, objectives, graph) {
+            return Verdict::Refuted(NO_PROMOTION_GROUND_REASON.to_string());
+        }
+
         let prompt = build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors);
         match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
             // Two deterministic backstops on a promotion, in order:
-            //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic);
-            //   - JEF-111: an `Exploitable` meeting NONE of the procedure's four
-            //     deterministic promotion grounds is unjustified (almost always a step-4
-            //     tenancy misread of a same-ns path) → `Refuted`, since the engine is
-            //     certain here. A genuine `Exploitable` passes both untouched.
+            //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic); a
+            //     model can still fabricate a CVE even when another ground holds, so this
+            //     guard is needed even behind the JEF-112 pre-call filter;
+            //   - JEF-111: defense-in-depth — an `Exploitable` meeting NONE of the
+            //     procedure's four deterministic promotion grounds is unjustified → `Refuted`.
+            //     The pre-call filter already refuses to call the model in that case, so this
+            //     should never fire, but it is kept as a backstop. A genuine `Exploitable`
+            //     passes both untouched.
             Some(reply) => {
                 let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
-                // (1) a CVE present in the entry's real evidence; (2) an alerting signal.
-                let cve_present = !cves.is_empty();
-                let alert_present = behaviors.iter().any(Behavior::is_alert);
                 guard_unjustified_exploitable(
                     verdict,
                     cve_present,
@@ -1247,6 +1274,108 @@ mod tests {
                 .judge(&chain.entry, &objectives_of(&chain), &graph)
                 .await,
             Verdict::Confirmed
+        );
+    }
+
+    /// Build a graph with one internet-facing entry `workload/<ns>/Pod/web` that reaches a
+    /// single database objective, and return `(graph, entry_key, objectives)`. No image, so
+    /// no CVE; no runtime events, so no alert — the only possible ground is the objective's
+    /// tenancy/tactic. `db_ns`/`db_name` and `attack` choose which ground (if any) holds.
+    fn entry_reaching_db(
+        entry_ns: &str,
+        db_ns: &str,
+        db_name: &str,
+        attack: AttackRef,
+    ) -> (SecurityGraph, NodeKey, Vec<(NodeKey, AttackRef)>) {
+        use crate::engine::graph::{
+            Edge, Exposure, Grade, Node, Protocol, Relation, SecurityGraph, Workload,
+        };
+        let proof = |relation| Edge {
+            relation,
+            provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+            grade: Grade::Proof,
+        };
+        let workload = |ns: &str, name: &str| {
+            Node::Workload(Workload {
+                namespace: ns.into(),
+                name: name.into(),
+                kind: "Pod".into(),
+                labels: Default::default(),
+                meshed: false,
+                exposure: Exposure::Internet,
+                runtime: Vec::new(),
+                persistent: false,
+            })
+        };
+        let mut g = SecurityGraph::new();
+        let entry = workload(entry_ns, "web");
+        let entry_key = entry.key();
+        let e = g.upsert_node(entry);
+        let db = workload(db_ns, db_name);
+        let db_key = db.key();
+        let d = g.upsert_node(db);
+        g.add_edge(
+            e,
+            d,
+            proof(Relation::Reaches {
+                port: Some(5432),
+                protocol: Protocol::Tcp,
+            }),
+        );
+        (g, entry_key, vec![(db_key, attack)])
+    }
+
+    /// JEF-112 pre-call filter: on a zero-promotion-ground entry, `judge` must return
+    /// `Refuted` WITHOUT calling the model. We point the adjudicator at an unroutable
+    /// endpoint: if the model were called, `chat` would fail and `judge` would return
+    /// `Uncertain("model unavailable")`. A deterministic `Refuted` therefore proves the
+    /// model call was skipped (the outcome is the same `Refuted` the post-call guard
+    /// produced before — outcome-equivalent).
+    #[tokio::test]
+    async fn zero_ground_entry_refutes_without_calling_the_model() {
+        use crate::engine::graph::attack::DATA_FROM_REPOSITORY;
+        // Same-namespace DB over the network, Collection tactic: no CVE, no alert, no
+        // high-severity outcome, no [cross-ns] reach — NONE of the four grounds hold.
+        let (g, entry, objs) = entry_reaching_db("app", "app", "postgres-0", DATA_FROM_REPOSITORY);
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry);
+        assert!(
+            !any_promotion_ground(cve_present, alert_present, &entry, &objs, &g),
+            "test fixture must be a genuine zero-ground entry"
+        );
+
+        // An endpoint that can never answer; a call would yield Uncertain, not Refuted.
+        let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none");
+        let verdict = adjudicator.judge(&entry, &objs, &g).await;
+        assert!(
+            matches!(verdict, Verdict::Refuted(_)) && !verdict.promotes(),
+            "zero-ground entry must be Refuted deterministically (model skipped), got {verdict:?}"
+        );
+    }
+
+    /// JEF-112: when a promotion ground DOES hold, behavior is unchanged — `judge` still
+    /// calls the model. With the model unreachable, that call fails and `judge` returns the
+    /// skeptic `Uncertain("model unavailable")` — which is only reachable AFTER the model
+    /// call, so it proves the pre-filter did NOT short-circuit (a zero-ground entry would
+    /// have returned `Refuted` instead).
+    #[tokio::test]
+    async fn ground_holding_entry_still_calls_the_model() {
+        use crate::engine::graph::attack::DATA_FROM_REPOSITORY;
+        // A different-namespace DB over the network → [NETWORK] [cross-ns] → ground (4)
+        // holds, so the model IS asked.
+        let (g, entry, objs) =
+            entry_reaching_db("app", "billing", "ledger-db", DATA_FROM_REPOSITORY);
+        let (cve_present, alert_present) = evidence_grounds(&g, &entry);
+        assert!(
+            any_promotion_ground(cve_present, alert_present, &entry, &objs, &g),
+            "test fixture must hold a promotion ground (cross-ns network)"
+        );
+
+        let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none");
+        let verdict = adjudicator.judge(&entry, &objs, &g).await;
+        assert_eq!(
+            verdict,
+            Verdict::Uncertain("model unavailable".to_string()),
+            "a ground-holding entry must reach (and depend on) the model call"
         );
     }
 
