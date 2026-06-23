@@ -214,8 +214,16 @@ async fn main() -> Result<()> {
         // Empty = none (easy mode — proposals only). The subtractive classes (rbac, mount,
         // identity) and irreversible `escape` are proposal-only and not enableable here.
         let enabled = env_or("PROTECTOR_ENGINE_ENABLE", "");
+        // Per-namespace actuation allowlist (JEF-104, ADR-0009/0014 "one reversible
+        // class, watch, widen"). Empty (the default) = unscoped: every namespace is
+        // eligible, preserving current behavior. Non-empty confines the first live cut
+        // to one low-blast-radius namespace — a cut targeting any other namespace is
+        // held as a proposal even when its class is enabled. Mirrors the webhook's
+        // PROTECTOR_ENFORCE_NAMESPACES idiom.
+        let enforce_namespaces = env_set("PROTECTOR_ENGINE_ENFORCE_NAMESPACES", "");
         let active =
-            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()));
+            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()))
+                .enforce_namespaces(enforce_namespaces);
         // Falco ingest endpoint (falcosidekick POSTs alerts here) for the
         // RuntimeEvidence "corroborated-now" signal. Unset = no runtime feed.
         let falco_addr = env::var("PROTECTOR_FALCO_ADDR")

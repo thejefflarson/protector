@@ -63,6 +63,14 @@ pub struct EnabledActions {
     /// internet-exposed chain to auto-eligible. Separate from an action class — it
     /// gates promotion, not the cut; the cut still needs its own class (`network`).
     judgement: bool,
+    /// Per-namespace actuation allowlist (`PROTECTOR_ENGINE_ENFORCE_NAMESPACES`).
+    /// Empty (the default) = unscoped: every namespace is eligible, preserving the
+    /// historical behavior. Non-empty = confine the first live cut to these
+    /// namespaces (ADR-0009/0014 "one reversible class, watch, widen") — a cut that
+    /// would write into any *other* namespace is held as a proposal even when its
+    /// class is enabled and corroborated. Mirrors the webhook's
+    /// `PROTECTOR_ENFORCE_NAMESPACES` allowlist idiom.
+    enforce_namespaces: HashSet<String>,
 }
 
 impl EnabledActions {
@@ -81,6 +89,31 @@ impl EnabledActions {
     pub fn enable_judgement(mut self) -> Self {
         self.judgement = true;
         self
+    }
+
+    /// Scope live actuation to a namespace allowlist (builder-style). An empty list
+    /// leaves actuation unscoped (every namespace eligible), matching the default.
+    pub fn enforce_namespaces(mut self, namespaces: impl IntoIterator<Item = String>) -> Self {
+        self.enforce_namespaces = namespaces.into_iter().collect();
+        self
+    }
+
+    /// Whether `mitigation`'s cut is within the actuation namespace allowlist. An
+    /// empty allowlist is unscoped (always eligible) — the historical behavior. When
+    /// the list is non-empty, **every** workload endpoint the cut would write into
+    /// (source and target) must be listed: the live actuators write an
+    /// `AdminNetworkPolicy`/`NetworkPolicy` selecting the target's and the source's
+    /// namespaces, so an out-of-scope endpoint on either side would place an object in
+    /// an unallowed namespace. Non-workload endpoints carry no namespace to scope on
+    /// and so don't constrain (non-network cuts are forbidden upstream anyway).
+    pub fn namespace_in_scope(&self, mitigation: &Mitigation) -> bool {
+        if self.enforce_namespaces.is_empty() {
+            return true;
+        }
+        [&mitigation.cut.from, &mitigation.cut.to]
+            .iter()
+            .filter_map(|key| workload_namespace(key))
+            .all(|ns| self.enforce_namespaces.contains(ns))
     }
 
     /// Build from operator-facing class names (e.g. `["network", "judgement"]`).
@@ -213,6 +246,13 @@ pub fn decide(mitigation: &Mitigation, active: &EnabledActions, blast: &BlastRad
     }
     if !active.is_enabled(mitigation.action) {
         return Decision::Propose("action class not enabled".to_string());
+    }
+    if !active.namespace_in_scope(mitigation) {
+        return Decision::Propose(
+            "cut's namespace is outside the engine actuation allowlist \
+             (PROTECTOR_ENGINE_ENFORCE_NAMESPACES); needs approval"
+                .to_string(),
+        );
     }
     Decision::AutoApply
 }
@@ -905,6 +945,75 @@ mod tests {
             decide(&net(), &EnabledActions::none(), &BlastRadius::default()),
             Decision::Propose(_)
         ));
+    }
+
+    #[test]
+    fn decide_scopes_auto_apply_to_the_namespace_allowlist() {
+        // JEF-104: an enabled + corroborated + collateral-free network cut auto-applies
+        // only when its namespaces are in PROTECTOR_ENGINE_ENFORCE_NAMESPACES. Cut runs
+        // app -> data (both workload endpoints carry a namespace).
+        let net = || Mitigation {
+            justifications: vec![corroborated()],
+            ..mitigation(
+                "workload/app/Pod/web",
+                "reaches/Tcp/5432",
+                "workload/data/Pod/db",
+                ProposedAction::DenyNetworkPath,
+            )
+        };
+        let enabled = EnabledActions::none().enable(ProposedAction::DenyNetworkPath);
+
+        // Empty allowlist (the default) ⇒ unscoped, every namespace eligible ⇒ apply.
+        assert_eq!(
+            decide(&net(), &enabled, &BlastRadius::default()),
+            Decision::AutoApply
+        );
+
+        // Both endpoints' namespaces listed ⇒ in scope ⇒ apply.
+        let in_scope = enabled
+            .clone()
+            .enforce_namespaces(["app".to_string(), "data".to_string()]);
+        assert_eq!(
+            decide(&net(), &in_scope, &BlastRadius::default()),
+            Decision::AutoApply
+        );
+
+        // Allowlist covers only the source, not the target ⇒ out of scope ⇒ propose
+        // (the deny would write an ANP selecting the unlisted `data` namespace).
+        let partial = enabled.clone().enforce_namespaces(["app".to_string()]);
+        assert!(matches!(
+            decide(&net(), &partial, &BlastRadius::default()),
+            Decision::Propose(_)
+        ));
+
+        // A disjoint allowlist ⇒ out of scope ⇒ propose.
+        let other = enabled.clone().enforce_namespaces(["other".to_string()]);
+        assert!(matches!(
+            decide(&net(), &other, &BlastRadius::default()),
+            Decision::Propose(_)
+        ));
+    }
+
+    #[test]
+    fn namespace_in_scope_is_unscoped_when_allowlist_empty() {
+        // The gate is purely additive: with no allowlist, every cut is in scope.
+        let m = mitigation(
+            "workload/app/Pod/web",
+            "reaches/Tcp/5432",
+            "workload/data/Pod/db",
+            ProposedAction::DenyNetworkPath,
+        );
+        assert!(EnabledActions::none().namespace_in_scope(&m));
+        assert!(
+            EnabledActions::none()
+                .enforce_namespaces(["app".to_string(), "data".to_string()])
+                .namespace_in_scope(&m)
+        );
+        assert!(
+            !EnabledActions::none()
+                .enforce_namespaces(["app".to_string()])
+                .namespace_in_scope(&m)
+        );
     }
 
     #[test]
