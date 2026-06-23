@@ -22,5 +22,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0012](0012-exposure-observed-or-declared.md) | Exposure is observed where possible, declared (annotation) where it can't be — tunnels | Accepted |
 | [0013](0013-proof-winnows-model-decides.md) | Proof winnows the search space; the model makes the exploitability call (positive gate + breach-relevance) | Accepted |
 | [0014](0014-behavioral-telemetry-ebpf.md) | First-party behavioral telemetry via eBPF, behind a tool-agnostic port (potential vs actual) | Accepted |
+| [0015](0015-advisory-evidence-egress.md) | Advisory evidence is mounted-snapshot-only (zero egress); structurally extracted + capped for injection safety | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.

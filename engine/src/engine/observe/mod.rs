@@ -7,6 +7,7 @@
 //! source of truth, so it is the honest v0.
 
 pub mod adapter;
+pub mod advisory;
 pub mod exploit_intel;
 pub mod health;
 pub mod linkerd;
