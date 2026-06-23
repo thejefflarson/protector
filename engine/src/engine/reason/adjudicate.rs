@@ -1285,5 +1285,25 @@ mod tests {
             (false, false) => "INCOHERENT",
         };
         eprintln!("[{model}] analyst competence: {verdict}");
+
+        // Calibration GATE (JEF-109). When this gated test is run against a candidate
+        // model as the pre-swap check (see docs/model-calibration.md), the two anchor
+        // cases are hard requirements, not just a classification print: a model that
+        // fails either is not allowed in prod. (a) The log4shell chain — a critical,
+        // exploited-in-wild CVE loaded at runtime — MUST promote (`Exploitable`); a model
+        // that won't act on the textbook KEV case is useless for the speculative lane.
+        assert!(
+            matches!(toxic_verdict, Verdict::Exploitable(_)),
+            "calibration gate: a critical KEV CVE (log4shell) loaded at runtime must be \
+             Exploitable, got {toxic_verdict:?} from {model}"
+        );
+        // (b) The same chain WITHOUT a CVE or runtime evidence — only an own-namespace
+        // [MOUNTED] secret — MUST refute; a model that promotes here is over-eager and
+        // would manufacture unevidenced cuts.
+        assert!(
+            matches!(bare_verdict, Verdict::Refuted(_)),
+            "calibration gate: an unevidenced own-app [MOUNTED] secret must be Refuted, \
+             got {bare_verdict:?} from {model}"
+        );
     }
 }
