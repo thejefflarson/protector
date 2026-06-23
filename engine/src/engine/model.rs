@@ -39,8 +39,11 @@ fn timeout_only_client(timeout: u64) -> reqwest::Result<reqwest::Client> {
 /// timeouts — that would reintroduce the exact unbounded stall this module exists to
 /// prevent (a hung Ollama blocking a judging pass indefinitely). Instead we retry with a
 /// minimal builder that still carries the configured total `timeout`, so the fallback is
-/// itself bounded. Either fallback is loud: a `tracing::warn!` plus a
+/// itself bounded. That fallback is loud: a `tracing::warn!` plus a
 /// `protector.engine.model_client_fallback` counter so the path is observable in metrics.
+/// If even the timeout-only builder fails, reqwest cannot construct any client at all, so
+/// rather than degrade to an unbounded client we panic — there is no safe bounded client
+/// to return, and an unbounded one would reintroduce the stall this module bounds against.
 pub fn client() -> reqwest::Client {
     let timeout = timeout_secs();
     reqwest::Client::builder()
@@ -54,11 +57,18 @@ pub fn client() -> reqwest::Client {
             tracing::warn!(%error, "model client builder failed; retrying with a timeout-only client");
             record_fallback();
             timeout_only_client(timeout).unwrap_or_else(|error| {
-                // Even the minimal builder failed: `Client::new()` has NO timeouts, the
-                // exact stall we bound against, so this must be loud too.
-                tracing::warn!(%error, "timeout-only model client builder also failed; using a default client WITHOUT timeouts");
+                // Even the minimal timeout-only builder failed — reqwest cannot
+                // construct ANY client (TLS backend / runtime fundamentally broken).
+                // We must NOT degrade to an unbounded default reqwest client here:
+                // that would reintroduce the exact unbounded stall this module exists to
+                // prevent (a hung Ollama blocking a judging pass indefinitely). There is
+                // no safe bounded client to hand back, so fail loudly rather than ship a
+                // client that can stall the engine loop forever.
                 record_fallback();
-                reqwest::Client::new()
+                panic!(
+                    "model client builder failed even with a timeout-only builder \
+                     ({error}); refusing to fall back to an unbounded client"
+                );
             })
         })
 }
@@ -93,6 +103,62 @@ pub async fn chat(
     json["choices"][0]["message"]["content"]
         .as_str()
         .map(str::to_string)
+}
+
+/// Default keep-warm interval (seconds). Ollama unloads an idle model after
+/// `OLLAMA_KEEP_ALIVE` (5 minutes by default), so a ping every 4 minutes keeps the
+/// model resident with margin to spare — that's what stops the first judging pass
+/// after an engine restart from being glacial (JEF-63). Override with
+/// `PROTECTOR_ENGINE_KEEPWARM_SECS`; `0` disables keep-warm entirely.
+pub const DEFAULT_KEEPWARM_SECS: u64 = 240;
+
+/// How long Ollama should hold the model resident after a keep-warm ping, sent as the
+/// `keep_alive` field (Ollama-specific; a strict OpenAI gateway simply ignores the
+/// extra field). Chosen comfortably longer than [`DEFAULT_KEEPWARM_SECS`] so the
+/// residency window never lapses between pings even if one is delayed.
+const KEEPWARM_RESIDENCY_SECS: u64 = 600;
+
+/// The configured keep-warm interval, or `None` when keep-warm is disabled (the env
+/// var is `0`). Reads `PROTECTOR_ENGINE_KEEPWARM_SECS`, defaulting to
+/// [`DEFAULT_KEEPWARM_SECS`]; an unparseable value falls back to the default.
+pub fn keepwarm_interval() -> Option<Duration> {
+    parse_keepwarm_interval(
+        std::env::var("PROTECTOR_ENGINE_KEEPWARM_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure interval-gating decision, split out from [`keepwarm_interval`] so it's testable
+/// without touching process-global env: `raw` is the raw `PROTECTOR_ENGINE_KEEPWARM_SECS`
+/// value (`None` when unset). Unset or unparseable → [`DEFAULT_KEEPWARM_SECS`]; `0`
+/// disables keep-warm (`None`); any positive value is that many seconds.
+fn parse_keepwarm_interval(raw: Option<&str>) -> Option<Duration> {
+    let secs = raw
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(DEFAULT_KEEPWARM_SECS);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Issue a single best-effort keep-warm ping: a minimal, near-no-op chat that asks the
+/// endpoint to load (or keep) the model resident without doing real judging work. The
+/// output is capped to one token (the discarded completion is irrelevant — the point is
+/// the resident weights), and Ollama is asked via `keep_alive` to hold the model in
+/// memory for [`KEEPWARM_RESIDENCY_SECS`]. Returns `true` if the endpoint answered (the
+/// model is warm), `false` on any transport/status error — callers treat this as
+/// best-effort and never block on it. Does NOT touch verdicts or actuation.
+pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) -> bool {
+    let body = json!({
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 1,
+        "keep_alive": KEEPWARM_RESIDENCY_SECS,
+        "messages": [{ "role": "user", "content": "ping" }]
+    });
+    matches!(
+        client.post(endpoint).json(&body).send().await,
+        Ok(response) if response.status().is_success()
+    )
 }
 
 #[cfg(test)]
@@ -139,5 +205,68 @@ mod tests {
     fn client_constructs_and_fallback_counter_is_safe() {
         let _ = client();
         record_fallback();
+    }
+
+    #[test]
+    fn keepwarm_unset_uses_the_default_interval() {
+        assert_eq!(
+            parse_keepwarm_interval(None),
+            Some(Duration::from_secs(DEFAULT_KEEPWARM_SECS)),
+            "an unset PROTECTOR_ENGINE_KEEPWARM_SECS must fall back to the default"
+        );
+    }
+
+    #[test]
+    fn keepwarm_zero_disables() {
+        assert_eq!(
+            parse_keepwarm_interval(Some("0")),
+            None,
+            "PROTECTOR_ENGINE_KEEPWARM_SECS=0 must disable keep-warm"
+        );
+        assert_eq!(
+            parse_keepwarm_interval(Some("  0  ")),
+            None,
+            "surrounding whitespace must not defeat the disable sentinel"
+        );
+    }
+
+    #[test]
+    fn keepwarm_positive_is_that_many_seconds() {
+        assert_eq!(
+            parse_keepwarm_interval(Some("90")),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            parse_keepwarm_interval(Some(" 90 ")),
+            Some(Duration::from_secs(90)),
+            "trimmed values must parse"
+        );
+    }
+
+    #[test]
+    fn keepwarm_unparseable_falls_back_to_the_default() {
+        assert_eq!(
+            parse_keepwarm_interval(Some("not-a-number")),
+            Some(Duration::from_secs(DEFAULT_KEEPWARM_SECS)),
+            "a garbage value must fall back to the default, not disable keep-warm"
+        );
+        assert_eq!(
+            parse_keepwarm_interval(Some("")),
+            Some(Duration::from_secs(DEFAULT_KEEPWARM_SECS)),
+            "an empty value must fall back to the default"
+        );
+    }
+
+    /// The keep-warm residency hint must outlast the ping interval, so the model never
+    /// lapses out of memory between pings even if one tick is delayed. A `const` block
+    /// makes this a compile-time guarantee rather than a runtime check.
+    #[test]
+    fn residency_outlasts_the_default_interval() {
+        const {
+            assert!(
+                KEEPWARM_RESIDENCY_SECS > DEFAULT_KEEPWARM_SECS,
+                "the Ollama keep_alive residency must exceed the ping interval"
+            );
+        }
     }
 }
