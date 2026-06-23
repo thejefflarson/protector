@@ -94,6 +94,9 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
                         // Reachability is correlated later (ReachabilityAdapter); the
                         // scanner alone never asserts it.
                         reachability: Reachability::Unknown,
+                        // Advisory enrichment is applied later from the mounted snapshot
+                        // (Advisory port, JEF-103); the scanner does not carry it.
+                        advisory: None,
                     })
                 })
                 .collect()

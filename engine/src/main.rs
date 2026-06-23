@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use protector::engine::observe::advisory::AdvisoryStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::respond::actuator::EnabledActions;
 use protector::metrics::Metrics;
@@ -239,6 +240,14 @@ async fn main() -> Result<()> {
             Ok(path) => KevCatalog::from_file(&path),
             Err(_) => KevCatalog::empty(),
         };
+        // Advisory snapshot (a mounted CVE-keyed file an operator syncs from a public
+        // advisory feed) for the Advisory enrichment — CWE class, fix-availability, and a
+        // short summary the model reasons over (JEF-103/ADR-0015). Mounted-snapshot-only,
+        // zero egress; unset = no advisory enrichment (byte-identical to today).
+        let advisory = match env::var("PROTECTOR_ADVISORY_FILE") {
+            Ok(path) => AdvisoryStore::from_file(&path),
+            Err(_) => AdvisoryStore::empty(),
+        };
         match kube::Client::try_default().await {
             Ok(client) => {
                 tracing::info!("starting mitigation engine (event-driven observer)");
@@ -249,6 +258,7 @@ async fn main() -> Result<()> {
                         falco_addr,
                         dashboard_addr,
                         kev,
+                        advisory,
                     )
                     .await
                     {

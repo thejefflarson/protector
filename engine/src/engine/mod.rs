@@ -604,6 +604,7 @@ pub async fn run(
     interval: Duration,
     active: EnabledActions,
     kev: observe::exploit_intel::KevCatalog,
+    advisory: observe::advisory::AdvisoryStore,
 ) {
     let mut engine = Engine::new(
         active.clone(),
@@ -615,6 +616,7 @@ pub async fn run(
         match Snapshot::observe(client.clone()).await {
             Ok(mut snapshot) => {
                 kev.mark_exploited(&mut snapshot.image_vulns);
+                advisory.apply(&mut snapshot.image_vulns);
                 engine.process(&snapshot).await;
             }
             Err(error) => tracing::warn!(%error, "observe failed; retaining previous state"),
@@ -783,6 +785,7 @@ pub async fn run_watch(
     runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
+    advisory: observe::advisory::AdvisoryStore,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
@@ -928,6 +931,7 @@ pub async fn run_watch(
             image_vulns: {
                 let mut v = observe::list_image_vulns(&client).await;
                 kev.mark_exploited(&mut v);
+                advisory.apply(&mut v);
                 v
             },
             runtime_events: runtime_events.current(),
