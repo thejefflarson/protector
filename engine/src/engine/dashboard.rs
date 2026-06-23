@@ -196,14 +196,19 @@ fn escape(s: &str) -> String {
 }
 
 /// A short, human label for a node key — drop the kind prefix (`workload/`, …).
+/// Delegates to [`NodeKey::short_of`] so the parsing lives in one place.
 fn short(key: &str) -> String {
-    key.split_once('/')
-        .map_or_else(|| key.to_string(), |(_, rest)| rest.to_string())
+    crate::engine::graph::NodeKey::short_of(key).to_string()
 }
 
 /// The node kind — the key's first path segment (`secret`, `capability`, …).
+/// Delegates to [`NodeKey::kind_of`]; a keyless string has no kind prefix, so it
+/// falls back to `"node"` (matching the prior behaviour).
 fn kind(key: &str) -> &str {
-    key.split('/').next().unwrap_or("node")
+    match key.split_once('/') {
+        Some(_) => crate::engine::graph::NodeKey::kind_of(key),
+        None => "node",
+    }
 }
 
 /// Sanitize an untrusted label for the Mermaid source. Strips the characters that

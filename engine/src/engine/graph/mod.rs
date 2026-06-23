@@ -120,7 +120,13 @@ impl NodeKey {
     /// key when there is no `/`). The single source of truth for the kind seam that
     /// consumers used to re-derive by hand-splitting.
     pub fn kind(&self) -> &str {
-        self.0.split('/').next().unwrap_or(&self.0)
+        Self::kind_of(&self.0)
+    }
+
+    /// [`NodeKey::kind`] over a borrowed key string — the same parsing without owning a
+    /// `NodeKey`, so string-typed consumers (the dashboard) share this one parser.
+    pub fn kind_of(key: &str) -> &str {
+        key.split('/').next().unwrap_or(key)
     }
 
     /// The namespace segment, for the namespace-scoped key shapes only. Workload
@@ -145,10 +151,10 @@ impl NodeKey {
     /// not met. Workload is `workload/<ns>/<kind>/<name>` (4 segments); secret and
     /// identity are `<kind>/<ns>/<name>` (3 segments).
     pub fn name(&self) -> Option<&str> {
-        let parts: Vec<&str> = self.0.split('/').collect();
-        match *parts.first()? {
-            "workload" if parts.len() == 4 => Some(parts[3]),
-            "secret" | "identity" if parts.len() == 3 => Some(parts[2]),
+        let count = self.0.split('/').count();
+        match self.0.split('/').next()? {
+            "workload" if count == 4 => self.0.split('/').nth(3),
+            "secret" | "identity" if count == 3 => self.0.split('/').nth(2),
             _ => None,
         }
     }
@@ -158,9 +164,13 @@ impl NodeKey {
     /// back to the whole key when there is no `/`. Used for compact labels (the dashboard)
     /// where the kind is conveyed by node shape rather than by text.
     pub fn short(&self) -> &str {
-        self.0
-            .split_once('/')
-            .map_or(self.0.as_str(), |(_, rest)| rest)
+        Self::short_of(&self.0)
+    }
+
+    /// [`NodeKey::short`] over a borrowed key string — the same parsing without owning a
+    /// `NodeKey`, so string-typed consumers (the dashboard) share this one parser.
+    pub fn short_of(key: &str) -> &str {
+        key.split_once('/').map_or(key, |(_, rest)| rest)
     }
 }
 
