@@ -64,7 +64,7 @@ mod ebpf {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::pod::parse_pod_uid;
+    use crate::pod::{PodAttribution, classify_cgroup};
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
@@ -211,17 +211,24 @@ mod ebpf {
             // JEF-58 follow-up: in-kernel event aggregation (BPF-map dedup of
             // high-frequency repeats) is still not done — out of scope here, see JEF-64.
             let (raw_tx, raw_rx) = mpsc::channel::<RawEvent>(ATTRIB_QUEUE);
-            // Per-node counters shared with the attribution worker (JEF-101). Both are
-            // cumulative; the heartbeat snapshots them to surface the three numbers
-            // JEF-48's exit criteria need measurable per node: ring-buffer drops,
-            // attribution-unresolved count, and a signal rate. `Relaxed` is fine — these
-            // are monotonic counters read for observability, not a synchronization gate.
+            // Per-node counters shared with the attribution worker (JEF-101). All are
+            // cumulative; the heartbeat snapshots them to surface the numbers JEF-48's
+            // exit criteria need measurable per node: ring-buffer drops, the signal rate,
+            // and attribution quality. `Relaxed` is fine — these are monotonic counters
+            // read for observability, not a synchronization gate.
+            //
+            // JEF-115: `unresolved` now counts ONLY genuine misses (pid gone / cgroup
+            // unreadable), matching the engine-side ~1.4%. The host-process firehose the
+            // node-wide kprobe sees — readable cgroups that simply aren't pods — is the
+            // EXPECTED case and is counted separately in `host_events`, not as a failure.
             let unresolved = Arc::new(AtomicU64::new(0));
+            let host_events = Arc::new(AtomicU64::new(0));
             let signals = Arc::new(AtomicU64::new(0));
             let worker = tokio::spawn(Self::attribution_worker(
                 raw_rx,
                 tx,
                 Arc::clone(&unresolved),
+                Arc::clone(&host_events),
                 Arc::clone(&signals),
             ));
             // Snapshots from the previous heartbeat, for the per-interval rate.
@@ -273,13 +280,19 @@ mod ebpf {
                         }
                         last_drops = total;
 
-                        // JEF-101: emit the three per-node numbers JEF-48 needs measurable
-                        // — cumulative ring drops, cumulative attribution-unresolved, and
-                        // the signal rate over this interval — as a structured stat line
-                        // (greppable/scrapeable per node, no new deps, wire payload
-                        // unchanged). Unlike the drop warning above this fires every tick
-                        // so "zero drops" is observable as a present-and-zero datapoint.
+                        // JEF-101: emit the per-node numbers JEF-48 needs measurable —
+                        // cumulative ring drops, the signal rate over this interval, and
+                        // attribution quality — as a structured stat line (greppable/
+                        // scrapeable per node, no new deps, wire payload unchanged). Unlike
+                        // the drop warning above this fires every tick so "zero drops" is
+                        // observable as a present-and-zero datapoint.
+                        //
+                        // JEF-115: `attribution_unresolved` is now genuine misses only
+                        // (should be near-zero, matching the engine's ~1.4%); the expected
+                        // host-process firehose is reported separately as `host_events` so
+                        // it's visible without masquerading as attribution failure.
                         let unresolved_total = unresolved.load(Ordering::Relaxed);
+                        let host_total = host_events.load(Ordering::Relaxed);
                         let signals_total = signals.load(Ordering::Relaxed);
                         let now = Instant::now();
                         let rate = signal_rate(
@@ -291,6 +304,7 @@ mod ebpf {
                         tracing::info!(
                             ring_drops = total,
                             attribution_unresolved = unresolved_total,
+                            host_events = host_total,
                             signals_per_s = rate,
                             "agent stats"
                         );
@@ -310,19 +324,35 @@ mod ebpf {
         /// `RuntimeObservation`, and forwards it to `tx`. Exits when the drain drops its
         /// sender (`recv` → `None`) or the report receiver is gone (`tx.send` errors) —
         /// either way a clean shutdown.
+        ///
+        /// JEF-115: the cgroup read has three outcomes. A pod is forwarded; a readable
+        /// non-pod cgroup (the host-process firehose) is dropped and counted as a
+        /// `host_event` (EXPECTED, not a failure); an unreadable cgroup (pid gone) is the
+        /// only case counted as `unresolved` — a genuine miss.
         async fn attribution_worker(
             mut raw_rx: mpsc::Receiver<RawEvent>,
             tx: Sender<RuntimeObservation>,
             unresolved: Arc<AtomicU64>,
+            host_events: Arc<AtomicU64>,
             signals: Arc<AtomicU64>,
         ) {
-            let mut cache: HashMap<u32, Option<String>> = HashMap::new();
+            let mut cache: HashMap<u32, PodAttribution> = HashMap::new();
             while let Some(raw) = raw_rx.recv().await {
-                let Some(uid) = Self::attribute(&mut cache, raw.pid(), read_cgroup) else {
-                    // Host process / unreadable cgroup — dropped (never fatal). Count it
-                    // so JEF-48's "low unresolved attribution" is measurable per node.
-                    unresolved.fetch_add(1, Ordering::Relaxed);
-                    continue;
+                let uid = match Self::attribute(&mut cache, raw.pid(), read_cgroup) {
+                    PodAttribution::Pod(uid) => uid,
+                    PodAttribution::NotAPod => {
+                        // The node-wide kprobe's expected host firehose — dropped (never
+                        // fatal). Counted apart from misses so it doesn't masquerade as
+                        // attribution failure (JEF-115).
+                        host_events.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    PodAttribution::Unreadable => {
+                        // pid gone / cgroup unreadable — a genuine miss. This is what
+                        // JEF-48's "low unresolved attribution" measures per node.
+                        unresolved.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 };
                 let obs = RuntimeObservation {
                     attribution: Attribution::by_pod_uid(uid),
@@ -338,26 +368,27 @@ mod ebpf {
             }
         }
 
-        /// Resolve a pid to its pod UID, memoized in `cache` so repeated events from the
-        /// same pid skip the `/proc` read. The `read` closure yields the pid's cgroup text
-        /// (injected so this is unit-testable without a real `/proc`). A `None` result
-        /// (host process / unreadable) is cached too, so a flood from one host pid doesn't
-        /// re-read `/proc` per event. Bounded: at `PID_CACHE_CAP` entries the cache is
-        /// cleared wholesale before inserting (cheap, rare; pids churn anyway).
+        /// Resolve a pid to its [`PodAttribution`], memoized in `cache` so repeated events
+        /// from the same pid skip the `/proc` read. The `read` closure yields the pid's
+        /// cgroup text (injected so this is unit-testable without a real `/proc`); a `None`
+        /// from it means unreadable. Every outcome — pod, host non-pod, and unreadable —
+        /// is cached, so a flood from one pid doesn't re-read `/proc` per event. Bounded:
+        /// at `PID_CACHE_CAP` entries the cache is cleared wholesale before inserting
+        /// (cheap, rare; pids churn anyway).
         fn attribute(
-            cache: &mut HashMap<u32, Option<String>>,
+            cache: &mut HashMap<u32, PodAttribution>,
             pid: u32,
             read: impl Fn(u32) -> Option<String>,
-        ) -> Option<String> {
+        ) -> PodAttribution {
             if let Some(cached) = cache.get(&pid) {
                 return cached.clone();
             }
-            let uid = read(pid).as_deref().and_then(parse_pod_uid);
+            let attribution = classify_cgroup(read(pid).as_deref());
             if cache.len() >= PID_CACHE_CAP {
                 cache.clear();
             }
-            cache.insert(pid, uid.clone());
-            uid
+            cache.insert(pid, attribution.clone());
+            attribution
         }
 
         /// Sum the per-CPU drop counter across all CPUs into the cumulative total.
@@ -585,8 +616,8 @@ mod ebpf {
             let second = EbpfObserver::attribute(&mut cache, 42, &read);
 
             assert_eq!(
-                first.as_deref(),
-                Some("3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b")
+                first,
+                PodAttribution::Pod("3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b".to_string())
             );
             assert_eq!(first, second);
             // The second call must hit the cache, not re-read `/proc`.
@@ -594,27 +625,36 @@ mod ebpf {
         }
 
         #[test]
-        fn attribute_caches_negative_result() {
+        fn attribute_classifies_host_cgroup_as_not_a_pod() {
             let mut cache = HashMap::new();
             let reads = Cell::new(0);
-            // A host process: readable cgroup, but not a pod's.
+            // A host process: readable cgroup, but not a pod's — expected, not a miss.
             let read = |_pid: u32| {
                 reads.set(reads.get() + 1);
                 Some("/system.slice/sshd.service".to_string())
             };
 
-            assert_eq!(EbpfObserver::attribute(&mut cache, 7, &read), None);
-            assert_eq!(EbpfObserver::attribute(&mut cache, 7, &read), None);
+            assert_eq!(
+                EbpfObserver::attribute(&mut cache, 7, &read),
+                PodAttribution::NotAPod
+            );
+            assert_eq!(
+                EbpfObserver::attribute(&mut cache, 7, &read),
+                PodAttribution::NotAPod
+            );
             // A flood from one host pid must not re-read `/proc` per event.
-            assert_eq!(reads.get(), 1, "negative result should be cached too");
+            assert_eq!(reads.get(), 1, "host result should be cached too");
         }
 
         #[test]
-        fn attribute_caches_unreadable_cgroup() {
+        fn attribute_classifies_unreadable_cgroup_as_unreadable() {
             let mut cache = HashMap::new();
-            // An exited / unreadable pid yields `None` from the reader.
+            // An exited / unreadable pid yields `None` from the reader — a genuine miss.
             let read = |_pid: u32| None;
-            assert_eq!(EbpfObserver::attribute(&mut cache, 99, &read), None);
+            assert_eq!(
+                EbpfObserver::attribute(&mut cache, 99, &read),
+                PodAttribution::Unreadable
+            );
             assert!(cache.contains_key(&99), "missing cgroup should be cached");
         }
 
