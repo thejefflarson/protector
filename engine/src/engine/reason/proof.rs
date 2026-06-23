@@ -215,7 +215,12 @@ fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
 /// per-objective seam the ADR's non-shadow design is stated in terms of.
 ///
 /// An *alerting* signal corroborates **any** objective: a Falco critical means "an
-/// attack is happening now" regardless of which chain. The agent's own mundane behaviors
+/// attack is happening now" regardless of which chain. An interactive-shell or
+/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): it is the
+/// agent-side equivalent of Falco's "terminal shell in container" / "package management
+/// in container" criticals — a hands-on-keyboard / tamper-now signal that, like the alert,
+/// evidences active intrusion irrespective of which chain it lands on. This is the seam
+/// that lets us retire Falco (JEF-56). The agent's own mundane behaviors
 /// (connection / secret-read / library-load) corroborate per objective — each only for
 /// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
 /// "everything corroborates everything" blanket the alert gate intentionally is.
@@ -251,11 +256,19 @@ fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
-        // PrivilegeChange and ProcessExec are NON-corroborating here: model evidence, not
-        // per-objective "now" signals (legit entrypoints escalate and exec too). Wiring
-        // either into a specific attack chain would be a JEF-49-style follow-up.
+        // A *notable* exec — an interactive shell or package manager in the container
+        // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): it is the
+        // agent-side replacement for Falco's "terminal shell in container" / "package
+        // management in container" criticals, a tamper-now signal that evidences active
+        // intrusion regardless of chain. Conservative on purpose: a *bare* ProcessExec
+        // (anything else) stays NON-corroborating — legit entrypoints exec constantly
+        // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
+        // only. `notable_exec()` is `Some` exactly for shell/pkg-mgr execs.
+        Behavior::ProcessExec { .. } => behavior.notable_exec().is_some(),
+        // PrivilegeChange is NON-corroborating here: model evidence, not a per-objective
+        // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
+        // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
         Behavior::PrivilegeChange { .. } => false,
-        Behavior::ProcessExec { .. } => false,
     }
 }
 
@@ -1106,6 +1119,63 @@ mod tests {
         assert!(corroborates(&alert, &EXFILTRATION));
         assert!(corroborates(&alert, &ESCAPE_TO_HOST));
         assert!(corroborates(&alert, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// A shell exec (JEF-55 interactive-shell) corroborates ANY objective like an alert
+    /// (JEF-117): the agent-side replacement for Falco's "terminal shell in container".
+    #[test]
+    fn shell_exec_corroborates_any_objective() {
+        let shell = Behavior::ProcessExec {
+            path: "/bin/bash".into(),
+        };
+        assert!(shell.is_interactive_shell());
+        assert!(corroborates(&shell, &CREDENTIAL_ACCESS));
+        assert!(corroborates(&shell, &EXFILTRATION));
+        assert!(corroborates(&shell, &ESCAPE_TO_HOST));
+        assert!(corroborates(&shell, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// A package-manager exec (JEF-55) corroborates ANY objective like an alert (JEF-117):
+    /// the agent-side replacement for Falco's "package management in container".
+    #[test]
+    fn package_manager_exec_corroborates_any_objective() {
+        let pkg = Behavior::ProcessExec {
+            path: "/usr/bin/apt".into(),
+        };
+        assert!(pkg.is_package_manager());
+        assert!(corroborates(&pkg, &CREDENTIAL_ACCESS));
+        assert!(corroborates(&pkg, &EXFILTRATION));
+        assert!(corroborates(&pkg, &ESCAPE_TO_HOST));
+        assert!(corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating —
+    /// legit entrypoints exec constantly (the ADR-0011 false positive). It is model
+    /// evidence only, never the broad tamper-now gate (JEF-117).
+    #[test]
+    fn bare_exec_does_not_corroborate() {
+        let bare = Behavior::ProcessExec {
+            path: "/app/server".into(),
+        };
+        assert!(bare.notable_exec().is_none());
+        assert!(!corroborates(&bare, &CREDENTIAL_ACCESS));
+        assert!(!corroborates(&bare, &EXFILTRATION));
+        assert!(!corroborates(&bare, &ESCAPE_TO_HOST));
+        assert!(!corroborates(&bare, &EXPLOIT_PUBLIC_FACING));
+    }
+
+    /// NEGATIVE: a PrivilegeChange stays non-corroborating — legit entrypoints escalate
+    /// (the ADR-0011 false positive). JEF-117 promotes notable execs only, not privesc.
+    #[test]
+    fn privilege_change_does_not_corroborate() {
+        let priv_change = Behavior::PrivilegeChange {
+            from_uid: 1000,
+            to_uid: 0,
+        };
+        assert!(!corroborates(&priv_change, &CREDENTIAL_ACCESS));
+        assert!(!corroborates(&priv_change, &EXFILTRATION));
+        assert!(!corroborates(&priv_change, &ESCAPE_TO_HOST));
+        assert!(!corroborates(&priv_change, &EXPLOIT_PUBLIC_FACING));
     }
 
     /// Integration check through the full `prove` path: a secret-read runtime signal on
