@@ -643,6 +643,10 @@ pub struct ModelAdjudicator {
     endpoint: String,
     model: String,
     client: reqwest::Client,
+    /// Optional diagnostic sink: every judgement's full prompt, raw reply, and
+    /// verdict, exposed at `/judgements`. `None` outside the served engine (tests,
+    /// the timer path) so journaling never affects the verdict.
+    journal: Option<std::sync::Arc<crate::engine::dashboard::JudgementLog>>,
 }
 
 impl ModelAdjudicator {
@@ -651,6 +655,37 @@ impl ModelAdjudicator {
             endpoint: endpoint.into(),
             model: model.into(),
             client: crate::engine::model::client(),
+            journal: None,
+        }
+    }
+
+    /// Attach a diagnostic judgement log; the adjudicator records each judgement's
+    /// prompt/reply/verdict into it for inspection at `/judgements`.
+    pub fn with_journal(
+        mut self,
+        journal: std::sync::Arc<crate::engine::dashboard::JudgementLog>,
+    ) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Record a judgement into the diagnostic log, if one is attached.
+    fn record_judgement(
+        &self,
+        entry: &NodeKey,
+        objectives: usize,
+        prompt: Option<String>,
+        reply: Option<String>,
+        verdict: &Verdict,
+    ) {
+        if let Some(journal) = &self.journal {
+            journal.record(crate::engine::dashboard::Judgement {
+                entry: entry.0.clone(),
+                objectives,
+                verdict: format!("{verdict:?}"),
+                prompt,
+                reply,
+            });
         }
     }
 }
@@ -682,34 +717,45 @@ impl Adjudicator for ModelAdjudicator {
         // directly and SKIP the CPU-bound (minutes-long on a Pi) model call entirely. This
         // is outcome-equivalent to the post-call guard for zero-ground entries.
         if !any_promotion_ground(cve_present, alert_present, entry, objectives, graph) {
-            return Verdict::Refuted(NO_PROMOTION_GROUND_REASON.to_string());
+            let verdict = Verdict::Refuted(NO_PROMOTION_GROUND_REASON.to_string());
+            // No prompt/reply — the model was never asked (pre-filter shortcut).
+            self.record_judgement(entry, objectives.len(), None, None, &verdict);
+            return verdict;
         }
 
         let prompt = build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors);
-        match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt).await {
-            // Two deterministic backstops on a promotion, in order:
-            //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic); a
-            //     model can still fabricate a CVE even when another ground holds, so this
-            //     guard is needed even behind the JEF-112 pre-call filter;
-            //   - JEF-111: defense-in-depth — an `Exploitable` meeting NONE of the
-            //     procedure's four deterministic promotion grounds is unjustified → `Refuted`.
-            //     The pre-call filter already refuses to call the model in that case, so this
-            //     should never fire, but it is kept as a backstop. A genuine `Exploitable`
-            //     passes both untouched.
-            Some(reply) => {
-                let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
-                guard_unjustified_exploitable(
-                    verdict,
-                    cve_present,
-                    alert_present,
-                    entry,
-                    objectives,
-                    graph,
-                )
-            }
-            // Model unavailable → skeptic: do not let an auto-action proceed.
-            None => Verdict::Uncertain("model unavailable".to_string()),
-        }
+        let (reply, verdict) =
+            match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt)
+                .await
+            {
+                // Two deterministic backstops on a promotion, in order:
+                //   - JEF-79: a fabricated CVE citation can never auto-promote (→ skeptic); a
+                //     model can still fabricate a CVE even when another ground holds, so this
+                //     guard is needed even behind the JEF-112 pre-call filter;
+                //   - JEF-111: defense-in-depth — an `Exploitable` meeting NONE of the
+                //     procedure's four deterministic promotion grounds is unjustified → `Refuted`.
+                //     The pre-call filter already refuses to call the model in that case, so this
+                //     should never fire, but it is kept as a backstop. A genuine `Exploitable`
+                //     passes both untouched.
+                Some(reply) => {
+                    let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
+                    let verdict = guard_unjustified_exploitable(
+                        verdict,
+                        cve_present,
+                        alert_present,
+                        entry,
+                        objectives,
+                        graph,
+                    );
+                    (Some(reply), verdict)
+                }
+                // Model unavailable → skeptic: do not let an auto-action proceed.
+                None => (None, Verdict::Uncertain("model unavailable".to_string())),
+            };
+        // Capture the prompt the model saw, its raw reply, and the guarded verdict so an
+        // `exploitable` call can be diagnosed at `/judgements` (JEF diagnostic).
+        self.record_judgement(entry, objectives.len(), Some(prompt), reply, &verdict);
+        verdict
     }
 }
 
@@ -1602,6 +1648,51 @@ mod tests {
             Verdict::Uncertain("model unavailable".to_string()),
             "a ground-holding entry must reach (and depend on) the model call"
         );
+    }
+
+    /// With a journal attached, every judgement is captured for `/judgements`: the
+    /// pre-filter refute records a prompt-less entry (the model was never asked), and a
+    /// ground-holding entry records the full prompt it built (reply `None` here only
+    /// because the endpoint is unreachable). This is the diagnostic the operator reads
+    /// to see why an entry was judged exploitable.
+    #[tokio::test]
+    async fn judgements_are_journaled_with_prompt_and_verdict() {
+        use crate::engine::graph::attack::DATA_FROM_REPOSITORY;
+        let journal = std::sync::Arc::new(crate::engine::dashboard::JudgementLog::new());
+        let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none")
+            .with_journal(journal.clone());
+
+        // Zero-ground entry → refuted by the pre-filter, model skipped → no prompt.
+        let (g, entry, objs) = entry_reaching_db("app", "app", "postgres-0", DATA_FROM_REPOSITORY);
+        adjudicator.judge(&entry, &objs, &g).await;
+
+        // Ground-holding entry → the model IS asked, so a prompt is built and recorded.
+        let (g2, entry2, objs2) =
+            entry_reaching_db("app", "billing", "ledger-db", DATA_FROM_REPOSITORY);
+        adjudicator.judge(&entry2, &objs2, &g2).await;
+
+        let recorded = journal.snapshot(); // newest-first
+        assert_eq!(recorded.len(), 2, "both judgements captured");
+
+        let ground = &recorded[0]; // ledger-db, judged most recently
+        assert_eq!(ground.entry, entry2.0);
+        assert!(
+            ground
+                .prompt
+                .as_deref()
+                .is_some_and(|p| p.contains(&entry2.0)),
+            "ground-holding judgement records the full prompt the model saw"
+        );
+        assert!(ground.reply.is_none(), "endpoint unreachable → no reply");
+        assert!(ground.verdict.contains("Uncertain"));
+
+        let prefilter = &recorded[1]; // postgres-0, the zero-ground refute
+        assert_eq!(prefilter.entry, entry.0);
+        assert!(
+            prefilter.prompt.is_none(),
+            "pre-filter never asked the model"
+        );
+        assert!(prefilter.verdict.contains("Refuted"));
     }
 
     /// Exercises the *real* judgement path (build_judgment_prompt → a real model →
