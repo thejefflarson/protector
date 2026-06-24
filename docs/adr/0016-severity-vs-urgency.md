@@ -1,108 +1,81 @@
-# 0016. Severity (reachability) and urgency (live exploitation) are separate axes; only urgency may auto-act
+# 0016. The breach model: prove chains, enrich them, the model decides and isolates until clear
 
 - Status: Accepted
 - Date: 2026-06-24
-- Amends: [0013](0013-proof-winnows-model-decides.md) §2, [0011](0011-positive-judgement.md), [0009](0009-asymmetric-action-bar.md)
+- Amends: [0013](0013-proof-winnows-model-decides.md), [0011](0011-positive-judgement.md), [0009](0009-asymmetric-action-bar.md)
 
 ## Context
 
-[ADR-0013](0013-proof-winnows-model-decides.md) created two lanes to auto-eligibility:
-a **corroborated** lane (a live runtime signal, model vetoes) and a **foothold** lane
-(no live signal — the model's affirmative `exploitable` verdict *promotes* an
-otherwise-latent chain). The deterministic "promotion grounds" that decide whether to
-even ask the model are: (1) a CVE present, (2) a runtime alert, (3) an objective whose
-ATT&CK tactic is PrivEsc/Execution/Persistence/Impact, (4) a `[NETWORK]` objective that
-is `[cross-ns]`.
+We kept layering structure on the adjudicator — first deterministic "promotion
+grounds," then a severity-vs-urgency split — and kept producing the wrong call. The
+clearest failure: `argocd-server`, which reaches a `delete/persistentvolumeclaims`
+capability and ~120 secrets entirely through authorized RBAC grants and mounts with no
+live activity, was judged `Exploitable` because a deterministic ground (a high-severity
+tactic) *forced the model a promotion candidate* and the model went along with it,
+confabulating a `[NETWORK]` rationale the tags contradict. The deterministic gates were
+pre-deciding the thing only the model should decide.
 
-In practice that lane conflated two questions that are not the same thing:
+The model is simpler than the scaffolding we built around it. Three principles:
 
-1. **Severity (reachability)** — *if this were exploited, how bad would it be?* A pure
-   property of what the entry can reach: the privilege of the objective (host escape,
-   code execution, data destruction), whether the path crosses a tenant boundary, the
-   blast radius, the CVE's rating. Knowable from the graph alone, before anything
-   happens.
-2. **Urgency (exploitation)** — *is this being exploited right now?* A property of live
-   runtime evidence: a Falco alert or an agent behavior corroborating the chain's
-   technique on this entry (`ProvenChain::corroborated`).
-
-Grounds (3) and (4) are **severity** signals wired into the **urgency** decision: a
-high-severity tactic or a cross-tenant reach was treated as a reason to *act now*, with
-no live signal. The argo case made it concrete — `argocd-server` reaches a
-`capability/cluster/delete/persistentvolumeclaims` (T1485, Impact) and ~120 secrets,
-**all via RBAC grants or mounts, zero over the network**. Every objective is
-authorized-by-design, yet the Impact tactic alone satisfied ground (3), the model was
-asked, and `granite4:3b-h` returned `Exploitable` — confabulating a `[NETWORK]`
-cross-namespace lateral-movement rationale that the actual `[RBAC-GRANTED]` tags
-contradict.
-
-Reachability tells you how bad a hypothetical is. It never tells you the hypothetical is
-occurring. Treating "severe" as "urgent" manufactures act-now findings for every
-broadly-privileged controller in a normal cluster.
+1. **Find provable attack chains** from configuration *and* actual communication. A path
+   is real only when the config grants it and/or observed traffic demonstrates it; the
+   proof layer cannot invent an edge (ADR-0002/0003/0004).
+2. **Enrich those chains** with CVEs, static analysis, and behavioral (runtime) data —
+   what is vulnerable, what is reachable in code, and what is happening now.
+3. **The model decides whether there is a breach** by judging (1) and (2) **holistically**,
+   and **makes the cuts necessary to isolate the workload, until (1) and (2) clear.** (1)
+   and (2) measure **divergent things** — (1) whether the workload is reachable/exposed,
+   (2) whether it is vulnerable or active — so each catches what the other misses, and
+   neither alone is a breach: a reaching chain with no concerning enrichment (argo's
+   authorized RBAC, no CVE, no behavior) is not a breach; and scary enrichment on an
+   **isolated** workload — a CVE plus a shell on something nothing can reach — is not a
+   breach either, because the chain (1) doesn't expose it. The model must truly understand
+   both. On a real breach it isolates the workload; the isolation persists while the breach
+   condition holds and lifts when the chain or its enrichment clears.
 
 ## Decision
 
-We separate the two axes and let **only urgency** drive action.
+### 1. The deterministic layer does proof and enrichment only — it never pre-decides breach
 
-### 1. Urgency requires a live runtime signal — "something happening now"
+The engine's deterministic job is principles (1) and (2): build provable chains and attach
+evidence (CVEs, static analysis, behavioral signals). It does **not** decide breach. This
+**retires** the `any_promotion_ground` / `guard_unjustified_exploitable` gating and the
+severity-vs-urgency axes as a decision mechanism — they encoded analyst heuristics as
+deterministic gates that pre-empted the model.
 
-Auto-action eligibility (the `exploitable` / promote outcome and `meets_action_bar`)
-requires runtime corroboration: a Falco alert or an agent behavior matching the chain's
-technique or foothold (`ProvenChain::corroborated`). On this lane the model's role is the
-**veto** ([ADR-0009](0009-asymmetric-action-bar.md)): is the live signal a genuine
-exploit, or benign activity? A non-confirming verdict demotes it to a proposal.
+### 2. The model decides breach holistically, and promotes
 
-### 2. A model `exploitable` verdict no longer promotes an uncorroborated chain (amends ADR-0013 §2)
+Given the proven chain (1) and its full enrichment (2), the model decides **breach or not
+a breach** — one holistic call per internet-facing entry over everything it reaches. It
+**promotes** (decides breach → act) and refutes (no breach); ADR-0013's positive role and
+the `judgement` action class stand. The model cannot invent a path — every edge is
+proof-grade — so it judges a *proven* topology against real evidence, never the topology
+itself.
 
-Reachability — however severe, however broad, however cross-tenant — never makes a chain
-auto-eligible on its own. Without a live signal, a breach path is **propose-only**. This
-reverses ADR-0013's positive-promotion thesis for the uncorroborated lane: the model does
-not "authorize" a latent foothold to auto-cut. ADR-0013's insight (presence ≠
-exploitability) stands; we go one step further — even the model's *belief* in
-exploitability is not act-now without live evidence.
+### 3. On a breach, the model isolates the workload until the condition clears
 
-### 3. Reachability computes a Severity score, not a promotion
-
-The severity inputs — objective tactic (host escape / code exec / data destruction rank
-high; collection / credential-access lower), cross-tenant reach, privilege, blast radius,
-CVE rating — combine into a **severity** on the finding. Severity ranks findings and
-prioritizes the durable-fix remediation (e.g. revoke the over-broad RBAC grant, remove
-the mount). It changes *how loud and how prioritized* a proposal is — never *whether to
-act now*.
-
-### 4. The deterministic "promotion grounds" are reclassified
-
-| ground (ADR-0013) | axis | new role |
-|---|---|---|
-| runtime **Alert** | urgency | the corroboration signal — gates act-now (veto lane) |
-| high-severity **tactic** (PrivEsc/Exec/Persist/Impact) | severity | severity input; never promotes |
-| `[NETWORK]` `[cross-ns]` | severity | severity input; never promotes |
-| **CVE** present | severity (mostly) | severity input; an exploited-in-wild CVE raises severity but still needs a live signal to be urgent |
-
-The act-now gate becomes: **corroboration present ∧ breach-relevant ∧ model does not veto.**
-Reachability/CVE/tactic/tenancy feed severity only.
+The action is the reversible, additive, blast-radius-gated cut that isolates the workload
+(ADR-0007/0010 — it cannot touch the control plane). The cut **persists until (1) or (2)
+clears**: the chain is removed (config/comms change) or the enrichment clears (the CVE is
+patched, the behavior stops). Then it self-reverts. This refines ADR-0009's
+self-reverting action — the revert condition is "the breach condition cleared," tied to
+the live proof+enrichment, not a fixed timer.
 
 ## Consequences
 
-Easier / better:
-
-- **argo and every broadly-RBAC'd controller stop being `Exploitable`.** No live signal ⇒
-  no urgency ⇒ the model is not even asked, so it cannot confabulate. They surface as
-  high-severity, propose-only RBAC-revocation findings, ranked by severity.
-- **`Exploitable` means what it says:** exploitation is happening, corroborated by a
-  runtime signal. The verdict stops being a severity proxy.
-- The severity axis gives the dashboard a real prioritization over the propose-only mass,
-  instead of a binary exploitable/refuted that mislabels broad-but-authorized access.
-
-Harder / accepted:
-
-- **A genuine internet-facing foothold with an exploited-in-wild CVE but no observed
-  runtime activity is propose-only (high severity), not auto-cut**, until the agent/Falco
-  observes activity. Accepted: the posture is reversible, self-reverting actions plus a
-  human on high-severity proposals; auto-acting on *un-observed* exploitation is exactly
-  the speculative lane we are closing.
-- **The `judgement` opt-in action class (promote-on-model-verdict) loses its lane** and is
-  retired or repurposed; promotion is now corroboration-gated, not a separate speculative
-  class. (Implementation detail tracked in the follow-up.)
-- **Urgency now depends on runtime-signal coverage** (the eBPF agent + Falco). Gaps in
-  corroboration mean real exploitation could go un-promoted; this raises the priority of
-  broadening agent probes and keeping Falco as a corroboration source until they land.
+- **argo falls out correctly.** Provable chains via authorized RBAC (1); enrichment (2) is
+  no CVE, no behavioral signal. The model decides *no breach* — no deterministic ground
+  forces it. It stays context in `/findings`, not an action.
+- **The engine gets simpler.** Proof and enrichment are deterministic and testable; the
+  judgement is the model's, holistically. We stop maintaining heuristic gates that
+  approximated the model's job.
+- **`Exploitable` means the model judged a real breach** from the chain and its evidence —
+  and the isolation it triggers lasts exactly as long as that breach condition does.
+- **Safety is preserved.** The model decides over *proven* chains (it can't fabricate a
+  path) using *real* enrichment; the only lever is the reversible, blast-radius-gated,
+  self-reverting isolation. A wrong call is at worst a temporary, auto-lifting cut of one
+  internet-exposed workload's network.
+- **Enrichment coverage is load-bearing.** The decision is only as good as (2): CVE scan,
+  static reachability (M2), and behavioral telemetry (eBPF agent + Falco). Gaps weaken the
+  model's input. Prompt-injection hardening (JEF-106) matters precisely because the model
+  decides on (2)'s evidence and acts on it.
