@@ -261,6 +261,14 @@ impl Engine {
         self.metrics
             .runtime_store
             .record(snapshot.runtime_events.len() as u64, &[]);
+        // Accumulate this pass's bake snapshot (JEF-48) alongside the OTLP counters: the
+        // same figures, surfaced on the dashboard so the shadow-bake exit criteria are
+        // readable without an OTLP collector. Filled out (corroborations) after the chains
+        // are proven below, then published to the findings handle.
+        let mut bake = dashboard::BakeStats {
+            runtime_store: snapshot.runtime_events.len() as u64,
+            ..Default::default()
+        };
         // The live pod UIDs, built once so the per-event ByPodUid attribution check below
         // is an O(1) set lookup rather than an O(pods) scan per runtime event.
         let pod_uids: HashSet<&str> = snapshot
@@ -276,13 +284,19 @@ impl Engine {
                     event.behavior.variant_label(),
                 )],
             );
+            *bake
+                .signals_by_variant
+                .entry(event.behavior.variant_label().to_string())
+                .or_insert(0) += 1;
             // The resolution rule lives on `Attribution` (shared with the RuntimeAdapter,
             // so the two can't drift): a namespace/name attribution always resolves; a
             // cgroup-UID one resolves iff a pod with that UID is in the snapshot (the
             // adapter drops the rest as unknown UIDs).
             let outcome = if event.attribution.resolves_in(|uid| pod_uids.contains(uid)) {
+                bake.resolved += 1;
                 "resolved"
             } else {
+                bake.unresolved += 1;
                 "unresolved"
             };
             self.metrics
@@ -355,6 +369,11 @@ impl Engine {
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
         }
+        // Publish this pass's behavioral-bake snapshot for the dashboard (JEF-48). Done
+        // here, before the slow adjudication loop, for the same reason the findings are:
+        // the bake view must reflect the current pass even while the model is judging.
+        bake.corroborations = corroborations;
+        self.findings.set_bake(bake);
 
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant PATH,
         // always. The deterministic proof winnows to the paths an internet-facing
@@ -1107,6 +1126,56 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.breach_relevant && f.corroborated),
             "a live alert on the entry must corroborate a breach-relevant chain"
+        );
+    }
+
+    /// `process` publishes the behavioral-bake snapshot (JEF-48) to the findings handle
+    /// each pass: signal volume by variant, attribution resolved/unresolved mirroring the
+    /// adapter rule, the live-store size, and corroborations fired — the dashboard's
+    /// in-process mirror of the OTLP bake counters.
+    #[tokio::test]
+    async fn process_publishes_the_behavioral_bake_snapshot() {
+        use crate::engine::observe::{Attribution, RuntimeObservation};
+        use protector_behavior::Behavior;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with(calls.clone());
+
+        let mut snapshot = exposed_snapshot(true);
+        snapshot.runtime_events = vec![
+            // A live alert on the entry pod (namespace/name → always resolves), which also
+            // corroborates the breach-relevant chain.
+            RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "web"),
+                source: Some("falco".into()),
+                observed_at_ms: None,
+                behavior: Behavior::Alert {
+                    rule: "Terminal shell in container".into(),
+                },
+            },
+            // A connection attributed to an unknown cgroup UID → unresolved (no such pod).
+            RuntimeObservation {
+                attribution: Attribution::by_pod_uid("uid-not-in-snapshot"),
+                source: Some("agent".into()),
+                observed_at_ms: None,
+                behavior: Behavior::NetworkConnection {
+                    peer: "10.0.0.9:443".into(),
+                    internet: false,
+                },
+            },
+        ];
+        engine.process(&snapshot).await;
+
+        let bake = engine.findings().bake();
+        assert_eq!(bake.total_signals(), 2, "both signals are counted");
+        assert_eq!(bake.signals_by_variant.get("alert"), Some(&1));
+        assert_eq!(bake.signals_by_variant.get("connection"), Some(&1));
+        assert_eq!(bake.resolved, 1, "the namespace/name alert resolves");
+        assert_eq!(bake.unresolved, 1, "the unknown-UID connection does not");
+        assert_eq!(bake.runtime_store, 2, "store cardinality is the live set");
+        assert!(
+            bake.corroborations >= 1,
+            "the live alert corroborates a breach-relevant chain"
         );
     }
 }

@@ -153,6 +153,51 @@ fn classify(chain: &ProvenChain, action: Option<super::respond::ProposedAction>)
     .to_string()
 }
 
+/// The behavioral-bake snapshot (JEF-48): what the behavioral port saw in the most
+/// recent pass, surfaced on the dashboard so the shadow bake's exit criteria are
+/// readable WITHOUT an OTLP collector. The same per-pass figures also feed the OTLP
+/// counters (JEF-100) — this is the at-a-glance, in-process mirror. Purely observational:
+/// it carries no per-pod payload, only counts and low-cardinality variant labels.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BakeStats {
+    /// Signals ingested this pass by [`super::graph::Behavior::variant_label`]
+    /// (connection / secret-read / library-load / exec / priv-change / file-read /
+    /// alert), ordered by variant for a stable table.
+    pub signals_by_variant: BTreeMap<String, u64>,
+    /// Signals this pass the runtime adapter could attribute to a live workload
+    /// (a namespace/name attribution, or a cgroup UID matching a pod in the snapshot).
+    pub resolved: u64,
+    /// Signals this pass whose attribution did NOT resolve (unknown cgroup UID — pod
+    /// gone or not yet observed). A sustained nonzero share is the JEF-48 attribution
+    /// exit-criterion to watch.
+    pub unresolved: u64,
+    /// The live (TTL'd) runtime-store cardinality as of this pass — the working set.
+    pub runtime_store: u64,
+    /// Corroborations that fired this pass: breach-relevant chains a live runtime signal
+    /// completed (ADR-0009). In shadow this is the countable "would this have promoted?"
+    pub corroborations: u64,
+}
+
+impl BakeStats {
+    /// Total signals ingested this pass (the sum across variants), the volume figure
+    /// for the JEF-48 "signal volume per node is sane" criterion.
+    pub fn total_signals(&self) -> u64 {
+        self.signals_by_variant.values().copied().sum()
+    }
+
+    /// The fraction of attributed signals that did NOT resolve to a live workload, in
+    /// `[0, 1]`; `0.0` when nothing was attributed this pass (no signals → no misses).
+    /// This is the engine-side resolution rate JEF-48 reads attribution quality from.
+    pub fn unresolved_fraction(&self) -> f64 {
+        let total = self.resolved + self.unresolved;
+        if total == 0 {
+            0.0
+        } else {
+            self.unresolved as f64 / total as f64
+        }
+    }
+}
+
 /// The current findings snapshot, shared between the engine (writer) and the HTTP
 /// server (reader).
 #[derive(Default)]
@@ -161,6 +206,9 @@ pub struct Findings {
     /// Whether any action class is armed (`engine.enable` non-empty). Drives the
     /// remediations section title: "Active" when armed, "Proposed" in shadow.
     armed: std::sync::atomic::AtomicBool,
+    /// The most recent behavioral-bake snapshot (JEF-48), replaced each pass alongside
+    /// the findings rows.
+    bake: Mutex<BakeStats>,
 }
 
 impl Findings {
@@ -185,6 +233,16 @@ impl Findings {
 
     pub fn snapshot(&self) -> Vec<Finding> {
         self.rows.lock().expect("findings mutex poisoned").clone()
+    }
+
+    /// Replace the behavioral-bake snapshot (JEF-48) with this pass's figures.
+    pub fn set_bake(&self, bake: BakeStats) {
+        *self.bake.lock().expect("bake mutex poisoned") = bake;
+    }
+
+    /// The most recent behavioral-bake snapshot, for the dashboard / `/findings` view.
+    pub fn bake(&self) -> BakeStats {
+        self.bake.lock().expect("bake mutex poisoned").clone()
     }
 }
 
@@ -601,12 +659,70 @@ fn attack_vectors(findings: &[Finding]) -> String {
     )
 }
 
+/// The behavioral-bake panel (JEF-48): the at-a-glance view of what the behavioral
+/// port saw in the most recent pass — signal volume by variant, attribution
+/// resolved/unresolved, the live runtime-store size, and corroborations fired. This is
+/// the dashboard mirror of the OTLP bake counters (JEF-100), so the bake's exit criteria
+/// ("signal volume sane", "attribution resolves", "corroboration would fire") are
+/// readable on the dashboard itself, not only through a collector. Read-only, shadow-safe.
+fn bake_panel(bake: &BakeStats) -> String {
+    let total = bake.total_signals();
+    if total == 0 && bake.runtime_store == 0 {
+        return "<p class=\"muted\">no behavioral signals observed yet \
+                (no sensor reporting, or a quiet cluster)</p>"
+            .to_string();
+    }
+
+    // Per-variant volume rows, ordered by the BTreeMap (stable, variant-name keyed).
+    let variant_rows: String = bake
+        .signals_by_variant
+        .iter()
+        .map(|(variant, n)| {
+            format!(
+                "<tr><td><code>{}</code></td><td>{}</td></tr>",
+                escape(variant),
+                n
+            )
+        })
+        .collect();
+
+    // The attribution line: resolved vs unresolved with the unresolved share, the
+    // JEF-48 attribution exit-criterion. A nonzero unresolved share is highlighted.
+    let pct = bake.unresolved_fraction() * 100.0;
+    let attribution = if bake.unresolved == 0 {
+        format!(
+            "<b>{}</b> resolved · <span class=\"muted\">0 unresolved</span>",
+            bake.resolved
+        )
+    } else {
+        format!(
+            "<b>{}</b> resolved · <span class=\"flagged\">{} unresolved ({:.1}%)</span>",
+            bake.resolved, bake.unresolved, pct
+        )
+    };
+
+    format!(
+        "<div class=\"sum\">last pass: <b>{total}</b> signal{} · {attribution} · \
+         live store <b>{store}</b> · corroborations <b>{corr}</b></div>\
+         <table class=\"vectors\"><thead><tr><th>Signal variant</th><th>Count (last pass)</th>\
+         </tr></thead><tbody>{rows}</tbody></table>",
+        if total == 1 { "" } else { "s" },
+        store = bake.runtime_store,
+        corr = bake.corroborations,
+        rows = if variant_rows.is_empty() {
+            "<tr><td class=\"muted\" colspan=\"2\">no signals this pass</td></tr>".to_string()
+        } else {
+            variant_rows
+        },
+    )
+}
+
 /// Render the dashboard: two sections, both graph-based.
 ///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
 ///      the cut marked.
 ///   2. Possible attack paths, one coalesced graph per internet-facing endpoint,
 ///      each terminal edge labeled with why it isn't remediated.
-fn render_html(findings: &[Finding], armed: bool) -> String {
+fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
     // One pass over the breach-relevant findings: the auto-eligible ones are
     // remediations; the rest group by endpoint (entry) for the attack-path graphs.
     let mut remediations: Vec<&Finding> = Vec::new();
@@ -644,6 +760,7 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
             .collect()
     };
     let vectors_body = attack_vectors(findings);
+    let bake_body = bake_panel(bake);
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
@@ -703,6 +820,12 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
          <b>Reachable</b> is what proof winnows to; <b>model-flagged</b> is where the model \
          affirmed exploitability (ADR-0013).</p>\
          {vectors_body}\
+         <h2>Behavioral bake <span class=\"muted\">(shadow)</span></h2>\
+         <p class=\"sum\">What the behavioral port saw last pass (ADR-0014 rollout step 2). \
+         The shadow-bake gate before corroboration is armed: signal volume should be sane, \
+         attribution should resolve (low unresolved), and corroborations are the countable \
+         &ldquo;would this have promoted?&rdquo; — all here without an OTLP collector.</p>\
+         {bake_body}\
          <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
          <p class=\"legend\">edge legend — \
          <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
@@ -720,11 +843,22 @@ fn render_html(findings: &[Finding], armed: bool) -> String {
 }
 
 async fn html_view(State(findings): State<Arc<Findings>>) -> Html<String> {
-    Html(render_html(&findings.snapshot(), findings.is_armed()))
+    Html(render_html(
+        &findings.snapshot(),
+        findings.is_armed(),
+        &findings.bake(),
+    ))
 }
 
 async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> {
     Json(findings.snapshot())
+}
+
+/// The behavioral-bake snapshot as JSON (JEF-48) — the machine-readable form of the
+/// dashboard panel, so the bake's exit criteria can be scraped/asserted, not only
+/// eyeballed. Kept on its own route so the `/findings` array contract is unchanged.
+async fn bake_view(State(findings): State<Arc<Findings>>) -> Json<BakeStats> {
+    Json(findings.bake())
 }
 
 async fn judgements_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
@@ -746,9 +880,9 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
     )
 }
 
-/// Serve the findings dashboard (`/` HTML, `/findings` JSON) plus the diagnostic
-/// `/judgements` JSON (full prompt + raw reply + verdict per recent judgement).
-/// Read-only; cluster-facing glue around the tested classification.
+/// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON) plus the
+/// diagnostic `/judgements` JSON (full prompt + raw reply + verdict per recent
+/// judgement). Read-only; cluster-facing glue around the tested classification.
 pub async fn serve_dashboard(
     addr: SocketAddr,
     findings: Arc<Findings>,
@@ -757,6 +891,7 @@ pub async fn serve_dashboard(
     let app = Router::new()
         .route("/", get(html_view))
         .route("/findings", get(json_view))
+        .route("/bake", get(bake_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
         .with_state(findings)
         .merge(
@@ -981,10 +1116,12 @@ mod tests {
             ),
         ];
 
-        let html = render_html(&findings, false);
+        let html = render_html(&findings, false, &BakeStats::default());
         // Shadow → "Proposed Remediations"; armed → "Active Remediations".
         assert!(html.contains("Proposed Remediations"));
-        assert!(render_html(&findings, true).contains("Active Remediations"));
+        assert!(
+            render_html(&findings, true, &BakeStats::default()).contains("Active Remediations")
+        );
         assert!(html.contains("Possible attack paths"));
         // The attack-vector summary names the ATT&CK outcomes reachable, with the
         // model-flagged count (one objective was judged exploitable above).
@@ -1007,5 +1144,76 @@ mod tests {
         assert!(html.contains("1 endpoint"));
         // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
         let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
+    }
+
+    fn bake(resolved: u64, unresolved: u64) -> BakeStats {
+        let mut signals_by_variant = BTreeMap::new();
+        signals_by_variant.insert("connection".to_string(), 12);
+        signals_by_variant.insert("secret-read".to_string(), 3);
+        signals_by_variant.insert("library-load".to_string(), 5);
+        BakeStats {
+            signals_by_variant,
+            resolved,
+            unresolved,
+            runtime_store: 7,
+            corroborations: 2,
+        }
+    }
+
+    #[test]
+    fn bake_stats_total_and_unresolved_fraction() {
+        let b = bake(80, 20);
+        assert_eq!(b.total_signals(), 20, "sum across the three variants");
+        assert!(
+            (b.unresolved_fraction() - 0.2).abs() < 1e-9,
+            "20 of 100 attributed are unresolved"
+        );
+        // No attributed signals → no misses (avoid a divide-by-zero NaN).
+        assert_eq!(BakeStats::default().unresolved_fraction(), 0.0);
+    }
+
+    #[test]
+    fn bake_panel_renders_volume_attribution_and_corroborations() {
+        let panel = bake_panel(&bake(80, 20));
+        // Per-variant volume rows the JEF-48 "connect / secret-read / library-load" watch
+        // wants to see by name.
+        assert!(panel.contains("connection"));
+        assert!(panel.contains("secret-read"));
+        assert!(panel.contains("library-load"));
+        // The attribution line surfaces resolved + the unresolved share, highlighted.
+        assert!(panel.contains("80"), "resolved count");
+        assert!(panel.contains("class=\"flagged\""), "unresolved is flagged");
+        assert!(panel.contains("20.0%"), "unresolved fraction shown");
+        // The live store size and corroborations-fired (the bake's promotion proxy).
+        assert!(panel.contains("live store"));
+        assert!(panel.contains("corroborations"));
+    }
+
+    #[test]
+    fn bake_panel_is_quiet_when_nothing_observed() {
+        let panel = bake_panel(&BakeStats::default());
+        assert!(
+            panel.contains("no behavioral signals observed yet"),
+            "an empty bake reads as quiet, not as an error"
+        );
+        // A fully-resolved pass shows no flagged unresolved share.
+        let clean = bake_panel(&bake(15, 0));
+        assert!(
+            !clean.contains("unresolved ("),
+            "0 unresolved is not flagged"
+        );
+    }
+
+    #[test]
+    fn render_html_includes_the_behavioral_bake_section() {
+        let html = render_html(&[], false, &bake(80, 20));
+        assert!(
+            html.contains("Behavioral bake"),
+            "the section header is present"
+        );
+        assert!(
+            html.contains("connection"),
+            "the per-variant volume renders"
+        );
     }
 }
