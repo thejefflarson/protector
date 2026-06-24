@@ -45,7 +45,11 @@ jobs:
       run: cargo clippy --all-targets -- -D warnings
     - name: Audit dependencies
       run: |
-        cargo install cargo-audit --locked
+        # binstall a prebuilt binary instead of compiling cargo-audit from source.
+        # --force for the same reason as sccache above: rust-cache restores cargo's
+        # "already installed" metadata on a warm cache but not the binary, so a plain
+        # binstall would skip and leave cargo-audit absent from PATH.
+        cargo binstall --no-confirm --force cargo-audit
         # RUSTSEC-2023-0071 (rsa "Marvin" timing attack) has no fixed release and
         # reaches us only transitively via sigstore. protector does signature
         # verification (public-key ops), not the attacker-timed RSA private-key
