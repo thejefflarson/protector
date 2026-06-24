@@ -188,6 +188,63 @@ impl Findings {
     }
 }
 
+/// A single model judgement captured for diagnosis: the full prompt the model saw,
+/// its raw reply, and the final verdict after the deterministic guards. Diagnostic
+/// only — exposed read-only at `/judgements` so the prompt behind an `exploitable`
+/// verdict can be inspected directly instead of reconstructed from multi-line logs.
+#[derive(Clone, Serialize)]
+pub struct Judgement {
+    /// The internet-facing entry that was judged.
+    pub entry: String,
+    /// How many objectives the entry reaches (the breadth the model weighed).
+    pub objectives: usize,
+    /// The final verdict (Debug form: variant + reason), after both guards.
+    pub verdict: String,
+    /// The full prompt sent to the model. `None` when the deterministic pre-call
+    /// filter (JEF-112) refuted the entry without asking the model.
+    pub prompt: Option<String>,
+    /// The model's raw reply, before parsing/guards. `None` when the model was
+    /// unavailable (timeout).
+    pub reply: Option<String>,
+}
+
+/// A bounded, newest-last ring of recent [`Judgement`]s, shared between the
+/// adjudicator (writer) and the HTTP server (reader). Diagnostic only: a handful of
+/// entries are judged per pass and only on cache misses, so the cap comfortably holds
+/// several restarts' worth of judgements without growing unbounded.
+#[derive(Default)]
+pub struct JudgementLog {
+    rows: Mutex<std::collections::VecDeque<Judgement>>,
+}
+
+impl JudgementLog {
+    const CAP: usize = 64;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a judgement, evicting the oldest once at capacity.
+    pub fn record(&self, judgement: Judgement) {
+        let mut rows = self.rows.lock().expect("judgement log mutex poisoned");
+        if rows.len() >= Self::CAP {
+            rows.pop_front();
+        }
+        rows.push_back(judgement);
+    }
+
+    /// Snapshot newest-first for display.
+    pub fn snapshot(&self) -> Vec<Judgement> {
+        self.rows
+            .lock()
+            .expect("judgement log mutex poisoned")
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
+    }
+}
+
 /// Minimal HTML escape for the few values that could contain markup-special chars.
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -670,6 +727,10 @@ async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> 
     Json(findings.snapshot())
 }
 
+async fn judgements_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
+    Json(journal.snapshot())
+}
+
 /// The vendored, self-hosted graph renderer (beautiful-mermaid + elkjs, bundled in
 /// `web/dist` and embedded in the binary). Served same-origin so the dashboard never
 /// loads third-party JS — see the import in [`render_html`].
@@ -685,14 +746,24 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
     )
 }
 
-/// Serve the findings dashboard (`/` HTML, `/findings` JSON). Read-only;
-/// cluster-facing glue around the tested classification.
-pub async fn serve_dashboard(addr: SocketAddr, findings: Arc<Findings>) -> anyhow::Result<()> {
+/// Serve the findings dashboard (`/` HTML, `/findings` JSON) plus the diagnostic
+/// `/judgements` JSON (full prompt + raw reply + verdict per recent judgement).
+/// Read-only; cluster-facing glue around the tested classification.
+pub async fn serve_dashboard(
+    addr: SocketAddr,
+    findings: Arc<Findings>,
+    judgements: Arc<JudgementLog>,
+) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(html_view))
         .route("/findings", get(json_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
-        .with_state(findings);
+        .with_state(findings)
+        .merge(
+            Router::new()
+                .route("/judgements", get(judgements_view))
+                .with_state(judgements),
+        );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "findings dashboard listening");
     axum::serve(listener, app).await?;
@@ -705,6 +776,37 @@ mod tests {
     use crate::engine::graph::NodeKey;
     use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
     use crate::engine::reason::proof::Link;
+
+    fn judgement(entry: &str) -> Judgement {
+        Judgement {
+            entry: entry.to_string(),
+            objectives: 1,
+            verdict: "Refuted(..)".to_string(),
+            prompt: None,
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn judgement_log_is_newest_first_and_capped() {
+        let log = JudgementLog::new();
+        // Overflow the ring by one so the oldest is evicted.
+        for n in 0..=JudgementLog::CAP {
+            log.record(judgement(&format!("entry-{n}")));
+        }
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), JudgementLog::CAP, "ring is bounded by CAP");
+        assert_eq!(
+            snap[0].entry,
+            format!("entry-{}", JudgementLog::CAP),
+            "newest judgement is first"
+        );
+        assert_eq!(
+            snap.last().unwrap().entry,
+            "entry-1",
+            "the oldest (entry-0) was evicted"
+        );
+    }
 
     /// A chain with a single-edge cut on `cut_relation` (what the disposition now
     /// keys on), plus the evidence flags.

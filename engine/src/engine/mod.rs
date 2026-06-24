@@ -610,7 +610,8 @@ pub async fn run(
         active.clone(),
         build_actuator(&active, &client),
         build_hypothesizer(),
-        build_adjudicator(),
+        // The timer path serves no dashboard, so there is nowhere to read a journal.
+        build_adjudicator(None),
     );
     loop {
         match Snapshot::observe(client.clone()).await {
@@ -759,11 +760,17 @@ fn keep_warm_plan(
 /// configured, else the null adjudicator (confirm everything — the deterministic bar
 /// governs). The model judges exploitability bidirectionally — vetoing a live chain
 /// the deterministic bar would act on, or promoting an exposed one it wouldn't.
-fn build_adjudicator() -> Box<dyn reason::adjudicate::Adjudicator> {
+fn build_adjudicator(
+    journal: Option<std::sync::Arc<dashboard::JudgementLog>>,
+) -> Box<dyn reason::adjudicate::Adjudicator> {
     match model_config() {
         Some((endpoint, model)) => {
             tracing::info!(%model, "adjudicator: model-backed (judges exploitability — promote/veto)");
-            Box::new(reason::adjudicate::ModelAdjudicator::new(endpoint, model))
+            let mut adjudicator = reason::adjudicate::ModelAdjudicator::new(endpoint, model);
+            if let Some(journal) = journal {
+                adjudicator = adjudicator.with_journal(journal);
+            }
+            Box::new(adjudicator)
         }
         None => Box::new(reason::adjudicate::NullAdjudicator),
     }
@@ -794,19 +801,23 @@ pub async fn run_watch(
     use kube::Api;
     use kube::runtime::{WatchStreamExt, reflector, watcher};
 
+    // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
+    // shared from the adjudicator (writer) to the dashboard's `/judgements` (reader).
+    let journal = std::sync::Arc::new(dashboard::JudgementLog::new());
     let mut engine = Engine::new(
         active.clone(),
         build_actuator(&active, &client),
         build_hypothesizer(),
-        build_adjudicator(),
+        build_adjudicator(Some(journal.clone())),
     );
 
     // Findings dashboard (read-only): surfaces the proven chains, especially the
-    // latent-foothold proposals a human acts on.
+    // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis.
     if let Some(addr) = dashboard_addr {
         let findings = engine.findings();
+        let journal = journal.clone();
         tokio::spawn(async move {
-            if let Err(error) = dashboard::serve_dashboard(addr, findings).await {
+            if let Err(error) = dashboard::serve_dashboard(addr, findings, journal).await {
                 tracing::error!(%error, "dashboard stopped");
             }
         });
