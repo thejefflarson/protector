@@ -12,18 +12,22 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 jobs:
-  rust:
+  # fmt+clippy and audit+test run as two parallel jobs so clippy no longer serializes
+  # ahead of the test build. They share ONE warm target/ via the rust-cache `shared-key`
+  # (the dep graph is identical), so the parallelism costs no extra compilation — only a
+  # second checkout/toolchain/sccache-install (~15s). Whichever job saves the shared key
+  # first wins; the other's save is a benign no-op.
+  lint:
     permissions:
       contents: read
-    # Self-hosted protector-runners (meshed) so cargo uses the shared in-cluster
-    # sccache redis. Moved off ubuntu-latest now that the runner has the memory it
-    # needs (cluster repo: charts/actions/runners/values-protector.yaml — 6Gi/8Gi +
-    # anti-affinity onto the 16GB nodes); the base 3Gi runner OOM-killed this before.
+    # Self-hosted protector-runners (meshed) so cargo uses the shared in-cluster sccache
+    # redis. Sized in the cluster repo (charts/actions/runners/values-protector.yaml —
+    # 6Gi/8Gi + anti-affinity onto the 16GB nodes); the base 3Gi runner OOM-killed this.
     runs-on: protector-runners
     env:
-      # sccache → shared in-cluster redis (cluster repo: charts/sccache). Reachable
-      # only through Linkerd mTLS (the protector runner identity is admitted); it
-      # carries no credentials, so it lives here. CARGO_INCREMENTAL=0 — sccache needs it off.
+      # sccache → shared in-cluster redis (cluster repo: charts/sccache). Reachable only
+      # through Linkerd mTLS (the protector runner identity is admitted); it carries no
+      # credentials, so it lives here. CARGO_INCREMENTAL=0 — sccache needs it off.
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
       CARGO_INCREMENTAL: "0"
@@ -34,6 +38,15 @@ jobs:
         toolchain: stable
         components: clippy, rustfmt
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        # A stable shared-key (replacing the per-job default) keeps target/ warm across
+        # runs AND shared with the `test` job, so cargo fingerprint-skips unchanged deps
+        # instead of re-materializing the whole dep graph from sccache-redis (~1400
+        # hit-fetches + links, ~5 min, even at a 99.9% sccache hit rate). The lockfile
+        # hash is still appended automatically, so a dep bump rotates the key (warm-
+        # starting from the previous lockfile). sccache is the fallback for real misses.
+        shared-key: protector
+        cache-all-crates: "true"
     - name: Install sccache
       # --force: rust-cache restores cargo's "already installed" metadata on a warm
       # cache, but not the binary, so a plain binstall skips and sccache is absent
@@ -43,9 +56,37 @@ jobs:
       run: cargo fmt --check
     - name: Clippy
       run: cargo clippy --all-targets -- -D warnings
+    - name: sccache stats
+      if: always()
+      run: sccache --show-stats
+
+  test:
+    permissions:
+      contents: read
+    runs-on: protector-runners
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
+      CARGO_INCREMENTAL: "0"
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+    - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+      with:
+        toolchain: stable
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        # Same shared-key as `lint` so both jobs restore the one warm target/.
+        shared-key: protector
+        cache-all-crates: "true"
+    - name: Install sccache
+      run: cargo binstall --no-confirm --force sccache
     - name: Audit dependencies
       run: |
-        cargo install cargo-audit --locked
+        # binstall a prebuilt binary instead of compiling cargo-audit from source.
+        # --force for the same reason as sccache above: rust-cache restores cargo's
+        # "already installed" metadata on a warm cache but not the binary, so a plain
+        # binstall would skip and leave cargo-audit absent from PATH.
+        cargo binstall --no-confirm --force cargo-audit
         # RUSTSEC-2023-0071 (rsa "Marvin" timing attack) has no fixed release and
         # reaches us only transitively via sigstore. protector does signature
         # verification (public-key ops), not the attacker-timed RSA private-key
@@ -53,7 +94,10 @@ jobs:
         cargo audit --ignore RUSTSEC-2023-0071
     - name: Run tests
       run: |
-        cargo install cargo-nextest --locked
+        # binstall a prebuilt binary instead of compiling cargo-nextest from source
+        # (the larger of the two source builds). --force for the same warm-cache reason
+        # as the sccache/cargo-audit steps above.
+        cargo binstall --no-confirm --force cargo-nextest
         cargo nextest run
       env:
         RUST_BACKTRACE: 1
@@ -68,9 +112,9 @@ jobs:
     # deploy value — and worse, a release pushes main and the tag together, so two
     # docker builds would run concurrently against the same remote buildkit + shared
     # registry cache and corrupt each other's layers (the intermittent `cook`/link
-    # failures). main pushes still run the `rust` job (fmt/clippy/audit/test).
+    # failures). main pushes still run the lint + test jobs (fmt/clippy/audit/test).
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: rust
+    needs: [lint, test]
     permissions:
       contents: read
       packages: write
