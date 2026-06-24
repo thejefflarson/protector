@@ -34,6 +34,16 @@ jobs:
         toolchain: stable
         components: clippy, rustfmt
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        # Without a shared-key each branch/PR gets its own cache scope, so target/ is
+        # restored cold (~4s, near-empty) and every run re-materializes the whole dep
+        # graph from sccache-redis — ~1400 cache-hit fetches + links, ~5 min, even at a
+        # 99.9% sccache hit rate. A stable shared-key (still salted by Cargo.lock +
+        # rustc under the hood) makes the warm target/ reusable across runs, so cargo
+        # fingerprint-skips unchanged deps instead of re-pulling them. This is what
+        # makes the clippy/test steps fast; sccache is the fallback for real misses.
+        shared-key: protector
+        cache-all-crates: "true"
     - name: Install sccache
       # --force: rust-cache restores cargo's "already installed" metadata on a warm
       # cache, but not the binary, so a plain binstall skips and sccache is absent
