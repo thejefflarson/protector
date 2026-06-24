@@ -81,3 +81,101 @@ pub struct PrivEvent {
     /// The process's real UID after the change (0 — root).
     pub new_uid: u32,
 }
+
+/// In-kernel dedup window for high-frequency repeat events (JEF-65). A connect to the
+/// same `(pid, daddr, dport)` seen again within this many nanoseconds is coalesced —
+/// suppressed at the source so it never costs a ring-buffer slot. 1s is long enough to
+/// collapse a chatty process hammering one destination (the volume problem) yet short
+/// enough that a genuinely sustained flow still refreshes its behavioral signal roughly
+/// once a second — the additive-evidence model needs presence, not every packet.
+pub const DEDUP_WINDOW_NS: u64 = 1_000_000_000;
+
+/// Max entries in the connect dedup map (JEF-65). One slot per live `(pid, dest)` tuple;
+/// an LRU map evicts the coldest when full, so a churn of distinct destinations can't
+/// exhaust it (eviction just means the evicted key re-emits once — safe, never a crash).
+/// Sized to cover a busy node's working set of concurrent flows while bounding kernel
+/// memory (16Ki * sizeof(ConnKey+u64) ≈ a few hundred KiB).
+pub const DEDUP_MAP_CAP: u32 = 16384;
+
+/// Dedup key for the connect probe: the `(pid, destination)` tuple the ticket names.
+/// `repr(C)` so the in-kernel BPF-map key layout is fixed (it never crosses to userspace,
+/// but keeping it `repr(C)` keeps the in-kernel ABI explicit). `daddr` is the IPv4
+/// destination in network byte order, `dport` host order — same as [`ConnEvent`].
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ConnKey {
+    pub pid: u32,
+    pub daddr: u32,
+    pub dport: u16,
+}
+
+impl ConnKey {
+    /// Build the dedup key for a connect to `(pid, daddr, dport)`.
+    pub fn new(pid: u32, daddr: u32, dport: u16) -> Self {
+        Self { pid, daddr, dport }
+    }
+}
+
+/// Whether a repeat event keyed at `last_ns` should be coalesced (suppressed) at `now_ns`,
+/// given the dedup `window_ns` (JEF-65). The single source of truth for the dedup
+/// decision, shared verbatim by the kernel probe and the userspace tests so the two can't
+/// drift. Returns `true` (coalesce — drop it) when the last emit for this key was strictly
+/// within the window. A non-monotonic clock (`now_ns < last_ns`, which `bpf_ktime_get_ns`
+/// never produces) is treated as "outside the window" — emit, never wrongly suppress.
+#[inline]
+pub fn should_coalesce(last_ns: u64, now_ns: u64, window_ns: u64) -> bool {
+    now_ns >= last_ns && now_ns.saturating_sub(last_ns) < window_ns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesces_a_repeat_inside_the_window() {
+        // A second connect 100ms after the first (window 1s) is a repeat — suppress it.
+        assert!(should_coalesce(0, 100_000_000, DEDUP_WINDOW_NS));
+    }
+
+    #[test]
+    fn emits_a_repeat_after_the_window() {
+        // Exactly at the window boundary the entry has expired — emit (refresh signal).
+        assert!(!should_coalesce(0, DEDUP_WINDOW_NS, DEDUP_WINDOW_NS));
+        // Well past the window — emit.
+        assert!(!should_coalesce(0, DEDUP_WINDOW_NS + 1, DEDUP_WINDOW_NS));
+    }
+
+    #[test]
+    fn emits_the_very_first_event_for_a_key() {
+        // The first event for a key has no prior timestamp, so the kernel never calls
+        // this for it — but a same-tick repeat (now == last == 0) is inside the window.
+        assert!(should_coalesce(0, 0, DEDUP_WINDOW_NS));
+    }
+
+    #[test]
+    fn non_monotonic_clock_does_not_suppress() {
+        // Defensive: if now ever reads before last, never wrongly coalesce.
+        assert!(!should_coalesce(500, 100, DEDUP_WINDOW_NS));
+    }
+
+    #[test]
+    fn conn_key_distinguishes_pid_dest_and_port() {
+        let base = ConnKey::new(1234, u32::from_ne_bytes([10, 0, 0, 1]), 443);
+        assert_eq!(
+            base,
+            ConnKey::new(1234, u32::from_ne_bytes([10, 0, 0, 1]), 443)
+        );
+        assert_ne!(
+            base,
+            ConnKey::new(9999, u32::from_ne_bytes([10, 0, 0, 1]), 443)
+        );
+        assert_ne!(
+            base,
+            ConnKey::new(1234, u32::from_ne_bytes([10, 0, 0, 2]), 443)
+        );
+        assert_ne!(
+            base,
+            ConnKey::new(1234, u32::from_ne_bytes([10, 0, 0, 1]), 8443)
+        );
+    }
+}
