@@ -22,10 +22,16 @@ The model is simpler than the scaffolding we built around it. Three principles:
    proof layer cannot invent an edge (ADR-0002/0003/0004).
 2. **Enrich those chains** with CVEs, static analysis, and behavioral (runtime) data —
    what is vulnerable, what is reachable in code, and what is happening now.
-3. **The model decides whether there is a breach** given (1) and (2), and **makes the cuts
-   necessary to isolate the workload, until (1) and (2) clear.** The model is the decider
-   and the actor; the isolation persists while the breach condition holds and lifts when
-   the chain or its enrichment clears.
+3. **The model decides whether there is a breach** by judging (1) and (2) **holistically**,
+   and **makes the cuts necessary to isolate the workload, until (1) and (2) clear.** (1)
+   and (2) measure **divergent things** — (1) whether the workload is reachable/exposed,
+   (2) whether it is vulnerable or active — so each catches what the other misses, and
+   neither alone is a breach: a reaching chain with no concerning enrichment (argo's
+   authorized RBAC, no CVE, no behavior) is not a breach; and scary enrichment on an
+   **isolated** workload — a CVE plus a shell on something nothing can reach — is not a
+   breach either, because the chain (1) doesn't expose it. The model must truly understand
+   both. On a real breach it isolates the workload; the isolation persists while the breach
+   condition holds and lifts when the chain or its enrichment clears.
 
 ## Decision
 
