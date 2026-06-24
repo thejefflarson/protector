@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use protector::engine::observe::advisory::AdvisoryStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
-use protector::engine::respond::actuator::EnabledActions;
+use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{CosignChecker, SignaturePolicy};
@@ -223,8 +223,11 @@ async fn main() -> Result<()> {
         // PROTECTOR_ENFORCE_NAMESPACES idiom.
         let enforce_namespaces = env_set("PROTECTOR_ENGINE_ENFORCE_NAMESPACES", "");
         let active =
-            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()))
-                .enforce_namespaces(enforce_namespaces);
+            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()));
+        // The actuation scope is its own seam (JEF-104 follow-up): `active` says what
+        // classes are armed, `scope` says where a cut may be auto-applied. An empty
+        // allowlist is unscoped (every namespace eligible), preserving current behavior.
+        let scope = ActuationScope::enforce_namespaces(enforce_namespaces);
         // Falco ingest endpoint (falcosidekick POSTs alerts here) for the
         // RuntimeEvidence "corroborated-now" signal. Unset = no runtime feed.
         let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
@@ -255,6 +258,7 @@ async fn main() -> Result<()> {
                     if let Err(error) = protector::engine::run_watch(
                         client,
                         active,
+                        scope,
                         falco_addr,
                         dashboard_addr,
                         kev,
