@@ -20,16 +20,20 @@
 mod vmlinux;
 
 use aya_ebpf::{
+    helpers::bpf_ktime_get_ns,
     helpers::gen::{bpf_d_path, bpf_probe_read_kernel, bpf_probe_read_kernel_str},
     macros::{fentry, kprobe, map},
-    maps::{PerCpuArray, RingBuf},
+    maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{FEntryContext, ProbeContext},
 };
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
-// via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014).
+// via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014). The
+// dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
+// tests share one definition and can't drift.
 use protector_agent_common::{
-    ConnEvent, EventHeader, FileEvent, PrivEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
-    KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
+    ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, DEDUP_MAP_CAP, DEDUP_WINDOW_NS,
+    KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
+    should_coalesce,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -52,6 +56,54 @@ fn record_drop() {
     if let Some(slot) = DROPS.get_ptr_mut(0) {
         unsafe { *slot += 1 };
     }
+}
+
+/// In-kernel connect dedup map (JEF-65): `(pid, daddr, dport)` → last-emit time (ns).
+/// Coalesces high-frequency *repeats* — a chatty process hammering the same destination —
+/// at the source, so a suppressed connect never costs a ring-buffer slot (the volume
+/// problem JEF-58's drop counter measures). LRU so a churn of distinct destinations can't
+/// exhaust it: the coldest key is evicted and simply re-emits once. Connect is the
+/// firehose probe; the other probes are already volume-bounded (in-kernel filtered to rare
+/// events), so dedup is applied to connect only — the per-(pid, dest) case the ticket names.
+#[map]
+static CONN_SEEN: LruHashMap<ConnKey, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
+
+/// Count of connect events coalesced (suppressed in-kernel) by [`CONN_SEEN`] dedup
+/// (JEF-65). Same per-CPU, one-slot shape as [`DROPS`]: each CPU bumps its own slot, no
+/// atomics; userspace sums across CPUs and surfaces the cumulative total in the heartbeat,
+/// so the volume cut is observable rather than invisible. Bumped only in [`record_coalesced`].
+#[map]
+static COALESCED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// Bump the per-CPU coalesced counter (slot 0). Called whenever the connect dedup map
+/// suppresses a repeat. Verifier-safe: one bounded lookup + in-place increment, no loops.
+fn record_coalesced() {
+    if let Some(slot) = COALESCED.get_ptr_mut(0) {
+        unsafe { *slot += 1 };
+    }
+}
+
+/// The connect dedup gate (JEF-65). Returns `true` if this connect to `key` should be
+/// emitted, `false` if it's a repeat inside [`DEDUP_WINDOW_NS`] and was coalesced (the
+/// counter is bumped here). On emit, stamps `now` so the next repeat is measured from it.
+/// LRU insert can't fail meaningfully — if it ever did we fall through to emit (fail open:
+/// never silently lose a real signal to a bookkeeping error). The first sighting of a key
+/// (no entry) always emits.
+fn allow_connect(key: &ConnKey) -> bool {
+    let now = unsafe { bpf_ktime_get_ns() };
+    if let Some(last) = CONN_SEEN.get_ptr_mut(key) {
+        // SAFETY: `last` points at this key's live slot; we read then overwrite it.
+        let last_ns = unsafe { *last };
+        if should_coalesce(last_ns, now, DEDUP_WINDOW_NS) {
+            record_coalesced();
+            return false;
+        }
+        unsafe { *last = now };
+        return true;
+    }
+    // First time we've seen this key (or it was LRU-evicted): record and emit.
+    let _ = CONN_SEEN.insert(key, &now, 0);
+    true
 }
 
 // Minimal kernel sockaddr layout for the IPv4 case. We only touch the family and the
@@ -110,6 +162,14 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
     }
 
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    let dport = u16::from_be(dport);
+    // JEF-65: coalesce high-frequency repeats in-kernel. A connect to the same
+    // (pid, daddr, dport) seen again within DEDUP_WINDOW_NS is suppressed here — it never
+    // reaches the ring buffer — cutting volume at the source rather than draining + dropping
+    // duplicates in userspace. The first sighting (and one per window thereafter) emits.
+    if !allow_connect(&ConnKey::new(pid, daddr, dport)) {
+        return Ok(());
+    }
     if let Some(mut slot) = EVENTS.reserve::<ConnEvent>(0) {
         slot.write(ConnEvent {
             header: EventHeader {
@@ -117,7 +177,7 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
                 pid,
             },
             daddr,
-            dport: u16::from_be(dport),
+            dport,
         });
         slot.submit(0);
     } else {

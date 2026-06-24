@@ -194,6 +194,13 @@ mod ebpf {
                 ebpf.take_map("DROPS")
                     .ok_or_else(|| anyhow::anyhow!("DROPS map missing"))?,
             )?;
+            // The kernel's cumulative in-kernel-coalesced counter (per-CPU, one slot),
+            // taken like DROPS so the heartbeat can surface how many connect repeats the
+            // dedup map suppressed at the source (JEF-65).
+            let coalesced: PerCpuArray<_, u64> = PerCpuArray::try_from(
+                ebpf.take_map("COALESCED")
+                    .ok_or_else(|| anyhow::anyhow!("COALESCED map missing"))?,
+            )?;
             let mut async_fd = AsyncFd::new(ring)?;
             // Heartbeat ticker for the drop counter. The first tick fires immediately;
             // skip it so the first *logged* heartbeat reflects a real interval.
@@ -208,8 +215,11 @@ mod ebpf {
             // back the ring up — at worst the channel fills and we drop new raw events
             // (see `try_send` below), which the additive-evidence model tolerates.
             //
-            // JEF-58 follow-up: in-kernel event aggregation (BPF-map dedup of
-            // high-frequency repeats) is still not done — out of scope here, see JEF-64.
+            // JEF-65: in-kernel event aggregation now coalesces high-frequency connect
+            // repeats at the source — a per-(pid, dest) LRU dedup map in the connect probe
+            // suppresses a repeat seen within the dedup window so it never costs a ring slot
+            // (cutting volume before the drain, not draining + dropping duplicates here). The
+            // suppressed count surfaces as `coalesced` in the heartbeat below.
             let (raw_tx, raw_rx) = mpsc::channel::<RawEvent>(ATTRIB_QUEUE);
             // Per-node counters shared with the attribution worker (JEF-101). All are
             // cumulative; the heartbeat snapshots them to surface the numbers JEF-48's
@@ -269,7 +279,7 @@ mod ebpf {
                         }
                     }
                     _ = heartbeat.tick() => {
-                        let total = Self::read_drops(&drops);
+                        let total = Self::sum_percpu(&drops);
                         // Only log the loud drop warning when there's loss and it's
                         // changed since last tick — a quiet ring stays silent.
                         if total > 0 && total != last_drops {
@@ -294,6 +304,10 @@ mod ebpf {
                         let unresolved_total = unresolved.load(Ordering::Relaxed);
                         let host_total = host_events.load(Ordering::Relaxed);
                         let signals_total = signals.load(Ordering::Relaxed);
+                        // JEF-65: connect repeats coalesced in-kernel (cumulative). A
+                        // rising `coalesced` against a flat/low `ring_drops` is the dedup
+                        // working — volume cut at the source before it can pressure the ring.
+                        let coalesced_total = Self::sum_percpu(&coalesced);
                         let now = Instant::now();
                         let rate = signal_rate(
                             signals_total.saturating_sub(last_signals),
@@ -303,6 +317,7 @@ mod ebpf {
                         last_tick = now;
                         tracing::info!(
                             ring_drops = total,
+                            coalesced = coalesced_total,
                             attribution_unresolved = unresolved_total,
                             host_events = host_total,
                             signals_per_s = rate,
@@ -391,13 +406,15 @@ mod ebpf {
             attribution
         }
 
-        /// Sum the per-CPU drop counter across all CPUs into the cumulative total.
-        /// A per-CPU read failure is treated as 0 for that read (best-effort
-        /// observability — never errors the drain).
-        fn read_drops(
-            drops: &PerCpuArray<impl std::borrow::Borrow<aya::maps::MapData>, u64>,
+        /// Sum a single-slot per-CPU `u64` counter across all CPUs into its cumulative
+        /// total. Shared by the ring-drop counter (JEF-58) and the in-kernel-coalesced
+        /// counter (JEF-65) — both are the same one-slot `PerCpuArray<u64>` shape. A
+        /// per-CPU read failure is treated as 0 for that read (best-effort observability —
+        /// never errors the drain).
+        fn sum_percpu(
+            counter: &PerCpuArray<impl std::borrow::Borrow<aya::maps::MapData>, u64>,
         ) -> u64 {
-            match drops.get(&0, 0) {
+            match counter.get(&0, 0) {
                 Ok(values) => values.iter().copied().sum(),
                 Err(_) => 0,
             }
