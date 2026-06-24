@@ -57,7 +57,10 @@ jobs:
         cargo audit --ignore RUSTSEC-2023-0071
     - name: Run tests
       run: |
-        cargo install cargo-nextest --locked
+        # binstall a prebuilt binary instead of compiling cargo-nextest from source
+        # (the larger of the two source builds). --force for the same warm-cache reason
+        # as the sccache/cargo-audit steps above.
+        cargo binstall --no-confirm --force cargo-nextest
         cargo nextest run
       env:
         RUST_BACKTRACE: 1
