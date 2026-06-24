@@ -1,20 +1,18 @@
-# 0016. Severity (reachability) and urgency (live exploitation) are separate axes; only urgency may auto-act
+# 0016. Severity (reachability) and urgency (live exploitation) are separate axes
 
 - Status: Accepted
 - Date: 2026-06-24
-- Amends: [0013](0013-proof-winnows-model-decides.md) §2, [0011](0011-positive-judgement.md), [0009](0009-asymmetric-action-bar.md)
+- Amends: [0013](0013-proof-winnows-model-decides.md) §2 (the model still promotes — this fixes what it promotes *on*)
 
 ## Context
 
-[ADR-0013](0013-proof-winnows-model-decides.md) created two lanes to auto-eligibility:
-a **corroborated** lane (a live runtime signal, model vetoes) and a **foothold** lane
-(no live signal — the model's affirmative `exploitable` verdict *promotes* an
-otherwise-latent chain). The deterministic "promotion grounds" that decide whether to
-even ask the model are: (1) a CVE present, (2) a runtime alert, (3) an objective whose
-ATT&CK tactic is PrivEsc/Execution/Persistence/Impact, (4) a `[NETWORK]` objective that
-is `[cross-ns]`.
+[ADR-0013](0013-proof-winnows-model-decides.md) is right that **the model promotes**:
+its affirmative `exploitable` verdict is the positive authority that **upgrades** a
+proven, internet-facing path to act-now. That is the point of the tool and it stays.
+The bug this ADR fixes is not *that* the model promotes — it is **what we let it promote
+on**.
 
-In practice that lane conflated two questions that are not the same thing:
+The adjudicator conflated two questions that are not the same thing:
 
 1. **Severity (reachability)** — *if this were exploited, how bad would it be?* A pure
    property of what the entry can reach: the privilege of the objective (host escape,
@@ -25,84 +23,82 @@ In practice that lane conflated two questions that are not the same thing:
    runtime evidence: a Falco alert or an agent behavior corroborating the chain's
    technique on this entry (`ProvenChain::corroborated`).
 
-Grounds (3) and (4) are **severity** signals wired into the **urgency** decision: a
-high-severity tactic or a cross-tenant reach was treated as a reason to *act now*, with
-no live signal. The argo case made it concrete — `argocd-server` reaches a
-`capability/cluster/delete/persistentvolumeclaims` (T1485, Impact) and ~120 secrets,
-**all via RBAC grants or mounts, zero over the network**. Every objective is
-authorized-by-design, yet the Impact tactic alone satisfied ground (3), the model was
-asked, and `granite4:3b-h` returned `Exploitable` — confabulating a `[NETWORK]`
-cross-namespace lateral-movement rationale that the actual `[RBAC-GRANTED]` tags
-contradict.
+The deterministic "promotion grounds" mixed them. Grounds (3) a high-severity tactic
+(PrivEsc/Execution/Persistence/Impact) and (4) a `[NETWORK]` `[cross-ns]` reach are
+**severity** signals, yet they gated the model's promotion — so reachability *alone*
+handed the model a promotion candidate, and the model upgraded it. The argo case made it
+concrete: `argocd-server` reaches a `capability/cluster/delete/persistentvolumeclaims`
+(T1485, Impact) and ~120 secrets, **all via RBAC grants or mounts, none over the network,
+with no live activity** — pure reachability. The Impact tactic satisfied a severity
+ground, the model was asked, and it promoted to `Exploitable`, confabulating a `[NETWORK]`
+lateral-movement rationale the `[RBAC-GRANTED]` tags contradict.
 
-Reachability tells you how bad a hypothetical is. It never tells you the hypothetical is
-occurring. Treating "severe" as "urgent" manufactures act-now findings for every
-broadly-privileged controller in a normal cluster.
+Reachability tells you how bad a hypothetical would be. It never tells you the
+hypothetical is occurring. Promotion must be driven by **urgency**; reachability drives
+**severity**.
 
 ## Decision
 
-We separate the two axes and let **only urgency** drive action.
+### 1. The model promotes — on urgency, not reachability (amends ADR-0013 §2)
 
-### 1. Urgency requires a live runtime signal — "something happening now"
+The model's positive role is unchanged: it is the authority that **upgrades** a proven
+path to `exploitable`/act-now. What changes is the **basis**: a promotion must be grounded
+in **urgency** — a live runtime signal that exploitation is happening now (`corroborated`:
+a Falco alert or an agent behavior matching the chain's technique/foothold). Reachability,
+however severe or broad or cross-tenant, is **never** by itself a basis to promote. This
+amends ADR-0013 §2, which let CVE-presence/reachability hand the model an uncorroborated
+foothold to promote.
 
-Auto-action eligibility (the `exploitable` / promote outcome and `meets_action_bar`)
-requires runtime corroboration: a Falco alert or an agent behavior matching the chain's
-technique or foothold (`ProvenChain::corroborated`). On this lane the model's role is the
-**veto** ([ADR-0009](0009-asymmetric-action-bar.md)): is the live signal a genuine
-exploit, or benign activity? A non-confirming verdict demotes it to a proposal.
+### 2. Urgency requires something happening now
 
-### 2. A model `exploitable` verdict no longer promotes an uncorroborated chain (amends ADR-0013 §2)
+No live runtime signal ⇒ no urgency ⇒ nothing for the model to promote to act-now,
+however high the severity. A high-severity but quiet path is a **prioritized proposal**,
+not an action.
 
-Reachability — however severe, however broad, however cross-tenant — never makes a chain
-auto-eligible on its own. Without a live signal, a breach path is **propose-only**. This
-reverses ADR-0013's positive-promotion thesis for the uncorroborated lane: the model does
-not "authorize" a latent foothold to auto-cut. ADR-0013's insight (presence ≠
-exploitability) stands; we go one step further — even the model's *belief* in
-exploitability is not act-now without live evidence.
-
-### 3. Reachability computes a Severity score, not a promotion
+### 3. Reachability computes a Severity score
 
 The severity inputs — objective tactic (host escape / code exec / data destruction rank
 high; collection / credential-access lower), cross-tenant reach, privilege, blast radius,
 CVE rating — combine into a **severity** on the finding. Severity ranks findings and
-prioritizes the durable-fix remediation (e.g. revoke the over-broad RBAC grant, remove
-the mount). It changes *how loud and how prioritized* a proposal is — never *whether to
-act now*.
+prioritizes the durable-fix remediation (e.g. revoke the over-broad RBAC grant). It
+changes *how loud and how prioritized* a proposal is — never *whether to act now*.
 
 ### 4. The deterministic "promotion grounds" are reclassified
 
-| ground (ADR-0013) | axis | new role |
+| ground (ADR-0013) | axis | role |
 |---|---|---|
-| runtime **Alert** | urgency | the corroboration signal — gates act-now (veto lane) |
-| high-severity **tactic** (PrivEsc/Exec/Persist/Impact) | severity | severity input; never promotes |
-| `[NETWORK]` `[cross-ns]` | severity | severity input; never promotes |
-| **CVE** present | severity (mostly) | severity input; an exploited-in-wild CVE raises severity but still needs a live signal to be urgent |
+| runtime **alert** / live signal | urgency | the model promotes on it (its positive verdict upgrades) |
+| high-severity **tactic** (PrivEsc/Exec/Persist/Impact) | severity | severity input; never a promotion basis |
+| `[NETWORK]` `[cross-ns]` | severity | severity input; never a promotion basis |
+| **CVE** present | severity | severity input; raises severity, not a promotion basis |
 
-The act-now gate becomes: **corroboration present ∧ breach-relevant ∧ model does not veto.**
-Reachability/CVE/tactic/tenancy feed severity only.
+The act-now path becomes: **a live signal (urgency) ∧ breach-relevant ∧ the model
+affirmatively promotes it.** Reachability/CVE/tactic/tenancy feed severity only.
 
 ## Consequences
 
 Easier / better:
 
-- **argo and every broadly-RBAC'd controller stop being `Exploitable`.** No live signal ⇒
-  no urgency ⇒ the model is not even asked, so it cannot confabulate. They surface as
-  high-severity, propose-only RBAC-revocation findings, ranked by severity.
-- **`Exploitable` means what it says:** exploitation is happening, corroborated by a
-  runtime signal. The verdict stops being a severity proxy.
+- **argo and every broadly-RBAC'd controller stop being `Exploitable`.** With no live
+  signal there is no urgency, so reachability alone no longer hands the model a promotion
+  candidate. They surface as high-severity, propose-only RBAC-revocation findings, ranked
+  by severity.
+- **`Exploitable` (promoted) means the model judged live exploitation** — something
+  happening now — not "this would be bad if it happened."
 - The severity axis gives the dashboard a real prioritization over the propose-only mass,
-  instead of a binary exploitable/refuted that mislabels broad-but-authorized access.
+  instead of a binary that mislabels broad-but-authorized access.
 
 Harder / accepted:
 
-- **A genuine internet-facing foothold with an exploited-in-wild CVE but no observed
-  runtime activity is propose-only (high severity), not auto-cut**, until the agent/Falco
-  observes activity. Accepted: the posture is reversible, self-reverting actions plus a
-  human on high-severity proposals; auto-acting on *un-observed* exploitation is exactly
-  the speculative lane we are closing.
-- **The `judgement` opt-in action class (promote-on-model-verdict) loses its lane** and is
-  retired or repurposed; promotion is now corroboration-gated, not a separate speculative
-  class. (Implementation detail tracked in the follow-up.)
-- **Urgency now depends on runtime-signal coverage** (the eBPF agent + Falco). Gaps in
-  corroboration mean real exploitation could go un-promoted; this raises the priority of
-  broadening agent probes and keeping Falco as a corroboration source until they land.
+- **A proven foothold with an exploited-in-wild CVE but no observed runtime activity is
+  high-severity propose-only, not auto-cut**, until the agent/Falco observes activity.
+  This narrows ADR-0013 §2's promote lane to corroborated exploitation. Accepted: the
+  posture is reversible, self-reverting actions plus a human on high-severity proposals;
+  auto-acting on *un-observed* exploitation is the speculative case we are closing.
+- **The model's promotion role and the `judgement` action class STAY** — they are the
+  point of the tool. This ADR does not retire them; it grounds them in urgency. Because
+  the model promotes, prompt-injection hardening (JEF-106) remains important: a crafted
+  input must not trick the model into upgrading a path that is not being exploited.
+- **Urgency now depends on runtime-signal coverage** (the eBPF agent + Falco). Gaps mean
+  real exploitation could go un-promoted; this raises the priority of broadening agent
+  probes and keeping Falco as a corroboration source until they land.
