@@ -52,31 +52,39 @@ demolition.
 That power is only safe because of one division of labor, and the whole design
 exists to enforce it:
 
-> **Proof winnows the search space; the model makes the exploitability call.
-> Privilege moves only on their conjunction.**
+> **Prove the attack chains. Enrich them. The model decides whether there's a
+> breach — and isolates the workload until it clears.**
 
-Deterministic proof is the search-space reducer. It walks the graph and establishes
-what is *possible* — which paths are reachable, privileged, internet-facing, and
-carry a known CVE — and it can never be talked out of the topology: every edge is
-proof-grade, and `confirm` discards any step a model makes up. That winnows a
-small cluster down to a handful of candidate breach paths.
+Three steps, each doing only its job:
 
-The model then makes the judgement a deterministic rule *cannot*: given a proven
-candidate, is it genuinely **exploitable**, end to end, from the internet — or is
-the CVE merely *present*? A log4shell layer in an image is not proof the vulnerable
-code is reachable or that attacker input ever reaches it; that call is exactly what
-an analyst is for, and what the model replaces. On a proven foothold, the cut
-requires the model's affirmative `exploitable` verdict — with no model (or an
-uncertain one) the candidate is propose-only, never auto-cut on mere presence. The
-parallel runtime lane is the other half: a live Falco signal is genuine evidence of
-activity, auto-eligible with the model able to veto.
+**Prove (1).** Deterministic proof walks the graph and establishes which paths are
+*real* — reachable, privileged, internet-facing — from configuration *and* actual
+communication. It can never be talked out of the topology: every edge is proof-grade,
+and `confirm` discards any step a model makes up. That winnows a small cluster down to
+a handful of candidate breach paths.
 
-The model still cannot *invent* a chain — proof owns the topology — and every action
-it can trigger is the same bounded one: reversible, announced, blast-radius-gated,
+**Enrich (2).** Each candidate is annotated with what's known about it — CVEs, static
+reachability analysis, and live behavioral signals (what's running, what's connecting,
+what shell just spawned).
+
+**Decide and act (3).** The model makes the judgement a deterministic rule *cannot*:
+given a proven chain (1) and its enrichment (2), is this a **breach**? Reachability and
+evidence measure divergent things, so it weighs both together — and neither alone is a
+breach. A broadly-privileged controller reaching what it is authorized to reach, with
+no CVE and nothing happening, is not a breach. A vulnerable image with a shell on a
+workload *nothing can reach* is not a breach either — isolation defangs it. A log4shell
+layer is not proof the vulnerable code is reachable or that attacker input ever
+arrives; that call is exactly what an analyst is for, and what the model replaces. When
+it *is* a breach, the model isolates the workload, and the cut persists only until (1)
+or (2) clears — the path is removed or the evidence resolves.
+
+The model still cannot *invent* a chain — proof owns the topology — and every action it
+can trigger is the same bounded one: reversible, announced, blast-radius-gated,
 self-reverting, and unable to touch the control plane. So the worst a wrong model
 verdict causes is a temporary, auto-reverting network cut of one exposed workload.
-(See [`adr/0013`](adr/0013-proof-winnows-model-decides.md), which states the model's
-role; it evolved through [`adr/0011`](adr/0011-positive-judgement.md).)
+(See [`adr/0016`](adr/0016-severity-vs-urgency.md) for this model; it evolved through
+[`adr/0013`](adr/0013-proof-winnows-model-decides.md) and
+[`adr/0011`](adr/0011-positive-judgement.md).)
 
 ## Local-first, by conviction
 
