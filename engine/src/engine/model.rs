@@ -105,6 +105,20 @@ pub async fn chat(
         .map(str::to_string)
 }
 
+/// The model endpoint + name, read once from `PROTECTOR_ENGINE_MODEL` /
+/// `PROTECTOR_ENGINE_MODEL_NAME`. `None` when no endpoint is set (deterministic-only —
+/// null hypothesizer and adjudicator). The single source of truth for the model
+/// endpoint and the default model name, shared by the engine's model-backed builders
+/// and by [`spawn_keep_warm`] below (so keep-warm warms exactly the configured model).
+pub fn config() -> Option<(String, String)> {
+    let endpoint = std::env::var("PROTECTOR_ENGINE_MODEL")
+        .ok()
+        .filter(|e| !e.is_empty())?;
+    let name =
+        std::env::var("PROTECTOR_ENGINE_MODEL_NAME").unwrap_or_else(|_| "qwen2.5:3b".to_string());
+    Some((endpoint, name))
+}
+
 /// Default keep-warm interval (seconds). Ollama unloads an idle model after
 /// `OLLAMA_KEEP_ALIVE` (5 minutes by default), so a ping every 4 minutes keeps the
 /// model resident with margin to spare — that's what stops the first judging pass
@@ -159,6 +173,63 @@ pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) ->
         client.post(endpoint).json(&body).send().await,
         Ok(response) if response.status().is_success()
     )
+}
+
+/// Keep the configured model warm so the first judging pass after an engine restart
+/// isn't glacial (the "dashboard blank ~20 min after restart" pain, JEF-63). A CPU-only
+/// local model takes minutes to load its weights; once Ollama unloads an idle model
+/// (default 5 min) the next adjudication eats that cold-load before any verdict lands.
+///
+/// This spawns a lightweight background task that warms the model once at startup and
+/// then pings it on an interval shorter than Ollama's unload timeout, keeping the model
+/// resident between judging passes. It is strictly **best-effort and shadow-safe**: the
+/// ping is a one-token no-op chat (see [`keep_warm`]) that touches no verdict, enable, or
+/// actuation path, and a down or slow endpoint is logged at debug and retried next tick —
+/// it never blocks the engine loop or the dashboard.
+///
+/// A **no-op when no model is configured** (`PROTECTOR_ENGINE_MODEL` empty → no task is
+/// spawned) and when keep-warm is disabled (`PROTECTOR_ENGINE_KEEPWARM_SECS=0`).
+/// Returns the spawned task's handle (so the caller can abort it on shutdown), or `None`
+/// when nothing was spawned. The engine calls this opaquely — keep-warm lives here, with
+/// the client, the interval const, and the [`keep_warm`] ping it drives.
+pub fn spawn_keep_warm() -> Option<tokio::task::JoinHandle<()>> {
+    let (endpoint, model, interval) = keep_warm_plan(config(), keepwarm_interval())?;
+    tracing::info!(
+        %model,
+        interval_secs = interval.as_secs(),
+        "keep-warm: pinging the model to stay resident between judging passes"
+    );
+    Some(tokio::spawn(async move {
+        let client = client();
+        let mut ticker = tokio::time::interval(interval);
+        // Skip missed ticks rather than bursting catch-up pings if a tick is delayed
+        // (e.g. the runtime was busy) — one ping per interval is all keep-warm needs.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // The first tick fires immediately, giving the startup warm-up; subsequent
+            // ticks are the periodic keep-alive.
+            ticker.tick().await;
+            if keep_warm(&client, &endpoint, &model).await {
+                tracing::debug!(%model, "keep-warm ping ok (model resident)");
+            } else {
+                tracing::debug!(%model, "keep-warm ping failed (model down?); retrying next tick");
+            }
+        }
+    }))
+}
+
+/// The pure keep-warm gating decision, split out of [`spawn_keep_warm`] so it's testable
+/// without spawning a task or reading process env. Returns `Some((endpoint, model,
+/// interval))` only when BOTH a model is configured (`config`) AND keep-warm is enabled
+/// (`interval`); `None` otherwise — i.e. a no-op when `PROTECTOR_ENGINE_MODEL` is empty
+/// or `PROTECTOR_ENGINE_KEEPWARM_SECS=0`.
+fn keep_warm_plan(
+    config: Option<(String, String)>,
+    interval: Option<Duration>,
+) -> Option<(String, String, Duration)> {
+    let (endpoint, model) = config?;
+    let interval = interval?;
+    Some((endpoint, model, interval))
 }
 
 #[cfg(test)]
@@ -254,6 +325,45 @@ mod tests {
             parse_keepwarm_interval(Some("")),
             Some(Duration::from_secs(DEFAULT_KEEPWARM_SECS)),
             "an empty value must fall back to the default"
+        );
+    }
+
+    /// Keep-warm (JEF-107) is gated on BOTH a configured model and a non-zero interval.
+    /// With no model configured it must be a no-op regardless of the interval — that's
+    /// the `PROTECTOR_ENGINE_MODEL` empty case the issue requires.
+    #[test]
+    fn keep_warm_is_a_noop_with_no_model() {
+        assert!(
+            keep_warm_plan(None, Some(Duration::from_secs(240))).is_none(),
+            "no model configured must mean no keep-warm, even with a valid interval"
+        );
+    }
+
+    /// With keep-warm disabled (`PROTECTOR_ENGINE_KEEPWARM_SECS=0` → `None` interval) it
+    /// must be a no-op even when a model IS configured.
+    #[test]
+    fn keep_warm_is_a_noop_when_disabled() {
+        assert!(
+            keep_warm_plan(Some(("http://ollama/v1".into(), "qwen2.5:3b".into())), None).is_none(),
+            "a zero interval must disable keep-warm even with a model configured"
+        );
+    }
+
+    /// With both a model and an interval, keep-warm carries the endpoint/model/interval
+    /// through unchanged for the spawned task to use.
+    #[test]
+    fn keep_warm_plans_when_model_and_interval_present() {
+        let plan = keep_warm_plan(
+            Some(("http://ollama/v1".into(), "qwen2.5:3b".into())),
+            Some(Duration::from_secs(120)),
+        );
+        assert_eq!(
+            plan,
+            Some((
+                "http://ollama/v1".to_string(),
+                "qwen2.5:3b".to_string(),
+                Duration::from_secs(120)
+            ))
         );
     }
 

@@ -42,7 +42,8 @@ use observe::adapter::Adapter;
 use observe::health::{Health, HealthProvider, PodStatusHealth};
 use respond::MitigationLedger;
 use respond::actuator::{
-    ActionLog, Actuator, Decision, DryRunActuator, EnabledActions, decide, predict_blast_radius,
+    ActionLog, ActuationScope, Actuator, Decision, DryRunActuator, EnabledActions, decide,
+    predict_blast_radius,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -158,19 +159,6 @@ impl EngineMetrics {
     }
 }
 
-/// Whether an ingested signal's [`Attribution`] resolves to a live workload, mirroring
-/// the [`observe::adapter::RuntimeAdapter`]'s resolution rule (JEF-100, for the
-/// attribution-outcome metric — pure, no graph mutation). A namespace/name attribution
-/// (Falco) is always resolvable; a cgroup-UID attribution (the eBPF agent) resolves only
-/// if a pod with that UID is in the snapshot, exactly as the adapter's `by_uid` lookup
-/// does — an unknown UID (pod gone / not yet observed) is dropped as `unresolved`.
-fn attribution_resolves(attribution: &observe::Attribution, pod_uids: &HashSet<&str>) -> bool {
-    match attribution {
-        observe::Attribution::ByNamespacedName { .. } => true,
-        observe::Attribution::ByPodUid { pod_uid } => pod_uids.contains(pod_uid.as_str()),
-    }
-}
-
 /// The engine's stateful processing core. It owns everything that persists across
 /// observations — the prior graph state, the mitigation ledger, and the applied-
 /// action log — and exposes one operation, [`Engine::process`], run once per
@@ -180,6 +168,10 @@ fn attribution_resolves(attribution: &observe::Attribution, pod_uids: &HashSet<&
 pub struct Engine {
     adapters: Vec<Box<dyn Adapter>>,
     active: EnabledActions,
+    /// Where a cut may be auto-applied (the namespace allowlist). Separate from
+    /// [`EnabledActions`] (what classes are armed): one says "is this class enabled",
+    /// the other "is this cut in scope" (JEF-104 follow-up).
+    scope: ActuationScope,
     actuator: Box<dyn Actuator>,
     hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
     adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
@@ -215,6 +207,7 @@ impl Engine {
     /// model is configured.
     pub fn new(
         active: EnabledActions,
+        scope: ActuationScope,
         actuator: Box<dyn Actuator>,
         hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
         adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
@@ -229,6 +222,7 @@ impl Engine {
         Self {
             adapters: observe::adapter::default_adapters(),
             active,
+            scope,
             actuator,
             hypothesizer,
             adjudicator,
@@ -282,10 +276,11 @@ impl Engine {
                     event.behavior.variant_label(),
                 )],
             );
-            // Mirror the RuntimeAdapter's resolution rule: a namespace/name attribution is
-            // always resolvable; a cgroup-UID one resolves iff a pod with that UID is in
-            // the snapshot (the adapter drops the rest as unknown UIDs).
-            let outcome = if attribution_resolves(&event.attribution, &pod_uids) {
+            // The resolution rule lives on `Attribution` (shared with the RuntimeAdapter,
+            // so the two can't drift): a namespace/name attribution always resolves; a
+            // cgroup-UID one resolves iff a pod with that UID is in the snapshot (the
+            // adapter drops the rest as unknown UIDs).
+            let outcome = if event.attribution.resolves_in(|uid| pod_uids.contains(uid)) {
                 "resolved"
             } else {
                 "unresolved"
@@ -555,7 +550,7 @@ impl Engine {
             .record(active_mitigations.len() as u64, &[]);
         for mitigation in &active_mitigations {
             let blast = predict_blast_radius(mitigation, &graph, &health);
-            match decide(mitigation, &self.active, &blast) {
+            match decide(mitigation, &self.active, &self.scope, &blast) {
                 Decision::AutoApply => {
                     if !self.actions.is_active(mitigation) {
                         self.actuator.apply(mitigation).await;
@@ -603,11 +598,13 @@ pub async fn run(
     client: kube::Client,
     interval: Duration,
     active: EnabledActions,
+    scope: ActuationScope,
     kev: observe::exploit_intel::KevCatalog,
     advisory: observe::advisory::AdvisoryStore,
 ) {
     let mut engine = Engine::new(
         active.clone(),
+        scope,
         build_actuator(&active, &client),
         build_hypothesizer(),
         // The timer path serves no dashboard, so there is nowhere to read a journal.
@@ -667,12 +664,7 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
 /// — null hypothesizer and adjudicator). Shared by both model-backed builders so the
 /// endpoint and the default model name have a single source of truth.
 fn model_config() -> Option<(String, String)> {
-    let endpoint = std::env::var("PROTECTOR_ENGINE_MODEL")
-        .ok()
-        .filter(|e| !e.is_empty())?;
-    let name =
-        std::env::var("PROTECTOR_ENGINE_MODEL_NAME").unwrap_or_else(|_| "qwen2.5:3b".to_string());
-    Some((endpoint, name))
+    model::config()
 }
 
 /// Choose the hypothesis source: a model-backed one when a model is configured AND
@@ -698,62 +690,6 @@ fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
         }
         _ => Box::new(reason::hypothesis::NullHypothesizer),
     }
-}
-
-/// Keep the configured model warm so the first judging pass after an engine restart
-/// isn't glacial (the "dashboard blank ~20 min after restart" pain, JEF-63). A CPU-only
-/// local model takes minutes to load its weights; once Ollama unloads an idle model
-/// (default 5 min) the next adjudication eats that cold-load before any verdict lands.
-///
-/// This spawns a lightweight background task that warms the model once at startup and
-/// then pings it on an interval shorter than Ollama's unload timeout, keeping the model
-/// resident between judging passes. It is strictly **best-effort and shadow-safe**: the
-/// ping is a one-token no-op chat (see [`model::keep_warm`]) that touches no verdict,
-/// enable, or actuation path, and a down or slow endpoint is logged at debug and
-/// retried next tick — it never blocks the engine loop or the dashboard.
-///
-/// A **no-op when no model is configured** (`PROTECTOR_ENGINE_MODEL` empty → no task is
-/// spawned) and when keep-warm is disabled (`PROTECTOR_ENGINE_KEEPWARM_SECS=0`).
-/// Returns the spawned task's handle (so the caller can abort it on shutdown), or `None`
-/// when nothing was spawned.
-fn spawn_keep_warm() -> Option<tokio::task::JoinHandle<()>> {
-    let (endpoint, model, interval) = keep_warm_plan(model_config(), model::keepwarm_interval())?;
-    tracing::info!(
-        %model,
-        interval_secs = interval.as_secs(),
-        "keep-warm: pinging the model to stay resident between judging passes"
-    );
-    Some(tokio::spawn(async move {
-        let client = model::client();
-        let mut ticker = tokio::time::interval(interval);
-        // Skip missed ticks rather than bursting catch-up pings if a tick is delayed
-        // (e.g. the runtime was busy) — one ping per interval is all keep-warm needs.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            // The first tick fires immediately, giving the startup warm-up; subsequent
-            // ticks are the periodic keep-alive.
-            ticker.tick().await;
-            if model::keep_warm(&client, &endpoint, &model).await {
-                tracing::debug!(%model, "keep-warm ping ok (model resident)");
-            } else {
-                tracing::debug!(%model, "keep-warm ping failed (model down?); retrying next tick");
-            }
-        }
-    }))
-}
-
-/// The pure keep-warm gating decision, split out of [`spawn_keep_warm`] so it's testable
-/// without spawning a task or reading process env. Returns `Some((endpoint, model,
-/// interval))` only when BOTH a model is configured (`config`) AND keep-warm is enabled
-/// (`interval`); `None` otherwise — i.e. a no-op when `PROTECTOR_ENGINE_MODEL` is empty
-/// or `PROTECTOR_ENGINE_KEEPWARM_SECS=0`.
-fn keep_warm_plan(
-    config: Option<(String, String)>,
-    interval: Option<Duration>,
-) -> Option<(String, String, Duration)> {
-    let (endpoint, model) = config?;
-    let interval = interval?;
-    Some((endpoint, model, interval))
 }
 
 /// Choose the adjudicator (ADR-0013): a model-backed judge when a model endpoint is
@@ -789,6 +725,7 @@ fn build_adjudicator(
 pub async fn run_watch(
     client: kube::Client,
     active: EnabledActions,
+    scope: ActuationScope,
     runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
@@ -806,6 +743,7 @@ pub async fn run_watch(
     let journal = std::sync::Arc::new(dashboard::JudgementLog::new());
     let mut engine = Engine::new(
         active.clone(),
+        scope,
         build_actuator(&active, &client),
         build_hypothesizer(),
         build_adjudicator(Some(journal.clone())),
@@ -827,7 +765,7 @@ pub async fn run_watch(
     // stays resident between judging passes — the first post-restart pass isn't glacial.
     // Best-effort and shadow-safe; a no-op when no model is configured. Aborted on loop
     // exit so it can't outlive the engine.
-    let keep_warm = spawn_keep_warm();
+    let keep_warm = model::spawn_keep_warm();
 
     // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
     // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
@@ -1041,6 +979,7 @@ mod tests {
     fn engine_with(counter: Arc<AtomicUsize>) -> Engine {
         Engine::new(
             EnabledActions::from_names(std::iter::empty::<&str>()),
+            ActuationScope::unscoped(),
             Box::new(DryRunActuator),
             Box::new(reason::hypothesis::NullHypothesizer),
             Box::new(CountingAdjudicator(counter)),
@@ -1097,10 +1036,12 @@ mod tests {
         );
     }
 
-    /// The attribution-outcome metric (JEF-100) must mirror the RuntimeAdapter's
-    /// resolution rule: a namespace/name attribution always resolves; a cgroup-UID one
-    /// resolves only when a pod with that UID is in the snapshot (an unknown UID is
-    /// `unresolved`).
+    /// The attribution-outcome metric (JEF-100) uses [`Attribution::resolves_in`] against
+    /// the live pod-UID set the metric loop builds once per pass — the same rule the
+    /// RuntimeAdapter applies. A namespace/name attribution always resolves; a cgroup-UID
+    /// one resolves only when a pod with that UID is in the snapshot (an unknown UID is
+    /// `unresolved`). (The rule itself is unit-tested in the `protector-behavior` crate;
+    /// this pins the metric loop's call shape against a real snapshot's UID set.)
     #[test]
     fn attribution_resolves_mirrors_the_adapter_rule() {
         use crate::engine::observe::Attribution;
@@ -1127,62 +1068,16 @@ mod tests {
         let empty: HashSet<&str> = HashSet::new();
 
         // namespace/name (Falco) always resolves, even against an empty snapshot.
-        assert!(attribution_resolves(
-            &Attribution::by_namespaced_name("app", "web"),
-            &present
-        ));
-        assert!(attribution_resolves(
-            &Attribution::by_namespaced_name("ghost", "nobody"),
-            &empty
-        ));
+        assert!(
+            Attribution::by_namespaced_name("app", "web").resolves_in(|uid| present.contains(uid))
+        );
+        assert!(
+            Attribution::by_namespaced_name("ghost", "nobody")
+                .resolves_in(|uid| empty.contains(uid))
+        );
         // A cgroup UID resolves iff a pod with that UID is present.
-        assert!(attribution_resolves(
-            &Attribution::by_pod_uid("uid-1"),
-            &present
-        ));
-        assert!(!attribution_resolves(
-            &Attribution::by_pod_uid("uid-unknown"),
-            &present
-        ));
-    }
-
-    /// Keep-warm (JEF-107) is gated on BOTH a configured model and a non-zero interval.
-    /// With no model configured it must be a no-op regardless of the interval — that's
-    /// the `PROTECTOR_ENGINE_MODEL` empty case the issue requires.
-    #[test]
-    fn keep_warm_is_a_noop_with_no_model() {
-        assert!(
-            keep_warm_plan(None, Some(Duration::from_secs(240))).is_none(),
-            "no model configured must mean no keep-warm, even with a valid interval"
-        );
-    }
-
-    /// With keep-warm disabled (`PROTECTOR_ENGINE_KEEPWARM_SECS=0` → `None` interval) it
-    /// must be a no-op even when a model IS configured.
-    #[test]
-    fn keep_warm_is_a_noop_when_disabled() {
-        assert!(
-            keep_warm_plan(Some(("http://ollama/v1".into(), "qwen2.5:3b".into())), None).is_none(),
-            "a zero interval must disable keep-warm even with a model configured"
-        );
-    }
-
-    /// With both a model and an interval, keep-warm carries the endpoint/model/interval
-    /// through unchanged for the spawned task to use.
-    #[test]
-    fn keep_warm_plans_when_model_and_interval_present() {
-        let plan = keep_warm_plan(
-            Some(("http://ollama/v1".into(), "qwen2.5:3b".into())),
-            Some(Duration::from_secs(120)),
-        );
-        assert_eq!(
-            plan,
-            Some((
-                "http://ollama/v1".to_string(),
-                "qwen2.5:3b".to_string(),
-                Duration::from_secs(120)
-            ))
-        );
+        assert!(Attribution::by_pod_uid("uid-1").resolves_in(|uid| present.contains(uid)));
+        assert!(!Attribution::by_pod_uid("uid-unknown").resolves_in(|uid| present.contains(uid)));
     }
 
     /// A live alert on a breach-relevant entry sets `corroborated` — the source the

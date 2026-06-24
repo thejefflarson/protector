@@ -238,6 +238,25 @@ impl Attribution {
             pod: pod.into(),
         }
     }
+
+    /// Whether this attribution resolves to a live workload, given a way to ask whether a
+    /// pod UID is currently observed. A [`ByNamespacedName`](Self::ByNamespacedName)
+    /// attribution (Falco, which already carries cluster metadata) always resolves; a
+    /// [`ByPodUid`](Self::ByPodUid) one (the eBPF agent) resolves only when a pod with that
+    /// UID is present — an unknown UID (pod gone / not yet observed) does not resolve and is
+    /// dropped rather than guessed (ADR-0014).
+    ///
+    /// This is the single owner of the resolution rule: the engine's `RuntimeAdapter`
+    /// applies it to attach signals and the attribution-outcome metric applies it to count
+    /// resolved vs unresolved, so the two can't drift. `pod_uid_known` is a caller-supplied
+    /// lookup (e.g. membership in the snapshot's live pod-UID set), keeping this crate free
+    /// of any Kubernetes/engine types.
+    pub fn resolves_in(&self, pod_uid_known: impl FnOnce(&str) -> bool) -> bool {
+        match self {
+            Attribution::ByNamespacedName { .. } => true,
+            Attribution::ByPodUid { pod_uid } => pod_uid_known(pod_uid),
+        }
+    }
 }
 
 /// A normalized live runtime observation about a workload — the behavioral port's input
@@ -282,6 +301,16 @@ mod tests {
             v,
             serde_json::json!({"kind": "network_connection", "peer": "1.2.3.4:443", "internet": true})
         );
+    }
+
+    #[test]
+    fn resolves_in_applies_the_attribution_resolution_rule() {
+        // A namespace/name attribution (Falco) always resolves — even when the lookup
+        // would reject everything.
+        assert!(Attribution::by_namespaced_name("app", "web").resolves_in(|_| false));
+        // A cgroup-UID attribution (the eBPF agent) resolves iff the UID is known.
+        assert!(Attribution::by_pod_uid("uid-1").resolves_in(|uid| uid == "uid-1"));
+        assert!(!Attribution::by_pod_uid("uid-unknown").resolves_in(|uid| uid == "uid-1"));
     }
 
     #[test]

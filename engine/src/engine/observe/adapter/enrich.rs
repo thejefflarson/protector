@@ -72,19 +72,27 @@ impl Adapter for RuntimeAdapter {
 
         let (mut attached, mut unresolved, mut filtered) = (0usize, 0usize, 0usize);
         for event in &snapshot.runtime_events {
+            // The resolution rule (a namespace/name attribution always resolves; a cgroup
+            // UID resolves iff a pod with that UID is observed) lives on `Attribution`,
+            // shared with the engine's attribution-outcome metric so the two can't drift.
+            if !event
+                .attribution
+                .resolves_in(|uid| by_uid.contains_key(uid))
+            {
+                // Unknown UID (pod gone / not yet observed) — drop, don't guess.
+                unresolved += 1;
+                continue;
+            }
             let (ns, name, pod): (String, String, Option<&Pod>) = match &event.attribution {
-                Attribution::ByPodUid { pod_uid } => match by_uid.get(pod_uid) {
-                    Some(p) => (
+                Attribution::ByPodUid { pod_uid } => {
+                    // resolves_in above guarantees the UID is present.
+                    let p = by_uid[pod_uid];
+                    (
                         pod_namespace(p),
                         p.metadata.name.clone().unwrap_or_default(),
-                        Some(*p),
-                    ),
-                    None => {
-                        // Unknown UID (pod gone / not yet observed) — drop, don't guess.
-                        unresolved += 1;
-                        continue;
-                    }
-                },
+                        Some(p),
+                    )
+                }
                 Attribution::ByNamespacedName { namespace, pod } => {
                     (namespace.clone(), pod.clone(), None)
                 }

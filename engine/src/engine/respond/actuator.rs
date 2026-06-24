@@ -56,6 +56,11 @@ fn action_from_name(name: &str) -> Option<ProposedAction> {
 
 /// Which action classes are enabled for automatic application. Default: none — the
 /// shadow-first posture. Operators enable one reversible class at a time after a bake.
+///
+/// A **pure armed-classes type**: it answers "what is armed?" (which cut classes, and
+/// whether model promotion is allowed) and nothing else. *Where* a cut may be actuated
+/// is a separate concern owned by [`ActuationScope`] — keeping the two apart so "is this
+/// class enabled" never blurs into "is this cut in scope" (JEF-104 follow-up).
 #[derive(Debug, Default, Clone)]
 pub struct EnabledActions {
     enabled: HashSet<ProposedAction>,
@@ -63,14 +68,6 @@ pub struct EnabledActions {
     /// internet-exposed chain to auto-eligible. Separate from an action class — it
     /// gates promotion, not the cut; the cut still needs its own class (`network`).
     judgement: bool,
-    /// Per-namespace actuation allowlist (`PROTECTOR_ENGINE_ENFORCE_NAMESPACES`).
-    /// Empty (the default) = unscoped: every namespace is eligible, preserving the
-    /// historical behavior. Non-empty = confine the first live cut to these
-    /// namespaces (ADR-0009/0014 "one reversible class, watch, widen") — a cut that
-    /// would write into any *other* namespace is held as a proposal even when its
-    /// class is enabled and corroborated. Mirrors the webhook's
-    /// `PROTECTOR_ENFORCE_NAMESPACES` allowlist idiom.
-    enforce_namespaces: HashSet<String>,
 }
 
 impl EnabledActions {
@@ -89,31 +86,6 @@ impl EnabledActions {
     pub fn enable_judgement(mut self) -> Self {
         self.judgement = true;
         self
-    }
-
-    /// Scope live actuation to a namespace allowlist (builder-style). An empty list
-    /// leaves actuation unscoped (every namespace eligible), matching the default.
-    pub fn enforce_namespaces(mut self, namespaces: impl IntoIterator<Item = String>) -> Self {
-        self.enforce_namespaces = namespaces.into_iter().collect();
-        self
-    }
-
-    /// Whether `mitigation`'s cut is within the actuation namespace allowlist. An
-    /// empty allowlist is unscoped (always eligible) — the historical behavior. When
-    /// the list is non-empty, **every** workload endpoint the cut would write into
-    /// (source and target) must be listed: the live actuators write an
-    /// `AdminNetworkPolicy`/`NetworkPolicy` selecting the target's and the source's
-    /// namespaces, so an out-of-scope endpoint on either side would place an object in
-    /// an unallowed namespace. Non-workload endpoints carry no namespace to scope on
-    /// and so don't constrain (non-network cuts are forbidden upstream anyway).
-    pub fn namespace_in_scope(&self, mitigation: &Mitigation) -> bool {
-        if self.enforce_namespaces.is_empty() {
-            return true;
-        }
-        [&mitigation.cut.from, &mitigation.cut.to]
-            .iter()
-            .filter_map(|key| workload_namespace(key))
-            .all(|ns| self.enforce_namespaces.contains(ns))
     }
 
     /// Build from operator-facing class names (e.g. `["network", "judgement"]`).
@@ -145,6 +117,52 @@ impl EnabledActions {
     /// action class (`network`) is also enabled.
     pub fn is_empty(&self) -> bool {
         self.enabled.is_empty()
+    }
+}
+
+/// The per-namespace actuation allowlist (`PROTECTOR_ENGINE_ENFORCE_NAMESPACES`) — the
+/// scope guard for *where* a cut may be auto-applied, distinct from [`EnabledActions`]
+/// ("what classes are armed"). Empty (the default) = unscoped: every namespace is
+/// eligible, preserving the historical behavior. Non-empty = confine the first live cut
+/// to these namespaces (ADR-0009/0014 "one reversible class, watch, widen") — a cut that
+/// would write into any *other* namespace is held as a proposal even when its class is
+/// enabled and corroborated. Mirrors the webhook's `PROTECTOR_ENFORCE_NAMESPACES`
+/// allowlist idiom. Passed to [`decide`] as its own parameter so the enable decision and
+/// the scope decision stay separable.
+#[derive(Debug, Default, Clone)]
+pub struct ActuationScope {
+    namespaces: HashSet<String>,
+}
+
+impl ActuationScope {
+    /// Unscoped — every namespace eligible (the default, historical behavior).
+    pub fn unscoped() -> Self {
+        Self::default()
+    }
+
+    /// Confine actuation to a namespace allowlist. An empty list leaves it unscoped.
+    pub fn enforce_namespaces(namespaces: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            namespaces: namespaces.into_iter().collect(),
+        }
+    }
+
+    /// Whether `mitigation`'s cut is within the actuation namespace allowlist. An empty
+    /// allowlist is unscoped (always eligible) — the historical behavior. When the list
+    /// is non-empty, **every** workload endpoint the cut would write into (source and
+    /// target) must be listed: the live actuators write an `AdminNetworkPolicy`/
+    /// `NetworkPolicy` selecting the target's and the source's namespaces, so an
+    /// out-of-scope endpoint on either side would place an object in an unallowed
+    /// namespace. Non-workload endpoints carry no namespace to scope on and so don't
+    /// constrain (non-network cuts are forbidden upstream anyway).
+    pub fn in_scope(&self, mitigation: &Mitigation) -> bool {
+        if self.namespaces.is_empty() {
+            return true;
+        }
+        [&mitigation.cut.from, &mitigation.cut.to]
+            .iter()
+            .filter_map(|key| workload_namespace(key))
+            .all(|ns| self.namespaces.contains(ns))
     }
 }
 
@@ -214,10 +232,15 @@ pub enum Decision {
     Forbidden(String),
 }
 
-/// Decide how to handle `mitigation` given the active policy and predicted blast
-/// radius. The order of checks is the safety order: irreversibility first, then
-/// live-collateral guard, then active.
-pub fn decide(mitigation: &Mitigation, active: &EnabledActions, blast: &BlastRadius) -> Decision {
+/// Decide how to handle `mitigation` given the active policy, the actuation scope, and
+/// the predicted blast radius. The order of checks is the safety order: irreversibility
+/// first, then live-collateral guard, then active, then scope.
+pub fn decide(
+    mitigation: &Mitigation,
+    active: &EnabledActions,
+    scope: &ActuationScope,
+    blast: &BlastRadius,
+) -> Decision {
     if !mitigation.action.is_reversible() {
         return Decision::Forbidden("irreversible action is never auto-enabled".to_string());
     }
@@ -247,7 +270,7 @@ pub fn decide(mitigation: &Mitigation, active: &EnabledActions, blast: &BlastRad
     if !active.is_enabled(mitigation.action) {
         return Decision::Propose("action class not enabled".to_string());
     }
-    if !active.namespace_in_scope(mitigation) {
+    if !scope.in_scope(mitigation) {
         return Decision::Propose(
             "cut's namespace is outside the engine actuation allowlist \
              (PROTECTOR_ENGINE_ENFORCE_NAMESPACES); needs approval"
@@ -815,7 +838,12 @@ mod tests {
             "host/node-1",
             ProposedAction::RemoveEscapePrimitive,
         );
-        let d = decide(&m, &EnabledActions::none(), &BlastRadius::default());
+        let d = decide(
+            &m,
+            &EnabledActions::none(),
+            &ActuationScope::unscoped(),
+            &BlastRadius::default(),
+        );
         assert!(matches!(d, Decision::Forbidden(_)));
     }
 
@@ -832,7 +860,10 @@ mod tests {
             alive_collateral: vec!["workload/app/Pod/web".to_string()],
             ..Default::default()
         };
-        assert!(matches!(decide(&m, &active, &blast), Decision::Propose(_)));
+        assert!(matches!(
+            decide(&m, &active, &ActuationScope::unscoped(), &blast),
+            Decision::Propose(_)
+        ));
 
         // Even with no collateral, an incompletely-modeled graph fails safe.
         let unknown = BlastRadius {
@@ -847,6 +878,7 @@ mod tests {
             decide(
                 &live,
                 &EnabledActions::none().enable(ProposedAction::DenyNetworkPath),
+                &ActuationScope::unscoped(),
                 &unknown
             ),
             Decision::Propose(_)
@@ -871,6 +903,7 @@ mod tests {
             decide(
                 &net(vec![justification(false, true, true)]),
                 &armed,
+                &ActuationScope::unscoped(),
                 &BlastRadius::default()
             ),
             Decision::AutoApply
@@ -880,6 +913,7 @@ mod tests {
             decide(
                 &net(vec![justification(true, false, true)]),
                 &armed,
+                &ActuationScope::unscoped(),
                 &BlastRadius::default()
             ),
             Decision::Propose(_)
@@ -889,6 +923,7 @@ mod tests {
             decide(
                 &net(vec![justification(false, true, false)]),
                 &armed,
+                &ActuationScope::unscoped(),
                 &BlastRadius::default()
             ),
             Decision::Propose(_)
@@ -906,7 +941,12 @@ mod tests {
         );
         let enabled = EnabledActions::none().enable(ProposedAction::RevokeRbacGrant);
         assert!(matches!(
-            decide(&m, &enabled, &BlastRadius::default()),
+            decide(
+                &m,
+                &enabled,
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::Forbidden(_)
         ));
     }
@@ -926,7 +966,12 @@ mod tests {
 
         // Corroborated + enabled + no live collateral ⇒ auto-apply.
         assert_eq!(
-            decide(&net(), &enabled, &BlastRadius::default()),
+            decide(
+                &net(),
+                &enabled,
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::AutoApply
         );
         // Enabled but the justifying chain isn't corroborated ⇒ propose.
@@ -937,12 +982,22 @@ mod tests {
             ProposedAction::DenyNetworkPath,
         );
         assert!(matches!(
-            decide(&uncorroborated, &enabled, &BlastRadius::default()),
+            decide(
+                &uncorroborated,
+                &enabled,
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::Propose(_)
         ));
         // Corroborated but not enabled ⇒ propose.
         assert!(matches!(
-            decide(&net(), &EnabledActions::none(), &BlastRadius::default()),
+            decide(
+                &net(),
+                &EnabledActions::none(),
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::Propose(_)
         ));
     }
@@ -965,37 +1020,40 @@ mod tests {
 
         // Empty allowlist (the default) ⇒ unscoped, every namespace eligible ⇒ apply.
         assert_eq!(
-            decide(&net(), &enabled, &BlastRadius::default()),
+            decide(
+                &net(),
+                &enabled,
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::AutoApply
         );
 
         // Both endpoints' namespaces listed ⇒ in scope ⇒ apply.
-        let in_scope = enabled
-            .clone()
-            .enforce_namespaces(["app".to_string(), "data".to_string()]);
+        let in_scope = ActuationScope::enforce_namespaces(["app".to_string(), "data".to_string()]);
         assert_eq!(
-            decide(&net(), &in_scope, &BlastRadius::default()),
+            decide(&net(), &enabled, &in_scope, &BlastRadius::default()),
             Decision::AutoApply
         );
 
         // Allowlist covers only the source, not the target ⇒ out of scope ⇒ propose
         // (the deny would write an ANP selecting the unlisted `data` namespace).
-        let partial = enabled.clone().enforce_namespaces(["app".to_string()]);
+        let partial = ActuationScope::enforce_namespaces(["app".to_string()]);
         assert!(matches!(
-            decide(&net(), &partial, &BlastRadius::default()),
+            decide(&net(), &enabled, &partial, &BlastRadius::default()),
             Decision::Propose(_)
         ));
 
         // A disjoint allowlist ⇒ out of scope ⇒ propose.
-        let other = enabled.clone().enforce_namespaces(["other".to_string()]);
+        let other = ActuationScope::enforce_namespaces(["other".to_string()]);
         assert!(matches!(
-            decide(&net(), &other, &BlastRadius::default()),
+            decide(&net(), &enabled, &other, &BlastRadius::default()),
             Decision::Propose(_)
         ));
     }
 
     #[test]
-    fn namespace_in_scope_is_unscoped_when_allowlist_empty() {
+    fn actuation_scope_is_unscoped_when_allowlist_empty() {
         // The gate is purely additive: with no allowlist, every cut is in scope.
         let m = mitigation(
             "workload/app/Pod/web",
@@ -1003,17 +1061,12 @@ mod tests {
             "workload/data/Pod/db",
             ProposedAction::DenyNetworkPath,
         );
-        assert!(EnabledActions::none().namespace_in_scope(&m));
+        assert!(ActuationScope::unscoped().in_scope(&m));
         assert!(
-            EnabledActions::none()
-                .enforce_namespaces(["app".to_string(), "data".to_string()])
-                .namespace_in_scope(&m)
+            ActuationScope::enforce_namespaces(["app".to_string(), "data".to_string()])
+                .in_scope(&m)
         );
-        assert!(
-            !EnabledActions::none()
-                .enforce_namespaces(["app".to_string()])
-                .namespace_in_scope(&m)
-        );
+        assert!(!ActuationScope::enforce_namespaces(["app".to_string()]).in_scope(&m));
     }
 
     #[test]
@@ -1031,7 +1084,12 @@ mod tests {
         };
         let enabled = EnabledActions::none().enable(ProposedAction::DenyNetworkPath);
         assert_eq!(
-            decide(&promoted_net, &enabled, &BlastRadius::default()),
+            decide(
+                &promoted_net,
+                &enabled,
+                &ActuationScope::unscoped(),
+                &BlastRadius::default()
+            ),
             Decision::AutoApply
         );
         // The `judgement` opt-in toggles promotion (consumed in the engine loop), not
