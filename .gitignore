@@ -4,3 +4,7 @@ target/
 
 # JS bundle build (vendored output in web/dist is committed)
 engine/web/node_modules/
+
+# Python bytecode cache (e.g. scripts/__pycache__ from judge_bakeoff.py)
+__pycache__/
+*.pyc
