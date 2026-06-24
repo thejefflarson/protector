@@ -31,6 +31,7 @@ use std::time::Duration;
 // model + dashboard are cross-cutting single files; this mod.rs is the orchestrator.
 pub mod dashboard;
 pub mod graph;
+pub mod journal;
 pub mod model;
 pub mod observe;
 pub mod reason;
@@ -176,6 +177,14 @@ pub struct Engine {
     hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
     adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     findings: std::sync::Arc<dashboard::Findings>,
+    /// Recent lifted cuts + why (JEF-141), shared with the dashboard's `/reversions`.
+    /// Seeded from the journal on boot so a self-revert survives a restart.
+    reversions: std::sync::Arc<dashboard::ReversionLog>,
+    /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
+    /// apply/revert deltas are appended here so a restart replays them. Disabled (a
+    /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
+    /// then runs exactly as it did before, in-memory only.
+    journal: journal::DecisionJournal,
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
@@ -196,6 +205,17 @@ pub struct Engine {
     /// — model unavailable" — stays visible while the model re-judges. Pruned to present
     /// entries each pass.
     last_verdict: HashMap<String, reason::adjudicate::Verdict>,
+    /// Verdict summaries restored from the durable journal on boot (JEF-141), keyed by
+    /// entry. Display-only and verbatim (the model's own words from before the restart),
+    /// so a breach path shows its prior judgement IMMEDIATELY — before the slow CPU model
+    /// re-judges. Used only to seed `verdict` at publish time when there's no live
+    /// `last_verdict` yet; cleared for an entry once the model produces a fresh verdict,
+    /// and pruned to present entries each pass.
+    restored_verdicts: HashMap<String, String>,
+    /// The last breach-verdict summary written to the journal per entry, so a steady-state
+    /// cluster doesn't append an identical line every pass (JEF-141). Pruned to present
+    /// entries each pass.
+    journaled_verdicts: HashMap<String, String>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -227,18 +247,93 @@ impl Engine {
             hypothesizer,
             adjudicator,
             findings,
+            reversions: std::sync::Arc::new(dashboard::ReversionLog::new()),
+            // Disabled by default — durability is opt-in via a mounted volume. The watch
+            // path enables it from the env (see [`with_journal`]); tests run in-memory.
+            journal: journal::DecisionJournal::disabled(),
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
             verdict_cache: HashMap::new(),
             last_verdict: HashMap::new(),
+            restored_verdicts: HashMap::new(),
+            journaled_verdicts: HashMap::new(),
             metrics: EngineMetrics::new(),
         }
+    }
+
+    /// Attach a durable decision journal (JEF-141) and replay it onto the in-memory
+    /// state, so `/findings`, `/judgements`, and the reversions view populate IMMEDIATELY
+    /// after a restart — before a fresh (slow CPU) model pass lands. A disabled journal
+    /// (no volume configured) replays nothing, leaving today's cold-start behaviour.
+    /// Builder-style; called once on boot.
+    pub fn with_journal(mut self, journal: journal::DecisionJournal) -> Self {
+        self.replay_journal(&journal);
+        self.journal = journal;
+        self
+    }
+
+    /// Replay the journal's durable decisions onto the in-memory views: the last-known
+    /// verdict per entry (so findings show a judgement without re-judging), the recent
+    /// reversions ring, and the last-pass freshness stamp. Idempotent and bounded by the
+    /// journal's own rotation window.
+    fn replay_journal(&mut self, journal: &journal::DecisionJournal) {
+        let entries = journal.replay();
+        if entries.is_empty() {
+            return;
+        }
+        let mut latest_at = std::time::SystemTime::UNIX_EPOCH;
+        let mut restored_verdicts = 0usize;
+        let mut restored_reversions = 0usize;
+        for entry in &entries {
+            latest_at = latest_at.max(entry.at());
+            match &entry.decision {
+                journal::Decision::Breach {
+                    entry: key,
+                    verdict,
+                    ..
+                } => {
+                    // Carry the model's prior words forward verbatim as a display memory,
+                    // so the breach path shows its last judgement IMMEDIATELY while a fresh
+                    // one is computed. Replayed in chronological order, so the final write
+                    // per entry wins. Display-only: the action logic still uses the live
+                    // verdict, never this restored string.
+                    self.restored_verdicts.insert(key.clone(), verdict.clone());
+                    restored_verdicts += 1;
+                }
+                journal::Decision::Revert { cut, reason } => {
+                    self.reversions.record(dashboard::ReversionRecord {
+                        cut: cut.clone(),
+                        reason: reason.clone(),
+                        at_ms: entry.at_ms,
+                    });
+                    restored_reversions += 1;
+                }
+                // Applies are durable for the audit trail but don't seed a view directly
+                // (the live ledger re-derives the active set from current proof each pass).
+                journal::Decision::Apply { .. } => {}
+            }
+        }
+        if latest_at > std::time::SystemTime::UNIX_EPOCH {
+            self.findings.mark_pass(latest_at);
+        }
+        tracing::info!(
+            decisions = entries.len(),
+            restored_verdicts,
+            restored_reversions,
+            "replayed decision journal on boot (dashboard populated from durable history)"
+        );
     }
 
     /// A handle to the current findings, for the dashboard server to read.
     pub fn findings(&self) -> std::sync::Arc<dashboard::Findings> {
         self.findings.clone()
+    }
+
+    /// A handle to the recent-reversions ring (JEF-141), for the dashboard's
+    /// `/reversions` view.
+    pub fn reversions(&self) -> std::sync::Arc<dashboard::ReversionLog> {
+        self.reversions.clone()
     }
 
     /// Run the five-question pipeline against one observed snapshot.
@@ -337,10 +432,15 @@ impl Engine {
         // UI every pass. Both decisive and inconclusive verdicts are carried (seeing
         // "uncertain — model unavailable" is the point — it shows the model was asked).
         for c in chains.iter_mut() {
-            if c.is_breach_relevant()
-                && let Some(v) = self.last_verdict.get(&c.entry.0)
-            {
-                c.verdict = Some(v.summary());
+            if c.is_breach_relevant() {
+                if let Some(v) = self.last_verdict.get(&c.entry.0) {
+                    c.verdict = Some(v.summary());
+                } else if let Some(restored) = self.restored_verdicts.get(&c.entry.0) {
+                    // No live verdict yet this run, but the durable journal carried one
+                    // forward from before the restart (JEF-141) — show it so the dashboard
+                    // isn't blank while the slow CPU model re-judges.
+                    c.verdict = Some(restored.clone());
+                }
             }
         }
 
@@ -481,8 +581,27 @@ impl Engine {
                 _ => verdict.clone(),
             };
             // Remember the displayed verdict for the carry-forward seed above, so the
-            // next pass shows it instead of blanking.
+            // next pass shows it instead of blanking. A live verdict supersedes any
+            // journal-restored one for this entry.
             self.last_verdict.insert(entry_key.clone(), display.clone());
+            self.restored_verdicts.remove(entry_key);
+            // Append the breach decision to the durable journal (JEF-141) — but only a
+            // DECISIVE verdict, and only when it changed from the last line we wrote for
+            // this entry, so a steady-state cluster doesn't append an identical line every
+            // pass. Uncertain (transient timeout) is skipped, mirroring the verdict-cache
+            // discipline. A no-op when the journal is disabled (no volume).
+            let summary = display.summary();
+            if !matches!(display, reason::adjudicate::Verdict::Uncertain(_))
+                && self.journaled_verdicts.get(entry_key) != Some(&summary)
+            {
+                self.journal.record(journal::Decision::Breach {
+                    entry: entry_key.clone(),
+                    objectives: objectives.len(),
+                    verdict: summary.clone(),
+                });
+                self.journaled_verdicts
+                    .insert(entry_key.clone(), summary.clone());
+            }
             // The entry's verdict applies to every chain from it. Keep the model's call
             // — positive *and* negative — on each so the dashboard shows why it acted.
             for &i in idxs {
@@ -502,6 +621,10 @@ impl Engine {
         self.verdict_cache
             .retain(|entry, _| current_entries.contains(entry));
         self.last_verdict
+            .retain(|entry, _| current_entries.contains(entry));
+        self.restored_verdicts
+            .retain(|entry, _| current_entries.contains(entry));
+        self.journaled_verdicts
             .retain(|entry, _| current_entries.contains(entry));
         // Current verdict distribution over breach paths (per-label gauge).
         for (verdict, count) in &verdict_counts {
@@ -578,6 +701,12 @@ impl Engine {
                         self.metrics
                             .mitigations
                             .add(1, &[opentelemetry::KeyValue::new("action", "applied")]);
+                        // Durable record of the cut going live (JEF-141) — one line, only
+                        // when newly applied (the `is_active` guard), so re-applies don't
+                        // re-log. No-op when the journal is disabled.
+                        self.journal.record(journal::Decision::Apply {
+                            cut: mitigation.cut_signature(),
+                        });
                     }
                 }
                 Decision::Propose(reason) => {
@@ -603,7 +732,29 @@ impl Engine {
             self.metrics
                 .mitigations
                 .add(1, &[opentelemetry::KeyValue::new("action", "reverted")]);
+            // Make the lifted cut VISIBLE and DURABLE (JEF-141): the self-revert is the
+            // core safety story (ADR-0016), but it was previously invisible. Push it onto
+            // the in-memory reversions ring (for `/reversions`) and append it to the
+            // journal so it survives a restart.
+            let cut = reversion.mitigation.cut_signature();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            self.reversions.record(dashboard::ReversionRecord {
+                cut: cut.clone(),
+                reason: reversion.reason.clone(),
+                at_ms: now_ms,
+            });
+            self.journal.record(journal::Decision::Revert {
+                cut,
+                reason: reversion.reason.clone(),
+            });
         }
+
+        // Mark the pass complete for the dashboard's "last pass NNs ago" freshness line
+        // (JEF-141), so a quiet/loading view reads as fresh rather than broken.
+        self.findings.mark_pass(std::time::SystemTime::now());
 
         self.previous = current;
     }
@@ -760,21 +911,30 @@ pub async fn run_watch(
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
     // shared from the adjudicator (writer) to the dashboard's `/judgements` (reader).
     let journal = std::sync::Arc::new(dashboard::JudgementLog::new());
+    // The durable decision journal (JEF-141): reload pre-restart decisions onto the
+    // in-memory views so the dashboard isn't blank while the caches + CPU model warm.
+    // Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no
+    // crash) — the engine then behaves exactly as before.
     let mut engine = Engine::new(
         active.clone(),
         scope,
         build_actuator(&active, &client),
         build_hypothesizer(),
         build_adjudicator(Some(journal.clone())),
-    );
+    )
+    .with_journal(journal::DecisionJournal::from_env());
 
     // Findings dashboard (read-only): surfaces the proven chains, especially the
-    // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis.
+    // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis and
+    // `/reversions` for lifted cuts (JEF-141).
     if let Some(addr) = dashboard_addr {
         let findings = engine.findings();
+        let reversions = engine.reversions();
         let journal = journal.clone();
         tokio::spawn(async move {
-            if let Err(error) = dashboard::serve_dashboard(addr, findings, journal).await {
+            if let Err(error) =
+                dashboard::serve_dashboard(addr, findings, journal, reversions).await
+            {
                 tracing::error!(%error, "dashboard stopped");
             }
         });
@@ -1176,6 +1336,113 @@ mod tests {
         assert!(
             bake.corroborations >= 1,
             "the live alert corroborates a breach-relevant chain"
+        );
+    }
+
+    /// A unique temp journal path for a test, without a temp-file crate.
+    fn temp_journal_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let n = NONCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "protector-engine-journal-{tag}-{}-{n}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    /// JEF-141 acceptance: after a "restart", `/findings` shows the pre-restart breach
+    /// verdict WITHOUT a fresh model pass, and the reversions ring + last-pass freshness
+    /// are seeded from the durable journal. We process once with a journal enabled (which
+    /// appends the breach decision), then build a SECOND engine on the SAME journal path
+    /// and assert the dashboard is populated from replay alone — before any `process`.
+    #[tokio::test]
+    async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
+        let path = temp_journal_path("restore");
+
+        // --- First engine "run": process a breach snapshot with the journal enabled. ---
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::new(
+            EnabledActions::from_names(std::iter::empty::<&str>()),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(reason::hypothesis::NullHypothesizer),
+            Box::new(CountingAdjudicator(calls.clone())),
+        )
+        .with_journal(journal::DecisionJournal::open(&path));
+        engine.process(&exposed_snapshot(true)).await;
+        // The breach decision (a decisive Refuted verdict) was journaled.
+        let written = journal::DecisionJournal::open(&path).replay();
+        assert!(
+            written
+                .iter()
+                .any(|e| matches!(e.decision, journal::Decision::Breach { .. })),
+            "the breach decision is durable"
+        );
+        drop(engine); // "restart"
+
+        // --- Second engine "boot": replay the journal, NO process() yet. ---
+        let fresh_calls = Arc::new(AtomicUsize::new(0));
+        let engine2 = Engine::new(
+            EnabledActions::from_names(std::iter::empty::<&str>()),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(reason::hypothesis::NullHypothesizer),
+            Box::new(CountingAdjudicator(fresh_calls.clone())),
+        )
+        .with_journal(journal::DecisionJournal::open(&path));
+        // The model was NOT consulted on boot — the verdict is restored from disk.
+        assert_eq!(
+            fresh_calls.load(Ordering::SeqCst),
+            0,
+            "no fresh model pass ran on boot"
+        );
+        // Freshness is seeded from the journal's newest stamp.
+        assert!(
+            engine2.findings().last_pass().is_some(),
+            "last-pass freshness is restored from the journal"
+        );
+
+        // The restored verdict surfaces on /findings the moment the next pass publishes
+        // chains — without the (counting) model being consulted for it.
+        let mut engine2 = engine2;
+        engine2.process(&exposed_snapshot(true)).await;
+        let findings = engine2.findings().snapshot();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.breach_relevant && f.verdict.is_some()),
+            "the breach path shows a verdict immediately after restart"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file({
+            let mut s = path.clone().into_os_string();
+            s.push(".1");
+            std::path::PathBuf::from(s)
+        });
+    }
+
+    /// JEF-141 graceful degradation at the engine level: with no journal configured the
+    /// engine runs exactly as before (in-memory only) and never touches disk — the
+    /// disabled-journal path is a no-op, not a crash.
+    #[tokio::test]
+    async fn no_journal_keeps_today_in_memory_behavior() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with(calls.clone()); // built with a disabled journal
+        engine.process(&exposed_snapshot(true)).await;
+        // Findings publish as usual; reversions ring is empty (nothing reverted, nothing
+        // restored); a disabled journal replays nothing.
+        assert!(
+            engine
+                .findings()
+                .snapshot()
+                .iter()
+                .any(|f| f.breach_relevant),
+            "findings publish in-memory with no journal"
+        );
+        assert!(
+            engine.reversions().snapshot().is_empty(),
+            "no reversions without a journal or a revert"
         );
     }
 }

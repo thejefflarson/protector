@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use axum::extract::State;
 use axum::response::Html;
@@ -209,6 +210,10 @@ pub struct Findings {
     /// The most recent behavioral-bake snapshot (JEF-48), replaced each pass alongside
     /// the findings rows.
     bake: Mutex<BakeStats>,
+    /// When the engine last completed a pass (JEF-141), surfaced as "last pass NNs ago"
+    /// so a quiet/loading dashboard reads as *fresh*, not broken. `None` until the first
+    /// pass completes (or is seeded from the journal on boot).
+    last_pass: Mutex<Option<SystemTime>>,
 }
 
 impl Findings {
@@ -243,6 +248,42 @@ impl Findings {
     /// The most recent behavioral-bake snapshot, for the dashboard / `/findings` view.
     pub fn bake(&self) -> BakeStats {
         self.bake.lock().expect("bake mutex poisoned").clone()
+    }
+
+    /// Mark a pass as just completed (JEF-141) — drives the "last pass NNs ago"
+    /// freshness line. Also used to seed freshness from the journal on boot.
+    pub fn mark_pass(&self, at: SystemTime) {
+        *self.last_pass.lock().expect("last_pass mutex poisoned") = Some(at);
+    }
+
+    /// When the last pass completed, if any. `None` until the first pass (or journal
+    /// seed). The dashboard renders this as a relative "NNs ago".
+    pub fn last_pass(&self) -> Option<SystemTime> {
+        *self.last_pass.lock().expect("last_pass mutex poisoned")
+    }
+}
+
+/// Render a `SystemTime` as a short relative "NN<unit> ago" (JEF-141), so the dashboard's
+/// freshness line reads as a human duration. `None` (no pass yet) renders as a muted
+/// "waiting for first pass". A future timestamp (clock skew) clamps to "just now".
+fn relative_time(at: Option<SystemTime>) -> String {
+    let Some(at) = at else {
+        return "waiting for first pass".to_string();
+    };
+    let secs = SystemTime::now()
+        .duration_since(at)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs < 1 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -296,6 +337,58 @@ impl JudgementLog {
         self.rows
             .lock()
             .expect("judgement log mutex poisoned")
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
+    }
+}
+
+/// One lifted cut for the recent-reversions view (JEF-141): the self-revert is the core
+/// safety story (ADR-0016 — a cut persists only while the breach condition holds, then
+/// self-reverts), but it was previously invisible — nothing showed a cut was lifted and
+/// why. This makes it durable and visible.
+#[derive(Clone, Serialize)]
+pub struct ReversionRecord {
+    /// The cut signature that was lifted (`from -[relation]-> to`).
+    pub cut: String,
+    /// Why it was lifted — health divergence, or the breach condition cleared.
+    pub reason: String,
+    /// When it was lifted, Unix epoch milliseconds (so the JSON view is self-contained
+    /// and the HTML can render "NNs ago").
+    pub at_ms: u64,
+}
+
+/// A bounded, newest-last ring of recent [`ReversionRecord`]s, analogous to
+/// [`JudgementLog`] — shared between the engine (writer) and the HTTP server (reader),
+/// and seeded from the journal on boot so lifted cuts survive a restart. Diagnostic /
+/// audit only.
+#[derive(Default)]
+pub struct ReversionLog {
+    rows: Mutex<std::collections::VecDeque<ReversionRecord>>,
+}
+
+impl ReversionLog {
+    const CAP: usize = 64;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a reversion, evicting the oldest once at capacity.
+    pub fn record(&self, reversion: ReversionRecord) {
+        let mut rows = self.rows.lock().expect("reversion log mutex poisoned");
+        if rows.len() >= Self::CAP {
+            rows.pop_front();
+        }
+        rows.push_back(reversion);
+    }
+
+    /// Snapshot newest-first for display.
+    pub fn snapshot(&self) -> Vec<ReversionRecord> {
+        self.rows
+            .lock()
+            .expect("reversion log mutex poisoned")
             .iter()
             .rev()
             .cloned()
@@ -717,12 +810,46 @@ fn bake_panel(bake: &BakeStats) -> String {
     )
 }
 
-/// Render the dashboard: two sections, both graph-based.
+/// The recent-reversions panel (JEF-141): lifted cuts and why — the visible record of
+/// the self-revert (ADR-0016). Quiet when nothing has been lifted (a healthy default,
+/// not an error). Newest first.
+fn reversions_panel(reversions: &[ReversionRecord]) -> String {
+    if reversions.is_empty() {
+        return "<p class=\"muted\">no cuts have been lifted yet</p>".to_string();
+    }
+    let rows: String = reversions
+        .iter()
+        .map(|r| {
+            let when = relative_time(Some(
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(r.at_ms),
+            ));
+            format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td class=\"muted\">{}</td></tr>",
+                escape(&r.cut),
+                escape(&r.reason),
+                escape(&when),
+            )
+        })
+        .collect();
+    format!(
+        "<table class=\"vectors\"><thead><tr><th>Lifted cut</th><th>Reason</th>\
+         <th>When</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+}
+
+/// Render the dashboard: graph-based sections plus the freshness line and the
+/// recent-reversions panel (JEF-141).
 ///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
 ///      the cut marked.
 ///   2. Possible attack paths, one coalesced graph per internet-facing endpoint,
 ///      each terminal edge labeled with why it isn't remediated.
-fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
+fn render_html(
+    findings: &[Finding],
+    armed: bool,
+    bake: &BakeStats,
+    reversions: &[ReversionRecord],
+    last_pass: Option<SystemTime>,
+) -> String {
     // One pass over the breach-relevant findings: the auto-eligible ones are
     // remediations; the rest group by endpoint (entry) for the attack-path graphs.
     let mut remediations: Vec<&Finding> = Vec::new();
@@ -761,6 +888,8 @@ fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
     };
     let vectors_body = attack_vectors(findings);
     let bake_body = bake_panel(bake);
+    let reversions_body = reversions_panel(reversions);
+    let freshness = relative_time(last_pass);
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
@@ -813,7 +942,8 @@ fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
          </script></head><body>\
          <h1>protector</h1>\
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
-         possible attack paths &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
+         possible attack paths · last pass <b>{freshness}</b> \
+         &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
          <p class=\"sum\">ATT&amp;CK outcomes reachable from an internet-facing front door. \
@@ -826,6 +956,11 @@ fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
          attribution should resolve (low unresolved), and corroborations are the countable \
          &ldquo;would this have promoted?&rdquo; — all here without an OTLP collector.</p>\
          {bake_body}\
+         <h2>Recent reversions <span class=\"muted\">(lifted cuts)</span></h2>\
+         <p class=\"sum\">Cuts the engine lifted, and why — the visible record of the \
+         self-revert (ADR-0016): an isolation persists only while the breach condition \
+         holds, then reverts when the chain or its enrichment clears.</p>\
+         {reversions_body}\
          <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
          <p class=\"legend\">edge legend — \
          <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
@@ -842,16 +977,34 @@ fn render_html(findings: &[Finding], armed: bool, bake: &BakeStats) -> String {
     )
 }
 
-async fn html_view(State(findings): State<Arc<Findings>>) -> Html<String> {
+/// Shared state for the dashboard's HTML view: the findings handle plus the reversions
+/// ring (JEF-141), so the rendered page can show lifted cuts alongside the findings.
+#[derive(Clone)]
+struct DashboardState {
+    findings: Arc<Findings>,
+    reversions: Arc<ReversionLog>,
+}
+
+async fn html_view(State(state): State<DashboardState>) -> Html<String> {
     Html(render_html(
-        &findings.snapshot(),
-        findings.is_armed(),
-        &findings.bake(),
+        &state.findings.snapshot(),
+        state.findings.is_armed(),
+        &state.findings.bake(),
+        &state.reversions.snapshot(),
+        state.findings.last_pass(),
     ))
 }
 
 async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> {
     Json(findings.snapshot())
+}
+
+/// The recent-reversions view as JSON (JEF-141) — the machine-readable form of the
+/// lifted-cuts panel, on its own route so the `/findings` contract is unchanged.
+async fn reversions_view(
+    State(reversions): State<Arc<ReversionLog>>,
+) -> Json<Vec<ReversionRecord>> {
+    Json(reversions.snapshot())
 }
 
 /// The behavioral-bake snapshot as JSON (JEF-48) — the machine-readable form of the
@@ -882,14 +1035,19 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
 
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON) plus the
 /// diagnostic `/judgements` JSON (full prompt + raw reply + verdict per recent
-/// judgement). Read-only; cluster-facing glue around the tested classification.
+/// judgement) and the `/reversions` JSON (lifted cuts + why, JEF-141). Read-only;
+/// cluster-facing glue around the tested classification.
 pub async fn serve_dashboard(
     addr: SocketAddr,
     findings: Arc<Findings>,
     judgements: Arc<JudgementLog>,
+    reversions: Arc<ReversionLog>,
 ) -> anyhow::Result<()> {
+    let html_state = DashboardState {
+        findings: findings.clone(),
+        reversions: reversions.clone(),
+    };
     let app = Router::new()
-        .route("/", get(html_view))
         .route("/findings", get(json_view))
         .route("/bake", get(bake_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
@@ -898,6 +1056,16 @@ pub async fn serve_dashboard(
             Router::new()
                 .route("/judgements", get(judgements_view))
                 .with_state(judgements),
+        )
+        .merge(
+            Router::new()
+                .route("/reversions", get(reversions_view))
+                .with_state(reversions),
+        )
+        .merge(
+            Router::new()
+                .route("/", get(html_view))
+                .with_state(html_state),
         );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "findings dashboard listening");
@@ -940,6 +1108,95 @@ mod tests {
             snap.last().unwrap().entry,
             "entry-1",
             "the oldest (entry-0) was evicted"
+        );
+    }
+
+    fn reversion(cut: &str) -> ReversionRecord {
+        ReversionRecord {
+            cut: cut.to_string(),
+            reason: "no proven chain still justifies this control".to_string(),
+            at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn reversion_log_is_newest_first_and_capped() {
+        // The recent-reversions ring (JEF-141) is bounded and newest-first, like the
+        // judgement ring — so a restart-seeded history can't grow unbounded.
+        let log = ReversionLog::new();
+        for n in 0..=ReversionLog::CAP {
+            log.record(reversion(&format!("cut-{n}")));
+        }
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), ReversionLog::CAP, "ring is bounded by CAP");
+        assert_eq!(
+            snap[0].cut,
+            format!("cut-{}", ReversionLog::CAP),
+            "newest reversion is first"
+        );
+        assert_eq!(snap.last().unwrap().cut, "cut-1", "the oldest was evicted");
+    }
+
+    #[test]
+    fn relative_time_renders_human_freshness() {
+        // The "last pass NNs ago" freshness (JEF-141): None reads as waiting, a recent
+        // time as seconds, older as minutes/hours — never a raw timestamp.
+        assert_eq!(relative_time(None), "waiting for first pass");
+        assert_eq!(relative_time(Some(SystemTime::now())), "just now");
+        let ninety_s = SystemTime::now() - std::time::Duration::from_secs(90);
+        assert_eq!(relative_time(Some(ninety_s)), "1m ago");
+        let two_h = SystemTime::now() - std::time::Duration::from_secs(7200);
+        assert_eq!(relative_time(Some(two_h)), "2h ago");
+    }
+
+    #[test]
+    fn reversions_panel_shows_lifted_cuts_or_a_quiet_default() {
+        // Empty ⇒ a quiet (not error) message; non-empty ⇒ the cut + reason rendered.
+        assert!(reversions_panel(&[]).contains("no cuts have been lifted"));
+        let panel = reversions_panel(&[ReversionRecord {
+            cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
+            reason: "no proven chain still justifies this control".into(),
+            at_ms: unix_now_ms(),
+        }]);
+        assert!(panel.contains("workload/app/Pod/web"));
+        assert!(panel.contains("no proven chain still justifies"));
+    }
+
+    /// Now as Unix-millis, for building a `ReversionRecord` with a sane stamp in tests.
+    fn unix_now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn render_html_shows_the_freshness_line_and_reversions_section() {
+        // The dashboard surfaces "last pass NNs ago" and a recent-reversions section
+        // (JEF-141), both populated.
+        let revs = vec![ReversionRecord {
+            cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
+            reason: "no proven chain still justifies this control".into(),
+            at_ms: unix_now_ms(),
+        }];
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &revs,
+            Some(SystemTime::now()),
+        );
+        assert!(
+            html.contains("last pass <b>just now</b>"),
+            "freshness line present"
+        );
+        assert!(
+            html.contains("Recent reversions"),
+            "reversions section header present"
+        );
+        assert!(
+            html.contains("no proven chain still justifies"),
+            "the lifted cut's reason is shown"
         );
     }
 
@@ -1116,11 +1373,12 @@ mod tests {
             ),
         ];
 
-        let html = render_html(&findings, false, &BakeStats::default());
+        let html = render_html(&findings, false, &BakeStats::default(), &[], None);
         // Shadow → "Proposed Remediations"; armed → "Active Remediations".
         assert!(html.contains("Proposed Remediations"));
         assert!(
-            render_html(&findings, true, &BakeStats::default()).contains("Active Remediations")
+            render_html(&findings, true, &BakeStats::default(), &[], None)
+                .contains("Active Remediations")
         );
         assert!(html.contains("Possible attack paths"));
         // The attack-vector summary names the ATT&CK outcomes reachable, with the
@@ -1206,7 +1464,7 @@ mod tests {
 
     #[test]
     fn render_html_includes_the_behavioral_bake_section() {
-        let html = render_html(&[], false, &bake(80, 20));
+        let html = render_html(&[], false, &bake(80, 20), &[], None);
         assert!(
             html.contains("Behavioral bake"),
             "the section header is present"
