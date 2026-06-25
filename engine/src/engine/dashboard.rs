@@ -9,14 +9,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use super::journal::{Decision, DecisionJournal, JournalEntry};
 use super::reason::proof::ProvenChain;
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
@@ -837,6 +838,490 @@ fn reversions_panel(reversions: &[ReversionRecord]) -> String {
     )
 }
 
+// ===========================================================================
+// The shadow "would-have-acted" report (JEF-143)
+// ===========================================================================
+//
+// Nothing else answers the question that gates exiting shadow (JEF-50): "over the
+// last N days, how many cuts WOULD protector have made, on what, and were any
+// wrong?" `/report` aggregates the durable decision journal (JEF-141) into that
+// diff — read-side only, no new signals, no action.
+//
+// The journal records one [`Decision::Breach`] per pass per internet-facing entry,
+// carrying the model's verdict in its own words ("exploitable — …" / "not
+// exploitable — …"). In shadow the engine never cuts, but a breach decision whose
+// verdict AFFIRMS exploitability is exactly the workload it WOULD have isolated. So
+// the report walks each entry's breach decisions chronologically and folds them into
+// **would-act episodes**: a run of consecutive exploitable verdicts. The projected
+// would-be cut lifetime is from the episode's first exploitable verdict to when it
+// cleared (the next non-exploitable verdict for that entry) — or to now, if it never
+// cleared (still open). An entry whose latest verdict in the window is NOT
+// exploitable is a **proven-but-cleared** path the model deliberately left alone:
+// the trust half of the diff.
+
+/// Default rolling window for `/report`, in hours (7 days). The journal's own
+/// rotation bounds how far back history actually reaches; this is the default the
+/// view aggregates over when `?hours=`/`?days=` isn't supplied. Configurable per
+/// request, never narrower than the journal — a window wider than the on-disk
+/// history simply yields everything that survived rotation.
+const DEFAULT_WINDOW_HOURS: u64 = 24 * 7;
+
+/// A would-be cut lifted within this long is **short-lived** — the likely-false-
+/// positive signature (a transient breach condition that cleared in minutes, e.g. a
+/// scanner blip or a pod that restarted clean). A sustained would-act (at or above
+/// this) is the one worth a real cut. The ticket frames "lifted within minutes" as
+/// the FP tell; five minutes is the conservative default, configurable via
+/// `?short_lived_secs=`.
+const DEFAULT_SHORT_LIVED_SECS: u64 = 5 * 60;
+
+/// Query parameters for `/report` (and `/report.json`): the rolling window and the
+/// short-lived threshold, all optional with sane defaults. `days` is sugar for
+/// `hours`; if both are given, `hours` wins (the finer unit).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReportQuery {
+    /// Window length in hours. Defaults to [`DEFAULT_WINDOW_HOURS`].
+    pub hours: Option<u64>,
+    /// Window length in days (sugar for `hours`). Ignored when `hours` is set.
+    pub days: Option<u64>,
+    /// Short-lived threshold in seconds. Defaults to [`DEFAULT_SHORT_LIVED_SECS`].
+    pub short_lived_secs: Option<u64>,
+}
+
+impl ReportQuery {
+    /// The resolved window length, falling back through `hours` → `days` → default.
+    fn window(&self) -> Duration {
+        let hours = self
+            .hours
+            .or(self.days.map(|d| d.saturating_mul(24)))
+            .unwrap_or(DEFAULT_WINDOW_HOURS);
+        Duration::from_secs(hours.saturating_mul(3600))
+    }
+
+    /// The resolved short-lived threshold.
+    fn short_lived(&self) -> Duration {
+        Duration::from_secs(self.short_lived_secs.unwrap_or(DEFAULT_SHORT_LIVED_SECS))
+    }
+}
+
+/// One workload the engine WOULD have isolated in the window: the entry, how often
+/// the breach condition held, the projected would-be cut lifetime, and the FP-vs-real
+/// classification. JSON-serializable so `/report.json` is self-contained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WouldActEntry {
+    /// The internet-facing workload key that reached the exploitable verdict.
+    pub entry: String,
+    /// How many would-act episodes occurred in the window (consecutive runs of
+    /// exploitable verdicts) — the frequency of the breach condition recurring.
+    pub episodes: usize,
+    /// How many breach decisions in the window affirmed exploitability for this entry
+    /// (the raw "would-cut" frequency, ≥ `episodes`).
+    pub would_act_decisions: usize,
+    /// The longest projected would-be cut lifetime across this entry's episodes, in
+    /// seconds — how long the cut would have stood at its most sustained.
+    pub max_lifetime_secs: u64,
+    /// Whether the longest episode is still OPEN (the breach condition is the entry's
+    /// latest verdict in the window — the cut would still be standing now).
+    pub open: bool,
+    /// Short-lived (lifted within the threshold) ⇒ likely false positive. `false`
+    /// when sustained. An open episode is never short-lived (it's still standing).
+    pub short_lived: bool,
+    /// At least one would-act episode fired during an enrichment-coverage gap — the
+    /// model affirmed exploitability WITHOUT a CVE backing it (no advisory enrichment
+    /// matched). These are the would-acts to scrutinize first.
+    pub coverage_gap: bool,
+    /// The model's verdict for the most recent would-act episode (its own words) — the
+    /// human-readable "why it would have cut".
+    pub last_verdict: String,
+}
+
+/// One proven path the model deliberately CLEARED in the window — the entry's latest
+/// breach decision affirmed it is NOT exploitable. The trust half of the diff: a
+/// reachable path protector proved out and left alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LeftAloneEntry {
+    /// The internet-facing workload key whose latest verdict cleared it.
+    pub entry: String,
+    /// The model's clearing verdict (its own words — "not exploitable — …").
+    pub verdict: String,
+}
+
+/// The aggregated shadow report (JEF-143): the would-have-acted diff over a rolling
+/// window. JSON-serializable for `/report.json`; the HTML view renders the same data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Report {
+    /// The window length aggregated over, in seconds.
+    pub window_secs: u64,
+    /// The short-lived threshold applied, in seconds.
+    pub short_lived_secs: u64,
+    /// How many breach decisions fell within the window (the raw material).
+    pub decisions_in_window: usize,
+    /// Whether the journal had NO breach decisions at all (durable history is empty) —
+    /// drives the honest "no decisions yet" state, distinct from "decisions, but none
+    /// in this window".
+    pub journal_empty: bool,
+    /// Workloads the engine would have isolated, most-sustained first.
+    pub would_act: Vec<WouldActEntry>,
+    /// Proven paths the model cleared and left alone, the trust evidence.
+    pub left_alone: Vec<LeftAloneEntry>,
+}
+
+impl Report {
+    /// The headline would-act count: distinct workloads that would have been cut.
+    pub fn would_act_count(&self) -> usize {
+        self.would_act.len()
+    }
+
+    /// The headline left-alone count: distinct proven-but-cleared paths.
+    pub fn left_alone_count(&self) -> usize {
+        self.left_alone.len()
+    }
+
+    /// Would-acts flagged short-lived (the likely-FP subset).
+    pub fn short_lived_count(&self) -> usize {
+        self.would_act.iter().filter(|w| w.short_lived).count()
+    }
+
+    /// Would-acts that fired during an enrichment-coverage gap (scrutinize first).
+    pub fn coverage_gap_count(&self) -> usize {
+        self.would_act.iter().filter(|w| w.coverage_gap).count()
+    }
+}
+
+/// A model verdict AFFIRMS exploitability when its own words begin with "exploitable"
+/// (or "confirmed" — an already-corroborated live attack that should stand). A "not
+/// exploitable — …" / "refuted" / "uncertain" verdict does not. This mirrors the
+/// dashboard's [`flagged`] convention so the report and the findings table agree on
+/// what counts as a would-act.
+fn verdict_would_act(verdict: &str) -> bool {
+    let v = verdict.trim_start().to_ascii_lowercase();
+    v.starts_with("exploitable") || v.starts_with("confirmed")
+}
+
+/// A would-act verdict that fired WITHOUT a CVE backing it is an enrichment-coverage
+/// gap: the model affirmed exploitability but no advisory enrichment matched (the
+/// verdict cites no `CVE-` id). These are the would-acts to scrutinize — the call was
+/// made blind to the very vulnerability data that would corroborate it.
+fn is_coverage_gap(verdict: &str) -> bool {
+    !verdict.to_ascii_uppercase().contains("CVE-")
+}
+
+/// Aggregate the journal's breach decisions into the would-have-acted diff (JEF-143).
+/// Pure and total: takes the replayed entries (any order — they are sorted here by
+/// time) and the wall-clock `now` (injected for testability), and folds each entry's
+/// breach decisions into would-act episodes vs. left-alone clears. Read-only.
+fn aggregate_report(
+    entries: &[JournalEntry],
+    now: SystemTime,
+    window: Duration,
+    short_lived: Duration,
+) -> Report {
+    let window_start = now.checked_sub(window).unwrap_or(SystemTime::UNIX_EPOCH);
+    let window_start_ms = window_start
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let now_ms = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // Did the journal hold ANY breach decision at all? (Distinguishes a truly empty
+    // journal from one with history but nothing in this particular window.)
+    let mut any_breach = false;
+
+    // Collect breach decisions per entry, in time order, restricted to the window.
+    // BTreeMap keeps the output stable (entry-keyed) before the final sustained-first sort.
+    type Breach<'a> = (u64, &'a str); // (at_ms, verdict)
+    let mut by_entry: BTreeMap<&str, Vec<Breach>> = BTreeMap::new();
+    let mut sorted: Vec<&JournalEntry> = entries.iter().collect();
+    sorted.sort_by_key(|e| e.at_ms);
+    let mut decisions_in_window = 0usize;
+    for e in sorted {
+        if let Decision::Breach { entry, verdict, .. } = &e.decision {
+            any_breach = true;
+            if e.at_ms >= window_start_ms {
+                by_entry
+                    .entry(entry.as_str())
+                    .or_default()
+                    .push((e.at_ms, verdict));
+                decisions_in_window += 1;
+            }
+        }
+    }
+
+    let mut would_act: Vec<WouldActEntry> = Vec::new();
+    let mut left_alone: Vec<LeftAloneEntry> = Vec::new();
+
+    for (entry, decisions) in by_entry {
+        // Walk the entry's window decisions, folding consecutive exploitable verdicts
+        // into episodes. An episode's lifetime runs from its first exploitable verdict
+        // to the first NON-exploitable verdict that follows (the clear) — or to `now`
+        // if it never cleared (still open). The closing decision's timestamp is the
+        // best evidence of when the breach condition lifted in the journal.
+        let mut episodes = 0usize;
+        let mut would_act_decisions = 0usize;
+        let mut max_lifetime_ms = 0u64;
+        let mut max_open = false;
+        let mut coverage_gap = false;
+        let mut last_would_act_verdict: Option<&str> = None;
+
+        let mut i = 0usize;
+        while i < decisions.len() {
+            let (start_ms, verdict) = decisions[i];
+            if !verdict_would_act(verdict) {
+                i += 1;
+                continue;
+            }
+            // Start of an episode: consume the run of consecutive exploitable verdicts.
+            episodes += 1;
+            let mut j = i;
+            let mut episode_gap = false;
+            while j < decisions.len() && verdict_would_act(decisions[j].1) {
+                would_act_decisions += 1;
+                if is_coverage_gap(decisions[j].1) {
+                    episode_gap = true;
+                }
+                last_would_act_verdict = Some(decisions[j].1);
+                j += 1;
+            }
+            // The episode closes at the next (non-exploitable) decision if there is one,
+            // else it's still open and projected to `now`.
+            let (end_ms, open) = if j < decisions.len() {
+                (decisions[j].0, false)
+            } else {
+                (now_ms, true)
+            };
+            let lifetime_ms = end_ms.saturating_sub(start_ms);
+            if open {
+                // An open episode is the most-sustained by definition (still standing);
+                // prefer it, and never mark it short-lived.
+                if !max_open || lifetime_ms > max_lifetime_ms {
+                    max_lifetime_ms = lifetime_ms;
+                }
+                max_open = true;
+            } else if !max_open && lifetime_ms > max_lifetime_ms {
+                max_lifetime_ms = lifetime_ms;
+            }
+            coverage_gap |= episode_gap;
+            i = j;
+        }
+
+        if episodes > 0 {
+            let short = !max_open && max_lifetime_ms < short_lived.as_millis() as u64;
+            would_act.push(WouldActEntry {
+                entry: entry.to_string(),
+                episodes,
+                would_act_decisions,
+                max_lifetime_secs: max_lifetime_ms / 1000,
+                open: max_open,
+                short_lived: short,
+                coverage_gap,
+                last_verdict: last_would_act_verdict.unwrap_or_default().to_string(),
+            });
+        } else {
+            // No would-act episode in the window: the entry's paths were all proven and
+            // CLEARED. The trust half — surface the latest (clearing) verdict.
+            if let Some((_, verdict)) = decisions.last() {
+                left_alone.push(LeftAloneEntry {
+                    entry: entry.to_string(),
+                    verdict: verdict.to_string(),
+                });
+            }
+        }
+    }
+
+    // Most-sustained first: open episodes, then by lifetime descending, then by entry
+    // for a stable order.
+    would_act.sort_by(|a, b| {
+        b.open
+            .cmp(&a.open)
+            .then(b.max_lifetime_secs.cmp(&a.max_lifetime_secs))
+            .then(a.entry.cmp(&b.entry))
+    });
+    left_alone.sort_by(|a, b| a.entry.cmp(&b.entry));
+
+    Report {
+        window_secs: window.as_secs(),
+        short_lived_secs: short_lived.as_secs(),
+        decisions_in_window,
+        journal_empty: !any_breach,
+        would_act,
+        left_alone,
+    }
+}
+
+/// Render a `Duration`-in-seconds as a compact human span ("4m", "2h", "3d") for the
+/// would-be cut lifetime column. Sub-minute spans read as seconds (the short-lived
+/// tell).
+fn human_span(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// The `/report` HTML body: the would-have-acted diff (JEF-143). Empty journal ⇒ an
+/// honest "no decisions yet" state. Otherwise the headline diff sentence, the would-act
+/// table (short-lived visually distinct, coverage-gap flagged), and the left-alone
+/// trust evidence.
+fn report_panel(report: &Report) -> String {
+    let window = human_span(report.window_secs);
+    if report.journal_empty {
+        return format!(
+            "<p class=\"muted\">no decisions yet — the decision journal is empty (no pass has \
+             recorded a breach decision, or no durable journal volume is configured). Once the \
+             engine judges an internet-facing workload, this report fills in over the last \
+             {window}.</p>"
+        );
+    }
+    if report.would_act.is_empty() && report.left_alone.is_empty() {
+        return format!(
+            "<p class=\"muted\">no breach decisions in the last {window} (the journal has older \
+             history — widen the window with <code>?days=N</code>).</p>"
+        );
+    }
+
+    // The diff headline: would-isolate N, left M proven-but-cleared paths alone.
+    let head = format!(
+        "<div class=\"sum\">over the last <b>{window}</b> protector would have isolated \
+         <b>{act}</b> workload{act_s} and deliberately left <b>{left}</b> proven-but-cleared \
+         path{left_s} alone. {short} short-lived (likely FP) · {gap} during an \
+         enrichment-coverage gap (scrutinize first).</div>",
+        act = report.would_act_count(),
+        act_s = if report.would_act_count() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        left = report.left_alone_count(),
+        left_s = if report.left_alone_count() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        short = report.short_lived_count(),
+        gap = report.coverage_gap_count(),
+    );
+
+    let would_rows: String = if report.would_act.is_empty() {
+        "<tr><td class=\"muted\" colspan=\"5\">none — every proven path was cleared</td></tr>"
+            .to_string()
+    } else {
+        report
+            .would_act
+            .iter()
+            .map(|w| {
+                // Lifetime: sustained vs short-lived is the FP tell, made visually distinct.
+                let life = if w.open {
+                    format!(
+                        "<span class=\"sustained\">{} (open)</span>",
+                        human_span(w.max_lifetime_secs)
+                    )
+                } else if w.short_lived {
+                    format!(
+                        "<span class=\"shortlived\">{} (short-lived)</span>",
+                        human_span(w.max_lifetime_secs)
+                    )
+                } else {
+                    format!(
+                        "<span class=\"sustained\">{}</span>",
+                        human_span(w.max_lifetime_secs)
+                    )
+                };
+                let gap = if w.coverage_gap {
+                    "<span class=\"flagged\">coverage gap</span>".to_string()
+                } else {
+                    "<span class=\"muted\">—</span>".to_string()
+                };
+                format!(
+                    "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td>\
+                     <td class=\"verdict-cell\">{}</td></tr>",
+                    escape(&short(&w.entry)),
+                    w.would_act_decisions,
+                    life,
+                    gap,
+                    escape(&w.last_verdict),
+                )
+            })
+            .collect()
+    };
+
+    let left_rows: String = if report.left_alone.is_empty() {
+        "<tr><td class=\"muted\" colspan=\"2\">none</td></tr>".to_string()
+    } else {
+        report
+            .left_alone
+            .iter()
+            .map(|l| {
+                format!(
+                    "<tr><td><code>{}</code></td><td class=\"verdict-cell\">{}</td></tr>",
+                    escape(&short(&l.entry)),
+                    escape(&l.verdict),
+                )
+            })
+            .collect()
+    };
+
+    format!(
+        "{head}\
+         <h3>Would have isolated <span class=\"muted\">({act})</span></h3>\
+         <table class=\"vectors\"><thead><tr><th>Workload</th><th>Would-cut decisions</th>\
+         <th>Projected cut lifetime</th><th>Enrichment</th><th>Latest verdict</th></tr></thead>\
+         <tbody>{would_rows}</tbody></table>\
+         <h3>Left alone <span class=\"muted\">({left}) — proven, then cleared</span></h3>\
+         <table class=\"vectors\"><thead><tr><th>Workload</th><th>Clearing verdict</th></tr></thead>\
+         <tbody>{left_rows}</tbody></table>",
+        act = report.would_act_count(),
+        left = report.left_alone_count(),
+    )
+}
+
+/// The full `/report` HTML page (JEF-143): a self-contained page wrapping
+/// [`report_panel`], styled in the dashboard's idiom. No graph renderer needed (no
+/// Mermaid), so the page is plain HTML — the would-have-acted diff that gates exiting
+/// shadow (JEF-50).
+fn render_report_html(report: &Report) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <title>protector — would-have-acted report</title>\
+         <style>\
+         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
+         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
+         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
+         h3{{font-size:.9rem;font-weight:600;margin:1.2rem 0 .3rem;color:#333}}\
+         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
+         .muted{{color:#777}}\
+         a{{color:#06c}}\
+         code{{background:#f4f4f4;padding:0 .2rem}}\
+         table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
+         table.vectors th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ddd;padding:.25rem .5rem}}\
+         table.vectors td{{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}}\
+         table.vectors code{{background:#f4f4f4;padding:0 .2rem}}\
+         table.vectors .flagged{{color:#b00000;font-weight:600}}\
+         .sustained{{color:#b00000;font-weight:600}}\
+         .shortlived{{color:#9a5b00}}\
+         .verdict-cell{{color:#333;max-width:38rem}}\
+         </style></head><body>\
+         <h1>protector — would-have-acted report</h1>\
+         <p class=\"sum\">The shadow diff that gates exiting shadow (JEF-50): over a rolling \
+         window, the workloads protector <b>would</b> have isolated, how often the breach \
+         condition held, the projected cut lifetime (short-lived = likely false positive), and \
+         the proven paths the model deliberately <b>left alone</b> — the trust evidence. \
+         Read-only; no action. Tune the window with <code>?days=N</code> or <code>?hours=N</code> \
+         and the short-lived threshold with <code>?short_lived_secs=N</code>. \
+         &nbsp;|&nbsp; <a href=\"/\">dashboard</a> &nbsp;|&nbsp; <a href=\"/report.json\">json</a></p>\
+         <h2>Shadow would-have-acted diff</h2>\
+         {body}\
+         </body></html>",
+        body = report_panel(report),
+    )
+}
+
 /// Render the dashboard: graph-based sections plus the freshness line and the
 /// recent-reversions panel (JEF-141).
 ///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
@@ -943,6 +1428,7 @@ fn render_html(
          <h1>protector</h1>\
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths · last pass <b>{freshness}</b> \
+         &nbsp;|&nbsp; <a href=\"/report\">would-have-acted report</a> \
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
@@ -1018,6 +1504,49 @@ async fn judgements_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<J
     Json(journal.snapshot())
 }
 
+/// Replay the durable decision journal and aggregate the would-have-acted report over
+/// the request's window (JEF-143). Read-only; the journal is append-only, so each
+/// request sees the current durable history (pre-restart on disk + this run's writes).
+fn build_report(journal: &DecisionJournal, query: &ReportQuery) -> Report {
+    aggregate_report(
+        &journal.replay(),
+        SystemTime::now(),
+        query.window(),
+        query.short_lived(),
+    )
+}
+
+/// Aggregate the would-have-acted report over the DEFAULT window from a journal handle
+/// (JEF-143), for the engine to mirror its headline counts to OTLP per pass — the same
+/// figures `/report` shows by default, the in-process mirror like the bake counts. A
+/// disabled journal replays nothing, so this is an empty report (all-zero headline).
+pub fn default_window_report(journal: &DecisionJournal) -> Report {
+    aggregate_report(
+        &journal.replay(),
+        SystemTime::now(),
+        Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+        Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+    )
+}
+
+/// The `/report` HTML view (JEF-143): the shadow would-have-acted diff over a rolling
+/// window. Window + thresholds come from the query string (see [`ReportQuery`]).
+async fn report_html_view(
+    State(journal): State<Arc<DecisionJournal>>,
+    Query(query): Query<ReportQuery>,
+) -> Html<String> {
+    Html(render_report_html(&build_report(&journal, &query)))
+}
+
+/// The `/report.json` view (JEF-143): the same aggregation as machine-readable JSON, so
+/// the would-have-acted diff can be scraped/asserted, not only eyeballed.
+async fn report_json_view(
+    State(journal): State<Arc<DecisionJournal>>,
+    Query(query): Query<ReportQuery>,
+) -> Json<Report> {
+    Json(build_report(&journal, &query))
+}
+
 /// The vendored, self-hosted graph renderer (beautiful-mermaid + elkjs, bundled in
 /// `web/dist` and embedded in the binary). Served same-origin so the dashboard never
 /// loads third-party JS — see the import in [`render_html`].
@@ -1035,13 +1564,15 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
 
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON) plus the
 /// diagnostic `/judgements` JSON (full prompt + raw reply + verdict per recent
-/// judgement) and the `/reversions` JSON (lifted cuts + why, JEF-141). Read-only;
-/// cluster-facing glue around the tested classification.
+/// judgement), the `/reversions` JSON (lifted cuts + why, JEF-141), and the
+/// `/report` + `/report.json` shadow would-have-acted diff (JEF-143). Read-only;
+/// cluster-facing glue around the tested classification + aggregation.
 pub async fn serve_dashboard(
     addr: SocketAddr,
     findings: Arc<Findings>,
     judgements: Arc<JudgementLog>,
     reversions: Arc<ReversionLog>,
+    journal: Arc<DecisionJournal>,
 ) -> anyhow::Result<()> {
     let html_state = DashboardState {
         findings: findings.clone(),
@@ -1061,6 +1592,12 @@ pub async fn serve_dashboard(
             Router::new()
                 .route("/reversions", get(reversions_view))
                 .with_state(reversions),
+        )
+        .merge(
+            Router::new()
+                .route("/report", get(report_html_view))
+                .route("/report.json", get(report_json_view))
+                .with_state(journal),
         )
         .merge(
             Router::new()
@@ -1473,5 +2010,362 @@ mod tests {
             html.contains("connection"),
             "the per-variant volume renders"
         );
+    }
+
+    // ====================================================================
+    // The shadow would-have-acted report (JEF-143)
+    // ====================================================================
+
+    /// A `now` to anchor the report's relative-time math deterministically.
+    fn report_now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    /// A breach journal entry for `entry` at `secs_before` seconds before [`report_now`],
+    /// carrying `verdict` (the model's own words).
+    fn breach(entry: &str, verdict: &str, secs_before: u64) -> JournalEntry {
+        let at = report_now() - Duration::from_secs(secs_before);
+        JournalEntry {
+            at_ms: at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            decision: Decision::Breach {
+                entry: entry.to_string(),
+                objectives: 1,
+                verdict: verdict.to_string(),
+            },
+        }
+    }
+
+    const WEEK: Duration = Duration::from_secs(7 * 24 * 3600);
+    const FIVE_MIN: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn verdict_classification_matches_the_findings_convention() {
+        assert!(verdict_would_act(
+            "exploitable — CVE-2021-44228 reaches the secret"
+        ));
+        assert!(verdict_would_act("Exploitable — RCE"));
+        assert!(verdict_would_act("confirmed — live attack should stand"));
+        assert!(!verdict_would_act(
+            "not exploitable — code path never invoked"
+        ));
+        assert!(!verdict_would_act("refuted — same-ns own DB"));
+        assert!(!verdict_would_act("uncertain — model unavailable"));
+    }
+
+    #[test]
+    fn coverage_gap_is_an_exploitable_verdict_with_no_cve() {
+        // An exploitable call with a CVE is enrichment-backed; without one it's a gap.
+        assert!(!is_coverage_gap(
+            "exploitable — CVE-2021-44228 is a remote RCE"
+        ));
+        assert!(is_coverage_gap(
+            "exploitable — a privileged container escape reaches the node"
+        ));
+    }
+
+    #[test]
+    fn empty_journal_is_an_honest_no_decisions_state() {
+        // The acceptance criterion: an empty journal reads as "no decisions yet", not
+        // an error or a misleading zero-diff.
+        let report = aggregate_report(&[], report_now(), WEEK, FIVE_MIN);
+        assert!(report.journal_empty, "no breach decisions ⇒ journal_empty");
+        assert_eq!(report.would_act_count(), 0);
+        assert_eq!(report.left_alone_count(), 0);
+        let panel = report_panel(&report);
+        assert!(panel.contains("no decisions yet"), "honest empty state");
+        // The full page wraps it and stays a valid document.
+        let page = render_report_html(&report);
+        assert!(page.contains("would-have-acted report"));
+        assert!(page.contains("no decisions yet"));
+    }
+
+    #[test]
+    fn window_filtering_excludes_decisions_outside_the_window() {
+        // A breach 8 days ago is outside a 7-day window; an in-window decision survives.
+        // The journal is NOT empty (history exists), but nothing falls in the window.
+        let entries = vec![breach(
+            "workload/app/Pod/old",
+            "exploitable — CVE-2020-0001 RCE",
+            8 * 24 * 3600,
+        )];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert!(!report.journal_empty, "the journal has history");
+        assert_eq!(
+            report.decisions_in_window, 0,
+            "but none in the 7-day window"
+        );
+        assert_eq!(report.would_act_count(), 0);
+        // A wider window pulls it back in.
+        let wide = aggregate_report(
+            &entries,
+            report_now(),
+            Duration::from_secs(30 * 24 * 3600),
+            FIVE_MIN,
+        );
+        assert_eq!(
+            wide.would_act_count(),
+            1,
+            "30-day window includes the old one"
+        );
+    }
+
+    #[test]
+    fn a_sustained_then_cleared_path_is_a_would_act_with_a_real_lifetime() {
+        // Breach held exploitable for an hour (two decisions an hour apart), then cleared.
+        // The projected cut lifetime is ~1h — sustained, not short-lived — and the entry
+        // shows in would-act, NOT left-alone (it WOULD have been cut, even though it later
+        // cleared: that's the whole point of the lifetime).
+        let entries = vec![
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                7200,
+            ),
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                3600,
+            ),
+            breach("workload/app/Pod/web", "not exploitable — patched", 0),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 1);
+        let w = &report.would_act[0];
+        assert_eq!(w.entry, "workload/app/Pod/web");
+        assert_eq!(
+            w.would_act_decisions, 2,
+            "two exploitable decisions in the run"
+        );
+        assert_eq!(w.episodes, 1);
+        assert!(!w.open, "it cleared, so the episode is closed");
+        assert_eq!(
+            w.max_lifetime_secs, 7200,
+            "first exploitable → the clear at now-3600"
+        );
+        assert!(!w.short_lived, "a 2h cut is sustained, not an FP");
+        // It is NOT double-counted as left-alone.
+        assert_eq!(report.left_alone_count(), 0);
+    }
+
+    #[test]
+    fn a_short_lived_would_act_is_flagged_as_a_likely_false_positive() {
+        // Exploitable once, then cleared 60s later: a 60s would-be cut — under the 5-min
+        // threshold ⇒ short-lived ⇒ likely FP.
+        let entries = vec![
+            breach(
+                "workload/app/Pod/blip",
+                "exploitable — CVE-2022-1 brief RCE",
+                120,
+            ),
+            breach(
+                "workload/app/Pod/blip",
+                "not exploitable — scanner artifact",
+                60,
+            ),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 1);
+        assert!(report.would_act[0].short_lived, "a 60s cut is short-lived");
+        assert_eq!(report.short_lived_count(), 1);
+    }
+
+    #[test]
+    fn an_open_episode_projects_to_now_and_is_never_short_lived() {
+        // Exploitable 30s ago and never cleared: the cut would still be standing. Even
+        // though only 30s old, an OPEN episode is sustained-by-definition (not an FP yet).
+        let entries = vec![breach(
+            "workload/app/Pod/live",
+            "exploitable — CVE-2023-9 active",
+            30,
+        )];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 1);
+        let w = &report.would_act[0];
+        assert!(w.open, "still standing");
+        assert!(!w.short_lived, "an open cut is never an FP");
+        assert_eq!(w.max_lifetime_secs, 30);
+    }
+
+    #[test]
+    fn a_cleared_only_path_is_left_alone_trust_evidence() {
+        // The model proved the path reachable but cleared it (never exploitable). This is
+        // the trust half: a proven path deliberately left alone, NOT a would-act.
+        let entries = vec![breach(
+            "workload/app/Pod/safe",
+            "not exploitable — the CVE is in a code path this service never invokes",
+            600,
+        )];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 0);
+        assert_eq!(report.left_alone_count(), 1);
+        assert_eq!(report.left_alone[0].entry, "workload/app/Pod/safe");
+        assert!(report.left_alone[0].verdict.contains("not exploitable"));
+    }
+
+    #[test]
+    fn coverage_gap_would_acts_are_counted_and_flagged() {
+        // An exploitable call with NO CVE backing it (e.g. a container-escape primitive)
+        // is the would-act to scrutinize: it fired during an enrichment-coverage gap.
+        let entries = vec![breach(
+            "workload/app/Pod/escape",
+            "exploitable — a privileged container escape reaches the node",
+            45,
+        )];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.coverage_gap_count(), 1, "no CVE ⇒ coverage gap");
+        assert!(report.would_act[0].coverage_gap);
+        // A CVE-backed exploitable is NOT a coverage gap.
+        let backed = vec![breach(
+            "workload/app/Pod/web",
+            "exploitable — CVE-2021-44228 is a remote RCE",
+            45,
+        )];
+        let r2 = aggregate_report(&backed, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(r2.coverage_gap_count(), 0);
+    }
+
+    #[test]
+    fn recurring_breach_counts_multiple_episodes() {
+        // Exploitable, cleared, then exploitable again: two distinct would-act episodes
+        // for the same workload (the breach condition recurred). The entry is a would-act
+        // (its latest run is exploitable), with episodes == 2.
+        let entries = vec![
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                3000,
+            ),
+            breach("workload/app/Pod/web", "not exploitable — patched", 2000),
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 regressed",
+                1000,
+            ),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 1);
+        assert_eq!(report.would_act[0].episodes, 2, "the breach recurred");
+        assert!(
+            report.would_act[0].open,
+            "latest run is exploitable ⇒ still open"
+        );
+    }
+
+    #[test]
+    fn report_panel_renders_the_diff_headline_and_both_tables() {
+        // The HTML panel frames the diff (isolated N / left M alone), distinguishes
+        // short-lived from sustained, and calls out the coverage-gap subset.
+        let entries = vec![
+            // A sustained, CVE-backed would-act (cleared after 2h).
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                7200,
+            ),
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                3600,
+            ),
+            breach("workload/app/Pod/web", "not exploitable — patched", 0),
+            // A short-lived, coverage-gap would-act (60s, no CVE).
+            breach("workload/app/Pod/blip", "exploitable — brief escape", 120),
+            breach("workload/app/Pod/blip", "not exploitable — gone", 60),
+            // A left-alone proven path.
+            breach(
+                "workload/app/Pod/safe",
+                "not exploitable — never invoked",
+                600,
+            ),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(report.would_act_count(), 2);
+        assert_eq!(report.left_alone_count(), 1);
+        assert_eq!(report.short_lived_count(), 1);
+        assert_eq!(report.coverage_gap_count(), 1);
+
+        let panel = report_panel(&report);
+        // The diff headline frames both halves.
+        assert!(panel.contains("would have isolated"));
+        assert!(panel.contains("left alone") || panel.contains("left <b>1</b>"));
+        // Short-lived is visually distinct, sustained too.
+        assert!(panel.contains("short-lived"), "FP tell rendered");
+        assert!(panel.contains("class=\"shortlived\""));
+        assert!(panel.contains("class=\"sustained\""));
+        // The coverage-gap would-act is flagged for scrutiny.
+        assert!(panel.contains("coverage gap"));
+        assert!(panel.contains("class=\"flagged\""));
+        // Both workloads and the left-alone one appear (short labels).
+        assert!(panel.contains("web"));
+        assert!(panel.contains("blip"));
+        assert!(panel.contains("safe"));
+
+        // The full page is a self-contained document.
+        let page = render_report_html(&report);
+        assert!(page.contains("<!doctype html>"));
+        assert!(page.contains("would-have-acted report"));
+        assert!(page.contains("Shadow would-have-acted diff"));
+        let _ = std::fs::write("/tmp/protector-report.html", &page);
+    }
+
+    #[test]
+    fn most_sustained_would_act_is_ranked_first() {
+        // Open (still standing) ranks above a closed long one, which ranks above a short one.
+        let entries = vec![
+            breach("workload/app/Pod/short", "exploitable — x", 200),
+            breach("workload/app/Pod/short", "not exploitable — gone", 100),
+            breach("workload/app/Pod/longclosed", "exploitable — y", 10_000),
+            breach(
+                "workload/app/Pod/longclosed",
+                "not exploitable — patched",
+                100,
+            ),
+            breach("workload/app/Pod/open", "exploitable — z", 50),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(
+            report.would_act[0].entry, "workload/app/Pod/open",
+            "open first"
+        );
+        assert_eq!(report.would_act[1].entry, "workload/app/Pod/longclosed");
+        assert_eq!(report.would_act[2].entry, "workload/app/Pod/short");
+    }
+
+    #[test]
+    fn report_query_resolves_window_and_threshold_with_defaults() {
+        // Defaults: 7-day window, 5-min short-lived.
+        let q = ReportQuery::default();
+        assert_eq!(q.window(), Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600));
+        assert_eq!(
+            q.short_lived(),
+            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS)
+        );
+        // `days` sugar, and `hours` taking precedence over `days`.
+        let by_days = ReportQuery {
+            days: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(by_days.window(), Duration::from_secs(3 * 24 * 3600));
+        let both = ReportQuery {
+            hours: Some(2),
+            days: Some(30),
+            short_lived_secs: Some(10),
+        };
+        assert_eq!(both.window(), Duration::from_secs(2 * 3600), "hours wins");
+        assert_eq!(both.short_lived(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn default_window_report_reads_an_in_memory_disabled_journal_as_empty() {
+        // The OTLP-mirror helper on a disabled journal (no volume) is an empty report —
+        // a cheap no-op, never a crash. (The enabled-journal round trip is covered by the
+        // journal module's own tests; here we only need the headline math to be zero.)
+        let report = default_window_report(&DecisionJournal::disabled());
+        assert!(report.journal_empty);
+        assert_eq!(report.would_act_count(), 0);
+        assert_eq!(report.left_alone_count(), 0);
     }
 }
