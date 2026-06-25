@@ -1432,20 +1432,19 @@ fn render_html(
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
-         <p class=\"sum\">ATT&amp;CK outcomes reachable from an internet-facing front door. \
-         <b>Reachable</b> is what proof winnows to; <b>model-flagged</b> is where the model \
-         affirmed exploitability (ADR-0013).</p>\
+         <p class=\"sum\">ATT&amp;CK outcomes an internet-facing entry can reach. \
+         <b>Reachable</b> = proven the entry can get there; <b>model-flagged</b> = the model \
+         judged it a real breach.</p>\
          {vectors_body}\
          <h2>Behavioral bake <span class=\"muted\">(shadow)</span></h2>\
-         <p class=\"sum\">What the behavioral port saw last pass (ADR-0014 rollout step 2). \
-         The shadow-bake gate before corroboration is armed: signal volume should be sane, \
-         attribution should resolve (low unresolved), and corroborations are the countable \
-         &ldquo;would this have promoted?&rdquo; — all here without an OTLP collector.</p>\
+         <p class=\"sum\">What the behavioral agent observed last pass — protector is only \
+         watching, not acting. A sanity check before relying on these signals: volume looks \
+         reasonable, most events map to a workload (low unresolved), and <b>corroborations</b> \
+         counts findings a live signal backed up.</p>\
          {bake_body}\
          <h2>Recent reversions <span class=\"muted\">(lifted cuts)</span></h2>\
-         <p class=\"sum\">Cuts the engine lifted, and why — the visible record of the \
-         self-revert (ADR-0016): an isolation persists only while the breach condition \
-         holds, then reverts when the chain or its enrichment clears.</p>\
+         <p class=\"sum\">Cuts the engine lifted, and why. An isolation stays only while the \
+         breach lasts, then lifts on its own once the path is gone or the evidence clears.</p>\
          {reversions_body}\
          <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
          <p class=\"legend\">edge legend — \
