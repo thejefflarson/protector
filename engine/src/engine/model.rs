@@ -24,7 +24,7 @@ fn timeout_secs() -> u64 {
 /// Build a client carrying ONLY the total timeout — the bounded fallback. Public to the
 /// crate so the fallback path is unit-testable: whatever build path `client()` lands on,
 /// the request is still bounded by `timeout_secs()`.
-fn timeout_only_client(timeout: u64) -> reqwest::Result<reqwest::Client> {
+pub(crate) fn timeout_only_client(timeout: u64) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout))
         .build()
