@@ -33,6 +33,7 @@ pub mod dashboard;
 pub mod graph;
 pub mod journal;
 pub mod model;
+pub mod notify;
 pub mod observe;
 pub mod reason;
 pub mod respond;
@@ -219,6 +220,13 @@ pub struct Engine {
     /// dashboard's `/report` view (JEF-143), which replays it read-only to aggregate the
     /// shadow "would-have-acted" diff.
     journal: std::sync::Arc<journal::DecisionJournal>,
+    /// The breach notifier (JEF-144, ADR-0018): the one sanctioned outbound path. POSTs a
+    /// redacted breach-decision summary to an operator-configured sink, fired on the SAME
+    /// decision identity as the journal write below — so one new decision is one
+    /// notification, never per-pass spam. Disabled (a no-op, zero outbound calls) when no
+    /// `PROTECTOR_ENGINE_NOTIFY_URL` is configured: the engine then behaves exactly as it
+    /// did before, byte-identical.
+    notifier: notify::BreachNotifier,
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
@@ -285,6 +293,9 @@ impl Engine {
             // Disabled by default — durability is opt-in via a mounted volume. The watch
             // path enables it from the env (see [`with_journal`]); tests run in-memory.
             journal: std::sync::Arc::new(journal::DecisionJournal::disabled()),
+            // Off by default (ADR-0018): no outbound path unless the watch loop enables it
+            // from the env (see [`with_notifier`]). Tests run with it disabled.
+            notifier: notify::BreachNotifier::disabled(),
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
@@ -313,6 +324,16 @@ impl Engine {
     /// pre-restart history on disk.
     pub fn journal(&self) -> std::sync::Arc<journal::DecisionJournal> {
         self.journal.clone()
+    }
+
+    /// Attach the operator-configured breach notifier (JEF-144, ADR-0018). The one
+    /// sanctioned outbound path: a redacted breach-decision summary POSTed to an in-cluster
+    /// sink, deduped on the journal's decision identity. A disabled notifier (no
+    /// `PROTECTOR_ENGINE_NOTIFY_URL`) makes zero outbound calls — today's behaviour exactly.
+    /// Builder-style; called once on boot.
+    pub fn with_notifier(mut self, notifier: notify::BreachNotifier) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     /// Replay the journal's durable decisions onto the in-memory views: the last-known
@@ -643,6 +664,22 @@ impl Engine {
                 });
                 self.journaled_verdicts
                     .insert(entry_key.clone(), summary.clone());
+                // The ONE sanctioned outbound notification (JEF-144, ADR-0018), fired on the
+                // SAME decision identity as the journal write above — a decisive verdict whose
+                // summary changed for this entry — so dedupe and durability share one key and
+                // a steady-state cluster notifies once, never per pass. The payload is redacted
+                // (decision summary only: no secret names, no peer graph, no CVE list) and the
+                // shadow-vs-armed posture is explicit. A no-op (zero outbound calls) when no
+                // notify URL is configured. Best-effort: it never affects the verdict, the
+                // journal, or actuation.
+                self.notifier
+                    .notify(&notify::BreachNotice {
+                        entry: entry_key,
+                        verdict: &display,
+                        objectives: &objectives,
+                        enforcement: notify::Enforcement::from_armed(!self.active.is_empty()),
+                    })
+                    .await;
             }
             // The entry's verdict applies to every chain from it. Keep the model's call
             // — positive *and* negative — on each so the dashboard shows why it acted.
@@ -981,7 +1018,11 @@ pub async fn run_watch(
         build_hypothesizer(),
         build_adjudicator(Some(journal.clone())),
     )
-    .with_journal(journal::DecisionJournal::from_env());
+    .with_journal(journal::DecisionJournal::from_env())
+    // The one sanctioned outbound path (JEF-144, ADR-0018): operator-configured via
+    // `PROTECTOR_ENGINE_NOTIFY_URL`, off (zero outbound calls) when unset, redacted by
+    // default. Only the watch loop wires it — the timer path (`run`) serves no operator.
+    .with_notifier(notify::BreachNotifier::from_env());
 
     // Findings dashboard (read-only): surfaces the proven chains, especially the
     // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis and
@@ -1481,6 +1522,110 @@ mod tests {
             s.push(".1");
             std::path::PathBuf::from(s)
         });
+    }
+
+    /// A tiny local HTTP sink that counts the breach notifications POSTed to it and
+    /// captures the bodies — the operator-configured target stand-in for the notifier
+    /// integration tests (JEF-144). Returns the bound URL and the shared counters.
+    async fn spawn_notify_sink() -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::Router;
+        use axum::routing::post;
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let count_h = count.clone();
+        let bodies_h = bodies.clone();
+        let app = Router::new().route(
+            "/notify",
+            post(move |body: String| {
+                let count = count_h.clone();
+                let bodies = bodies_h.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    bodies.lock().unwrap().push(body);
+                    "ok"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/notify"), count, bodies)
+    }
+
+    /// JEF-144 acceptance: a URL set ⇒ a NEW breach decision produces EXACTLY ONE
+    /// notification, deduped on the decision identity (the journal's). Processing the same
+    /// breach facts twice must POST once, not per pass. The payload is redacted (no secret
+    /// name leaks).
+    #[tokio::test]
+    async fn notifier_fires_once_per_decision_and_redacts() {
+        let (url, count, bodies) = spawn_notify_sink().await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::new(
+            EnabledActions::from_names(std::iter::empty::<&str>()),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(reason::hypothesis::NullHypothesizer),
+            Box::new(CountingAdjudicator(calls.clone())),
+        )
+        .with_notifier(notify::BreachNotifier::new(&url, false));
+
+        // First pass: a new breach decision → exactly one notification.
+        engine.process(&exposed_snapshot(true)).await;
+        // Second pass, identical facts → SAME decision identity → no second notification.
+        engine.process(&exposed_snapshot(true)).await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "one new decision must produce exactly one notification (deduped per pass)"
+        );
+        // The single payload is redacted: the entry workload is present, the secret name
+        // it mounts is NOT.
+        let body = bodies.lock().unwrap()[0].clone();
+        assert!(body.contains("web"), "the entry workload is surfaced");
+        assert!(
+            !body.contains("session-key"),
+            "the secret name must never leave in the notification"
+        );
+        // Shadow posture (nothing armed) is explicit.
+        assert!(
+            body.contains("shadow") || body.contains("would isolate"),
+            "shadow vs armed must be unambiguous in the message"
+        );
+    }
+
+    /// JEF-144 acceptance: NO URL ⇒ zero outbound calls — byte-identical to today. We
+    /// run a sink to PROVE nothing is sent: a disabled notifier must not POST to it.
+    #[tokio::test]
+    async fn no_notify_url_makes_zero_outbound_calls() {
+        let (_url, count, _bodies) = spawn_notify_sink().await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        // Default engine: notifier disabled (no URL).
+        let mut engine = engine_with(calls.clone());
+        engine.process(&exposed_snapshot(true)).await;
+        engine.process(&exposed_snapshot(true)).await;
+
+        // Give any (erroneous) spawned POST a moment to land — it must not.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "with no URL configured the engine makes zero outbound notifications"
+        );
+        // And findings still publish exactly as before.
+        assert!(
+            engine
+                .findings()
+                .snapshot()
+                .iter()
+                .any(|f| f.breach_relevant),
+            "findings publish as usual with the notifier disabled"
+        );
     }
 
     /// JEF-141 graceful degradation at the engine level: with no journal configured the

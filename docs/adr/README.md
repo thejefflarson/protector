@@ -25,5 +25,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0015](0015-advisory-evidence-egress.md) | Advisory evidence is mounted-snapshot-only (zero egress); structurally extracted + capped for injection safety | Accepted |
 | [0016](0016-severity-vs-urgency.md) | The breach model: prove chains, enrich them, the model decides and isolates until clear | Accepted (amended by 0017) |
 | [0017](0017-isolation-persists-on-the-breach-condition.md) | Isolation persists on the breach condition: chain ∧ enrichment fingerprint (revert keys on `entry_fingerprint`) | Accepted |
+| [0018](0018-operator-configured-redacted-breach-notifier.md) | The breach notifier is the one sanctioned outbound path: operator-configured, off by default, redacted by default | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.
