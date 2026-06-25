@@ -94,6 +94,20 @@ struct EngineMetrics {
     /// Adjudicator model-call latency in milliseconds (histogram), recorded around each
     /// fresh `judge` call so the slow CPU model's tail is visible.
     model_latency_ms: opentelemetry::metrics::Histogram<f64>,
+    /// Shadow would-have-acted report headline (JEF-143): distinct workloads the engine
+    /// WOULD have isolated over the default rolling window, as of this pass — the gates-
+    /// exiting-shadow figure (JEF-50), mirrored to OTLP like the bake counts. A gauge:
+    /// the current window snapshot, the in-process mirror of the `/report` panel.
+    report_would_act: opentelemetry::metrics::Gauge<u64>,
+    /// Shadow report headline: distinct proven-but-cleared paths the model left alone
+    /// over the window (the trust half of the diff).
+    report_left_alone: opentelemetry::metrics::Gauge<u64>,
+    /// Shadow report headline: would-acts whose projected cut was short-lived (likely
+    /// false positives) — the subset to discount when judging the shadow bake.
+    report_short_lived: opentelemetry::metrics::Gauge<u64>,
+    /// Shadow report headline: would-acts made during an enrichment-coverage gap (no CVE
+    /// backing) — the ones to scrutinize first.
+    report_coverage_gap: opentelemetry::metrics::Gauge<u64>,
 }
 
 impl EngineMetrics {
@@ -156,6 +170,24 @@ impl EngineMetrics {
                 .f64_histogram("protector.engine.model_latency_ms")
                 .with_description("Adjudicator model-call latency in milliseconds.")
                 .build(),
+            report_would_act: m
+                .u64_gauge("protector.engine.report_would_act")
+                .with_description(
+                    "Shadow report: workloads that would have been isolated (window).",
+                )
+                .build(),
+            report_left_alone: m
+                .u64_gauge("protector.engine.report_left_alone")
+                .with_description("Shadow report: proven-but-cleared paths left alone (window).")
+                .build(),
+            report_short_lived: m
+                .u64_gauge("protector.engine.report_short_lived")
+                .with_description("Shadow report: short-lived would-acts (likely false positives).")
+                .build(),
+            report_coverage_gap: m
+                .u64_gauge("protector.engine.report_coverage_gap")
+                .with_description("Shadow report: would-acts during an enrichment-coverage gap.")
+                .build(),
         }
     }
 }
@@ -183,8 +215,10 @@ pub struct Engine {
     /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
     /// apply/revert deltas are appended here so a restart replays them. Disabled (a
     /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
-    /// then runs exactly as it did before, in-memory only.
-    journal: journal::DecisionJournal,
+    /// then runs exactly as it did before, in-memory only. Shared (`Arc`) with the
+    /// dashboard's `/report` view (JEF-143), which replays it read-only to aggregate the
+    /// shadow "would-have-acted" diff.
+    journal: std::sync::Arc<journal::DecisionJournal>,
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
@@ -250,7 +284,7 @@ impl Engine {
             reversions: std::sync::Arc::new(dashboard::ReversionLog::new()),
             // Disabled by default — durability is opt-in via a mounted volume. The watch
             // path enables it from the env (see [`with_journal`]); tests run in-memory.
-            journal: journal::DecisionJournal::disabled(),
+            journal: std::sync::Arc::new(journal::DecisionJournal::disabled()),
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
@@ -269,8 +303,16 @@ impl Engine {
     /// Builder-style; called once on boot.
     pub fn with_journal(mut self, journal: journal::DecisionJournal) -> Self {
         self.replay_journal(&journal);
-        self.journal = journal;
+        self.journal = std::sync::Arc::new(journal);
         self
+    }
+
+    /// A handle to the durable decision journal (JEF-143), for the dashboard's `/report`
+    /// view to replay read-only. Shares the same `Arc` the engine writes through, so the
+    /// report reflects every decision the live engine has journaled this run plus the
+    /// pre-restart history on disk.
+    pub fn journal(&self) -> std::sync::Arc<journal::DecisionJournal> {
+        self.journal.clone()
     }
 
     /// Replay the journal's durable decisions onto the in-memory views: the last-known
@@ -643,6 +685,23 @@ impl Engine {
         if cached > 0 {
             self.metrics.cached.add(cached, &[]);
         }
+        // Mirror the shadow would-have-acted report headline (JEF-143) to OTLP, like the
+        // bake counts: the gates-exiting-shadow figures (JEF-50) over the default window,
+        // read back from the durable journal we just appended this pass's breach decision
+        // to. Cheap no-op when the journal is disabled (replay is empty). Read-only.
+        let report = dashboard::default_window_report(&self.journal);
+        self.metrics
+            .report_would_act
+            .record(report.would_act_count() as u64, &[]);
+        self.metrics
+            .report_left_alone
+            .record(report.left_alone_count() as u64, &[]);
+        self.metrics
+            .report_short_lived
+            .record(report.short_lived_count() as u64, &[]);
+        self.metrics
+            .report_coverage_gap
+            .record(report.coverage_gap_count() as u64, &[]);
         if !by_entry.is_empty() {
             tracing::info!(
                 entries = by_entry.len(),
@@ -930,10 +989,12 @@ pub async fn run_watch(
     if let Some(addr) = dashboard_addr {
         let findings = engine.findings();
         let reversions = engine.reversions();
-        let journal = journal.clone();
+        let judgements = journal.clone();
+        // The durable decision journal (JEF-143) backs the `/report` would-have-acted view.
+        let decisions = engine.journal();
         tokio::spawn(async move {
             if let Err(error) =
-                dashboard::serve_dashboard(addr, findings, journal, reversions).await
+                dashboard::serve_dashboard(addr, findings, judgements, reversions, decisions).await
             {
                 tracing::error!(%error, "dashboard stopped");
             }
