@@ -22,10 +22,23 @@ The model must, on cluster-representative cases, get the call right:
 - **cross-tenant network** (`[NETWORK]` `[cross-ns]` into a different tenant) → **exploitable**
 - **escape-to-host** (a privilege-escalation / host-escape outcome) → **exploitable**
 
-The principle: authorization (the `[RBAC-GRANTED]` / `[MOUNTED]` / `[same-ns]` /
-`[cross-ns]` tags), not namespace-difference or breadth, drives the call. See
-`build_judgment_prompt` in `engine/src/engine/reason/adjudicate.rs` for the decision
-procedure the prompt encodes.
+The principle (JEF-134): the deterministic layer PROVES + ENRICHES — reachability, the
+`[RBAC-GRANTED]` / `[MOUNTED]` / `[same-ns]` / `[cross-ns]` reach tags, and the CVE /
+runtime evidence — and the **model decides breach holistically** from the *conjunction*
+of reachability and evidence. Neither half alone is a breach: authorized-but-unevidenced
+reach (`[RBAC-GRANTED]` / `[MOUNTED]`, however broad or high-severity) is **not** a
+breach, and scary evidence on an unreachable workload is not a breach. The engine no
+longer pre-decides via deterministic "promotion grounds" (those mis-gated ArgoCD into
+`exploitable`); the only deterministic backstop left is anti-fabrication
+(`guard_fabricated_cve`), which stops the model citing a CVE absent from the evidence — it
+is not a decision gate. See the holistic prompt in `build_judgment_prompt`
+(`engine/src/engine/reason/adjudicate.rs`).
+
+> **Recalibration gate (follow-up — JEF-50 arming, not the engine change):** removing the
+> deterministic grounds makes "is argo a breach" the *model's* call, so whether the prod
+> model (granite4:3b-h) decides correctly under the holistic prompt is verified by the
+> bake-off + the `#[ignore]`d e2e gate below — a follow-up gate on arming a class, **not**
+> a blocker for the engine, which stays shadow until a class is armed.
 
 ## How to run the gate
 
@@ -51,9 +64,12 @@ any case does not advance.
 
 The `#[ignore]`d e2e test in `engine/src/engine/reason/adjudicate.rs` drives the *real*
 judgement path (`build_judgment_prompt` → the model → `parse_verdict`) end-to-end against
-a live endpoint, and **hard-asserts the two anchor cases**: log4shell → `Exploitable`,
-no-evidence own-app secret → `Refuted`. It fails the build if the candidate misses either,
-so it is a real gate when run, not just a print.
+a live endpoint, and **hard-asserts the anchor cases**: log4shell on a reachable
+internet-facing entry → `Exploitable`; the same chain with no CVE / no runtime evidence
+(own-app `[MOUNTED]` secret) → `Refuted`; and the JEF-134 argo anchor — an internet-facing
+controller RBAC-granted secrets across many tenants (broad, some high-impact) with no CVE
+and no behavior → `Refuted`. It fails the build if the candidate misses any, so it is a
+real gate when run, not just a print.
 
 ```sh
 PROTECTOR_E2E_MODEL=http://localhost:11434/v1/chat/completions \
@@ -70,7 +86,8 @@ pointed at the candidate.)
    case correctly (own-app/argo refute; log4j/cross-tenant-net/escape exploitable) and is
    fast enough on the target hardware.
 2. `cargo nextest run real_model_judges -- --ignored` against the candidate endpoint —
-   the gated probe **passes** (both anchor assertions hold).
+   the gated probe **passes** (all anchor assertions hold: log4shell exploitable; own-app
+   and argo broad-RBAC refuted).
 3. Only then update the prod model configuration.
 
 ## Follow-ups (not yet implemented)
