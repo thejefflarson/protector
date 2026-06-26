@@ -2470,6 +2470,12 @@ pub struct Readiness {
     /// No pass has completed yet — the bake window (first verdicts can take minutes on a
     /// CPU model) is still open. Drives the cold-start note.
     pub warming_up: bool,
+    /// The model is actually answering RIGHT NOW — attached AND its last call was decisive
+    /// ([`ModelHealth::Ok`]). False when no model is configured, or it timed out / hasn't
+    /// been exercised this run. The banner (JEF-174) keys its "the model cleared them"
+    /// clearance claim on this: a calm/green `Watching`/`Quiet` is only honest while the
+    /// model is live; otherwise exposed paths are unjudged, not cleared (ADR-0016).
+    pub model_judging: bool,
 }
 
 impl Readiness {
@@ -2512,6 +2518,12 @@ fn derive_readiness(
         .filter(|(variant, _)| variant.as_str() != "alert")
         .map(|(_, n)| n)
         .sum();
+
+    // The model is "judging" — giving live verdicts the banner can lean on — only when it
+    // is attached AND its last fresh call was decisive. A timeout, a cold start, or no model
+    // at all all mean "not judging right now" (JEF-174): the decision still falls through to
+    // the deterministic skeptic, but the banner must not call that a clearance (ADR-0016).
+    let model_judging = config.model_attached && model_health == ModelHealth::Ok;
 
     // The model row: attached or not, and (if attached) its last-call health. A timeout is
     // Degraded, not Absent — the model IS configured, it just isn't answering right now.
@@ -2624,7 +2636,11 @@ fn derive_readiness(
         },
     ];
 
-    Readiness { inputs, warming_up }
+    Readiness {
+        inputs,
+        warming_up,
+        model_judging,
+    }
 }
 
 /// Present iff the condition holds, else Absent.
@@ -2773,8 +2789,14 @@ enum ClusterStatus {
     /// ≥1 breach-relevant finding the model affirmed exploitable now, with no cut in
     /// force. The one red state: a live breach the operator must look at.
     BreachLive,
-    /// Exposed breach-relevant endpoints exist but the model cleared them all (none
-    /// exploitable). Calm green — actively watched, nothing live.
+    /// Exposed breach-relevant endpoints exist and the model is NOT answering (no model
+    /// configured, or its last call timed out / hasn't landed this run — JEF-174). Nothing
+    /// is flagged, but that is the deterministic skeptic default, NOT a model clearance: the
+    /// single most load-bearing input is absent (ADR-0016). Non-green (amber) — these paths
+    /// are unjudged, not confirmed safe. Ranked worse than `Watching` (a real clearance).
+    Unjudged,
+    /// Exposed breach-relevant endpoints exist, the model IS answering, and it cleared them
+    /// all (none exploitable). Calm green — actively watched, a live verdict, nothing live.
     Watching,
     /// No breach-relevant exposure at all. Calm green — nothing reaches an objective.
     Quiet,
@@ -2787,6 +2809,7 @@ impl ClusterStatus {
             ClusterStatus::WarmingUp => "Warming up",
             ClusterStatus::Isolated => "Isolated",
             ClusterStatus::BreachLive => "Breach — live",
+            ClusterStatus::Unjudged => "Unjudged",
             ClusterStatus::Watching => "Watching",
             ClusterStatus::Quiet => "Quiet",
         }
@@ -2799,6 +2822,7 @@ impl ClusterStatus {
             ClusterStatus::WarmingUp => "◌",
             ClusterStatus::Isolated => "▣",
             ClusterStatus::BreachLive => "▲",
+            ClusterStatus::Unjudged => "◍",
             ClusterStatus::Watching => "●",
             ClusterStatus::Quiet => "●",
         }
@@ -2806,12 +2830,14 @@ impl ClusterStatus {
 
     /// The CSS class for the banner's tone — maps to the tokens in the `<style>` block.
     /// `ok` is the new calm/green token (the first "healthy" color); `breach` is the
-    /// reserved red; `isolated` is red-border-on-calm; `warming` is muted.
+    /// reserved red; `isolated` is red-border-on-calm; `warming` is muted; `unjudged` is the
+    /// amber/degraded token (JEF-174) — explicitly NOT green, because nothing was cleared.
     fn tone(self) -> &'static str {
         match self {
             ClusterStatus::WarmingUp => "warming",
             ClusterStatus::Isolated => "isolated",
             ClusterStatus::BreachLive => "breach",
+            ClusterStatus::Unjudged => "unjudged",
             ClusterStatus::Watching | ClusterStatus::Quiet => "ok",
         }
     }
@@ -2826,10 +2852,18 @@ impl ClusterStatus {
 /// `cut_applied` is whether a cut is actually in force — at the render layer that is
 /// "armed AND an auto-eligible breach remediation exists" (an auto-eligible breach
 /// finding renders as "applied" when armed; in shadow it only "would apply").
+///
+/// `model_judging` (JEF-174) is whether the model is actually answering right now (attached
+/// AND last call decisive — [`Readiness::model_judging`]). It gates the ONE clearance claim:
+/// exposed-but-unflagged paths are `Watching` (a real, green "the model cleared them") only
+/// while the model is live; otherwise they are [`Unjudged`](ClusterStatus::Unjudged) —
+/// non-green, because "nothing flagged" is the deterministic skeptic default, not a verdict
+/// (ADR-0016). It never relaxes a breach state, only withholds a clearance.
 fn cluster_status(
     findings: &[Finding],
     armed: bool,
     last_pass: Option<SystemTime>,
+    model_judging: bool,
 ) -> ClusterStatus {
     // No pass yet ⇒ no verdicts ⇒ never claim OK (warming, not blank, not clear).
     if last_pass.is_none() {
@@ -2855,8 +2889,14 @@ fn cluster_status(
     match (live_breach, cut_applied, exposed) {
         (true, true, _) => ClusterStatus::Isolated,
         (true, false, _) => ClusterStatus::BreachLive,
+        // No exposure at all ⇒ nothing for the model to clear, so model health is moot:
+        // `Quiet` makes no clearance claim ("no exposure reaches an objective") regardless.
         (false, _, 0) => ClusterStatus::Quiet,
-        (false, _, _) => ClusterStatus::Watching,
+        // Exposure exists and nothing is flagged: `Watching` (a green "the model cleared
+        // them") is honest ONLY while the model is live. Otherwise the all-clear is just the
+        // skeptic default with no model behind it ⇒ `Unjudged`, non-green (JEF-174).
+        (false, _, _) if model_judging => ClusterStatus::Watching,
+        (false, _, _) => ClusterStatus::Unjudged,
     }
 }
 
@@ -2869,8 +2909,9 @@ fn status_banner(
     armed: bool,
     last_pass: Option<SystemTime>,
     freshness: &str,
+    model_judging: bool,
 ) -> String {
-    let status = cluster_status(findings, armed, last_pass);
+    let status = cluster_status(findings, armed, last_pass, model_judging);
     let exposed = findings
         .iter()
         .filter(|f| f.breach_relevant)
@@ -2894,6 +2935,11 @@ fn status_banner(
         ClusterStatus::BreachLive => format!(
             "{flagged_n} exploitable path{} — <a href=\"#attack-paths\">needs attention now</a>",
             if flagged_n == 1 { "" } else { "s" }
+        ),
+        ClusterStatus::Unjudged => format!(
+            "{exposed} exposed path{} — <a href=\"#coverage\">the model isn't judging right now, \
+             so none are confirmed safe</a>",
+            if exposed == 1 { "" } else { "s" }
         ),
         ClusterStatus::Watching => format!(
             "{exposed} exposed path{} watched, none exploitable — the model cleared them",
@@ -3126,6 +3172,8 @@ fn render_html(
          .banner-isolated .banner-glyph,.banner-isolated .banner-word{{color:#b00000}}\
          .banner-warming{{background:#f4f4f4;border-color:#ccc;color:#555}}\
          .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#777}}\
+         .banner-unjudged{{background:#fbf6ee;border-color:#9a5b00;color:#7a4a00}}\
+         .banner-unjudged .banner-glyph,.banner-unjudged .banner-word{{color:#9a5b00}}\
          ol.readiness{{list-style:none;padding:0;margin:.2rem 0 .6rem;font-size:.85rem}}\
          ol.readiness li.r-row{{padding:.4rem .6rem;margin:.3rem 0;border:1px solid #e3e3e3;border-left-width:3px}}\
          ol.readiness li.r-ok{{border-left-color:#1a7f37}}\
@@ -3170,7 +3218,7 @@ fn render_html(
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths · last pass <b>{freshness}</b> \
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
-         <h2>Coverage &amp; readiness <span class=\"muted\">(decision inputs)</span></h2>\
+         <h2 id=\"coverage\">Coverage &amp; readiness <span class=\"muted\">(decision inputs)</span></h2>\
          <p class=\"sum\">Each decision input and its LIVE state — so an unconfigured or down \
          input is visible, not silent. An <b>absent</b> input that weakens decisions is called \
          out: the model's call is only as good as its enrichment (ADR-0016). \
@@ -3206,7 +3254,13 @@ fn render_html(
          <code>escapes via</code>: a container-escape primitive to the host node</p>\
          {path_body}\
          </body></html>",
-        banner = status_banner(findings, armed, last_pass, &freshness),
+        banner = status_banner(
+            findings,
+            armed,
+            last_pass,
+            &freshness,
+            readiness.model_judging
+        ),
         nav = nav_bar("/"),
         rem_n = remediations.len(),
         rem_word = if armed { "active" } else { "proposed" },
@@ -3657,13 +3711,13 @@ mod tests {
     fn cluster_status_warming_up_when_no_pass_has_completed() {
         // `last_pass` None ⇒ no verdicts yet ⇒ never claim OK, even with findings present.
         assert_eq!(
-            cluster_status(&[], false, None),
+            cluster_status(&[], false, None, true),
             ClusterStatus::WarmingUp,
             "no pass yet ⇒ warming, not Quiet"
         );
         let exploitable = vec![judged("workload/app/Pod/web", "exploitable — RCE", false)];
         assert_eq!(
-            cluster_status(&exploitable, false, None),
+            cluster_status(&exploitable, false, None, true),
             ClusterStatus::WarmingUp,
             "no pass yet ⇒ warming even with an exploitable finding (verdicts not trusted)"
         );
@@ -3676,11 +3730,12 @@ mod tests {
         let mut non_breach = breach_finding("workload/app/Pod/web");
         non_breach.breach_relevant = false;
         assert_eq!(
-            cluster_status(&[], false, Some(SystemTime::now())),
-            ClusterStatus::Quiet
+            cluster_status(&[], false, Some(SystemTime::now()), false),
+            ClusterStatus::Quiet,
+            "no exposure ⇒ Quiet even with the model down — nothing to clear, no claim made"
         );
         assert_eq!(
-            cluster_status(&[non_breach], false, Some(SystemTime::now())),
+            cluster_status(&[non_breach], false, Some(SystemTime::now()), false),
             ClusterStatus::Quiet,
             "non-breach-relevant rows don't count as exposure"
         );
@@ -3699,9 +3754,9 @@ mod tests {
             breach_finding("workload/app/Pod/api"), // awaiting verdict (None)
         ];
         assert_eq!(
-            cluster_status(&cleared, false, Some(SystemTime::now())),
+            cluster_status(&cleared, false, Some(SystemTime::now()), true),
             ClusterStatus::Watching,
-            "exposure with no exploitable verdict ⇒ Watching"
+            "exposure with no exploitable verdict AND a live model ⇒ Watching"
         );
     }
 
@@ -3714,14 +3769,14 @@ mod tests {
             true,
         )];
         assert_eq!(
-            cluster_status(&breach, false, Some(SystemTime::now())),
+            cluster_status(&breach, false, Some(SystemTime::now()), true),
             ClusterStatus::BreachLive,
             "exploitable + shadow (no cut) ⇒ live breach"
         );
         // Armed but the chain is NOT auto-eligible (propose-only) ⇒ no cut ⇒ still live.
         let propose_only = vec![judged("workload/app/Pod/web", "exploitable — RCE", false)];
         assert_eq!(
-            cluster_status(&propose_only, true, Some(SystemTime::now())),
+            cluster_status(&propose_only, true, Some(SystemTime::now()), true),
             ClusterStatus::BreachLive,
             "armed but propose-only (no auto cut) ⇒ still live, not Isolated"
         );
@@ -3732,7 +3787,7 @@ mod tests {
         // ≥1 exploitable verdict, armed, auto-eligible ⇒ a cut is applied ⇒ Isolated.
         let contained = vec![judged("workload/app/Pod/web", "exploitable — RCE", true)];
         assert_eq!(
-            cluster_status(&contained, true, Some(SystemTime::now())),
+            cluster_status(&contained, true, Some(SystemTime::now()), true),
             ClusterStatus::Isolated,
             "exploitable + armed + auto-eligible ⇒ contained (Isolated)"
         );
@@ -3753,6 +3808,7 @@ mod tests {
             false,
             now,
             "5s ago",
+            true, // model is judging ⇒ a real clearance ⇒ Watching/green
         );
         assert!(watching.contains("role=\"status\""));
         assert!(watching.contains("aria-live=\"polite\""));
@@ -3772,11 +3828,11 @@ mod tests {
             "refresh cadence noted"
         );
 
-        let quiet = status_banner(&[], false, now, "5s ago");
+        let quiet = status_banner(&[], false, now, "5s ago", true);
         assert!(quiet.contains("Quiet"));
         assert!(quiet.contains("banner-ok"));
 
-        let breach_banner = status_banner(&breach, false, now, "5s ago");
+        let breach_banner = status_banner(&breach, false, now, "5s ago", true);
         assert!(breach_banner.contains("Breach — live"));
         assert!(breach_banner.contains("banner-breach"));
         assert!(
@@ -3788,18 +3844,138 @@ mod tests {
             "anchors to the card(s)"
         );
 
-        let isolated = status_banner(&breach, true, now, "5s ago");
+        let isolated = status_banner(&breach, true, now, "5s ago", true);
         assert!(isolated.contains("Isolated"));
         assert!(isolated.contains("banner-isolated"));
         assert!(isolated.contains("armed (acting)"));
 
-        let warming = status_banner(&[], false, None, "waiting for first pass");
+        let warming = status_banner(&[], false, None, "waiting for first pass", true);
         assert!(warming.contains("Warming up"));
         assert!(warming.contains("banner-warming"));
         assert!(
             !warming.contains("Quiet") && !warming.contains("Watching"),
             "warming never claims OK"
         );
+    }
+
+    // -- JEF-174: the banner must not claim "the model cleared them" with no live model -----
+
+    /// Acceptance #1 & #3: exposed-but-unflagged paths are `Watching` (green clearance) ONLY
+    /// while the model is judging; with NO live model they are `Unjudged` (non-green). The
+    /// engine's skeptic default is unchanged — this is banner-state only.
+    #[test]
+    fn cluster_status_unjudged_when_exposed_and_model_not_judging() {
+        let exposed = vec![
+            judged("workload/app/Pod/web", "not exploitable — denied", false),
+            breach_finding("workload/app/Pod/api"), // awaiting a verdict (None)
+        ];
+        let now = Some(SystemTime::now());
+
+        // Model NOT judging (down / timed out / no model) ⇒ Unjudged, NOT Watching.
+        assert_eq!(
+            cluster_status(&exposed, false, now, false),
+            ClusterStatus::Unjudged,
+            "exposure with no live model ⇒ Unjudged, not a false clearance"
+        );
+        // Same findings, model judging ⇒ a real clearance ⇒ Watching (acceptance #3).
+        assert_eq!(
+            cluster_status(&exposed, false, now, true),
+            ClusterStatus::Watching,
+            "exposure cleared by a live model ⇒ Watching (unchanged)"
+        );
+    }
+
+    /// `Unjudged` is non-green and the model-health distinction lives in the TEXT, not color
+    /// alone (acceptance #1, #5), with the `role`/`aria-live` contract preserved.
+    #[test]
+    fn unjudged_banner_is_non_green_and_carries_status_in_text() {
+        let exposed = vec![judged(
+            "workload/app/Pod/web",
+            "not exploitable — denied",
+            false,
+        )];
+        let banner = status_banner(&exposed, false, Some(SystemTime::now()), "5s ago", false);
+
+        assert!(banner.contains("Unjudged"), "leads with the word");
+        assert!(
+            banner.contains("banner-unjudged") && !banner.contains("banner-ok"),
+            "non-green amber tone, never the green/ok token"
+        );
+        assert!(
+            banner.contains("the model isn't judging right now"),
+            "the meaning is in the text, not color alone"
+        );
+        assert!(banner.contains("1 exposed path"), "states the count");
+        // Acceptance #5: the aria contract is preserved verbatim.
+        assert!(banner.contains("role=\"status\""));
+        assert!(banner.contains("aria-live=\"polite\""));
+    }
+
+    /// Acceptance #4: in EVERY state with no live verdict, the detail text must never claim
+    /// the model cleared anything. The only "cleared" claim is the live-model `Watching`.
+    #[test]
+    fn detail_never_claims_clearance_without_a_live_verdict() {
+        let exposed = vec![judged("workload/app/Pod/web", "not exploitable", false)];
+        let now = Some(SystemTime::now());
+
+        // No model (acceptance #1): unjudged, never "cleared".
+        let no_model = status_banner(&exposed, false, now, "5s ago", false);
+        assert!(
+            !no_model.contains("cleared"),
+            "no live model ⇒ never claims a clearance"
+        );
+
+        // Warming up (no pass yet): never "cleared".
+        let warming = status_banner(&exposed, false, None, "warming", false);
+        assert!(!warming.contains("cleared"));
+
+        // Quiet (no exposure, model down): makes no clearance claim either.
+        let quiet = status_banner(&[], false, now, "5s ago", false);
+        assert!(!quiet.contains("cleared"));
+
+        // The ONLY place "cleared" appears is a live-model Watching.
+        let watching = status_banner(&exposed, false, now, "5s ago", true);
+        assert!(
+            watching.contains("the model cleared them"),
+            "a live model's clearance is still stated plainly"
+        );
+    }
+
+    /// Acceptance #2: a model attached but whose last call timed out is NOT judging, so the
+    /// readiness signal the banner reads is false — wiring it end-to-end through
+    /// [`derive_readiness`] (the engine's `ModelHealth::Timeout`), not just the banner fn.
+    #[test]
+    fn timed_out_model_is_not_judging_so_banner_does_not_clear() {
+        let attached = ReadinessConfig {
+            model_attached: true,
+            ..ReadinessConfig::default()
+        };
+        let now = Some(SystemTime::now());
+
+        // Attached + Ok ⇒ judging.
+        let live = derive_readiness(&attached, ModelHealth::Ok, &BakeStats::default(), now);
+        assert!(live.model_judging, "attached + last call ok ⇒ judging");
+
+        // Attached + Timeout ⇒ NOT judging (acceptance #2).
+        let stale = derive_readiness(&attached, ModelHealth::Timeout, &BakeStats::default(), now);
+        assert!(
+            !stale.model_judging,
+            "attached but last call timed out ⇒ not judging"
+        );
+
+        // No model at all ⇒ NOT judging (acceptance #1).
+        let absent = derive_readiness(
+            &ReadinessConfig::default(),
+            ModelHealth::Unknown,
+            &BakeStats::default(),
+            now,
+        );
+        assert!(!absent.model_judging, "no model configured ⇒ not judging");
+
+        // And the banner driven by the timed-out signal refuses the clearance.
+        let exposed = vec![judged("workload/app/Pod/web", "not exploitable", false)];
+        let banner = status_banner(&exposed, false, now, "5s ago", stale.model_judging);
+        assert!(banner.contains("Unjudged") && !banner.contains("cleared"));
     }
 
     #[test]
