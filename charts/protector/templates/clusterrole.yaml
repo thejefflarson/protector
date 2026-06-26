@@ -1,0 +1,45 @@
+{{- if and .Values.engine.enabled .Values.serviceAccount.create }}
+# The mitigation engine reads observed cluster state to build its security graph.
+# These are the reads ADR-0001 documents the engine needs — the webhook makes no API
+# calls, but the engine shares the pod's ServiceAccount, so the grant lives here.
+# Read-only by default; the NetworkPolicy *write* rule is added ONLY when actuationRBAC
+# is on (armed mode), so a shadow install has zero write grants.
+#
+# NOTE: list/watch on secrets grants read of secret *data* at the API level, even though
+# the engine only retains metadata. That is the sensitive read the engine's value rests
+# on; scope the cluster or split namespaces if that's too broad.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "protector.fullname" . }}-engine
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+  # trivy-operator vulnerability reports. Harmless if the CRD is absent — the engine
+  # degrades to no vuln data.
+  - apiGroups: ["aquasecurity.github.io"]
+    resources: ["vulnerabilityreports"]
+    verbs: ["get", "list", "watch"]
+  # Linkerd authorization policy (a mesh-native reachability source). Read-only;
+  # harmless if the CRDs are absent (the engine degrades to NetworkPolicy-only
+  # reachability).
+  - apiGroups: ["policy.linkerd.io"]
+    resources: ["servers", "authorizationpolicies", "meshtlsauthentications"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.engine.actuationRBAC }}
+  # Armed mode: the networkpolicy actuator creates/deletes its own (managed-by:
+  # protector) default-deny NetworkPolicies to quarantine a compromised workload.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "patch"]
+  {{- end }}
+{{- end }}

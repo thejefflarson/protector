@@ -1,0 +1,111 @@
+{{- if .Values.agent.enabled }}
+# protector's first-party eBPF behavioral collector (ADR-0014), a DaemonSet on every
+# node. It loads eBPF probes, resolves cgroup->pod, and POSTs normalized observations to
+# the engine's behavioral ingest (the falco-ingest service, /behavior). Passive and
+# read-only — it observes, it never blocks/kills/rewrites; enforcement stays the engine's
+# reversible NetworkPolicy cut.
+#
+# Its own minimal ServiceAccount: no cluster-API grants (pod resolution comes from the
+# node-local kubelet read-only /pods, not the API server) — kept off the webhook floor's
+# zero-access property.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "protector.fullname" . }}-agent
+  labels:
+    {{- include "protector.agentLabels" . | nindent 4 }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "protector.fullname" . }}-agent
+  labels:
+    {{- include "protector.agentLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "protector.agentSelectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  template:
+    metadata:
+      labels:
+        {{- include "protector.agentLabels" . | nindent 8 }}
+      {{- with .Values.agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "protector.fullname" . }}-agent
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # hostPID so the agent's /proc shows host PIDs — needed to map an eBPF event's pid
+      # to its cgroup, and thence to a pod (cgroup->pod, see agent/src/pod.rs).
+      hostPID: true
+      containers:
+        - name: agent
+          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          securityContext:
+            # Loading eBPF + creating BPF maps needs uid 0 with the BPF caps effective
+            # (a non-root uid doesn't get them even in a privileged pod), so run as root.
+            # Observe-only regardless (ADR-0014): read-only rootfs, no escalation.
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: {{ .Values.agent.privileged }}
+            privileged: {{ .Values.agent.privileged }}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+              {{- if not .Values.agent.privileged }}
+              add:
+                {{- toYaml .Values.agent.capabilities | nindent 16 }}
+              {{- end }}
+          env:
+            # The engine's behavioral ingest base — the agent appends /behavior.
+            - name: PROTECTOR_AGENT_ENDPOINT
+              value: "http://{{ include "protector.fullname" . }}-falco-ingest.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.engine.falco.port }}"
+            - name: RUST_LOG
+              value: "protector_agent=info"
+          {{- with .Values.agent.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # cgroup hierarchy (cgroup->pod resolution) and kernel BTF (CO-RE), read-only.
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

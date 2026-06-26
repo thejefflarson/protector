@@ -1,0 +1,254 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "protector.fullname" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
+  # The journal PVC is ReadWriteOnce; a RollingUpdate would deadlock (the new pod can't
+  # attach the volume while the old pod still holds it). Recreate: stop old, then start new.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "protector.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "protector.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "protector.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            {{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
+            - name: dashboard
+              containerPort: {{ .Values.engine.dashboard.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if and .Values.engine.enabled .Values.engine.falco.enabled }}
+            - name: falco-ingest
+              containerPort: {{ .Values.engine.falco.port }}
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: PROTECTOR_ADDR
+              value: "0.0.0.0:{{ .Values.service.port }}"
+            - name: PROTECTOR_TLS_CERT
+              value: /etc/protector/tls/tls.crt
+            - name: PROTECTOR_TLS_KEY
+              value: /etc/protector/tls/tls.key
+            # sigstore TUF cache — must be writable under readOnlyRootFilesystem,
+            # so it points into the /tmp emptyDir below.
+            - name: PROTECTOR_TUF_CACHE
+              value: /tmp/sigstore
+            - name: PROTECTOR_GATED_PREFIXES
+              value: {{ .Values.signature.gatedPrefixes | quote }}
+            - name: PROTECTOR_IDENTITY_REGEXP
+              value: {{ .Values.signature.identityRegexp | quote }}
+            - name: PROTECTOR_OIDC_ISSUER
+              value: {{ .Values.signature.oidcIssuer | quote }}
+            - name: PROTECTOR_ENFORCE_NAMESPACES
+              value: {{ .Values.signature.enforceNamespaces | quote }}
+            - name: PROTECTOR_ENFORCE_LABELS
+              value: {{ .Values.signature.enforceLabels | quote }}
+            - name: PROTECTOR_VERIFY_TIMEOUT
+              value: {{ .Values.signature.verifyTimeout | quote }}
+            - name: PROTECTOR_CACHE_TTL
+              value: {{ .Values.signature.cacheTtl | quote }}
+            - name: PROTECTOR_MAX_IMAGES
+              value: {{ .Values.signature.maxImages | quote }}
+            - name: PROTECTOR_MESH_ENFORCE_NAMESPACES
+              value: {{ .Values.mesh.enforceNamespaces | quote }}
+            - name: PROTECTOR_MESH_ENFORCE_LABELS
+              value: {{ .Values.mesh.enforceLabels | quote }}
+            {{- with .Values.registryAuth.secretName }}
+            - name: PROTECTOR_REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.registryAuth.usernameKey }}
+            - name: PROTECTOR_REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.registryAuth.passwordKey }}
+            {{- end }}
+            {{- if .Values.registryAuth.dockerconfigSecret }}
+            # Reuse a pull secret's creds to verify signatures of private gated images
+            # (mounted as a file below). Empty by default (public images need none).
+            - name: PROTECTOR_REGISTRY_AUTH_FILE
+              value: /etc/protector/registry/config.json
+            {{- end }}
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            {{- if .Values.otelEndpoint }}
+            # Export traces + engine metrics over OTLP. Unset = stdout logs only
+            # (zero egress, the default).
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otelEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.engine.enabled }}
+            # --- mitigation engine ---
+            - name: PROTECTOR_ENGINE
+              value: "on"
+            # Empty = propose-only (shadow). The engine forces dry-run actuation while
+            # this is empty, regardless of PROTECTOR_ENGINE_ACTUATOR. Arm classes only
+            # after a journal review.
+            - name: PROTECTOR_ENGINE_ENABLE
+              value: {{ .Values.engine.enable | quote }}
+            - name: PROTECTOR_ENGINE_ACTUATOR
+              value: {{ .Values.engine.actuator | quote }}
+            {{- if .Values.engine.dashboard.enabled }}
+            - name: PROTECTOR_DASHBOARD_ADDR
+              value: "0.0.0.0:{{ .Values.engine.dashboard.port }}"
+            {{- end }}
+            {{- if .Values.engine.falco.enabled }}
+            - name: PROTECTOR_FALCO_ADDR
+              value: "0.0.0.0:{{ .Values.engine.falco.port }}"
+            {{- end }}
+            {{- with .Values.engine.kev.configMapName }}
+            - name: PROTECTOR_KEV_FILE
+              value: /etc/protector/kev/{{ $.Values.engine.kev.key }}
+            {{- end }}
+            {{- with .Values.engine.advisory.configMapName }}
+            # Advisory snapshot (ADR-0015): mounted CVE-keyed file, zero egress. Unset =
+            # no advisory enrichment (prompt byte-identical to the no-snapshot path).
+            - name: PROTECTOR_ADVISORY_FILE
+              value: /etc/protector/advisory/{{ $.Values.engine.advisory.key }}
+            {{- end }}
+            {{- with .Values.engine.model.endpoint }}
+            # Local-first model (OpenAI-compatible). Unset = deterministic enumerator only.
+            - name: PROTECTOR_ENGINE_MODEL
+              value: {{ . | quote }}
+            - name: PROTECTOR_ENGINE_MODEL_NAME
+              value: {{ $.Values.engine.model.name | quote }}
+            - name: PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS
+              value: {{ $.Values.engine.model.timeoutSecs | quote }}
+            {{- end }}
+            {{- with .Values.engine.notify.url }}
+            # Breach notifier (ADR-0018). Unset = zero outbound calls (the default).
+            - name: PROTECTOR_ENGINE_NOTIFY_URL
+              value: {{ . | quote }}
+            - name: PROTECTOR_ENGINE_NOTIFY_VERBOSE
+              value: {{ $.Values.engine.notify.verbose | quote }}
+            - name: PROTECTOR_ENGINE_NOTIFY_TIMEOUT_SECS
+              value: {{ $.Values.engine.notify.timeoutSecs | quote }}
+            {{- end }}
+            {{- if .Values.engine.journal.enabled }}
+            # Persistent decision journal (JEF-141) — survives restarts; the path is on
+            # the journal PVC mounted below. Unset = in-memory only (graceful fallback).
+            - name: PROTECTOR_ENGINE_JOURNAL_PATH
+              value: {{ .Values.engine.journal.path | quote }}
+            {{- end }}
+            {{- else }}
+            - name: PROTECTOR_ENGINE
+              value: "off"
+            {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/protector/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
+            - name: journal
+              mountPath: {{ dir .Values.engine.journal.path | quote }}
+            {{- end }}
+            {{- if and .Values.engine.enabled .Values.engine.kev.configMapName }}
+            - name: kev
+              mountPath: /etc/protector/kev
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.engine.enabled .Values.engine.advisory.configMapName }}
+            - name: advisory
+              mountPath: /etc/protector/advisory
+              readOnly: true
+            {{- end }}
+            {{- if .Values.registryAuth.dockerconfigSecret }}
+            - name: registry-auth
+              mountPath: /etc/protector/registry
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "protector.servingCertName" . }}
+        - name: tmp
+          emptyDir: {}
+        {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
+        - name: journal
+          persistentVolumeClaim:
+            claimName: {{ include "protector.fullname" . }}-journal
+        {{- end }}
+        {{- if and .Values.engine.enabled .Values.engine.kev.configMapName }}
+        - name: kev
+          configMap:
+            name: {{ .Values.engine.kev.configMapName }}
+        {{- end }}
+        {{- if and .Values.engine.enabled .Values.engine.advisory.configMapName }}
+        - name: advisory
+          configMap:
+            name: {{ .Values.engine.advisory.configMapName }}
+        {{- end }}
+        {{- if .Values.registryAuth.dockerconfigSecret }}
+        # A pull secret's dockerconfigjson, surfaced as config.json so the cosign
+        # verifier can read its creds (PROTECTOR_REGISTRY_AUTH_FILE).
+        - name: registry-auth
+          secret:
+            secretName: {{ .Values.registryAuth.dockerconfigSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

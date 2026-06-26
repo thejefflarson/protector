@@ -1,0 +1,47 @@
+name: Chart
+# Lint + render the first-party Helm chart (charts/protector). Runs on GitHub-hosted
+# runners — it's a pure helm lint/template, so it needs none of the in-cluster
+# sccache/buildkit the self-hosted protector-runners exist for. Path-scoped so engine-
+# or agent-only changes don't trigger it.
+permissions:
+  contents: read
+on:
+  push:
+    branches: ["main"]
+    paths: ["charts/**", ".github/workflows/chart.yml"]
+  pull_request:
+    branches: ["main"]
+    paths: ["charts/**", ".github/workflows/chart.yml"]
+concurrency:
+  group: chart-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # First-party (Microsoft) Helm installer, pinned by commit SHA.
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.18.4
+      - name: Helm lint
+        run: helm lint charts/protector
+      # Render with the safe defaults AND with every opt-in armed, so a template that
+      # only breaks under an opt-in (model, agent, advisory, notify, live actuator) is
+      # caught here. Both must produce valid manifests.
+      - name: Helm template (safe defaults)
+        run: helm template protector charts/protector --namespace protector
+      - name: Helm template (all opt-ins armed)
+        run: |
+          helm template protector charts/protector --namespace protector \
+            --set agent.enabled=true \
+            --set engine.enable=network \
+            --set engine.actuator=networkpolicy \
+            --set engine.actuationRBAC=true \
+            --set engine.model.endpoint=http://model.svc:11434/v1/chat/completions \
+            --set engine.model.name=test \
+            --set engine.kev.configMapName=kev \
+            --set engine.advisory.configMapName=advisory \
+            --set otelEndpoint=http://otel.svc:4318 \
+            --set engine.notify.url=https://sink.example/hook \
+            --set registryAuth.dockerconfigSecret=registry

@@ -1,0 +1,17 @@
+apiVersion: v2
+name: protector
+description: >-
+  Incident prevention, response, and remediation for a Kubernetes cluster. The
+  admission webhook is the synchronous floor (first-party image-signature
+  verification, mesh-injection policy); the async mitigation engine — the product —
+  watches observed state, proves ATT&CK attack chains, and proposes (or, once a
+  class is armed, auto-applies) reversible minimal cuts. Ships fail-safe and
+  shadow-first: webhook audit-only, engine propose-only, actuator dry-run, no
+  egress, no model — every arming step is a single, documented opt-in.
+type: application
+# Chart version: independent of the app. 0.1.0 is the first release of the chart
+# from the protector repo itself.
+version: 0.1.0
+# appVersion pins the default container image tag (image.tag | default .Chart.AppVersion).
+# Bump in lockstep with a new cosign-signed ghcr semver tag.
+appVersion: "0.3.59"

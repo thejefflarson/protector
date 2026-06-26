@@ -1,0 +1,42 @@
+{{- if .Values.cert.create }}
+# Serving cert for the webhook, via cert-manager. The apiserver validates this against
+# the CA that cert-manager's cainjector copies into the ValidatingWebhookConfiguration's
+# caBundle (see the inject-ca-from annotation there). A selfSigned Issuer is sufficient:
+# the apiserver is told to trust exactly this cert's CA, nothing more. Requires
+# cert-manager (with cainjector) installed in the cluster; set cert.create=false to
+# supply your own serving Secret ("<release>-tls") + caBundle instead.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "protector.fullname" . }}-selfsign
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "protector.servingCertName" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "protector.servingCertName" . }}
+  duration: {{ .Values.cert.duration }}
+  renewBefore: {{ .Values.cert.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # protector's rustls server only loads PKCS#8 keys; cert-manager defaults ECDSA to
+    # SEC1, which would crashloop the server with "could not load private key".
+    encoding: PKCS8
+  usages:
+    - server auth
+  dnsNames:
+    - {{ include "protector.fullname" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "protector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ include "protector.fullname" . }}-selfsign
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}

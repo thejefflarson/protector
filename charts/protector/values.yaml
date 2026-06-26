@@ -1,0 +1,303 @@
+# Default values for protector.
+#
+# SAFE BY DEFAULT. Out of the box this chart installs protector in its most
+# conservative posture, and every step toward acting on the cluster is a single,
+# documented value change — never default-on:
+#
+#   * Webhook AUDIT-ONLY        signature.enforceNamespaces / mesh.enforceNamespaces empty
+#   * Engine SHADOW             engine.enable empty            (propose-only, touches nothing)
+#   * Actuator DRY-RUN          engine.actuator: dryrun        (no cluster writes even if armed)
+#   * ZERO EGRESS               no notify URL, no OTLP, no live advisory fetch
+#   * MODEL OPTIONAL            engine.model.endpoint empty    (deterministic enumerator only)
+#   * AGENT OFF                 agent.enabled: false           (no eBPF DaemonSet)
+#
+# See the chart README for the exact opt-in for each.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/thejefflarson/protector
+  pullPolicy: IfNotPresent
+  # A specific, cosign-signed semver tag. Empty falls back to the chart's appVersion
+  # (Chart.yaml), which tracks the latest signed release. Pin explicitly to override.
+  tag: ""
+
+# Pull secrets for the protector image. protector publishes to a PUBLIC ghcr repo,
+# so the default needs none. Add a secret name here if you mirror the image into a
+# private registry, e.g.:
+#   imagePullSecrets:
+#   - name: my-registry
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+# Extra pod annotations. EMPTY by default (no mesh assumption). If you run a service
+# mesh, the only inbound caller of the webhook is the kube-apiserver, which is NOT in
+# the mesh, so it serves its own cert-manager TLS regardless. Mesh users typically add:
+#   podAnnotations:
+#     linkerd.io/inject: enabled
+#     config.linkerd.io/opaque-ports: "8443"
+podAnnotations: {}
+podLabels: {}
+
+# Hardened: non-root, read-only root fs, no caps. The sigstore TUF cache needs a
+# writable dir, supplied by an emptyDir at /tmp (see deployment.yaml), not the rootfs.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+    - ALL
+
+service:
+  type: ClusterIP
+  # The apiserver dials this port over HTTPS; the container terminates TLS.
+  port: 8443
+
+# RAM-tight, arm64-friendly: a webhook that mostly idles with occasional signature
+# verification (network I/O to the registry + Rekor) plus the async engine loop.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+# Probes hit the HTTPS server; kubelet doesn't verify the cert for probes.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: https
+    scheme: HTTPS
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: https
+    scheme: HTTPS
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# --- signature policy (admission webhook) ---
+signature:
+  # Image-ref prefixes that MUST be signed; others (postgres, etc.) are out of scope.
+  # Set this to YOUR first-party registry prefix.
+  gatedPrefixes: "ghcr.io/thejefflarson/"
+  # Trusted keyless signing identity + issuer (the cosign incantation). Start-anchored;
+  # dots escaped so they match literally. Set to YOUR signing identity.
+  identityRegexp: "^https://github\\.com/thejefflarson/"
+  oidcIssuer: "https://token.actions.githubusercontent.com"
+  # Enforcement is OPT-IN: audit everywhere by default (log + meter, never block).
+  # Add namespaces here to start DENYING unsigned gated images there, one slice at a
+  # time once that namespace's audit log is clean. Empty = audit-only. There is no
+  # enforce-everywhere wildcard by design.
+  enforceNamespaces: ""
+  # Comma-separated key=value pod labels that opt a Pod into signature enforcement
+  # regardless of namespace (e.g. "tier=prod").
+  enforceLabels: ""
+  # Per-image verification timeout (s) — bounds a slow/hung registry.
+  verifyTimeout: 5
+  # Verdict cache TTL (s) — re-verifies a tag past this, bounding mutable-tag TOCTOU.
+  cacheTtl: 300
+  # Max distinct gated images verified per Pod (DoS amplification guard).
+  maxImages: 32
+
+# --- mesh-injection policy (admission webhook) ---
+mesh:
+  # Namespaces where unmeshed Pods are DENIED. Audit everywhere by default (empty).
+  # Leave empty until a namespace's audit log is clean.
+  enforceNamespaces: ""
+  # Comma-separated key=value pod labels that opt a Pod into mesh enforcement.
+  enforceLabels: ""
+
+# Registry credentials for verifying signatures of PRIVATE gated images (signatures
+# inherit repo visibility — without creds, a private-registry manifest fetch 401s).
+# OFF by default (public images need none).
+registryAuth:
+  # A dockerconfigjson Secret already in this namespace; its creds are mounted as a
+  # file and the verifier reads them. Empty = no registry auth.
+  dockerconfigSecret: ""
+  # Alternative: explicit username/password from a Secret's keys.
+  secretName: ""
+  usernameKey: username
+  passwordKey: password
+
+# --- webhook wiring ---
+webhook:
+  # Fail-safe: a webhook outage must never block API writes. Tighten to Fail
+  # per-policy only once proven.
+  failurePolicy: Ignore
+  # Keep the apiserver from stalling pod creation on a slow verify.
+  timeoutSeconds: 5
+  # Namespaces never gated — control plane + infra, and protector's own ns, so a bug
+  # here can't deadlock the cluster or protector itself. cert-manager is exempt because
+  # the chart depends on it (see `cert` below); drop it if you supply your own certs.
+  exemptNamespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - cert-manager
+  - protector
+
+# cert-manager serving cert for the webhook. The chart provisions a selfSigned Issuer
+# + Certificate and lets cainjector fill the webhook caBundle — so a stock install
+# needs only cert-manager present (no manual cert wrangling). ECDSA in PKCS#8 because
+# protector's rustls server only loads PKCS#8 keys.
+cert:
+  # Set false ONLY if you manage the serving Secret + webhook caBundle yourself; the
+  # Deployment still mounts the Secret named "<release>-tls".
+  create: true
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+
+# protector at info; everything else at warn. sigstore is pinned to `error` because it
+# logs a WARN for every UNSIGNED gated image (which protector already surfaces as its
+# own audit finding) — keeping it would just be noise; genuine errors still come through.
+logLevel: "protector=info,sigstore=error,warn"
+
+# OTLP export of traces + engine metrics to an OpenTelemetry collector. EMPTY by
+# default (zero egress — stdout logs only). Point at your in-cluster collector to opt in,
+# e.g. "http://otel-collector.observability.svc.cluster.local:4318".
+otelEndpoint: ""
+
+# --- mitigation engine (the product) ---
+# The async, out-of-band loop that watches observed cluster state, builds the security
+# graph, proves ATT&CK attack chains, and (only once a class is armed) auto-remediates.
+# It uses the pod's OWN ServiceAccount for cluster reads (templates/clusterrole.yaml).
+# Default posture is SHADOW: detect + propose, touch nothing.
+engine:
+  enabled: true
+  # ARMING SWITCH. Action classes auto-applied when a chain is proven AND
+  # live-corroborated AND adjudicator-confirmed (comma list: network,rbac,mount,identity).
+  # EMPTY = propose-only (shadow) — the engine forces the dry-run actuator regardless of
+  # `actuator` below whenever this is empty. Only `network` is live-actuatable today.
+  # `escape` is never enableable. Arm ONE class only after a journal review (ADR/JEF-50).
+  enable: ""
+  # Live actuator mechanism, used ONLY when a class is armed via `enable`:
+  #   dryrun             — log only; touches nothing. THE SAFE DEFAULT.
+  #   networkpolicy      — quarantine the workload with a default-deny NetworkPolicy.
+  #                        Works on any CNI that enforces NetworkPolicy. ADR-0010.
+  #   adminnetworkpolicy — surgical ANP edge-cut; needs a CNI implementing ANP
+  #                        (Cilium/Calico). ADR-0007.
+  # Left as dryrun by default so arming a class still writes nothing until you also
+  # choose a live mechanism here — a deliberate two-step to live actuation.
+  actuator: dryrun
+  # Grant the SA create/delete on NetworkPolicies so a live actuator can apply isolation.
+  # Keep false in shadow; turn on together with a live `actuator` + `enable: network`.
+  actuationRBAC: false
+  # Read-only findings dashboard (HTML at /, JSON at /findings) — surfaces the
+  # latent-foothold proposals a human acts on. ClusterIP only (no ingress created).
+  dashboard:
+    enabled: true
+    port: 8080
+  # Runtime-evidence ingest (the corroborated-now signal that makes a chain
+  # live-actionable). A Falco/falcosidekick deployment POSTs alerts here; the optional
+  # eBPF agent below also feeds this port. Enabling the listener is harmless on its own.
+  falco:
+    enabled: true
+    port: 9999
+  # CISA KEV catalogue (actively-exploited CVEs) for exploit intel. OPTIONAL —
+  # without it, footholds still fire on critical-severity CVEs. Point at an
+  # operator-synced ConfigMap (zero egress — same posture as the advisory snapshot).
+  kev:
+    configMapName: ""
+    key: known_exploited_vulnerabilities.json
+  # Advisory snapshot (ADR-0015): a CVE-keyed file the operator syncs out of band so the
+  # model reasons over CWE class + fix-availability + a capped summary. MOUNTED-SNAPSHOT
+  # ONLY — the engine never fetches advisories over the network (zero egress). OPTIONAL;
+  # empty = no advisory enrichment.
+  advisory:
+    configMapName: ""
+    key: advisories.json
+  # Local-first model for the adjudicator/hypothesis proposer (OpenAI-compatible chat
+  # endpoint). OPTIONAL and OFF by default — the engine runs the deterministic enumerator
+  # only with no model. Point at an IN-CLUSTER model so the graph never leaves the cluster
+  # (the adjudicator's veto is load-bearing once a class is armed, so set this before
+  # arming `network`). Example: "http://ollama.<ns>.svc.cluster.local:11434/v1/chat/completions".
+  model:
+    endpoint: ""
+    name: ""
+    # Per-call model timeout (s). CPU-only inference is slow; generous headroom keeps a
+    # burst of adjudications from surfacing as `model unavailable`. Never blocks the
+    # dashboard (verdicts are cached per entry and carried forward).
+    timeoutSecs: 1200
+  # Breach notifier (ADR-0018): an operator-configured webhook URL the engine POSTs a
+  # redacted breach summary to. OFF by default (zero egress — no outbound calls). Opt in
+  # by setting a URL; verbose adds non-redacted detail (only for a trusted sink).
+  notify:
+    url: ""
+    verbose: false
+    timeoutSecs: 10
+  # Decision journal (JEF-141): an append-only, size-rotated record of every breach
+  # decision + mitigation apply/revert, on a PERSISTENT volume so it survives a restart.
+  # Stays in-cluster (zero egress). Disable to fall back to in-memory only (degrades
+  # gracefully — the engine never crashes on a missing path).
+  journal:
+    enabled: true
+    # File the engine appends to; it rotates to <path>.1 in the same dir (~2 MiB total).
+    # The dir is the PVC mount; must be writable (fsGroup 65532 owns it).
+    path: /var/lib/protector/journal/decisions.jsonl
+    # Persistent claim so the journal survives pod restart/reschedule. RWO (replicaCount 1).
+    size: 256Mi
+    # "" = the cluster's default StorageClass.
+    storageClass: ""
+
+# --- behavioral telemetry agent (ADR-0014) ---
+# protector's first-party eBPF collector (agent/) — a DaemonSet on every node that
+# observes what workloads ACTUALLY do (connections, secret reads, exec) and POSTs them
+# to the engine's behavioral ingest. Passive, read-only — it observes, never blocks.
+#
+# OFF by default: it needs the protector-agent image and the eBPF probes load-tested on
+# your kernel (see agent/README.md). When enabled it runs in SHADOW — the signals enrich
+# the model + dashboard; only an `alert` behavior corroborates the action bar.
+agent:
+  enabled: false
+  image:
+    repository: ghcr.io/thejefflarson/protector-agent
+    # Empty falls back to the chart's appVersion (Chart.yaml). Pin explicitly to override.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Extra pod annotations for the agent DaemonSet. EMPTY by default. If you run a mesh
+  # and the engine's ingest port enforces mTLS, mesh the agent here, e.g.:
+  #   podAnnotations:
+  #     linkerd.io/inject: enabled
+  podAnnotations: {}
+  # RAM-tight for arm64: in-kernel aggregation is cheap; userspace is a thin batcher.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  # Narrowest caps that load eBPF + create ring-buffer maps on a stock kernel. Still runs
+  # as uid 0 (BPF caps aren't effective for a non-root uid even when granted) but drops
+  # everything else — read-only observe. Flip privileged: true only to bisect a regression.
+  privileged: false
+  capabilities:
+  - BPF
+  - PERFMON
+  - SYS_ADMIN
+  - SYS_RESOURCE
+  nodeSelector: {}
+  affinity: {}
+  # Run on every node, including tainted/control-plane ones.
+  tolerations:
+  - operator: Exists

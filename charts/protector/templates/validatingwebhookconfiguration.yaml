@@ -1,0 +1,44 @@
+# The apiserver calls protector on Pod creation. With cert.create, cainjector fills
+# caBundle from the serving cert's CA (inject-ca-from), so we never hand-manage it; with
+# cert.create=false you must inject the caBundle yourself (annotation/patch).
+#
+# Fail-safe by construction: failurePolicy Ignore means a protector outage can't block
+# Pod creation, and the namespaceSelector excludes the control plane + protector's own
+# namespace so a bug here can't deadlock the cluster.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "protector.fullname" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+  {{- if .Values.cert.create }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "protector.servingCertName" . }}
+  {{- end }}
+webhooks:
+  - name: pods.protector.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            {{- range .Values.webhook.exemptNamespaces }}
+            - {{ . }}
+            {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        operations: ["CREATE"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: {{ include "protector.fullname" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate
+        port: {{ .Values.service.port }}
