@@ -31,6 +31,12 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
       CARGO_INCREMENTAL: "0"
+      # Authenticate binstall's GitHub REST API calls (release-artifact lookups). The
+      # self-hosted runners share one egress IP, so the anonymous 60-req/hr/IP limit is
+      # exhausted fast → 403 Forbidden on api.github.com (same class as the Docker Hub 429
+      # in 1aaf4a5). The job's own GITHUB_TOKEN lifts it to 5000/hr; binstall reads it
+      # automatically. Durable follow-up: bake sccache/nextest/cargo-audit into the runner image.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
@@ -68,6 +74,12 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
       CARGO_INCREMENTAL: "0"
+      # Authenticate binstall's GitHub REST API calls (release-artifact lookups). The
+      # self-hosted runners share one egress IP, so the anonymous 60-req/hr/IP limit is
+      # exhausted fast → 403 Forbidden on api.github.com (same class as the Docker Hub 429
+      # in 1aaf4a5). The job's own GITHUB_TOKEN lifts it to 5000/hr; binstall reads it
+      # automatically. Durable follow-up: bake sccache/nextest/cargo-audit into the runner image.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
