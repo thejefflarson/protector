@@ -506,10 +506,12 @@ fn build_judgment_prompt_with(
             )
         })
         .collect();
-    let objectives = cap_lines(objective_lines, 40, |n| {
-        format!("  - (+{n} more reachable objectives — this front door reaches a very broad set, itself worth weighing)")
-    })
-    .join("\n");
+    // No cap on objectives: the model judges every reachable objective. Truncating to a
+    // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
+    // objectives) is exactly the case worth showing in full. A larger prompt is slower on the
+    // CPU Pi (~2 min for a ~110-objective entry) but that latency is amortized by the verdict
+    // cache, and accuracy beats speed for the judgement.
+    let objectives = objective_lines.join("\n");
     // JEF-134: the deterministic layer PROVES + ENRICHES; the model DECIDES breach. The prior
     // prompt encoded a rigid numbered procedure (step 4 → exploitable) plus six worked
     // examples; a small CPU model copied an example reason (Ex4's "another tenant's database
