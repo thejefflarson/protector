@@ -1495,6 +1495,197 @@ fn render_report_html(report: &Report) -> String {
     )
 }
 
+/// The glanceable cluster verdict (JEF-159): the one-word answer the status banner
+/// carries, so the operator reads "is my cluster OK right now?" without synthesizing it
+/// from the engine-internal counts below. Each state is a distinct word + glyph + color
+/// (never color alone — the meaning is in the text), computed as a PURE function of the
+/// current snapshot ([`cluster_status`]) — no new model call. Ordered from worst to best.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterStatus {
+    /// `last_pass` is `None` — no pass has completed, so there are no verdicts yet. We
+    /// show progress, NOT a blank and NOT a false "OK": a warming cluster is unknown, not
+    /// clear.
+    WarmingUp,
+    /// ≥1 breach-relevant finding the model affirmed exploitable now, AND a cut is in
+    /// force for it (armed + an auto-eligible remediation, which renders as "applied").
+    /// The breach is real but contained — red border on a calm fill, distinct from a
+    /// live, un-cut breach.
+    Isolated,
+    /// ≥1 breach-relevant finding the model affirmed exploitable now, with no cut in
+    /// force. The one red state: a live breach the operator must look at.
+    BreachLive,
+    /// Exposed breach-relevant endpoints exist but the model cleared them all (none
+    /// exploitable). Calm green — actively watched, nothing live.
+    Watching,
+    /// No breach-relevant exposure at all. Calm green — nothing reaches an objective.
+    Quiet,
+}
+
+impl ClusterStatus {
+    /// The one word the banner leads with — the glanceable answer.
+    fn word(self) -> &'static str {
+        match self {
+            ClusterStatus::WarmingUp => "Warming up",
+            ClusterStatus::Isolated => "Isolated",
+            ClusterStatus::BreachLive => "Breach — live",
+            ClusterStatus::Watching => "Watching",
+            ClusterStatus::Quiet => "Quiet",
+        }
+    }
+
+    /// A leading glyph so the state is legible without color (accessibility): the meaning
+    /// is carried by word + glyph, color only reinforces it.
+    fn glyph(self) -> &'static str {
+        match self {
+            ClusterStatus::WarmingUp => "◌",
+            ClusterStatus::Isolated => "▣",
+            ClusterStatus::BreachLive => "▲",
+            ClusterStatus::Watching => "●",
+            ClusterStatus::Quiet => "●",
+        }
+    }
+
+    /// The CSS class for the banner's tone — maps to the tokens in the `<style>` block.
+    /// `ok` is the new calm/green token (the first "healthy" color); `breach` is the
+    /// reserved red; `isolated` is red-border-on-calm; `warming` is muted.
+    fn tone(self) -> &'static str {
+        match self {
+            ClusterStatus::WarmingUp => "warming",
+            ClusterStatus::Isolated => "isolated",
+            ClusterStatus::BreachLive => "breach",
+            ClusterStatus::Watching | ClusterStatus::Quiet => "ok",
+        }
+    }
+}
+
+/// The glanceable cluster status (JEF-159) — a PURE function over the snapshot the
+/// dashboard already has: the resolved findings, whether the engine is armed, and the
+/// last-pass time. No model call. The verdict is read from each finding's RESOLVED
+/// verdict (JEF-157: the snapshot resolves it from the unified per-entry store), and a
+/// finding counts as a live breach exactly when [`flagged`] is true for it.
+///
+/// `cut_applied` is whether a cut is actually in force — at the render layer that is
+/// "armed AND an auto-eligible breach remediation exists" (an auto-eligible breach
+/// finding renders as "applied" when armed; in shadow it only "would apply").
+fn cluster_status(
+    findings: &[Finding],
+    armed: bool,
+    last_pass: Option<SystemTime>,
+) -> ClusterStatus {
+    // No pass yet ⇒ no verdicts ⇒ never claim OK (warming, not blank, not clear).
+    if last_pass.is_none() {
+        return ClusterStatus::WarmingUp;
+    }
+
+    let breach = findings.iter().filter(|f| f.breach_relevant);
+    let mut exposed = 0usize;
+    let mut live_breach = false;
+    let mut cut_applied = false;
+    for f in breach {
+        exposed += 1;
+        if flagged(f.verdict.as_deref()) {
+            live_breach = true;
+            // A cut is in force for a flagged breach only when the engine is armed AND the
+            // chain is auto-eligible (it would render "applied", not "would apply").
+            if armed && f.disposition == AUTO_ELIGIBLE {
+                cut_applied = true;
+            }
+        }
+    }
+
+    match (live_breach, cut_applied, exposed) {
+        (true, true, _) => ClusterStatus::Isolated,
+        (true, false, _) => ClusterStatus::BreachLive,
+        (false, _, 0) => ClusterStatus::Quiet,
+        (false, _, _) => ClusterStatus::Watching,
+    }
+}
+
+/// The full-width status banner (JEF-159): the first child of `<body>`, above `<h1>`.
+/// `role="status"` + `aria-live="polite"` so a screen reader announces a change; the
+/// meaning is in the WORD + glyph + subtitle, never color alone. The subtitle is the
+/// freshness + arm-state line. Pure over the same inputs as [`cluster_status`].
+fn status_banner(
+    findings: &[Finding],
+    armed: bool,
+    last_pass: Option<SystemTime>,
+    freshness: &str,
+) -> String {
+    let status = cluster_status(findings, armed, last_pass);
+    let exposed = findings
+        .iter()
+        .filter(|f| f.breach_relevant)
+        .map(|f| f.entry.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let flagged_n = findings
+        .iter()
+        .filter(|f| f.breach_relevant && flagged(f.verdict.as_deref()))
+        .map(|f| f.entry.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    // The detail line states the count and (for a breach) anchors to the endpoint cards.
+    let detail = match status {
+        ClusterStatus::WarmingUp => "first pass not yet complete — verdicts loading".to_string(),
+        ClusterStatus::Isolated => format!(
+            "{flagged_n} exploitable path{} — <a href=\"#attack-paths\">cut applied, contained</a>",
+            if flagged_n == 1 { "" } else { "s" }
+        ),
+        ClusterStatus::BreachLive => format!(
+            "{flagged_n} exploitable path{} — <a href=\"#attack-paths\">needs attention now</a>",
+            if flagged_n == 1 { "" } else { "s" }
+        ),
+        ClusterStatus::Watching => format!(
+            "{exposed} exposed path{} watched, none exploitable — the model cleared them",
+            if exposed == 1 { "" } else { "s" }
+        ),
+        ClusterStatus::Quiet => "no internet-facing exposure reaches an objective".to_string(),
+    };
+
+    // The arm-state half of the subtitle: shadow (proposing only) vs live (acting).
+    let arm = if armed {
+        "armed (acting)"
+    } else {
+        "shadow mode (proposing only)"
+    };
+
+    format!(
+        "<div class=\"banner banner-{tone}\" role=\"status\" aria-live=\"polite\">\
+         <div class=\"banner-head\"><span class=\"banner-glyph\" aria-hidden=\"true\">{glyph}</span>\
+         <span class=\"banner-word\">{word}</span></div>\
+         <div class=\"banner-detail\">{detail}</div>\
+         <div class=\"banner-sub\">last scan {freshness} · auto-refresh 30s · {arm}</div>\
+         </div>",
+        tone = status.tone(),
+        glyph = status.glyph(),
+        word = status.word(),
+    )
+}
+
+/// The persistent nav (JEF-159) shown across the read-only views. `current` is the path
+/// of the page being rendered, marked `aria-current="page"`.
+fn nav_bar(current: &str) -> String {
+    const LINKS: [(&str, &str); 4] = [
+        ("/", "dashboard"),
+        ("/judgements", "judgements"),
+        ("/report", "report"),
+        ("/reversions", "reversions"),
+    ];
+    let items: String = LINKS
+        .iter()
+        .map(|(href, label)| {
+            if *href == current {
+                format!("<a href=\"{href}\" aria-current=\"page\">{label}</a>")
+            } else {
+                format!("<a href=\"{href}\">{label}</a>")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!("<nav class=\"nav\" aria-label=\"views\">{items}</nav>")
+}
+
 /// Render the dashboard: graph-based sections plus the freshness line and the
 /// recent-reversions panel (JEF-141).
 ///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
@@ -1556,7 +1747,9 @@ fn render_html(
     // The graph renderer is beautiful-mermaid (ELK layout), vendored + bundled into
     // web/dist and served SAME-ORIGIN at /assets — never a third-party CDN.
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>protector</title>\
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <meta http-equiv=\"refresh\" content=\"30\">\
+         <title>protector</title>\
          <style>\
          body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
          h1{{font-size:1.2rem;font-weight:600;margin:0}}\
@@ -1587,6 +1780,24 @@ fn render_html(
          table.vectors td{{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0}}\
          table.vectors code{{background:#f4f4f4;padding:0 .2rem}}\
          table.vectors .flagged{{color:#b00000;font-weight:600}}\
+         .nav{{display:flex;gap:.1rem;font-size:.85rem;margin:0 0 1rem}}\
+         .nav a{{padding:.2rem .55rem;color:#06c;text-decoration:none;border-bottom:2px solid transparent}}\
+         .nav a[aria-current=\"page\"]{{color:#111;font-weight:600;border-bottom-color:#111}}\
+         .banner{{display:block;width:100%;box-sizing:border-box;border-radius:0;padding:.6rem .8rem;margin:0 0 1rem;border:1px solid #ddd}}\
+         .banner-head{{display:flex;align-items:baseline;gap:.4rem}}\
+         .banner-glyph{{font-size:1rem;line-height:1}}\
+         .banner-word{{font-size:1.05rem;font-weight:700;letter-spacing:.01em}}\
+         .banner-detail{{font-size:.85rem;margin-top:.15rem}}\
+         .banner-detail a{{color:inherit;text-decoration:underline}}\
+         .banner-sub{{font-size:.78rem;margin-top:.2rem;opacity:.85}}\
+         .banner-ok{{background:#eef7f0;border-color:#1a7f37;color:#155f29}}\
+         .banner-ok .banner-glyph,.banner-ok .banner-word{{color:#1a7f37}}\
+         .banner-breach{{background:#fdecec;border-color:#b00000;color:#7a0000}}\
+         .banner-breach .banner-glyph,.banner-breach .banner-word{{color:#b00000}}\
+         .banner-isolated{{background:#f4f4f4;border:2px solid #b00000;color:#5a2a2a}}\
+         .banner-isolated .banner-glyph,.banner-isolated .banner-word{{color:#b00000}}\
+         .banner-warming{{background:#f4f4f4;border-color:#ccc;color:#555}}\
+         .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#777}}\
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
@@ -1598,10 +1809,11 @@ fn render_html(
            }} catch (e) {{ /* leave the source text as a fallback */ }}\
          }}\
          </script></head><body>\
+         {banner}\
          <h1>protector</h1>\
+         {nav}\
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths · last pass <b>{freshness}</b> \
-         &nbsp;|&nbsp; <a href=\"/report\">would-have-acted report</a> \
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
@@ -1619,7 +1831,7 @@ fn render_html(
          <p class=\"sum\">Cuts the engine lifted, and why. An isolation stays only while the \
          breach lasts, then lifts on its own once the path is gone or the evidence clears.</p>\
          {reversions_body}\
-         <h2>Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
+         <h2 id=\"attack-paths\">Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
          <p class=\"legend\">edge legend — \
          <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
          <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
@@ -1628,6 +1840,8 @@ fn render_html(
          <code>escapes via</code>: a container-escape primitive to the host node</p>\
          {path_body}\
          </body></html>",
+        banner = status_banner(findings, armed, last_pass, &freshness),
+        nav = nav_bar("/"),
         rem_n = remediations.len(),
         rem_word = if armed { "active" } else { "proposed" },
         ep_n = endpoints.len(),
@@ -2010,6 +2224,200 @@ mod tests {
             html.contains("no proven chain still justifies"),
             "the lifted cut's reason is shown"
         );
+    }
+
+    // -- JEF-159: the glanceable cluster status banner --------------------------------
+
+    /// A breach-relevant finding with the model's resolved verdict set (and an optional
+    /// auto-eligible disposition), for the cluster-status states.
+    fn judged(entry: &str, verdict: &str, auto_eligible: bool) -> Finding {
+        let mut f = breach_finding(entry);
+        f.verdict = Some(verdict.to_string());
+        if auto_eligible {
+            f.disposition = AUTO_ELIGIBLE.to_string();
+        }
+        f
+    }
+
+    #[test]
+    fn cluster_status_warming_up_when_no_pass_has_completed() {
+        // `last_pass` None ⇒ no verdicts yet ⇒ never claim OK, even with findings present.
+        assert_eq!(
+            cluster_status(&[], false, None),
+            ClusterStatus::WarmingUp,
+            "no pass yet ⇒ warming, not Quiet"
+        );
+        let exploitable = vec![judged("workload/app/Pod/web", "exploitable — RCE", false)];
+        assert_eq!(
+            cluster_status(&exploitable, false, None),
+            ClusterStatus::WarmingUp,
+            "no pass yet ⇒ warming even with an exploitable finding (verdicts not trusted)"
+        );
+    }
+
+    #[test]
+    fn cluster_status_quiet_when_no_breach_relevant_exposure() {
+        // A pass completed, no breach-relevant exposure at all ⇒ Quiet (distinct from
+        // Watching, which has exposure).
+        let mut non_breach = breach_finding("workload/app/Pod/web");
+        non_breach.breach_relevant = false;
+        assert_eq!(
+            cluster_status(&[], false, Some(SystemTime::now())),
+            ClusterStatus::Quiet
+        );
+        assert_eq!(
+            cluster_status(&[non_breach], false, Some(SystemTime::now())),
+            ClusterStatus::Quiet,
+            "non-breach-relevant rows don't count as exposure"
+        );
+    }
+
+    #[test]
+    fn cluster_status_watching_when_exposed_but_model_cleared() {
+        // Exposed breach-relevant endpoints, none exploitable (model said "not
+        // exploitable" or hasn't flagged) ⇒ Watching, NOT Quiet.
+        let cleared = vec![
+            judged(
+                "workload/app/Pod/web",
+                "not exploitable — RBAC denies",
+                false,
+            ),
+            breach_finding("workload/app/Pod/api"), // awaiting verdict (None)
+        ];
+        assert_eq!(
+            cluster_status(&cleared, false, Some(SystemTime::now())),
+            ClusterStatus::Watching,
+            "exposure with no exploitable verdict ⇒ Watching"
+        );
+    }
+
+    #[test]
+    fn cluster_status_breach_live_when_exploitable_and_no_cut() {
+        // ≥1 exploitable verdict, not armed (so no cut is in force) ⇒ Breach — live.
+        let breach = vec![judged(
+            "workload/app/Pod/web",
+            "exploitable — RCE reaches the secret",
+            true,
+        )];
+        assert_eq!(
+            cluster_status(&breach, false, Some(SystemTime::now())),
+            ClusterStatus::BreachLive,
+            "exploitable + shadow (no cut) ⇒ live breach"
+        );
+        // Armed but the chain is NOT auto-eligible (propose-only) ⇒ no cut ⇒ still live.
+        let propose_only = vec![judged("workload/app/Pod/web", "exploitable — RCE", false)];
+        assert_eq!(
+            cluster_status(&propose_only, true, Some(SystemTime::now())),
+            ClusterStatus::BreachLive,
+            "armed but propose-only (no auto cut) ⇒ still live, not Isolated"
+        );
+    }
+
+    #[test]
+    fn cluster_status_isolated_when_exploitable_and_cut_applied() {
+        // ≥1 exploitable verdict, armed, auto-eligible ⇒ a cut is applied ⇒ Isolated.
+        let contained = vec![judged("workload/app/Pod/web", "exploitable — RCE", true)];
+        assert_eq!(
+            cluster_status(&contained, true, Some(SystemTime::now())),
+            ClusterStatus::Isolated,
+            "exploitable + armed + auto-eligible ⇒ contained (Isolated)"
+        );
+    }
+
+    #[test]
+    fn status_banner_renders_each_state_with_word_glyph_and_aria() {
+        let now = Some(SystemTime::now());
+        let breach = vec![judged("workload/app/Pod/web", "exploitable — RCE", true)];
+
+        // Every banner carries role/aria-live and a tone class; meaning is in the WORD.
+        let watching = status_banner(
+            &[judged(
+                "workload/app/Pod/web",
+                "not exploitable — denied",
+                false,
+            )],
+            false,
+            now,
+            "5s ago",
+        );
+        assert!(watching.contains("role=\"status\""));
+        assert!(watching.contains("aria-live=\"polite\""));
+        assert!(watching.contains("Watching"), "watching word");
+        assert!(watching.contains("banner-ok"), "calm/green tone");
+        assert!(watching.contains("1 exposed path"), "states paths watched");
+        assert!(
+            watching.contains("shadow mode (proposing only)"),
+            "arm-state in subtitle"
+        );
+        assert!(
+            watching.contains("last scan 5s ago"),
+            "freshness in subtitle"
+        );
+        assert!(
+            watching.contains("auto-refresh 30s"),
+            "refresh cadence noted"
+        );
+
+        let quiet = status_banner(&[], false, now, "5s ago");
+        assert!(quiet.contains("Quiet"));
+        assert!(quiet.contains("banner-ok"));
+
+        let breach_banner = status_banner(&breach, false, now, "5s ago");
+        assert!(breach_banner.contains("Breach — live"));
+        assert!(breach_banner.contains("banner-breach"));
+        assert!(
+            breach_banner.contains("1 exploitable path"),
+            "names the count"
+        );
+        assert!(
+            breach_banner.contains("href=\"#attack-paths\""),
+            "anchors to the card(s)"
+        );
+
+        let isolated = status_banner(&breach, true, now, "5s ago");
+        assert!(isolated.contains("Isolated"));
+        assert!(isolated.contains("banner-isolated"));
+        assert!(isolated.contains("armed (acting)"));
+
+        let warming = status_banner(&[], false, None, "waiting for first pass");
+        assert!(warming.contains("Warming up"));
+        assert!(warming.contains("banner-warming"));
+        assert!(
+            !warming.contains("Quiet") && !warming.contains("Watching"),
+            "warming never claims OK"
+        );
+    }
+
+    #[test]
+    fn render_html_includes_the_banner_nav_and_meta_refresh() {
+        // The dashboard leads with the status banner, has a persistent nav with the
+        // current page marked, and a 30s meta-refresh.
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+        );
+        // Banner is the first child of <body>, above <h1>.
+        let body_at = html.find("<body>").expect("body present");
+        let banner_at = html.find("class=\"banner").expect("banner present");
+        let h1_at = html.find("<h1>").expect("h1 present");
+        assert!(
+            banner_at > body_at && banner_at < h1_at,
+            "banner above <h1>"
+        );
+        assert!(
+            html.contains("role=\"status\""),
+            "banner is a status region"
+        );
+        // Persistent nav with aria-current on the dashboard, and all four views.
+        assert!(html.contains("<a href=\"/\" aria-current=\"page\">dashboard</a>"));
+        assert!(html.contains("href=\"/judgements\""));
+        assert!(html.contains("href=\"/report\""));
+        assert!(html.contains("href=\"/reversions\""));
+        // 30s meta-refresh.
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
     }
 
     /// A chain with a single-edge cut on `cut_relation` (what the disposition now
