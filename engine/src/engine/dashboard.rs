@@ -1051,7 +1051,7 @@ fn path_aria_label(entry: &str, fs: &[&Finding]) -> String {
     )
 }
 
-fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
+fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
     let mut seen_intermediate: BTreeSet<String> = BTreeSet::new();
@@ -1164,11 +1164,22 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         })
         .collect();
 
-    format!(
-        "<div class=\"card\">{verdict_line}{rail}{breadth}\
+    // The attention tier (JEF-163): a small chip — reusing the card chip idiom — that
+    // says WHY this card is where it is in the "look at this first" order. View-only; it
+    // labels the already-decided card and gates nothing (ADR-0016).
+    let tier_chip = format!(
+        "<span class=\"chip {}\" title=\"attention tier\">{}</span>",
+        tier.chip_class(),
+        tier.label()
+    );
+
+    // The card inner — identical regardless of tier; only the wrapper differs so the
+    // lowest (context) tier is de-emphasized AND collapsible (AC #3).
+    let inner = format!(
+        "{tier_chip}{verdict_line}{rail}{breadth}\
          <div class=\"kc2\">the picture of those facts — \
          <span class=\"muted\">{} ({} objective{} reachable)</span></div>\
-         <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}</div>",
+         <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
@@ -1178,7 +1189,22 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         } else {
             format!("<div class=\"expand\">{expand}</div>")
         },
-    )
+    );
+
+    // Context-tier cards collapse behind a <details> so the operator's eye lands on the
+    // flagged/watch cards first; flagged/watch render expanded as before.
+    if tier == Tier::Context {
+        format!(
+            "<details class=\"card card-context\"><summary>{tier_chip}\
+             <span class=\"muted\">{} — context, not flagged ({} objective{} reachable)</span>\
+             </summary>{inner}</details>",
+            escape(&short(entry)),
+            objectives,
+            if objectives == 1 { "" } else { "s" },
+        )
+    } else {
+        format!("<div class=\"card\">{inner}</div>")
+    }
 }
 
 /// A model verdict counts as a flag only when the model affirmed exploitability —
@@ -1189,6 +1215,108 @@ fn flagged(verdict: Option<&str>) -> bool {
             .to_ascii_lowercase()
             .starts_with("exploitable")
     })
+}
+
+/// The operator-attention TIER a finding falls in (JEF-163) — the **view** label that
+/// says *why a card is where it is*, NOT a decision (ADR-0016: ordering is a view, never
+/// a gate). It does not feed the model, gate any action, or touch a verdict/disposition;
+/// it is computed read-only from existing [`Finding`] fields at render time and only
+/// reorders + labels the already-decided cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// The model judged this a real breach (its verdict affirms `exploitable`). Always
+    /// at the top — a flagged endpoint sorts above a larger-but-unflagged one (AC #2).
+    Flagged,
+    /// Warrants a look but the model hasn't flagged a breach: either a coverage-gap /
+    /// latent foothold carrying a cited CVE, or a runtime-corroborated chain.
+    Watch,
+    /// Everything else — proven-reachable but neither flagged, CVE-bearing-latent, nor
+    /// runtime-corroborated. De-emphasized / collapsible in the view.
+    Context,
+}
+
+impl Tier {
+    /// The short label shown on the card so the operator sees its tier at a glance.
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Flagged => "flagged",
+            Tier::Watch => "watch",
+            Tier::Context => "context",
+        }
+    }
+
+    /// The chip tone class (reusing the existing card chip idiom): red for flagged,
+    /// amber for watch, grey for the de-emphasized context tier.
+    fn chip_class(self) -> &'static str {
+        match self {
+            Tier::Flagged => "tier-flagged",
+            Tier::Watch => "tier-watch",
+            Tier::Context => "tier-context",
+        }
+    }
+}
+
+/// The OPERATOR-PRIORITY rank of a single finding (JEF-163) — a TESTED PURE FUNCTION over
+/// existing [`Finding`] fields (AC #4). Lower number = more attention. This is the
+/// presentation-only "look at this first" key (ADR-0016: severity is a view, breach is the
+/// model's; a sort key never gates, decides, or feeds the model). The four levels, in the
+/// ticket's order:
+///
+///   1. model-flagged exploitable — the model judged a real breach ([`flagged`]).
+///   2. coverage-gap / latent foothold WITH a CVE present — `disposition` is the latent
+///      case AND the verdict cites a `CVE-…` ([`cve_id`], the only per-finding CVE signal
+///      that exists today; see the note below).
+///   3. runtime-corroborated — a live signal completed the chain (`corroborated`).
+///   4. everything else.
+///
+/// NOTE on "KEV / critical CVE": `Finding` has no per-finding KEV flag or CVE severity
+/// field — the sole CVE signal present is the id the model cited in its verdict text
+/// (`cve_id`). We therefore treat *any* cited CVE on a latent foothold as level 2 rather
+/// than fabricating a severity/KEV field. This is the conservative reading: it cannot
+/// over-promote (a cited CVE is, at worst, slightly broader than "KEV/critical only"), and
+/// it invents nothing. If a KEV/severity field is later added to `Finding`, tighten this.
+fn attention_priority(f: &Finding) -> u8 {
+    if flagged(f.verdict.as_deref()) {
+        0
+    } else if f.disposition.contains("latent foothold")
+        && f.verdict.as_deref().and_then(cve_id).is_some()
+    {
+        1
+    } else if f.corroborated {
+        2
+    } else {
+        3
+    }
+}
+
+/// The [`Tier`] a priority level maps to for display (AC #3): level 1 is `Flagged`,
+/// levels 2–3 are `Watch`, level 4 is the de-emphasized `Context` tier.
+fn tier_of_priority(priority: u8) -> Tier {
+    match priority {
+        0 => Tier::Flagged,
+        1 | 2 => Tier::Watch,
+        _ => Tier::Context,
+    }
+}
+
+/// The attention rank of one finding: its priority level and the display tier. The pure,
+/// unit-testable key for the per-card sort (AC #4) — view-only, no mutation, no model input.
+fn attention_rank(f: &Finding) -> (u8, Tier) {
+    let priority = attention_priority(f);
+    (priority, tier_of_priority(priority))
+}
+
+/// The attention rank of an ENDPOINT card — a card coalesces every finding from one
+/// internet-facing entry, so the card takes its group's WORST-CASE (lowest-number)
+/// priority: a single flagged path makes the whole card flagged. Returns the card's
+/// priority level and its display tier. Pure over the group; the BLAST RADIUS (group
+/// size) is NOT folded in here — it is applied only as the final tiebreak at the sort
+/// site, so it can never lift a card above a higher tier (AC #1, AC #2).
+fn endpoint_attention_rank(fs: &[&Finding]) -> (u8, Tier) {
+    // The card's priority is the most-attention-worthy of its findings (lowest number),
+    // via the per-finding `attention_rank` so card and finding rankings can never drift.
+    let priority = fs.iter().map(|f| attention_rank(f).0).min().unwrap_or(3);
+    (priority, tier_of_priority(priority))
 }
 
 /// The attack-vector summary: the ATT&CK outcomes an external attacker can actually
@@ -2527,12 +2655,29 @@ fn render_html(
     let path_body = if endpoints.is_empty() {
         "<p class=\"muted\">no internet-facing exposure reaches an objective</p>".to_string()
     } else {
-        // Rank by graph size — the widest blast radius (most objectives) first.
+        // Rank "look at this first" (JEF-163): the OPERATOR-PRIORITY tiers first
+        // (flagged → watch → context, via `endpoint_attention_rank`), with the blast
+        // radius (graph size) only as the FINAL tiebreaker WITHIN a tier. This is a
+        // presentation-only sort key — a view, never a gate (ADR-0016): it reorders the
+        // already-decided cards and touches no verdict/disposition and no model input. A
+        // flagged-exploitable endpoint therefore ALWAYS sorts above a larger-but-unflagged
+        // one (AC #2). `sort_by` is STABLE, so equal keys keep their (entry-sorted, since
+        // `endpoints` is a BTreeMap) order — and we tiebreak on the entry key last anyway
+        // to make the order fully deterministic.
         let mut ranked: Vec<(&&str, &Vec<&Finding>)> = endpoints.iter().collect();
-        ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        ranked.sort_by(|a, b| {
+            let (ap, _) = endpoint_attention_rank(a.1);
+            let (bp, _) = endpoint_attention_rank(b.1);
+            ap.cmp(&bp) // priority level: lower = more attention, first
+                .then_with(|| b.1.len().cmp(&a.1.len())) // then widest blast radius
+                .then_with(|| a.0.cmp(b.0)) // then entry key, for a stable total order
+        });
         ranked
             .iter()
-            .map(|(entry, fs)| endpoint_card(entry, fs))
+            .map(|(entry, fs)| {
+                let (priority, _) = endpoint_attention_rank(fs);
+                endpoint_card(entry, fs, tier_of_priority(priority))
+            })
             .collect()
     };
     let vectors_body = attack_vectors(findings);
@@ -2579,6 +2724,12 @@ fn render_html(
          .chip-breach{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
          .chip-safe{{color:#155f29;background:#eef7f0;border-color:#1a7f37}}\
          .chip-awaiting{{color:#555;background:#f4f4f4;border-color:#ccc}}\
+         .tier-flagged{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
+         .tier-watch{{color:#7a4a00;background:#fbf6ee;border-color:#9a5b00}}\
+         .tier-context{{color:#555;background:#f4f4f4;border-color:#ccc}}\
+         details.card-context{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0;opacity:.7}}\
+         details.card-context summary{{cursor:pointer;color:#555;font-size:.85rem}}\
+         details.card-context[open]{{opacity:1}}\
          .rail{{font-size:.78rem;margin:.2rem 0 .5rem;border-left:2px solid #1a7f37;padding:.1rem 0 .1rem .6rem}}\
          .rail-cap{{font-weight:600;color:#155f29}}\
          .rail ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
@@ -2693,6 +2844,11 @@ fn render_html(
          breach lasts, then lifts on its own once the path is gone or the evidence clears.</p>\
          {reversions_body}\
          <h2 id=\"attack-paths\">Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
+         <p class=\"sum\">Ranked by attention — <span class=\"chip tier-flagged\">flagged</span> (the model \
+         judged a breach) first, then <span class=\"chip tier-watch\">watch</span> (a latent foothold \
+         carrying a CVE, or runtime-corroborated), then <span class=\"chip tier-context\">context</span> \
+         (collapsed below). Blast radius (graph size) only breaks ties within a tier — breadth is \
+         severity, not breach (ADR-0016); this is a view, never a gate.</p>\
          <p class=\"legend\">edge legend — \
          <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
          <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
@@ -4402,7 +4558,11 @@ mod tests {
             true,
             Some("not exploitable — authorized RBAC, no CVE"),
         );
-        let html = endpoint_card("workload/app/Pod/web", &[&f]);
+        let html = endpoint_card(
+            "workload/app/Pod/web",
+            &[&f],
+            endpoint_attention_rank(&[&f]).1,
+        );
         // Posture chip TEXT (not color/glyph alone).
         assert!(html.contains("[SAFE]"), "the posture chip carries text");
         assert!(html.contains("chip-safe"));
@@ -4434,7 +4594,11 @@ mod tests {
             true,
             None,
         );
-        let html = endpoint_card("workload/app/Pod/web", &[&f]);
+        let html = endpoint_card(
+            "workload/app/Pod/web",
+            &[&f],
+            endpoint_attention_rank(&[&f]).1,
+        );
         assert!(html.contains("[awaiting judgement]"));
         assert!(html.contains("chip-awaiting"));
         assert!(html.contains("hasn't reached this entry yet"));
@@ -4456,7 +4620,11 @@ mod tests {
             })
             .collect();
         let refs: Vec<&Finding> = fs.iter().collect();
-        let html = endpoint_card("workload/argocd/Pod/argocd-server", &refs);
+        let html = endpoint_card(
+            "workload/argocd/Pod/argocd-server",
+            &refs,
+            endpoint_attention_rank(&refs).1,
+        );
         assert!(
             html.contains("breadth is severity, not urgency"),
             "a wide [SAFE] entry is framed as severity, not urgency"
@@ -4475,8 +4643,258 @@ mod tests {
             })
             .collect();
         let brefs: Vec<&Finding> = breach.iter().collect();
-        let bhtml = endpoint_card("workload/argocd/Pod/argocd-server", &brefs);
+        let bhtml = endpoint_card(
+            "workload/argocd/Pod/argocd-server",
+            &brefs,
+            endpoint_attention_rank(&brefs).1,
+        );
         assert!(!bhtml.contains("breadth is severity"));
+    }
+
+    // ---- JEF-163: presentation-only "look at this first" attention ranking ----
+
+    /// A finding with explicit attention-relevant fields — the `finding` helper hardcodes
+    /// `corroborated: true`, so this lets a test set the four signals independently.
+    fn ranked_finding(
+        entry: &str,
+        disposition: &str,
+        corroborated: bool,
+        verdict: Option<&str>,
+    ) -> Finding {
+        let mut f = finding(
+            entry,
+            "secret/app/session-key",
+            disposition,
+            "can-do/get/secrets",
+            true,
+            verdict,
+        );
+        f.corroborated = corroborated;
+        f.foothold = disposition.contains("latent foothold");
+        f
+    }
+
+    #[test]
+    fn attention_rank_assigns_each_tier_from_existing_fields() {
+        // 1. model-flagged exploitable → priority 0, Flagged.
+        let flagged_f = ranked_finding(
+            "e",
+            "auto-eligible",
+            false,
+            Some("exploitable — CVE-2021-44228 chains to the secret"),
+        );
+        assert_eq!(attention_rank(&flagged_f), (0, Tier::Flagged));
+
+        // 2. latent foothold WITH a cited CVE → priority 1, Watch.
+        let latent_cve = ranked_finding(
+            "e",
+            "latent foothold — propose",
+            false,
+            Some("uncertain — CVE-2023-1234 may be reachable"),
+        );
+        assert_eq!(attention_rank(&latent_cve), (1, Tier::Watch));
+
+        // 3. runtime-corroborated (no flag, no latent+CVE) → priority 2, Watch.
+        let corrob = ranked_finding("e", "structural — propose", true, None);
+        assert_eq!(attention_rank(&corrob), (2, Tier::Watch));
+
+        // 4. everything else → priority 3, Context.
+        let other = ranked_finding("e", "structural — propose", false, None);
+        assert_eq!(attention_rank(&other), (3, Tier::Context));
+    }
+
+    #[test]
+    fn latent_foothold_without_a_cve_is_only_context() {
+        // A latent foothold with NO cited CVE does NOT reach the watch tier — the CVE
+        // signal is required for level 2 (the conservative reading of the missing
+        // KEV/severity field: a cited CVE, not mere latency, promotes it).
+        let latent_no_cve = ranked_finding(
+            "e",
+            "latent foothold — propose",
+            false,
+            Some("uncertain — no CVE cited, just reachable"),
+        );
+        assert_eq!(attention_rank(&latent_no_cve), (3, Tier::Context));
+    }
+
+    #[test]
+    fn flagged_sorts_above_a_larger_unflagged_endpoint() {
+        // AC #2 (explicit): a flagged-exploitable endpoint ALWAYS sorts above a
+        // larger-but-unflagged one — blast radius can never overcome a higher tier.
+        let small_flagged = ranked_finding(
+            "e1",
+            "auto-eligible",
+            false,
+            Some("exploitable — reaches it"),
+        );
+        // A big, calm endpoint: 50 unflagged, corroborated paths.
+        let big_calm: Vec<Finding> = (0..50)
+            .map(|n| {
+                let mut f = ranked_finding(
+                    "e2",
+                    "structural — propose",
+                    true,
+                    Some("not exploitable — authorized RBAC"),
+                );
+                f.objective = format!("secret/app/s-{n}");
+                f
+            })
+            .collect();
+
+        let small_refs = vec![&small_flagged];
+        let big_refs: Vec<&Finding> = big_calm.iter().collect();
+        let mut endpoints: Vec<(&str, Vec<&Finding>)> = vec![("e2", big_refs), ("e1", small_refs)];
+        // Apply EXACTLY the render-site key: priority, then blast radius desc, then entry.
+        endpoints.sort_by(|a, b| {
+            endpoint_attention_rank(&a.1)
+                .0
+                .cmp(&endpoint_attention_rank(&b.1).0)
+                .then_with(|| b.1.len().cmp(&a.1.len()))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        assert_eq!(
+            endpoints[0].0, "e1",
+            "the small flagged endpoint outranks the 50-path calm one"
+        );
+    }
+
+    #[test]
+    fn blast_radius_only_tiebreaks_within_a_tier() {
+        // Two endpoints in the SAME (context) tier: the larger graph sorts first.
+        let make = |entry: &str, n: usize| -> Vec<Finding> {
+            (0..n)
+                .map(|i| {
+                    let mut f = ranked_finding(entry, "structural — propose", false, None);
+                    f.objective = format!("secret/app/{entry}-{i}");
+                    f
+                })
+                .collect()
+        };
+        let small = make("a", 2);
+        let large = make("b", 9);
+        let small_refs: Vec<&Finding> = small.iter().collect();
+        let large_refs: Vec<&Finding> = large.iter().collect();
+        // Same tier.
+        assert_eq!(endpoint_attention_rank(&small_refs).1, Tier::Context);
+        assert_eq!(endpoint_attention_rank(&large_refs).1, Tier::Context);
+
+        let mut endpoints: Vec<(&str, Vec<&Finding>)> = vec![("a", small_refs), ("b", large_refs)];
+        endpoints.sort_by(|a, b| {
+            endpoint_attention_rank(&a.1)
+                .0
+                .cmp(&endpoint_attention_rank(&b.1).0)
+                .then_with(|| b.1.len().cmp(&a.1.len()))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        assert_eq!(
+            endpoints[0].0, "b",
+            "the wider graph wins the in-tier tiebreak"
+        );
+    }
+
+    #[test]
+    fn sort_is_stable_for_fully_equal_keys() {
+        // Same priority AND same blast radius → the entry-key tiebreak gives a stable,
+        // deterministic total order (so equal cards never shuffle between renders).
+        let a = ranked_finding("aaa", "structural — propose", false, None);
+        let b = ranked_finding("bbb", "structural — propose", false, None);
+        let c = ranked_finding("ccc", "structural — propose", false, None);
+        let mut endpoints: Vec<(&str, Vec<&Finding>)> =
+            vec![("ccc", vec![&c]), ("aaa", vec![&a]), ("bbb", vec![&b])];
+        endpoints.sort_by(|x, y| {
+            endpoint_attention_rank(&x.1)
+                .0
+                .cmp(&endpoint_attention_rank(&y.1).0)
+                .then_with(|| y.1.len().cmp(&x.1.len()))
+                .then_with(|| x.0.cmp(y.0))
+        });
+        let order: Vec<&str> = endpoints.iter().map(|(e, _)| *e).collect();
+        assert_eq!(order, vec!["aaa", "bbb", "ccc"]);
+    }
+
+    #[test]
+    fn endpoint_attention_rank_takes_the_worst_case_in_the_group() {
+        // A card coalesces a group; one flagged path makes the whole card flagged.
+        let calm = ranked_finding(
+            "e",
+            "structural — propose",
+            true,
+            Some("not exploitable — ok"),
+        );
+        let one_flagged = ranked_finding("e", "auto-eligible", false, Some("exploitable — boom"));
+        let group = vec![&calm, &one_flagged];
+        assert_eq!(endpoint_attention_rank(&group), (0, Tier::Flagged));
+    }
+
+    #[test]
+    fn context_tier_card_is_collapsible_and_de_emphasized() {
+        // AC #3: the lowest tier is rendered behind a collapsible <details>, marked with
+        // the de-emphasis class and the "context" tier label.
+        let f = ranked_finding("workload/app/Pod/web", "structural — propose", false, None);
+        let refs = vec![&f];
+        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Context);
+        assert!(html.contains("<details"), "context cards collapse");
+        assert!(html.contains("card-context"), "de-emphasis class applied");
+        assert!(html.contains(">context<"), "the tier label shows");
+    }
+
+    #[test]
+    fn flagged_and_watch_cards_render_expanded_with_their_tier_label() {
+        let f = ranked_finding(
+            "workload/app/Pod/web",
+            "auto-eligible",
+            false,
+            Some("exploitable — boom"),
+        );
+        let refs = vec![&f];
+        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Flagged);
+        assert!(
+            html.contains("<div class=\"card\">"),
+            "flagged cards stay open"
+        );
+        assert!(!html.contains("card-context"));
+        assert!(html.contains(">flagged<"), "the flagged tier label shows");
+
+        let w = ranked_finding("workload/app/Pod/web", "structural — propose", true, None);
+        let wrefs = vec![&w];
+        let whtml = endpoint_card("workload/app/Pod/web", &wrefs, Tier::Watch);
+        assert!(whtml.contains(">watch<"), "the watch tier label shows");
+    }
+
+    #[test]
+    fn render_html_lists_the_ranked_by_attention_caption_and_tier_labels() {
+        // The list caption announces the ordering, and a context-tier card is collapsed.
+        let flagged = ranked_finding(
+            "workload/app/Pod/web",
+            "auto-eligible",
+            false,
+            Some("exploitable — boom"),
+        );
+        let context = {
+            let mut f =
+                ranked_finding("workload/argo/Pod/srv", "structural — propose", false, None);
+            f.entry = "workload/argo/Pod/srv".into();
+            f
+        };
+        let findings = vec![flagged, context];
+        let html = render_html(
+            &findings,
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        assert!(
+            html.contains("Ranked by attention"),
+            "the list carries a ranked-by-attention caption"
+        );
+        assert!(html.contains(">flagged<"), "the flagged tier label appears");
+        // The context-tier endpoint collapses behind <details class=\"card card-context\">.
+        assert!(
+            html.contains("card-context"),
+            "the context tier is de-emphasized/collapsible"
+        );
     }
 
     fn full_judgement(
