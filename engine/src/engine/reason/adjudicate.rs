@@ -374,18 +374,6 @@ fn fence_list(values: &[String]) -> String {
     }
 }
 
-/// Cap a list to `max` entries for the prompt, appending a `more(extra)` remainder line
-/// when over — keeps the prompt small enough for the CPU model without hiding that
-/// there's more. Used for the CVE, objective, and behavior lists.
-fn cap_lines(mut lines: Vec<String>, max: usize, more: impl Fn(usize) -> String) -> Vec<String> {
-    if lines.len() > max {
-        let extra = lines.len() - max;
-        lines.truncate(max);
-        lines.push(more(extra));
-    }
-    lines
-}
-
 /// JEF-79 — how the entry reaches an objective, derived from the objective node's
 /// incoming proof edges. This is the AUTHORIZATION signal that lets the model judge
 /// authorization rather than mere identity/breadth (fixing the ArgoCD false positive):
@@ -469,15 +457,12 @@ fn build_judgment_prompt_with(
     let mut behavior_lines: Vec<String> = behaviors.iter().map(Behavior::summary).collect();
     behavior_lines.sort();
     behavior_lines.dedup();
-    let behavior_lines = cap_lines(behavior_lines, 25, |n| {
-        format!("(+{n} more observed behaviors)")
-    });
-
+    // No caps: the model sees every observed behavior and every CVE on the entry. The
+    // untrusted third-party text in these is still fenced + sanitized (the real injection
+    // defense, JEF-106); the prior 25-line cap only bounded size, at the cost of hiding
+    // evidence from the judge.
     cves.sort();
     cves.dedup();
-    let cves = cap_lines(cves, 25, |n| {
-        format!("(+{n} more critical/known-exploited)")
-    });
 
     // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
@@ -506,10 +491,12 @@ fn build_judgment_prompt_with(
             )
         })
         .collect();
-    let objectives = cap_lines(objective_lines, 40, |n| {
-        format!("  - (+{n} more reachable objectives — this front door reaches a very broad set, itself worth weighing)")
-    })
-    .join("\n");
+    // No cap on objectives: the model judges every reachable objective. Truncating to a
+    // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
+    // objectives) is exactly the case worth showing in full. A larger prompt is slower on the
+    // CPU Pi (~2 min for a ~110-objective entry) but that latency is amortized by the verdict
+    // cache, and accuracy beats speed for the judgement.
+    let objectives = objective_lines.join("\n");
     // JEF-134: the deterministic layer PROVES + ENRICHES; the model DECIDES breach. The prior
     // prompt encoded a rigid numbered procedure (step 4 → exploitable) plus six worked
     // examples; a small CPU model copied an example reason (Ex4's "another tenant's database
