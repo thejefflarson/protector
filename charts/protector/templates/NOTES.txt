@@ -1,0 +1,28 @@
+protector is installed in namespace {{ .Release.Namespace }}.
+
+Posture (all safe-by-default):
+  Webhook signature gating : {{ if .Values.signature.enforceNamespaces }}ENFORCE in [{{ .Values.signature.enforceNamespaces }}]{{ else }}AUDIT-ONLY (logged, never blocked){{ end }}
+  Webhook failurePolicy    : {{ .Values.webhook.failurePolicy }}
+  Engine                   : {{ if .Values.engine.enabled }}{{ if .Values.engine.enable }}ARMED for class(es) [{{ .Values.engine.enable }}] via actuator '{{ .Values.engine.actuator }}'{{ else }}SHADOW (propose-only, touches nothing){{ end }}{{ else }}disabled (webhook only){{ end }}
+  Model                    : {{ if .Values.engine.model.endpoint }}{{ .Values.engine.model.endpoint }}{{ else }}none (deterministic enumerator only){{ end }}
+  Breach notifier          : {{ if .Values.engine.notify.url }}configured (egress to your sink){{ else }}off (zero egress){{ end }}
+  eBPF agent               : {{ if .Values.agent.enabled }}enabled (shadow, observe-only){{ else }}disabled{{ end }}
+
+Watch the audit log before arming anything:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "protector.name" . }} -f
+
+{{- if .Values.engine.enabled }}
+
+Review the engine's proposals (read-only findings dashboard):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "protector.fullname" . }}-dashboard {{ .Values.engine.dashboard.port }}:{{ .Values.engine.dashboard.port }}
+  # then open http://localhost:{{ .Values.engine.dashboard.port }}/
+{{- end }}
+
+{{- if .Values.cert.create }}
+
+Verify cert-manager injected the webhook caBundle:
+  kubectl get validatingwebhookconfiguration {{ include "protector.fullname" . }} \
+    -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20
+{{- end }}
+
+Arming is always a single, deliberate value change — see the chart README's "Opt-ins".
