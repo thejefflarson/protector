@@ -1,0 +1,61 @@
+name: Dependabot auto-merge
+# Auto-merge green Dependabot PRs for patch/minor dependency bumps so security
+# patches land without manual toil. Major bumps stay open for human review.
+#
+# Runs on GitHub-hosted ubuntu-latest, NOT the self-hosted protector-runners: this
+# job is just a metadata read + two `gh` calls, so it needs none of the in-cluster
+# sccache/buildkit those runners exist for, and keeping it off them avoids contending
+# with the heavy rust build jobs.
+#
+# `--auto` enqueues the squash-merge; GitHub only completes it once the required
+# checks (lint + test) pass, so a red check blocks the merge. This depends on two
+# one-time repo settings that cannot be set from a PR (see PR body):
+#   1. "Allow auto-merge" enabled in repo settings.
+#   2. Branch protection on main requiring `lint` + `test` (and NOT the path-skipped
+#      `docker` check).
+permissions:
+  contents: read
+on:
+  # pull_request (not pull_request_target): the only token need is the job's
+  # GITHUB_TOKEN with contents+pull-requests write, which `pull_request` grants for
+  # Dependabot events. pull_request_target would run with the base-ref workflow and a
+  # broader token we don't need and which is riskier.
+  pull_request:
+    branches: ["main"]
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    # Only act on Dependabot's own PRs.
+    if: github.actor == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        # First-party (Dependabot) action, pinned by commit SHA per the repo's
+        # workflow convention (see rust.yml). Reads the update-type for this PR.
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Approve the PR
+        # Dependabot cannot approve its own PR, so do it here to satisfy any
+        # "1 approval" branch-protection rule. Patch/minor only — major bumps are
+        # left untouched for manual review.
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Enable auto-merge for patch/minor bumps
+        # Squash + delete-branch to match the repo's manual merge convention.
+        # `--auto` waits for required checks; major bumps are excluded.
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
