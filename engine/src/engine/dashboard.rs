@@ -803,18 +803,31 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     } else {
         "<span class=\"proposed\">would apply (shadow)</span>"
     };
-    // The model's verdict (why it decided to act), when a model judged this chain.
-    let verdict = match &f.verdict {
-        Some(v) => format!("<div class=\"verdict\">model: {}</div>", escape(v)),
-        None => String::new(),
-    };
+    // JEF-161 verdict-first card: posture chip + the model's words VERBATIM above
+    // everything, then the "what's proven" certainty rail, then the (cut-marked) graph,
+    // then the disposition-derived "what to do". The remediation card is one chain, so
+    // the rail/aria are built over that single finding.
+    let one = std::slice::from_ref(&f);
+    let verdict_line = verdict_line(f.verdict.as_deref());
+    let facts: String = proven_facts(&f.entry, one)
+        .iter()
+        .map(|b| format!("<li>{b}</li>"))
+        .collect();
+    let rail = format!(
+        "<div class=\"rail\"><div class=\"rail-cap\">what's proven \
+         <span class=\"muted\">— deterministic facts; the model's call is above</span></div>\
+         <ul>{facts}</ul></div>"
+    );
+    let todo_line = format!(
+        "<div class=\"todo\"><b>what to do:</b> {}</div>",
+        what_to_do(&f.disposition)
+    );
+    let aria = escape(&path_aria_label(&f.entry, one));
     format!(
-        "<div class=\"card\"><div class=\"kc\">{} → {}  {status}</div>\
-         <div class=\"kc2\">kill chain: {}</div>{}<pre class=\"mermaid\">{}</pre></div>",
-        escape(&short(&f.entry)),
-        escape(&short(&f.objective)),
+        "<div class=\"card\">{verdict_line}{rail}\
+         <div class=\"kc2\">the picture of those facts — kill chain: {}  {status}</div>\
+         <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}</div>",
         escape(&f.killchain),
-        verdict,
         m.finish(),
     )
 }
@@ -866,6 +879,178 @@ fn humanize_relation(rel: &str) -> String {
     rel.to_string()
 }
 
+/// The three posture states a verdict can be in, for the verdict-first card and the
+/// `/judgements` view (JEF-161). The breach call is the model's (ADR-0013/0016), so
+/// this maps only the model's *own* affirmation to `[BREACH]` — a "not exploitable"
+/// verdict is `[SAFE]`, and no verdict yet is the muted `[awaiting judgement]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Posture {
+    /// The model affirmed a real breach (its words begin with "exploitable").
+    Breach,
+    /// The model judged this NOT a breach (a "not exploitable — …" call).
+    Safe,
+    /// The model hasn't reached this entry yet (slow CPU model) — not "clear".
+    Awaiting,
+}
+
+impl Posture {
+    /// The posture for a verdict summary string (the model's own words), or `None` if
+    /// the model hasn't judged the entry yet. Mirrors [`flagged`] for the breach test.
+    fn of(verdict: Option<&str>) -> Self {
+        match verdict {
+            None => Posture::Awaiting,
+            Some(v) if flagged(Some(v)) => Posture::Breach,
+            Some(_) => Posture::Safe,
+        }
+    }
+
+    /// The chip TEXT — meaning carried in words, never color/glyph alone (accessibility,
+    /// JEF-161 AC #4). The brackets read as a posture chip in a screen reader too.
+    fn label(self) -> &'static str {
+        match self {
+            Posture::Breach => "[BREACH]",
+            Posture::Safe => "[SAFE]",
+            Posture::Awaiting => "[awaiting judgement]",
+        }
+    }
+
+    /// The CSS tone class for the chip — red breach / green-calm safe / muted awaiting.
+    fn tone(self) -> &'static str {
+        match self {
+            Posture::Breach => "chip-breach",
+            Posture::Safe => "chip-safe",
+            Posture::Awaiting => "chip-awaiting",
+        }
+    }
+}
+
+/// The posture chip + the model's verdict VERBATIM (never paraphrased — the LLM is the
+/// judge, ADR-0013), foregrounded above everything on a finding card (JEF-161). When the
+/// model hasn't judged the entry, the chip stands alone with a muted "the model hasn't
+/// reached this entry yet" — an honest awaiting state, not an implied "clear".
+fn verdict_line(verdict: Option<&str>) -> String {
+    let posture = Posture::of(verdict);
+    let chip = format!(
+        "<span class=\"chip {}\">{}</span>",
+        posture.tone(),
+        posture.label()
+    );
+    match verdict {
+        Some(v) => format!(
+            "<div class=\"vline\">{chip} <span class=\"vwords\">{}</span></div>",
+            escape(v)
+        ),
+        None => format!(
+            "<div class=\"vline\">{chip} <span class=\"muted\">the model hasn't reached \
+             this entry yet — paths below are proven, the breach call is pending</span></div>"
+        ),
+    }
+}
+
+/// The "what's proven" certainty rail (JEF-161 AC #1/#2): 2–4 bullets of DETERMINISTIC
+/// facts drawn only from existing `Finding` fields — the proof side of the proof-vs-
+/// judgement line (ADR-0016). Missing evidence reads "unknown / not cited", never
+/// implied-absent (coverage-gap honesty, AC #2). No model call. Facts:
+///   1. internet-reachable (every shown finding is `breach_relevant` from an entry).
+///   2. how it reaches each objective kind — by RBAC vs mount, via [`humanize_relation`].
+///   3. CVE presence — surfaced ONLY from a `CVE-` id the model cited in its verdict
+///      (JEF-133 builds the real per-path evidence feed; here we read existing fields).
+fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
+    let mut facts = Vec::new();
+
+    // 1. Internet-reachability is the entry-level fact (only breach-relevant chains from
+    // an internet-facing entry reach this card — ProvenChain::is_breach_relevant).
+    facts.push(format!(
+        "internet-reachable: <code>{}</code> is an internet-facing entry",
+        escape(&short(entry))
+    ));
+
+    // 2. The distinct terminal relations — HOW it reaches an objective (RBAC vs mount vs
+    // network), the deterministic mechanism. Deduped, stable-ordered.
+    let mut relations: BTreeSet<String> = BTreeSet::new();
+    for f in fs {
+        if let Some(step) = f.path.iter().find(|s| s.to == f.objective) {
+            relations.insert(humanize_relation(&step.relation));
+        }
+    }
+    for rel in &relations {
+        facts.push(format!("reaches an objective by <b>{}</b>", escape(rel)));
+    }
+
+    // 3. CVE presence — from a `CVE-` id the model cited in its verdict (existing field
+    // only; NOT JEF-133's per-path feed). Absence reads "no CVE cited", never implied.
+    let cve = fs
+        .iter()
+        .find_map(|f| f.verdict.as_deref().and_then(cve_id).map(str::to_string));
+    match cve {
+        Some(id) => facts.push(format!(
+            "CVE present: the model cited <code>{}</code>",
+            escape(&id)
+        )),
+        None => facts.push(
+            "CVE: <span class=\"muted\">none cited in this verdict (CVE coverage unknown)</span>"
+                .to_string(),
+        ),
+    }
+
+    facts
+}
+
+/// The first `CVE-NNNN-NNNN` id in a string (case-insensitive prefix), if any — the
+/// only CVE signal available from existing fields (the model cites it in its verdict).
+/// Used by the certainty rail; the full per-path CVE evidence is JEF-133's job.
+fn cve_id(s: &str) -> Option<&str> {
+    let upper = s.to_ascii_uppercase();
+    let start = upper.find("CVE-")?;
+    let bytes = s.as_bytes();
+    let mut end = start + 4;
+    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'-') {
+        end += 1;
+    }
+    // Trim a trailing '-' (e.g. cited at the end of a sentence "… CVE-2021-44228.").
+    while end > start + 4 && bytes[end - 1] == b'-' {
+        end -= 1;
+    }
+    (end > start + 4).then(|| &s[start..end])
+}
+
+/// The "what to do" line, derived ONLY from the finding's mechanical `disposition`
+/// (JEF-161 AC #1) — no new model call, no new action. The disposition already encodes
+/// the cut type (see [`classify`]); this translates it to the operator's next step.
+fn what_to_do(disposition: &str) -> &'static str {
+    match disposition {
+        AUTO_ELIGIBLE
+        | "latent foothold — propose"
+        | "structural — propose"
+        | "vetoed — propose" => "would cut in shadow; arm `network` to act",
+        "durable-fix PR" => "revoke the grant / remove the mount (durable fix)",
+        "forbidden" => "manual — the only cut is an irreversible escape primitive",
+        "no-cut" => "manual — no single-edge cut severs this path",
+        // "unclassified" and any future disposition: the safe, conservative default.
+        _ => "manual — no automatic cut classified for this path",
+    }
+}
+
+/// The Mermaid graph's `aria-label` (JEF-161 AC #4): the proven path summarized IN WORDS
+/// so a screen reader conveys the picture the SVG draws. Applied to the rendered graph by
+/// the inline script (the SVG is client-rendered) via a `data-aria` attribute on the
+/// `<pre>`. Plain text only (it is an attribute value); escaped at the call site.
+fn path_aria_label(entry: &str, fs: &[&Finding]) -> String {
+    let objectives = fs
+        .iter()
+        .flat_map(|f| f.path.iter())
+        .filter(|s| fs.iter().any(|f| s.to == f.objective))
+        .map(|s| s.to.clone())
+        .collect::<BTreeSet<_>>()
+        .len();
+    format!(
+        "Attack-path graph: the internet reaches {entry}, which reaches {objectives} \
+         objective{}.",
+        if objectives == 1 { "" } else { "s" },
+        entry = short(entry),
+    )
+}
+
 fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
@@ -914,13 +1099,47 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
     // per-edge or per-objective verdict. So show the entry's one verdict (the model's
     // own words), not a count that would imply many judgements. `None` = the model
     // hasn't reached this entry yet (slow CPU model); the paths still render.
-    let judgement = match fs.iter().find_map(|f| f.verdict.as_deref()) {
-        Some(v) => format!(
-            "<div class=\"verdict\">model judgement: {}</div>",
-            escape(v)
-        ),
-        None => "<div class=\"verdict muted\">awaiting model judgement</div>".to_string(),
+    //
+    // JEF-161 verdict-first card: the posture chip + the model's words VERBATIM are
+    // foregrounded ABOVE everything, then the "what's proven" certainty rail draws the
+    // proof-vs-judgement line, then the graph, then a disposition-derived "what to do".
+    let verdict = fs.iter().find_map(|f| f.verdict.as_deref());
+    let posture = Posture::of(verdict);
+    let verdict_line = verdict_line(verdict);
+
+    // The certainty rail — deterministic facts, captioned so the model's call (above) is
+    // clearly the judgement and these are the proof (ADR-0016 proof-vs-judgement line).
+    let facts: String = proven_facts(entry, fs)
+        .iter()
+        .map(|b| format!("<li>{b}</li>"))
+        .collect();
+    let rail = format!(
+        "<div class=\"rail\"><div class=\"rail-cap\">what's proven \
+         <span class=\"muted\">— deterministic facts; the model's call is above</span></div>\
+         <ul>{facts}</ul></div>"
+    );
+
+    // Severity ≠ breach (ADR-0016): a broad, calm [SAFE] entry with a huge graph is the
+    // INTENDED picture — breadth is severity, not urgency. Call it out so the wide graph
+    // doesn't read as alarming. Only when the model judged it safe AND the reach is broad.
+    let breadth = if posture == Posture::Safe && objectives >= 20 {
+        "<div class=\"breadth muted\">wide reach, but not a breach — breadth is severity, \
+         not urgency.</div>"
+            .to_string()
+    } else {
+        String::new()
     };
+
+    // What to do — derived from the disposition class only (no model call). The endpoint
+    // card groups many findings; they share the entry's posture, so take the disposition
+    // of the first as the representative next step for this entry's paths.
+    let todo = fs
+        .first()
+        .map(|f| what_to_do(&f.disposition))
+        .unwrap_or("manual — no automatic cut classified for this path");
+    let todo_line = format!("<div class=\"todo\"><b>what to do:</b> {todo}</div>");
+
+    let aria = escape(&path_aria_label(entry, fs));
 
     // Expand the coalesced fan-out: a collapsed aggregate node ("47 secrets") hides
     // the names, so list each aggregated group's members under a native <details>
@@ -946,12 +1165,13 @@ fn endpoint_card(entry: &str, fs: &[&Finding]) -> String {
         .collect();
 
     format!(
-        "<div class=\"card\"><div class=\"kc\">{} <span class=\"muted\">({} objective{} reachable)</span></div>\
-         {}<pre class=\"mermaid\">{}</pre>{}</div>",
+        "<div class=\"card\">{verdict_line}{rail}{breadth}\
+         <div class=\"kc2\">the picture of those facts — \
+         <span class=\"muted\">{} ({} objective{} reachable)</span></div>\
+         <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}</div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
-        judgement,
         m.finish(),
         if expand.is_empty() {
             String::new()
@@ -1594,6 +1814,110 @@ fn render_report_html(report: &Report) -> String {
          {body}\
          </body></html>",
         body = report_panel(report),
+    )
+}
+
+// ===========================================================================
+// The human "why" view for /judgements (JEF-161)
+// ===========================================================================
+//
+// `/judgements` was JSON-only — an operator hitting it got a wall of escaped prompt
+// text. This adds a human HTML view (mirroring how `/report` is wired) that leads with
+// the posture chip + the model's prose, surfaces the three honest meta-states, and tucks
+// the raw prompt+reply behind a `<details>` expander. The prompt is the injection surface
+// (JEF-106); operators read the verdict, not the prompt. The JSON moves to
+// `/judgements.json` (the route is documented in [`serve_dashboard`]).
+
+/// One `/judgements` card (JEF-161): the posture chip + the model's prose, then the
+/// three meta-states surfaced honestly, with the raw prompt+reply behind an expander.
+fn judgement_card(j: &Judgement) -> String {
+    // The posture from the final verdict (Debug form, e.g. `Exploitable("…")`). `flagged`
+    // lowercases, so the capitalized Debug variant still maps correctly.
+    let posture = Posture::of(Some(&j.verdict));
+    let chip = format!(
+        "<span class=\"chip {}\">{}</span>",
+        posture.tone(),
+        posture.label()
+    );
+
+    // The three honest meta-states (JEF-161 AC #3):
+    //   prompt: None  → the deterministic pre-filter decided without the model (JEF-112).
+    //   reply:  None  → the model timed out; the engine fell back to a safe verdict.
+    //   normal        → the model answered; show its prose verdict.
+    let lead = if j.prompt.is_none() {
+        "<span class=\"meta\">decided without the model (pre-filter)</span>".to_string()
+    } else if j.reply.is_none() {
+        "<span class=\"meta\">model timed out — safe fallback</span>".to_string()
+    } else {
+        format!("<span class=\"vwords\">{}</span>", escape(&j.verdict))
+    };
+
+    // The raw prompt+reply behind a power-user expander — the injection surface stays a
+    // diagnostic, not something operators are asked to grade (JEF-106).
+    let raw = format!(
+        "<details class=\"raw\"><summary>show full prompt</summary>\
+         <div class=\"raw-cap\">prompt sent to the model</div><pre>{}</pre>\
+         <div class=\"raw-cap\">raw model reply</div><pre>{}</pre></details>",
+        escape(j.prompt.as_deref().unwrap_or("(none — pre-filter decided)")),
+        escape(j.reply.as_deref().unwrap_or("(none — model timed out)")),
+    );
+
+    format!(
+        "<div class=\"card\"><div class=\"vline\">{chip} {lead}</div>\
+         <div class=\"kc2\"><code>{}</code> <span class=\"muted\">· {} objective{} weighed</span></div>\
+         {raw}</div>",
+        escape(&short(&j.entry)),
+        j.objectives,
+        if j.objectives == 1 { "" } else { "s" },
+    )
+}
+
+/// The full `/judgements` HTML page (JEF-161): the human "why" view — one card per recent
+/// judgement, led by the posture chip + the model's prose, the three meta-states surfaced,
+/// the raw prompt behind an expander. Self-contained, styled in the dashboard's idiom. The
+/// machine-readable form stays at `/judgements.json`.
+fn render_judgements_html(judgements: &[Judgement]) -> String {
+    let body = if judgements.is_empty() {
+        "<p class=\"muted\">no model judgements yet (the model hasn't reached an \
+         internet-facing entry — a slow CPU model takes a few passes after a restart)</p>"
+            .to_string()
+    } else {
+        judgements.iter().map(judgement_card).collect()
+    };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <title>protector — judgements</title>\
+         <style>\
+         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
+         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
+         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
+         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
+         .muted{{color:#777}}\
+         a{{color:#06c}}\
+         code{{background:#f4f4f4;padding:0 .2rem}}\
+         .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
+         .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
+         .vline{{font-size:.92rem;line-height:1.4;margin:.1rem 0 .4rem}}\
+         .vwords{{color:#111}}\
+         .meta{{color:#555;font-style:italic}}\
+         .chip{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;letter-spacing:.02em;padding:.05rem .35rem;border-radius:2px;border:1px solid;margin-right:.35rem;white-space:nowrap}}\
+         .chip-breach{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
+         .chip-safe{{color:#155f29;background:#eef7f0;border-color:#1a7f37}}\
+         .chip-awaiting{{color:#555;background:#f4f4f4;border-color:#ccc}}\
+         .raw summary{{cursor:pointer;color:#06c;font-size:.8rem}}\
+         .raw-cap{{font-size:.72rem;font-weight:600;color:#444;margin:.4rem 0 .1rem}}\
+         .raw pre{{white-space:pre-wrap;word-break:break-word;background:#f7f7f7;border:1px solid #eee;padding:.4rem .5rem;font-size:.72rem;margin:0}}\
+         </style></head><body>\
+         <h1>protector — judgements</h1>\
+         <p class=\"sum\">Why the model called each internet-facing entry the way it did — \
+         the posture and the model's own words first. The raw prompt+reply is behind \
+         <i>show full prompt</i> (a power-user diagnostic; the prompt is the injection surface, \
+         JEF-106). &nbsp;|&nbsp; <a href=\"/\">dashboard</a> &nbsp;|&nbsp; \
+         <a href=\"/judgements.json\">json</a></p>\
+         <h2>Recent judgements <span class=\"muted\">({n})</span></h2>\
+         {body}\
+         </body></html>",
+        n = judgements.len(),
     )
 }
 
@@ -2249,6 +2573,20 @@ fn render_html(
          .kc{{font-family:ui-monospace,monospace;font-size:.85rem;font-weight:600}}\
          .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
          .verdict{{font-size:.78rem;color:#333;background:#f4f4f4;border-left:2px solid #888;padding:.2rem .5rem;margin:.2rem 0 .4rem}}\
+         .vline{{font-size:.92rem;line-height:1.4;margin:.1rem 0 .5rem}}\
+         .vwords{{color:#111}}\
+         .chip{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;letter-spacing:.02em;padding:.05rem .35rem;border-radius:2px;border:1px solid;margin-right:.35rem;white-space:nowrap}}\
+         .chip-breach{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
+         .chip-safe{{color:#155f29;background:#eef7f0;border-color:#1a7f37}}\
+         .chip-awaiting{{color:#555;background:#f4f4f4;border-color:#ccc}}\
+         .rail{{font-size:.78rem;margin:.2rem 0 .5rem;border-left:2px solid #1a7f37;padding:.1rem 0 .1rem .6rem}}\
+         .rail-cap{{font-weight:600;color:#155f29}}\
+         .rail ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
+         .rail li{{margin:.1rem 0;color:#333}}\
+         .rail code{{background:#f4f4f4;padding:0 .2rem}}\
+         .breadth{{font-size:.78rem;margin:.1rem 0 .4rem}}\
+         .todo{{font-size:.82rem;color:#333;background:#f8f8f8;border-left:2px solid #06c;padding:.25rem .5rem;margin:.3rem 0 .1rem}}\
+         .todo code{{background:#eee;padding:0 .2rem}}\
          .applied{{color:#b00000;font-weight:600}}\
          .proposed{{color:#9a5b00;font-weight:600}}\
          .muted{{color:#777}}\
@@ -2314,11 +2652,16 @@ fn render_html(
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
          for (const pre of document.querySelectorAll('pre.mermaid')) {{\
+           const aria = pre.getAttribute('data-aria');\
            try {{\
              const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
              const g = document.createElement('div'); g.className = 'graph'; g.innerHTML = svg;\
+             /* JEF-161 a11y: the client-rendered SVG carries the path summary in words */\
+             const el = g.querySelector('svg') || g;\
+             el.setAttribute('role', 'img');\
+             if (aria) el.setAttribute('aria-label', aria);\
              pre.replaceWith(g);\
-           }} catch (e) {{ /* leave the source text as a fallback */ }}\
+           }} catch (e) {{ /* leave the source text as a fallback */ if (aria) {{ pre.setAttribute('role', 'img'); pre.setAttribute('aria-label', aria); }} }}\
          }}\
          </script></head><body>\
          {banner}\
@@ -2424,7 +2767,17 @@ async fn bake_view(State(findings): State<Arc<Findings>>) -> Json<BakeStats> {
     Json(findings.bake())
 }
 
-async fn judgements_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
+/// The `/judgements` HTML view (JEF-161): the human "why" — one card per recent
+/// judgement, led by the posture chip + the model's prose, the raw prompt behind an
+/// expander. The machine-readable form is `/judgements.json`.
+async fn judgements_html_view(State(journal): State<Arc<JudgementLog>>) -> Html<String> {
+    Html(render_judgements_html(&journal.snapshot()))
+}
+
+/// The `/judgements.json` view: the diagnostic JSON (full prompt + raw reply + verdict
+/// per recent judgement), unchanged from the prior `/judgements` contract — only the path
+/// moved when the human HTML view took over `/judgements` (JEF-161).
+async fn judgements_json_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
     Json(journal.snapshot())
 }
 
@@ -2487,8 +2840,9 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
 }
 
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON, `/readiness`
-/// JSON) plus the diagnostic `/judgements` JSON (full prompt + raw reply + verdict per
-/// recent judgement), the `/reversions` JSON (lifted cuts + why, JEF-141), and the
+/// JSON) plus the human `/judgements` HTML "why" view (JEF-161) with its diagnostic
+/// `/judgements.json` (full prompt + raw reply + verdict per recent judgement), the
+/// `/reversions` JSON (lifted cuts + why, JEF-141), and the
 /// `/report` + `/report.json` shadow would-have-acted diff (JEF-143). Read-only;
 /// cluster-facing glue around the tested classification + aggregation. The `/readiness`
 /// view (JEF-160) reports each decision input's LIVE presence/health for alerting.
@@ -2511,7 +2865,8 @@ pub async fn serve_dashboard(
         .with_state(findings)
         .merge(
             Router::new()
-                .route("/judgements", get(judgements_view))
+                .route("/judgements", get(judgements_html_view))
+                .route("/judgements.json", get(judgements_json_view))
                 .with_state(judgements),
         )
         .merge(
@@ -3926,5 +4281,312 @@ mod tests {
         assert!(cfg.model_attached && cfg.armed && cfg.journal_durable);
         assert_eq!(cfg.kev_count, 10);
         assert_eq!(findings.model_health(), ModelHealth::Timeout);
+    }
+
+    // ===================================================================
+    // JEF-161 — verdict-first card + human /judgements view
+    // ===================================================================
+
+    #[test]
+    fn posture_chip_selection_per_verdict_state() {
+        // The model's affirmation → [BREACH]; a "not exploitable" call → [SAFE]; no
+        // verdict yet → [awaiting judgement]. The Debug form (capitalized) maps too.
+        assert_eq!(Posture::of(None), Posture::Awaiting);
+        assert_eq!(Posture::of(None).label(), "[awaiting judgement]");
+        assert_eq!(
+            Posture::of(Some("exploitable — RCE reaches the secret")),
+            Posture::Breach
+        );
+        assert_eq!(
+            Posture::of(Some("Exploitable(\"reason\")")),
+            Posture::Breach
+        );
+        assert_eq!(Posture::Breach.label(), "[BREACH]");
+        assert_eq!(
+            Posture::of(Some("not exploitable — authorized RBAC, no CVE")),
+            Posture::Safe
+        );
+        assert_eq!(Posture::of(Some("Refuted(\"benign\")")), Posture::Safe);
+        assert_eq!(Posture::Safe.label(), "[SAFE]");
+    }
+
+    #[test]
+    fn what_to_do_per_disposition_class() {
+        // AC #1: the "what to do" line is derived per disposition class, no model call.
+        assert_eq!(
+            what_to_do(AUTO_ELIGIBLE),
+            "would cut in shadow; arm `network` to act"
+        );
+        assert_eq!(
+            what_to_do("latent foothold — propose"),
+            "would cut in shadow; arm `network` to act"
+        );
+        assert_eq!(
+            what_to_do("structural — propose"),
+            "would cut in shadow; arm `network` to act"
+        );
+        assert!(what_to_do("durable-fix PR").contains("revoke the grant"));
+        assert!(what_to_do("forbidden").starts_with("manual"));
+        assert!(what_to_do("no-cut").starts_with("manual"));
+        // An unknown/future disposition falls back to the safe, conservative default.
+        assert!(what_to_do("unclassified").starts_with("manual"));
+        assert!(what_to_do("something-new").starts_with("manual"));
+    }
+
+    #[test]
+    fn cve_id_extracts_a_cited_cve_and_handles_absence() {
+        assert_eq!(
+            cve_id("exploitable — CVE-2021-44228 is a remote RCE reaching the secret"),
+            Some("CVE-2021-44228")
+        );
+        // Trailing punctuation is trimmed.
+        assert_eq!(cve_id("see CVE-2024-3094."), Some("CVE-2024-3094"));
+        // No CVE cited → None (the rail then reads "none cited", never implied-absent).
+        assert_eq!(cve_id("not exploitable — authorized RBAC"), None);
+        assert_eq!(cve_id("CVE-"), None);
+    }
+
+    #[test]
+    fn certainty_rail_reads_unknown_when_no_cve_cited() {
+        // AC #2: missing evidence reads "unknown", never implied-absent.
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "no-cut",
+            "can-read",
+            true,
+            Some("not exploitable — authorized RBAC, nothing concerning"),
+        );
+        let facts = proven_facts(&f.entry, std::slice::from_ref(&&f));
+        let joined = facts.join(" ");
+        assert!(
+            joined.contains("internet-reachable"),
+            "the entry's internet-reachability is a proven fact"
+        );
+        assert!(
+            joined.contains("mounts (direct read)"),
+            "the terminal relation is humanized into the rail"
+        );
+        assert!(
+            joined.contains("none cited") && joined.contains("unknown"),
+            "no CVE cited reads as unknown, not implied-absent: {joined}"
+        );
+    }
+
+    #[test]
+    fn certainty_rail_surfaces_a_cited_cve() {
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "auto-eligible",
+            "can-read",
+            true,
+            Some("exploitable — CVE-2021-44228 is a remote RCE reaching the secret"),
+        );
+        let joined = proven_facts(&f.entry, std::slice::from_ref(&&f)).join(" ");
+        assert!(
+            joined.contains("CVE present") && joined.contains("CVE-2021-44228"),
+            "a cited CVE surfaces on the rail: {joined}"
+        );
+    }
+
+    #[test]
+    fn endpoint_card_is_verdict_first_with_chip_rail_todo_and_aria() {
+        // AC #1 + #4: chip + model words + proven rail + what-to-do, and the SVG carries
+        // an aria-label summarizing the path in words.
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-do/get/secrets",
+            true,
+            Some("not exploitable — authorized RBAC, no CVE"),
+        );
+        let html = endpoint_card("workload/app/Pod/web", &[&f]);
+        // Posture chip TEXT (not color/glyph alone).
+        assert!(html.contains("[SAFE]"), "the posture chip carries text");
+        assert!(html.contains("chip-safe"));
+        // The model's words VERBATIM.
+        assert!(html.contains("not exploitable — authorized RBAC, no CVE"));
+        // The certainty rail and its caption.
+        assert!(html.contains("what's proven"));
+        assert!(html.contains("internet-reachable"));
+        // The disposition-derived "what to do".
+        assert!(html.contains("what to do:"));
+        assert!(html.contains("revoke the grant"));
+        // The graph's aria-label (data-aria on the <pre>, applied to the SVG by the JS).
+        assert!(html.contains("data-aria=\""));
+        assert!(html.contains("Attack-path graph"));
+        // The verdict-first chip must come BEFORE the graph in source order.
+        let chip_at = html.find("[SAFE]").unwrap();
+        let graph_at = html.find("class=\"mermaid\"").unwrap();
+        assert!(chip_at < graph_at, "the verdict leads the card");
+    }
+
+    #[test]
+    fn endpoint_card_awaiting_state_is_honest_not_clear() {
+        // AC #2 coverage-gap honesty: no verdict yet reads "awaiting", never "clear".
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "no-cut",
+            "can-read",
+            true,
+            None,
+        );
+        let html = endpoint_card("workload/app/Pod/web", &[&f]);
+        assert!(html.contains("[awaiting judgement]"));
+        assert!(html.contains("chip-awaiting"));
+        assert!(html.contains("hasn't reached this entry yet"));
+    }
+
+    #[test]
+    fn endpoint_card_calls_out_breadth_when_safe_and_wide() {
+        // ADR-0016 severity ≠ breach: a broad, calm [SAFE] entry is the intended picture.
+        let fs: Vec<Finding> = (0..25)
+            .map(|n| {
+                finding(
+                    "workload/argocd/Pod/argocd-server",
+                    &format!("secret/argocd/secret-{n}"),
+                    "durable-fix PR",
+                    "can-do/get/secrets",
+                    true,
+                    Some("not exploitable — authorized RBAC, no CVE, no behavior"),
+                )
+            })
+            .collect();
+        let refs: Vec<&Finding> = fs.iter().collect();
+        let html = endpoint_card("workload/argocd/Pod/argocd-server", &refs);
+        assert!(
+            html.contains("breadth is severity, not urgency"),
+            "a wide [SAFE] entry is framed as severity, not urgency"
+        );
+        // The same breadth, but BREACH, is not softened.
+        let breach: Vec<Finding> = (0..25)
+            .map(|n| {
+                finding(
+                    "workload/argocd/Pod/argocd-server",
+                    &format!("secret/argocd/secret-{n}"),
+                    "auto-eligible",
+                    "can-do/get/secrets",
+                    true,
+                    Some("exploitable — CVE-2021-44228 reaches everything"),
+                )
+            })
+            .collect();
+        let brefs: Vec<&Finding> = breach.iter().collect();
+        let bhtml = endpoint_card("workload/argocd/Pod/argocd-server", &brefs);
+        assert!(!bhtml.contains("breadth is severity"));
+    }
+
+    fn full_judgement(
+        entry: &str,
+        verdict: &str,
+        prompt: Option<&str>,
+        reply: Option<&str>,
+    ) -> Judgement {
+        Judgement {
+            entry: entry.to_string(),
+            objectives: 3,
+            verdict: verdict.to_string(),
+            prompt: prompt.map(str::to_string),
+            reply: reply.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn judgements_html_renders_the_three_meta_states_with_prose_first() {
+        // AC #3: prose-led, three honest meta-states, raw behind an expander.
+        let rows = vec![
+            // Normal: model answered → its prose verdict.
+            full_judgement(
+                "workload/app/Pod/web",
+                "exploitable — RCE reaches the secret",
+                Some("PROMPT TEXT the injection surface"),
+                Some("the model raw reply"),
+            ),
+            // Pre-filter: prompt None → decided without the model.
+            full_judgement(
+                "workload/app/Pod/api",
+                "Refuted(\"no promotion ground\")",
+                None,
+                None,
+            ),
+            // Timeout: reply None → safe fallback.
+            full_judgement(
+                "workload/app/Pod/cache",
+                "Uncertain(\"model timed out\")",
+                Some("PROMPT TEXT"),
+                None,
+            ),
+        ];
+        let html = render_judgements_html(&rows);
+
+        // Prose verdict leads the normal card.
+        assert!(html.contains("exploitable — RCE reaches the secret"));
+        assert!(html.contains("[BREACH]"));
+        // The three meta-states.
+        assert!(html.contains("decided without the model (pre-filter)"));
+        assert!(html.contains("model timed out — safe fallback"));
+        // The raw prompt is behind an expander, not inline above the prose.
+        assert!(html.contains("show full prompt"));
+        assert!(html.contains("<details"));
+        let prompt_at = html.find("PROMPT TEXT the injection surface").unwrap();
+        let prose_at = html.find("exploitable — RCE reaches the secret").unwrap();
+        assert!(
+            prose_at < prompt_at,
+            "the prose verdict comes before the raw prompt"
+        );
+        // The JSON link is documented on the page.
+        assert!(html.contains("/judgements.json"));
+    }
+
+    #[test]
+    fn judgements_html_empty_state_is_honest() {
+        let html = render_judgements_html(&[]);
+        assert!(html.contains("no model judgements yet"));
+        assert!(html.contains("hasn't reached"));
+    }
+
+    #[test]
+    fn render_html_card_has_aria_label_on_the_graph() {
+        // AC #4: every rendered attack-path graph carries the words summary.
+        let findings = vec![finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-do/get/secrets",
+            true,
+            Some("not exploitable — authorized RBAC"),
+        )];
+        let html = render_html(&findings, false, &BakeStats::default(), &[], None, &ready());
+        assert!(html.contains("data-aria=\""));
+        assert!(html.contains("Attack-path graph"));
+        // The JS wires data-aria → role="img" + aria-label on the rendered SVG.
+        assert!(html.contains("setAttribute('role', 'img')"));
+        assert!(html.contains("setAttribute('aria-label', aria)"));
+    }
+
+    #[test]
+    fn judgements_json_shape_is_unchanged() {
+        // The /judgements.json contract is the same Judgement shape as before JEF-161 —
+        // entry, objectives, verdict, prompt, reply — so existing scrapers keep working.
+        let j = full_judgement(
+            "workload/app/Pod/web",
+            "exploitable — RCE",
+            Some("p"),
+            Some("r"),
+        );
+        let v = serde_json::to_value(&j).unwrap();
+        assert_eq!(v["entry"], "workload/app/Pod/web");
+        assert_eq!(v["objectives"], 3);
+        assert_eq!(v["verdict"], "exploitable — RCE");
+        assert_eq!(v["prompt"], "p");
+        assert_eq!(v["reply"], "r");
+        // The pre-filter / timeout meta-states serialize as JSON null.
+        let pre = full_judgement("e", "Refuted(\"x\")", None, None);
+        let pv = serde_json::to_value(&pre).unwrap();
+        assert!(pv["prompt"].is_null());
+        assert!(pv["reply"].is_null());
     }
 }
