@@ -2971,11 +2971,14 @@ fn status_banner(
 /// The persistent nav (JEF-159) shown across the read-only views. `current` is the path
 /// of the page being rendered, marked `aria-current="page"`.
 fn nav_bar(current: &str) -> String {
-    const LINKS: [(&str, &str); 4] = [
+    // Trimmed to answer-first (JEF-175): dashboard · why · shadow log. `/readiness`,
+    // `/bake`, and `/reversions` are de-listed (their routes stay reachable — they're
+    // surfaced as the collapsed "Engine & coverage" sections / the "Recently lifted"
+    // section's json link).
+    const LINKS: [(&str, &str); 3] = [
         ("/", "dashboard"),
-        ("/judgements", "judgements"),
-        ("/report", "report"),
-        ("/reversions", "reversions"),
+        ("/judgements", "why"),
+        ("/report", "shadow log"),
     ];
     let items: String = LINKS
         .iter()
@@ -3017,10 +3020,13 @@ fn render_html(
         }
     }
 
+    // Remediations verb (JEF-175): answer-first phrasing — "What protector would do"
+    // (shadow, proposing) vs "What protector is doing" (armed, acting) — replacing the
+    // old "Proposed/Active Remediations" engine label.
     let rem_title = if armed {
-        "Active Remediations"
+        "What protector is doing"
     } else {
-        "Proposed Remediations"
+        "What protector would do"
     };
     let rem_body = if remediations.is_empty() {
         "<p class=\"muted\">none</p>".to_string()
@@ -3030,34 +3036,43 @@ fn render_html(
             .map(|f| remediation_card(f, armed))
             .collect()
     };
-    let path_body = if endpoints.is_empty() {
-        "<p class=\"muted\">no internet-facing exposure reaches an objective</p>".to_string()
-    } else {
-        // Rank "look at this first" (JEF-163): the OPERATOR-PRIORITY tiers first
-        // (flagged → watch → context, via `endpoint_attention_rank`), with the blast
-        // radius (graph size) only as the FINAL tiebreaker WITHIN a tier. This is a
-        // presentation-only sort key — a view, never a gate (ADR-0016): it reorders the
-        // already-decided cards and touches no verdict/disposition and no model input. A
-        // flagged-exploitable endpoint therefore ALWAYS sorts above a larger-but-unflagged
-        // one (AC #2). `sort_by` is STABLE, so equal keys keep their (entry-sorted, since
-        // `endpoints` is a BTreeMap) order — and we tiebreak on the entry key last anyway
-        // to make the order fully deterministic.
-        let mut ranked: Vec<(&&str, &Vec<&Finding>)> = endpoints.iter().collect();
-        ranked.sort_by(|a, b| {
-            let (ap, _) = endpoint_attention_rank(a.1);
-            let (bp, _) = endpoint_attention_rank(b.1);
-            ap.cmp(&bp) // priority level: lower = more attention, first
-                .then_with(|| b.1.len().cmp(&a.1.len())) // then widest blast radius
-                .then_with(|| a.0.cmp(b.0)) // then entry key, for a stable total order
-        });
-        ranked
-            .iter()
-            .map(|(entry, fs)| {
-                let (priority, _) = endpoint_attention_rank(fs);
-                endpoint_card(entry, fs, tier_of_priority(priority))
-            })
-            .collect()
-    };
+
+    // Rank "look at this first" (JEF-163): the OPERATOR-PRIORITY tiers first
+    // (flagged → watch → context, via `endpoint_attention_rank`), with the blast
+    // radius (graph size) only as the FINAL tiebreaker WITHIN a tier. This is a
+    // presentation-only sort key — a view, never a gate (ADR-0016): it reorders the
+    // already-decided cards and touches no verdict/disposition and no model input. A
+    // flagged-exploitable endpoint therefore ALWAYS sorts above a larger-but-unflagged
+    // one (AC #2). `sort_by` is STABLE, so equal keys keep their (entry-sorted, since
+    // `endpoints` is a BTreeMap) order — and we tiebreak on the entry key last anyway
+    // to make the order fully deterministic.
+    let mut ranked: Vec<(&&str, &Vec<&Finding>)> = endpoints.iter().collect();
+    ranked.sort_by(|a, b| {
+        let (ap, _) = endpoint_attention_rank(a.1);
+        let (bp, _) = endpoint_attention_rank(b.1);
+        ap.cmp(&bp) // priority level: lower = more attention, first
+            .then_with(|| b.1.len().cmp(&a.1.len())) // then widest blast radius
+            .then_with(|| a.0.cmp(b.0)) // then entry key, for a stable total order
+    });
+
+    // Answer-first split (JEF-175): the findings lead the page, partitioned into the two
+    // operator questions. "Needs attention" is the Flagged tier (the model judged a real
+    // breach); "Watching" is everything else (watch + the already-collapsed context cards).
+    // The partition keys on the SAME `endpoint_attention_rank` tier the cards already
+    // carry, so a card's section and its tier chip can never drift, and the stable, total
+    // sort above is preserved within each section.
+    let mut attention_cards = String::new();
+    let mut watching_cards = String::new();
+    for (entry, fs) in &ranked {
+        let (priority, tier) = endpoint_attention_rank(fs);
+        let card = endpoint_card(entry, fs, tier_of_priority(priority));
+        if tier == Tier::Flagged {
+            attention_cards.push_str(&card);
+        } else {
+            watching_cards.push_str(&card);
+        }
+    }
+
     let vectors_body = attack_vectors(findings);
     let bake_body = bake_panel(bake);
     let reversions_body = reversions_panel(reversions);
@@ -3065,16 +3080,50 @@ fn render_html(
     let freshness = relative_time(last_pass);
 
     // The instructional first-run state (JEF-160): when the engine has NO breach-relevant
-    // findings AND a decision input is unmet, the empty findings body would otherwise read
-    // as a (possibly false) "all clear". Replace it with the guided checklist so a blind
-    // cluster is never indistinguishable from a clean one. A clean cluster with every input
-    // wired keeps the existing honest-empty idiom ("no internet-facing exposure ...").
+    // findings AND a decision input is unmet, an empty findings body would otherwise read
+    // as a (possibly false) "all clear". Replace the whole findings region with the guided
+    // checklist so a blind cluster is never indistinguishable from a clean one. A clean
+    // cluster with every input wired keeps the existing honest-empty idiom.
     let no_breach_findings = !findings.iter().any(|f| f.breach_relevant);
     let first_run = no_breach_findings && readiness.has_unmet();
-    let path_body = if first_run {
+
+    // The findings region (JEF-175) — first content below the banner. Answer-first:
+    // "Needs attention" (flagged endpoints; OMITTED entirely when there are none, AC #2)
+    // then "Watching" (watch + the collapsed context cards). On first run the guided
+    // checklist replaces the whole region (preserving the JEF-160 path, AC #1).
+    let findings_body = if first_run {
         first_run_checklist(readiness)
     } else {
-        path_body
+        let attention = if attention_cards.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<h2 id=\"attack-paths\">Needs attention</h2>\
+                 <p class=\"sum\">Internet-facing endpoints the model judged a real breach — \
+                 look here first.</p>{attention_cards}"
+            )
+        };
+        let watching = format!(
+            "<h2 id=\"watching\">Watching</h2>\
+             <p class=\"sum\">Exposed paths the model is watching but has not flagged — a \
+             latent foothold carrying a CVE, or runtime-corroborated. Context-tier paths \
+             (proven-reachable, neither flagged nor corroborated) are collapsed below.</p>{}",
+            if watching_cards.is_empty() {
+                "<p class=\"muted\">no internet-facing exposure reaches an objective</p>"
+                    .to_string()
+            } else {
+                watching_cards
+            }
+        );
+        format!(
+            "{attention}{watching}\
+             <p class=\"legend\">edge legend — \
+             <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
+             <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
+             <code>network reach</code>: a NetworkPolicy- or Linkerd-authorized connection · \
+             <code>runs as</code>: assumes the ServiceAccount identity · \
+             <code>escapes via</code>: a container-escape primitive to the host node</p>"
+        )
     };
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
@@ -3091,6 +3140,11 @@ fn render_html(
          body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
          h1{{font-size:1.2rem;font-weight:600;margin:0}}\
          h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
+         details.diag{{margin:1.6rem 0 .4rem}}\
+         details.diag>summary,details.diag details>summary{{cursor:pointer;list-style:revert}}\
+         h2.diag-h{{display:inline-block;margin:0;border-bottom:none;padding:0}}\
+         h3.diag-h{{display:inline-block;font-size:.92rem;font-weight:600;margin:0;padding:0}}\
+         details.diag>details{{margin:.2rem 0 .2rem 1rem}}\
          .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
          .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
          .kc{{font-family:ui-monospace,monospace;font-size:.85rem;font-weight:600}}\
@@ -3218,41 +3272,41 @@ fn render_html(
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths · last pass <b>{freshness}</b> \
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
-         <h2 id=\"coverage\">Coverage &amp; readiness <span class=\"muted\">(decision inputs)</span></h2>\
+         {findings_body}\
+         <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
+         <details class=\"diag\"{readiness_open_outer}>\
+         <summary><h2 class=\"diag-h\">Engine &amp; coverage</h2></summary>\
+         <details id=\"coverage\"{readiness_open}>\
+         <summary><h3 class=\"diag-h\">Readiness <span class=\"muted\">(decision inputs)</span></h3></summary>\
          <p class=\"sum\">Each decision input and its LIVE state — so an unconfigured or down \
          input is visible, not silent. An <b>absent</b> input that weakens decisions is called \
-         out: the model's call is only as good as its enrichment (ADR-0016). \
+         out: the model's call is only as good as its enrichment. \
          &nbsp;|&nbsp; <a href=\"/readiness\">json</a></p>\
          {readiness_body}\
-         <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
-         <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
+         </details>\
+         <details>\
+         <summary><h3 class=\"diag-h\">Attack surface</h3></summary>\
          <p class=\"sum\">ATT&amp;CK outcomes an internet-facing entry can reach. \
          <b>Reachable</b> = proven the entry can get there; <b>model-flagged</b> = the model \
          judged it a real breach.</p>\
          {vectors_body}\
-         <h2>Behavioral bake <span class=\"muted\">(shadow)</span></h2>\
+         </details>\
+         <details>\
+         <summary><h3 class=\"diag-h\">Sensor activity <span class=\"muted\">(shadow)</span></h3></summary>\
          <p class=\"sum\">What the behavioral agent observed last pass — protector is only \
          watching, not acting. A sanity check before relying on these signals: volume looks \
          reasonable, most events map to a workload (low unresolved), and <b>corroborations</b> \
          counts findings a live signal backed up.</p>\
          {bake_body}\
-         <h2>Recent reversions <span class=\"muted\">(lifted cuts)</span></h2>\
+         </details>\
+         <details>\
+         <summary><h3 class=\"diag-h\">Recently lifted <span class=\"muted\">(lifted cuts)</span></h3></summary>\
          <p class=\"sum\">Cuts the engine lifted, and why. An isolation stays only while the \
-         breach lasts, then lifts on its own once the path is gone or the evidence clears.</p>\
+         breach lasts, then lifts on its own once the path is gone or the evidence clears. \
+         &nbsp;|&nbsp; <a href=\"/reversions\">json</a></p>\
          {reversions_body}\
-         <h2 id=\"attack-paths\">Possible attack paths <span class=\"muted\">({ep_n} endpoint{ep_plural})</span></h2>\
-         <p class=\"sum\">Ranked by attention — <span class=\"chip tier-flagged\">flagged</span> (the model \
-         judged a breach) first, then <span class=\"chip tier-watch\">watch</span> (a latent foothold \
-         carrying a CVE, or runtime-corroborated), then <span class=\"chip tier-context\">context</span> \
-         (collapsed below). Blast radius (graph size) only breaks ties within a tier — breadth is \
-         severity, not breach (ADR-0016); this is a view, never a gate.</p>\
-         <p class=\"legend\">edge legend — \
-         <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
-         <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
-         <code>network reach</code>: a NetworkPolicy- or Linkerd-authorized connection · \
-         <code>runs as</code>: assumes the ServiceAccount identity · \
-         <code>escapes via</code>: a container-escape primitive to the host node</p>\
-         {path_body}\
+         </details>\
+         </details>\
          </body></html>",
         banner = status_banner(
             findings,
@@ -3266,6 +3320,11 @@ fn render_html(
         rem_word = if armed { "active" } else { "proposed" },
         ep_n = endpoints.len(),
         ep_plural = if endpoints.len() == 1 { "" } else { "s" },
+        // AC #3: a degraded/absent decision-weakening input must still surface — the
+        // Readiness section (and its enclosing diagnostics region) auto-open ONLY when
+        // `has_unmet()`; a healthy cluster gets a one-line summary it can expand.
+        readiness_open = if readiness.has_unmet() { " open" } else { "" },
+        readiness_open_outer = if readiness.has_unmet() { " open" } else { "" },
     )
 }
 
@@ -3685,8 +3744,8 @@ mod tests {
             "freshness line present"
         );
         assert!(
-            html.contains("Recent reversions"),
-            "reversions section header present"
+            html.contains("Recently lifted"),
+            "lifted-cuts section header present"
         );
         assert!(
             html.contains("no proven chain still justifies"),
@@ -4002,13 +4061,208 @@ mod tests {
             html.contains("role=\"status\""),
             "banner is a status region"
         );
-        // Persistent nav with aria-current on the dashboard, and all four views.
+        // Trimmed nav (JEF-175): only dashboard · why · shadow log, with aria-current on
+        // the dashboard. `/readiness`, `/bake`, and `/reversions` are de-listed from nav.
         assert!(html.contains("<a href=\"/\" aria-current=\"page\">dashboard</a>"));
-        assert!(html.contains("href=\"/judgements\""));
-        assert!(html.contains("href=\"/report\""));
-        assert!(html.contains("href=\"/reversions\""));
+        assert!(html.contains("<a href=\"/judgements\">why</a>"));
+        assert!(html.contains("<a href=\"/report\">shadow log</a>"));
+        let nav_at = html.find("class=\"nav\"").expect("nav present");
+        let nav_end = html[nav_at..].find("</nav>").expect("nav closes") + nav_at;
+        let nav = &html[nav_at..nav_end];
+        assert!(
+            !nav.contains("href=\"/reversions\""),
+            "reversions de-listed"
+        );
+        assert!(!nav.contains("href=\"/readiness\""), "readiness de-listed");
+        assert!(!nav.contains("href=\"/bake\""), "bake de-listed");
+        assert_eq!(nav.matches("<a ").count(), 3, "exactly three nav items");
         // 30s meta-refresh.
         assert!(html.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
+    }
+
+    // -- JEF-175: answer-first reorder (findings on top, engine internals collapsed) -----
+
+    /// A readiness snapshot with EVERY decision input met — `has_unmet()` is false. The
+    /// counterpart to the default `ready()` (which is degraded/absent on every input).
+    fn ready_all_met() -> Readiness {
+        let mut bake = BakeStats::default();
+        // One Falco (`alert`) signal + one eBPF (any other variant) signal so both
+        // behavioral feeds read Present this pass.
+        bake.signals_by_variant.insert("alert".to_string(), 1);
+        bake.signals_by_variant.insert("connection".to_string(), 1);
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                kev_count: 3,
+                advisory_count: 3,
+                journal_durable: true,
+                ..Default::default()
+            },
+            ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+        );
+        assert!(!r.has_unmet(), "fixture: every decision input is met");
+        r
+    }
+
+    /// AC #1+#2+#3: the findings lead the page and the engine internals are collapsed
+    /// BELOW them. Concretely: findings (Needs attention / Watching) come before the
+    /// single "Engine & coverage" diagnostics region, which is a <details>, and the
+    /// readiness/attack-surface/sensor-activity/recently-lifted sections live inside it.
+    #[test]
+    fn render_html_puts_findings_above_a_collapsed_diagnostics_region() {
+        let findings = vec![
+            // A model-flagged endpoint ⇒ "Needs attention".
+            finding(
+                "workload/app/Pod/web",
+                "secret/app/session-key",
+                "latent foothold — propose",
+                "can-read",
+                true,
+                Some("exploitable — CVE-2021-44228 reaches the secret"),
+            ),
+        ];
+        let html = render_html(
+            &findings,
+            false,
+            &bake(80, 20),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+
+        let needs = html
+            .find("Needs attention")
+            .expect("needs-attention section");
+        let watching = html.find("Watching").expect("watching section");
+        let diag = html
+            .find("Engine &amp; coverage")
+            .expect("diagnostics region");
+        let readiness = html.find("Readiness").expect("readiness section");
+        let surface = html.find("Attack surface").expect("attack-surface section");
+        let sensor = html
+            .find("Sensor activity")
+            .expect("sensor-activity section");
+        let lifted = html
+            .find("Recently lifted")
+            .expect("recently-lifted section");
+
+        // Findings (both sub-sections) precede the diagnostics region.
+        assert!(
+            needs < diag,
+            "Needs attention is above the diagnostics region"
+        );
+        assert!(watching < diag, "Watching is above the diagnostics region");
+        // Remediations render between the findings and the diagnostics region (AC #2):
+        // the remediations heading sits after the findings and before "Engine & coverage".
+        let rem = html
+            .find("What protector would do")
+            .expect("remediations section");
+        assert!(
+            needs < rem && rem < diag,
+            "remediations after findings, before diag"
+        );
+        // All four engine sub-sections live inside the diagnostics region.
+        for (name, at) in [
+            ("Readiness", readiness),
+            ("Attack surface", surface),
+            ("Sensor activity", sensor),
+            ("Recently lifted", lifted),
+        ] {
+            assert!(at > diag, "{name} is inside the diagnostics region");
+        }
+        // The diagnostics region is ONE collapsible <details>.
+        assert!(
+            html.contains("<details class=\"diag\""),
+            "diagnostics is a <details> region"
+        );
+    }
+
+    /// AC #3: the Readiness section auto-opens (<details open>) iff a decision-weakening
+    /// input is absent/degraded — a healthy cluster gets a collapsed one-line summary.
+    #[test]
+    fn readiness_section_auto_opens_only_when_inputs_are_unmet() {
+        // Degraded/absent inputs (default `ready()`) ⇒ the readiness sub-section opens
+        // (and so does the enclosing region) so the gap surfaces prominently.
+        let unmet = render_html(&[], false, &BakeStats::default(), &[], None, &ready());
+        assert!(
+            unmet.contains("<details id=\"coverage\" open>"),
+            "readiness auto-opens when inputs unmet"
+        );
+        assert!(
+            unmet.contains("<details class=\"diag\" open>"),
+            "diagnostics region auto-opens when inputs unmet"
+        );
+
+        // Every input met ⇒ the readiness sub-section (and the region) stay collapsed.
+        let met = render_html(
+            &[],
+            false,
+            &bake(80, 20),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert!(
+            met.contains("<details id=\"coverage\">"),
+            "readiness stays collapsed when every input is met"
+        );
+        assert!(
+            !met.contains("<details id=\"coverage\" open>"),
+            "readiness has no open attribute when every input is met"
+        );
+        assert!(
+            met.contains("<details class=\"diag\">"),
+            "diagnostics region stays collapsed when every input is met"
+        );
+    }
+
+    /// AC #5: NO JSON endpoint or route is removed — the readiness/bake/reversions JSON
+    /// routes are only DE-LISTED from the human nav, but still reachable. The diagnostics
+    /// sections link to the readiness + reversions JSON (bake stays reachable at /bake).
+    #[test]
+    fn diagnostics_sections_keep_the_json_links() {
+        let html = render_html(&[], false, &bake(80, 20), &[], None, &ready_all_met());
+        assert!(
+            html.contains("<a href=\"/readiness\">json</a>"),
+            "readiness json link kept"
+        );
+        assert!(
+            html.contains("<a href=\"/reversions\">json</a>"),
+            "reversions json link kept (folded into Recently lifted)"
+        );
+    }
+
+    /// AC #2: "Needs attention" is OMITTED entirely when no endpoint is model-flagged —
+    /// the operator's eye isn't drawn to an empty alarm section.
+    #[test]
+    fn needs_attention_section_is_omitted_when_nothing_is_flagged() {
+        // A breach-relevant endpoint the model did NOT flag ⇒ Watching only.
+        let findings = vec![finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "latent foothold — propose",
+            "can-read",
+            true,
+            Some("not exploitable — the CVE is in a code path this service never invokes"),
+        )];
+        let html = render_html(
+            &findings,
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert!(
+            !html.contains("Needs attention"),
+            "no flagged ⇒ no attention section"
+        );
+        assert!(
+            html.contains("Watching"),
+            "the watching section is still present"
+        );
     }
 
     /// A chain with a single-edge cut on `cut_relation` (what the disposition now
@@ -4194,16 +4448,21 @@ mod tests {
         ];
 
         let html = render_html(&findings, false, &BakeStats::default(), &[], None, &ready());
-        // Shadow → "Proposed Remediations"; armed → "Active Remediations".
-        assert!(html.contains("Proposed Remediations"));
+        // Remediations verb (JEF-175): shadow → "What protector would do"; armed →
+        // "What protector is doing".
+        assert!(html.contains("What protector would do"));
         assert!(
             render_html(&findings, true, &BakeStats::default(), &[], None, &ready())
-                .contains("Active Remediations")
+                .contains("What protector is doing")
         );
-        assert!(html.contains("Possible attack paths"));
+        // The findings region carries the answer-first "Watching" section (the web
+        // endpoint's card is not model-flagged, so it lands under Watching, not the
+        // omitted-when-empty "Needs attention").
+        assert!(html.contains("Watching"));
         // The attack-vector summary names the ATT&CK outcomes reachable, with the
-        // model-flagged count (one objective was judged exploitable above).
-        assert!(html.contains("Attack vectors"));
+        // model-flagged count (one objective was judged exploitable above). Renamed to
+        // "Attack surface" under the diagnostics region (JEF-175).
+        assert!(html.contains("Attack surface"));
         assert!(html.contains("Credential Access"));
         assert!(html.contains("Unsecured Credentials"));
         assert!(html.contains("class=\"flagged\""));
@@ -4219,7 +4478,7 @@ mod tests {
         assert!(html.contains("not exploitable — the CVE is in a code path"));
         // The internal control-plane path is dropped entirely (one endpoint: web).
         assert!(!html.contains("argocd-secret"));
-        assert!(html.contains("1 endpoint"));
+        assert!(html.contains("1</b> exposed endpoint"));
         // Dump for eyeballing the UX (ignored by CI artifacts; just a dev aid).
         let _ = std::fs::write("/tmp/protector-dashboard.html", &html);
     }
@@ -4286,7 +4545,7 @@ mod tests {
     fn render_html_includes_the_behavioral_bake_section() {
         let html = render_html(&[], false, &bake(80, 20), &[], None, &ready());
         assert!(
-            html.contains("Behavioral bake"),
+            html.contains("Sensor activity"),
             "the section header is present"
         );
         assert!(
@@ -5024,7 +5283,8 @@ mod tests {
             Some(SystemTime::now()),
             &r,
         );
-        assert!(html.contains("Coverage &amp; readiness"));
+        // Renamed to "Readiness" inside the collapsed diagnostics region (JEF-175).
+        assert!(html.contains("Readiness"));
         assert!(html.contains("<a href=\"/readiness\">json</a>"));
         assert!(html.contains("Model adjudicator"));
         assert!(html.contains("<ol class=\"readiness\">"));
@@ -5515,11 +5775,14 @@ mod tests {
     }
 
     #[test]
-    fn render_html_lists_the_ranked_by_attention_caption_and_tier_labels() {
-        // The list caption announces the ordering, and a context-tier card is collapsed.
+    fn render_html_splits_findings_into_attention_and_watching_with_tier_labels() {
+        // Answer-first (JEF-175): a flagged endpoint heads "Needs attention"; a context
+        // endpoint lands collapsed under "Watching". The tier labels still render. The
+        // flagged finding uses a NON-auto-eligible disposition so it stays an endpoint
+        // card (auto-eligible findings are pulled into the remediations section instead).
         let flagged = ranked_finding(
             "workload/app/Pod/web",
-            "auto-eligible",
+            "latent foothold — propose",
             false,
             Some("exploitable — boom"),
         );
@@ -5538,10 +5801,12 @@ mod tests {
             Some(SystemTime::now()),
             &ready(),
         );
-        assert!(
-            html.contains("Ranked by attention"),
-            "the list carries a ranked-by-attention caption"
-        );
+        // Both answer-first sections render; Needs attention comes first.
+        let needs = html
+            .find("Needs attention")
+            .expect("needs-attention section");
+        let watching = html.find("Watching").expect("watching section");
+        assert!(needs < watching, "Needs attention precedes Watching");
         assert!(html.contains(">flagged<"), "the flagged tier label appears");
         // The context-tier endpoint collapses behind <details class=\"card card-context\">.
         assert!(
