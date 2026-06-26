@@ -17,6 +17,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use super::graph::{Behavior, SecurityGraph, Vulnerability};
 use super::journal::{Decision, DecisionJournal, JournalEntry};
 use super::reason::adjudicate::Verdict;
 use super::reason::proof::ProvenChain;
@@ -61,6 +62,13 @@ pub struct Finding {
     pub verdict: Option<String>,
     /// The proven attack path, hop by hop (entry → … → objective).
     pub path: Vec<PathStep>,
+    /// The evidence the adjudicator weighed for this path's entry (JEF-133) — the CVEs
+    /// on the entry's image and the runtime signals observed on it. Pulled from the same
+    /// [`SecurityGraph::entry_evidence`] the model reads, so the dashboard answers "what
+    /// is the evidence for this path?" with the model's own inputs. ADR-0016 frames the
+    /// two as divergent: CVEs are a SEVERITY/reachability input, runtime alerts the LIVE
+    /// corroboration signal — the view presents them as two distinct labeled blocks.
+    pub evidence: EntryEvidence,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
@@ -72,13 +80,113 @@ pub struct PathStep {
     pub to: String,
 }
 
+/// A single CVE on the entry's image, the dashboard-/JSON-facing projection of a
+/// [`graph::Vulnerability`] (JEF-133). The same fields `cve_evidence` surfaces to the
+/// model: id, severity, reachability, fix availability, and CWE/advisory when the
+/// mounted snapshot enriched it. ADR-0016: this is a SEVERITY/reachability input — "how
+/// bad IF exploited" — never on its own the breach call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CveEvidence {
+    pub id: String,
+    /// `low` / `medium` / `high` / `critical` (from [`graph::Severity::label`]).
+    pub severity: String,
+    /// Whether the CVE is listed in a known-exploited catalogue (CISA KEV) — the
+    /// stronger-than-severity exploitation signal.
+    pub kev: bool,
+    /// `unknown` / `loaded-at-runtime` / `not-observed` (from [`graph::Reachability`]).
+    pub reachability: String,
+    /// A human fix-availability phrase: `no fix available`, `fix available: <ver>`, or
+    /// `fix available: <installed> to <fixed>` — the same shape the prompt uses.
+    pub fix: String,
+    /// The advisory title (trivy's `title`), if reported. Untrusted free-text — HTML-
+    /// escaped at render time like every other model-adjacent string.
+    pub title: Option<String>,
+    /// CWE id(s) from a mounted advisory snapshot (ADR-0015), if matched. Empty otherwise.
+    pub cwe: Vec<String>,
+}
+
+impl CveEvidence {
+    /// Project a graph [`Vulnerability`] into the view shape. Keeps the fix-availability
+    /// phrasing identical to the adjudicator's `cve_evidence` so the operator reads the
+    /// same fact the model did.
+    fn from_vuln(v: &Vulnerability) -> Self {
+        let fix = match (v.fixed_version.as_deref(), v.installed_version.as_deref()) {
+            (Some(fixed), Some(installed)) => format!("fix available: {installed} to {fixed}"),
+            (Some(fixed), None) => format!("fix available: {fixed}"),
+            (None, _) => "no fix available".to_string(),
+        };
+        CveEvidence {
+            id: v.id.clone(),
+            severity: v.severity.label().to_string(),
+            kev: v.exploited_in_wild,
+            reachability: v.reachability.label().to_string(),
+            fix,
+            title: v.title.clone(),
+            cwe: v
+                .advisory
+                .as_ref()
+                .map(|a| a.cwe.clone())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// The two evidence blocks ADR-0016 keeps distinct, attached to a finding's entry
+/// (JEF-133):
+///
+/// - `cves` — the entry image's foothold-relevant CVEs (KEV or critical), the
+///   SEVERITY/reachability input.
+/// - `runtime` — the runtime [`Behavior`]s observed on the entry, the LIVE-corroboration
+///   signal. The subset that actually *corroborates* (Falco-style `Alert`s) is what flips
+///   `corroborated`; non-corroborating agent behaviors (exec/connect/secret-read/library-
+///   load/privilege-change) ride along as context, exactly as the model sees them.
+///
+/// Both empty is the honest "no evidence" state (render shows "none" / "unknown", never
+/// an implied-absent blank — JEF-161 coverage-gap idiom).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EntryEvidence {
+    pub cves: Vec<CveEvidence>,
+    pub runtime: Vec<Behavior>,
+}
+
+impl EntryEvidence {
+    /// Pull the entry's evidence from the graph — the SAME selection the adjudicator
+    /// reads ([`SecurityGraph::entry_evidence`]: KEV-or-critical CVEs + the entry's
+    /// runtime behaviors), projected into the view shape.
+    fn for_entry(graph: &SecurityGraph, entry: &super::graph::NodeKey) -> Self {
+        let (vulns, runtime) = graph.entry_evidence(entry);
+        EntryEvidence {
+            cves: vulns.iter().map(CveEvidence::from_vuln).collect(),
+            runtime,
+        }
+    }
+
+    /// The runtime behaviors that actually corroborate the chain (Falco-style alerts) —
+    /// what flips `ProvenChain::corroborated` (ADR-0009). Separated from context behaviors
+    /// in the live-corroboration block.
+    fn corroborating(&self) -> impl Iterator<Item = &Behavior> {
+        self.runtime.iter().filter(|b| b.is_alert())
+    }
+
+    /// The non-corroborating agent behaviors — context for the chain, not a corroboration
+    /// (exec/connect/secret-read/library-load/privilege-change). Shown for context.
+    fn context_behaviors(&self) -> impl Iterator<Item = &Behavior> {
+        self.runtime.iter().filter(|b| !b.is_alert())
+    }
+}
+
 impl Finding {
-    pub fn from_chain(chain: &ProvenChain) -> Self {
+    /// Build a finding from a proven chain and the graph it was proven over. The graph is
+    /// needed for the per-entry evidence blocks (JEF-133): the chain alone carries the
+    /// topology and verdict, but the CVEs and runtime signals live on the entry's graph
+    /// node — the same place the adjudicator reads them.
+    pub fn from_chain(chain: &ProvenChain, graph: &SecurityGraph) -> Self {
         let action = chain
             .single_edge_cuts
             .first()
             .map(super::respond::ProposedAction::for_cut);
         Finding {
+            evidence: EntryEvidence::for_entry(graph, &chain.entry),
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
             tactic: chain.attack.tactic.id().to_string(),
@@ -818,13 +926,17 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
          <span class=\"muted\">— deterministic facts; the model's call is above</span></div>\
          <ul>{facts}</ul></div>"
     );
+    // The per-path evidence (JEF-133): the entry's CVEs (severity input) and runtime
+    // alerts (live corroboration), the two ADR-0016 blocks — placed right after the
+    // certainty rail so "what's proven" → "what's the evidence" reads top to bottom.
+    let evidence = evidence_blocks(&f.evidence);
     let todo_line = format!(
         "<div class=\"todo\"><b>what to do:</b> {}</div>",
         what_to_do(&f.disposition)
     );
     let aria = escape(&path_aria_label(&f.entry, one));
     format!(
-        "<div class=\"card\">{verdict_line}{rail}\
+        "<div class=\"card\">{verdict_line}{rail}{evidence}\
          <div class=\"kc2\">the picture of those facts — kill chain: {}  {status}</div>\
          <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}</div>",
         escape(&f.killchain),
@@ -996,6 +1108,198 @@ fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
     facts
 }
 
+/// How many CVEs to list inline before the rest go behind a "show all" `<details>`
+/// expander (JEF-133 AC: CVE lists can be long — summarize, detail on demand). The
+/// top-N are shown by `severity_rank` so the worst surface first.
+const CVE_INLINE_CAP: usize = 3;
+
+/// The CSS tone class for a CVE severity label — reuses the chip idiom so critical/high
+/// read as alarming and low/medium calm, WITHOUT relying on color alone (the label text
+/// carries the meaning too, JEF-161 AC #4 accessibility).
+fn severity_tone(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "sev-critical",
+        "high" => "sev-high",
+        "medium" => "sev-medium",
+        _ => "sev-low",
+    }
+}
+
+/// A sort key putting the worst CVEs first: critical, then high, then KEV-flagged, then
+/// the rest. Used for both the inline top-N and the severity summary.
+fn severity_rank(c: &CveEvidence) -> u8 {
+    match c.severity.as_str() {
+        "critical" => 0,
+        "high" => 1,
+        _ if c.kev => 2,
+        "medium" => 3,
+        _ => 4,
+    }
+}
+
+/// One CVE as a list item: id, a severity chip, KEV/reachability/fix, and CWE/title when
+/// present. All free-text (title) is HTML-escaped — it is untrusted third-party data.
+fn cve_li(c: &CveEvidence) -> String {
+    let kev = if c.kev {
+        " <span class=\"kev\" title=\"CISA Known-Exploited\">KEV</span>"
+    } else {
+        ""
+    };
+    let cwe = if c.cwe.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " <span class=\"muted\">[{}]</span>",
+            escape(&c.cwe.join(", "))
+        )
+    };
+    let title = match c.title.as_deref() {
+        Some(t) if !t.is_empty() => format!(" — {}", escape(t)),
+        _ => String::new(),
+    };
+    format!(
+        "<li><code>{}</code> <span class=\"chip {}\">{}</span>{kev} \
+         <span class=\"muted\">reachability: {} · {}</span>{cwe}{title}</li>",
+        escape(&c.id),
+        severity_tone(&c.severity),
+        escape(&c.severity),
+        escape(&c.reachability),
+        escape(&c.fix),
+    )
+}
+
+/// The CVE evidence block (JEF-133) — the SEVERITY/reachability input half of ADR-0016.
+/// A one-line summary (count + the worst severities) with the full list behind a
+/// `<details>` expander when it runs long. Empty CVEs render an honest muted "none on the
+/// entry's image" — never an implied-absent blank box (JEF-161 coverage-gap idiom).
+fn cve_block(ev: &EntryEvidence) -> String {
+    if ev.cves.is_empty() {
+        return "<div class=\"ev ev-cve\"><div class=\"ev-cap\">CVEs \
+                <span class=\"muted\">— severity input (ADR-0016: how bad IF exploited)</span>\
+                </div><div class=\"muted\">none on the entry's image \
+                <span class=\"muted\">(KEV or critical; lower-severity CVEs not shown)</span>\
+                </div></div>"
+            .to_string();
+    }
+
+    let mut sorted: Vec<&CveEvidence> = ev.cves.iter().collect();
+    sorted.sort_by(|a, b| {
+        severity_rank(a)
+            .cmp(&severity_rank(b))
+            .then(a.id.cmp(&b.id))
+    });
+
+    // Summary: count + a per-severity tally (critical/high/medium/low), worst first.
+    let mut by_sev: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &sorted {
+        *by_sev.entry(c.severity.as_str()).or_default() += 1;
+    }
+    let order = ["critical", "high", "medium", "low"];
+    let tally: Vec<String> = order
+        .iter()
+        .filter_map(|s| by_sev.get(*s).map(|n| format!("{n} {s}")))
+        .collect();
+    let n = sorted.len();
+    let summary = format!(
+        "<b>{n}</b> CVE{} <span class=\"muted\">({})</span>",
+        if n == 1 { "" } else { "s" },
+        tally.join(", ")
+    );
+
+    let inline: String = sorted
+        .iter()
+        .take(CVE_INLINE_CAP)
+        .map(|c| cve_li(c))
+        .collect();
+    let rest: String = sorted
+        .iter()
+        .skip(CVE_INLINE_CAP)
+        .map(|c| cve_li(c))
+        .collect();
+    let more = if rest.is_empty() {
+        String::new()
+    } else {
+        format!("<details><summary>show all {n} CVEs</summary><ul>{rest}</ul></details>",)
+    };
+
+    format!(
+        "<div class=\"ev ev-cve\"><div class=\"ev-cap\">CVEs \
+         <span class=\"muted\">— severity input (ADR-0016: how bad IF exploited)</span></div>\
+         <div class=\"ev-sum\">{summary}</div><ul>{inline}</ul>{more}</div>"
+    )
+}
+
+/// The runtime-alert block (JEF-133) — the LIVE-corroboration half of ADR-0016. Lists the
+/// corroborating signals first (Falco-style `Alert`s, what flips `corroborated`), then the
+/// non-corroborating agent behaviors as context. Empty renders an honest muted "no runtime
+/// signal observed" — never implied-absent.
+fn runtime_block(ev: &EntryEvidence) -> String {
+    let corroborating: Vec<&Behavior> = ev.corroborating().collect();
+    let context: Vec<&Behavior> = ev.context_behaviors().collect();
+
+    let body = if corroborating.is_empty() && context.is_empty() {
+        "<div class=\"muted\">no runtime signal observed on this entry \
+         <span class=\"muted\">(no Falco alert, no agent behavior attributed)</span></div>"
+            .to_string()
+    } else {
+        let mut out = String::new();
+        if corroborating.is_empty() {
+            out.push_str(
+                "<div class=\"muted\">no corroborating alert \
+                 (nothing flips this chain to live-exploited)</div>",
+            );
+        } else {
+            let items: String = corroborating
+                .iter()
+                .map(|b| {
+                    format!(
+                        "<li><span class=\"chip chip-breach\">CORROBORATES</span> {}</li>",
+                        escape(&b.summary())
+                    )
+                })
+                .collect();
+            out.push_str(&format!("<ul>{items}</ul>"));
+        }
+        if !context.is_empty() {
+            let items: String = context
+                .iter()
+                .map(|b| {
+                    format!(
+                        "<li><span class=\"muted\">[{}]</span> {}</li>",
+                        escape(b.variant_label()),
+                        escape(&b.summary())
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "<details><summary>{} agent behavior{} (context, not corroboration)</summary>\
+                 <ul>{items}</ul></details>",
+                context.len(),
+                if context.len() == 1 { "" } else { "s" },
+            ));
+        }
+        out
+    };
+
+    format!(
+        "<div class=\"ev ev-runtime\"><div class=\"ev-cap\">runtime alerts \
+         <span class=\"muted\">— live corroboration (ADR-0016: is it being exploited NOW)\
+         </span></div>{body}</div>"
+    )
+}
+
+/// The two ADR-0016 evidence blocks for a finding's entry (JEF-133), wrapped so they read
+/// as one "evidence for this path" section beneath the certainty rail. CVEs (severity
+/// input) then runtime alerts (live corroboration) — always both blocks, each with its own
+/// honest empty state, so the operator can tell "no CVE" from "CVE block missing".
+fn evidence_blocks(ev: &EntryEvidence) -> String {
+    format!(
+        "<div class=\"evidence\"><div class=\"ev-head\">evidence for this path</div>{}{}</div>",
+        cve_block(ev),
+        runtime_block(ev),
+    )
+}
+
 /// The first `CVE-NNNN-NNNN` id in a string (case-insensitive prefix), if any — the
 /// only CVE signal available from existing fields (the model cites it in its verdict).
 /// Used by the certainty rail; the full per-path CVE evidence is JEF-133's job.
@@ -1119,6 +1423,16 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
          <ul>{facts}</ul></div>"
     );
 
+    // The per-path evidence (JEF-133): the entry's CVEs + runtime alerts, the two ADR-0016
+    // blocks. The model judges per ENTRY over everything it reaches, so the whole card
+    // shares ONE entry's evidence — take it from the first finding (all `fs` are this
+    // entry's paths). Behaviors are attributed by pod UID, so this is the entry's own
+    // low-cardinality signal set, no per-objective sprawl.
+    let evidence = fs
+        .first()
+        .map(|f| evidence_blocks(&f.evidence))
+        .unwrap_or_default();
+
     // Severity ≠ breach (ADR-0016): a broad, calm [SAFE] entry with a huge graph is the
     // INTENDED picture — breadth is severity, not urgency. Call it out so the wide graph
     // doesn't read as alarming. Only when the model judged it safe AND the reach is broad.
@@ -1176,7 +1490,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     // The card inner — identical regardless of tier; only the wrapper differs so the
     // lowest (context) tier is de-emphasized AND collapsible (AC #3).
     let inner = format!(
-        "{tier_chip}{verdict_line}{rail}{breadth}\
+        "{tier_chip}{verdict_line}{rail}{evidence}{breadth}\
          <div class=\"kc2\">the picture of those facts — \
          <span class=\"muted\">{} ({} objective{} reachable)</span></div>\
          <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}",
@@ -2752,6 +3066,23 @@ fn render_html(
          .expand summary{{cursor:pointer;color:#06c}}\
          .expand ul{{margin:.15rem 0 .4rem;padding-left:1.1rem;columns:2}}\
          .expand li{{margin:.05rem 0;font-family:ui-monospace,monospace}}\
+         .evidence{{font-size:.78rem;margin:.2rem 0 .5rem}}\
+         .ev-head{{font-weight:600;color:#444;margin:.1rem 0 .2rem}}\
+         .ev{{border-left:2px solid #ccc;padding:.1rem 0 .1rem .6rem;margin:.2rem 0}}\
+         .ev-cve{{border-left-color:#9a5b00}}\
+         .ev-runtime{{border-left-color:#b00000}}\
+         .ev-cap{{font-weight:600;color:#333}}\
+         .ev-sum{{margin:.1rem 0}}\
+         .ev ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
+         .ev li{{margin:.1rem 0;color:#333}}\
+         .ev code{{background:#f4f4f4;padding:0 .2rem}}\
+         .ev summary{{cursor:pointer;color:#06c}}\
+         .ev details ul{{margin:.1rem 0 .3rem}}\
+         .sev-critical{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
+         .sev-high{{color:#9a5b00;background:#fff3e0;border-color:#cc7a00}}\
+         .sev-medium{{color:#555;background:#f4f4f4;border-color:#bbb}}\
+         .sev-low{{color:#555;background:#f4f4f4;border-color:#ddd}}\
+         .kev{{font-family:ui-monospace,monospace;font-size:.7rem;font-weight:700;color:#7a0000;background:#fdecec;border:1px solid #b00000;border-radius:2px;padding:0 .25rem}}\
          .legend{{font-size:.75rem;color:#555;margin:.2rem 0 .6rem}}\
          .legend code{{background:#f4f4f4;padding:0 .2rem}}\
          table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
@@ -3117,6 +3448,7 @@ mod tests {
             killchain: "T1552 Unsecured Credentials".into(),
             verdict: None,
             path: Vec::new(),
+            evidence: EntryEvidence::default(),
         }
     }
 
@@ -3521,7 +3853,10 @@ mod tests {
 
     #[test]
     fn disposition_keys_on_what_the_cut_can_actually_do() {
-        let disp = |c: &ProvenChain| Finding::from_chain(c).disposition;
+        // Disposition keys on the cut + chain flags, not on the per-entry evidence, so an
+        // empty graph (no CVEs/behaviors) is fine here.
+        let g = SecurityGraph::new();
+        let disp = |c: &ProvenChain| Finding::from_chain(c, &g).disposition;
 
         // A network cut that meets the bar is the only thing that auto-applies.
         assert_eq!(
@@ -3562,7 +3897,10 @@ mod tests {
             promoted: true,
             ..chain("reaches/Tcp", false, false, true)
         };
-        assert_eq!(Finding::from_chain(&promoted).disposition, "auto-eligible");
+        assert_eq!(
+            Finding::from_chain(&promoted, &g).disposition,
+            "auto-eligible"
+        );
     }
 
     /// Build a Finding with a two-hop path entry →reaches→ store →&lt;rel&gt;→ objective.
@@ -3605,6 +3943,9 @@ mod tests {
                     to: objective.into(),
                 },
             ],
+            // Most render tests don't exercise the evidence blocks; the dedicated
+            // JEF-133 tests below build findings with populated evidence.
+            evidence: EntryEvidence::default(),
         }
     }
 
@@ -5006,5 +5347,326 @@ mod tests {
         let pv = serde_json::to_value(&pre).unwrap();
         assert!(pv["prompt"].is_null());
         assert!(pv["reply"].is_null());
+    }
+
+    // ---- JEF-133: per-path CVE + runtime-alert evidence blocks ----
+
+    use crate::engine::graph::{Advisory, Reachability, Severity, Vulnerability};
+
+    /// A `Vulnerability` with the fields the evidence block reads.
+    fn vuln(id: &str, severity: Severity, kev: bool) -> Vulnerability {
+        Vulnerability {
+            id: id.into(),
+            severity,
+            exploited_in_wild: kev,
+            reachability: Reachability::NotObserved,
+            ..Default::default()
+        }
+    }
+
+    /// The view-shape `CveEvidence` for a vuln — what `EntryEvidence.cves` holds.
+    fn cve(id: &str, severity: Severity, kev: bool) -> CveEvidence {
+        CveEvidence::from_vuln(&vuln(id, severity, kev))
+    }
+
+    #[test]
+    fn cve_block_summarizes_count_and_top_severities() {
+        let ev = EntryEvidence {
+            cves: vec![
+                cve("CVE-2021-0001", Severity::Critical, true),
+                cve("CVE-2021-0002", Severity::High, false),
+                cve("CVE-2021-0003", Severity::Critical, false),
+            ],
+            runtime: vec![],
+        };
+        let html = cve_block(&ev);
+        // Count + per-severity tally, worst first.
+        assert!(html.contains("<b>3</b> CVEs"), "count: {html}");
+        assert!(
+            html.contains("2 critical, 1 high"),
+            "tally worst-first: {html}"
+        );
+        // Each id surfaces, with its severity and reachability.
+        assert!(html.contains("CVE-2021-0001"));
+        assert!(html.contains("reachability: not-observed"));
+        // The KEV-listed CVE is badged.
+        assert!(html.contains(">KEV<"), "KEV badge: {html}");
+        // Labeled as the severity-input block (ADR-0016).
+        assert!(html.contains("severity input"));
+    }
+
+    #[test]
+    fn cve_block_lists_long_sets_behind_a_details_expander() {
+        let cves: Vec<CveEvidence> = (0..7)
+            .map(|i| {
+                CveEvidence::from_vuln(&vuln(&format!("CVE-2021-000{i}"), Severity::High, false))
+            })
+            .collect();
+        let ev = EntryEvidence {
+            cves,
+            runtime: vec![],
+        };
+        let html = cve_block(&ev);
+        // The inline cap is small; the remainder hides behind a "show all" details.
+        assert!(
+            html.contains("<details><summary>show all 7 CVEs"),
+            "expander: {html}"
+        );
+        // The expander still names every CVE (all 7 appear somewhere in the block).
+        for i in 0..7 {
+            assert!(
+                html.contains(&format!("CVE-2021-000{i}")),
+                "CVE {i} present"
+            );
+        }
+    }
+
+    #[test]
+    fn cve_block_empty_state_is_honest_not_implied_absent() {
+        let html = cve_block(&EntryEvidence::default());
+        assert!(
+            html.contains("none on the entry's image"),
+            "honest none: {html}"
+        );
+        // Still a labeled block, never a missing/empty box.
+        assert!(html.contains("severity input"));
+        // No phantom count or list.
+        assert!(!html.contains("<ul>"), "no empty list: {html}");
+    }
+
+    #[test]
+    fn cve_block_renders_cwe_and_advisory_title() {
+        let mut v = vuln("CVE-2021-44228", Severity::Critical, true);
+        v.title = Some("Log4Shell remote code execution".into());
+        v.advisory = Some(Advisory {
+            summary: "deserialization".into(),
+            cwe: vec!["CWE-502".into()],
+            fix_ref: None,
+        });
+        v.fixed_version = Some("2.17.0".into());
+        v.installed_version = Some("2.14.0".into());
+        let html = cve_block(&EntryEvidence {
+            cves: vec![CveEvidence::from_vuln(&v)],
+            runtime: vec![],
+        });
+        assert!(html.contains("CWE-502"), "cwe surfaced: {html}");
+        assert!(html.contains("Log4Shell"), "title surfaced: {html}");
+        assert!(
+            html.contains("fix available: 2.14.0 to 2.17.0"),
+            "fix phrasing matches the prompt: {html}"
+        );
+    }
+
+    #[test]
+    fn runtime_block_separates_corroborating_alerts_from_context_behaviors() {
+        let ev = EntryEvidence {
+            cves: vec![],
+            runtime: vec![
+                Behavior::Alert {
+                    rule: "Terminal shell in container".into(),
+                },
+                Behavior::NetworkConnection {
+                    peer: "10.0.0.5".into(),
+                    internet: false,
+                },
+            ],
+        };
+        let html = runtime_block(&ev);
+        // The alert corroborates; the connection is context (behind a details).
+        assert!(html.contains("CORROBORATES"), "alert corroborates: {html}");
+        assert!(html.contains("Terminal shell in container"));
+        assert!(
+            html.contains("1 agent behavior (context, not corroboration)"),
+            "context count: {html}"
+        );
+        assert!(html.contains("connects to 10.0.0.5"));
+        // Labeled as the live-corroboration block (ADR-0016).
+        assert!(html.contains("live corroboration"));
+    }
+
+    #[test]
+    fn runtime_block_empty_state_is_honest() {
+        let html = runtime_block(&EntryEvidence::default());
+        assert!(
+            html.contains("no runtime signal observed"),
+            "honest none: {html}"
+        );
+        assert!(html.contains("live corroboration"));
+        assert!(!html.contains("CORROBORATES"));
+    }
+
+    #[test]
+    fn runtime_block_behaviors_without_an_alert_read_as_context_only() {
+        // Agent behaviors with no Falco alert: context, never an implied corroboration.
+        let ev = EntryEvidence {
+            cves: vec![],
+            runtime: vec![Behavior::SecretRead {
+                secret: "db-password".into(),
+            }],
+        };
+        let html = runtime_block(&ev);
+        assert!(
+            !html.contains("CORROBORATES"),
+            "no false corroboration: {html}"
+        );
+        assert!(html.contains("no corroborating alert"));
+        assert!(html.contains("reads secret db-password"));
+    }
+
+    #[test]
+    fn finding_carries_evidence_in_json_for_programmatic_use() {
+        // A finding with both CVEs and a runtime alert: the /findings JSON must carry the
+        // new fields (JEF-133 AC). Built via the render `finding` helper, then evidence set.
+        let mut f = finding(
+            "workload/app/Pod/web",
+            "secret/app/s",
+            "auto-eligible",
+            "can-read",
+            true,
+            Some("exploitable — RCE"),
+        );
+        f.evidence = EntryEvidence {
+            cves: vec![cve("CVE-2021-44228", Severity::Critical, true)],
+            runtime: vec![Behavior::Alert {
+                rule: "shell".into(),
+            }],
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["evidence"]["cves"][0]["id"], "CVE-2021-44228");
+        assert_eq!(v["evidence"]["cves"][0]["severity"], "critical");
+        assert_eq!(v["evidence"]["cves"][0]["kev"], true);
+        assert_eq!(v["evidence"]["cves"][0]["reachability"], "not-observed");
+        // The runtime Behavior serializes via its wire tag (`kind`).
+        assert_eq!(v["evidence"]["runtime"][0]["kind"], "alert");
+        assert_eq!(v["evidence"]["runtime"][0]["rule"], "shell");
+    }
+
+    #[test]
+    fn endpoint_card_renders_both_evidence_blocks() {
+        let mut f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "auto-eligible",
+            "can-read",
+            true,
+            Some("exploitable — RCE reaches the secret"),
+        );
+        f.evidence = EntryEvidence {
+            cves: vec![cve("CVE-2021-44228", Severity::Critical, true)],
+            runtime: vec![Behavior::Alert {
+                rule: "Terminal shell in container".into(),
+            }],
+        };
+        let refs = vec![&f];
+        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Flagged);
+        // Both ADR-0016 blocks present, clearly labeled and distinct.
+        assert!(html.contains("evidence for this path"));
+        assert!(html.contains("severity input"), "CVE block: {html}");
+        assert!(html.contains("live corroboration"), "runtime block: {html}");
+        assert!(html.contains("CVE-2021-44228"));
+        assert!(html.contains("CORROBORATES"));
+    }
+
+    #[test]
+    fn endpoint_card_with_no_evidence_renders_both_honest_empty_states() {
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "structural — propose",
+            "can-read",
+            true,
+            None,
+        );
+        let refs = vec![&f];
+        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Context);
+        // Neither block is omitted; each shows its honest "none/unknown" (JEF-161 idiom).
+        assert!(html.contains("none on the entry's image"));
+        assert!(html.contains("no runtime signal observed"));
+        assert!(!html.contains("CORROBORATES"));
+    }
+
+    #[test]
+    fn from_chain_pulls_entry_evidence_filtered_to_kev_or_critical() {
+        use crate::engine::graph::{
+            Edge, Exposure, Grade, Image, Node, Provenance, Relation, RuntimeSignal, Trust,
+            Workload,
+        };
+        use crate::engine::reason::proof::Link;
+        use std::time::SystemTime;
+
+        // Build a minimal graph: an entry workload runs an image carrying three CVEs —
+        // one critical, one KEV-high, one plain medium (must be filtered out — the
+        // dashboard surfaces the same KEV-or-critical bar the foothold/model uses).
+        let mut g = SecurityGraph::new();
+        let wl = Node::Workload(Workload {
+            namespace: "app".into(),
+            name: "web".into(),
+            kind: "Pod".into(),
+            labels: Default::default(),
+            meshed: false,
+            exposure: Exposure::Internet,
+            runtime: vec![RuntimeSignal {
+                behavior: Behavior::Alert {
+                    rule: "shell".into(),
+                },
+                provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+            }],
+            persistent: false,
+        });
+        let entry_key = wl.key();
+        let e = g.upsert_node(wl);
+        let img = g.upsert_node(Node::Image(Image {
+            digest: "sha256:abc".into(),
+            reference: Some("web:1".into()),
+            trust: Trust::Unknown,
+            vulnerabilities: vec![
+                vuln("CVE-2021-0001", Severity::Critical, false),
+                vuln("CVE-2021-0002", Severity::High, true), // KEV
+                vuln("CVE-2021-0003", Severity::Medium, false), // filtered
+            ],
+        }));
+        g.add_edge(
+            e,
+            img,
+            Edge {
+                relation: Relation::RunsImage,
+                provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+                grade: Grade::Proof,
+            },
+        );
+
+        let cut = Link {
+            from: entry_key.clone(),
+            to: NodeKey("secret/app/s".into()),
+            relation: "can-read".into(),
+            technique: None,
+            from_labels: Default::default(),
+            to_labels: Default::default(),
+        };
+        let chain = ProvenChain {
+            entry: entry_key,
+            objective: NodeKey("secret/app/s".into()),
+            attack: CREDENTIAL_ACCESS,
+            foothold: Some(EXPLOIT_PUBLIC_FACING),
+            corroborated: false,
+            adjudicated: true,
+            promoted: false,
+            exposed_entry: true,
+            verdict: None,
+            links: vec![cut.clone()],
+            single_edge_cuts: vec![cut],
+        };
+
+        let f = Finding::from_chain(&chain, &g);
+        let ids: Vec<&str> = f.evidence.cves.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"CVE-2021-0001"), "critical kept: {ids:?}");
+        assert!(ids.contains(&"CVE-2021-0002"), "KEV kept: {ids:?}");
+        assert!(
+            !ids.contains(&"CVE-2021-0003"),
+            "plain medium filtered (same bar as the foothold): {ids:?}"
+        );
+        // The entry's runtime alert is pulled too (the live-corroboration signal).
+        assert_eq!(f.evidence.runtime.len(), 1, "entry runtime signal carried");
+        assert!(f.evidence.runtime[0].is_alert());
     }
 }

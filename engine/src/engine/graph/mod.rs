@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
+use petgraph::visit::EdgeRef;
 
 use self::attack::AttackRef;
 
@@ -667,6 +668,48 @@ impl SecurityGraph {
     /// The underlying graph, for the proof layer's walks.
     pub fn inner(&self) -> &StableGraph<Node, Edge> {
         &self.graph
+    }
+
+    /// The evidence (ADR-0016 enrichment) attached to an `entry` node: the CVEs its
+    /// image carries and the runtime [`Behavior`]s observed on it. This is the SINGLE
+    /// source of truth for "what is the evidence on this entry" — the adjudicator's
+    /// prompt assembly and the dashboard's per-finding evidence blocks (JEF-133) both
+    /// read it, so the model and the operator see the same facts and can't drift.
+    ///
+    /// CVE selection mirrors the deterministic foothold's compromise bar:
+    /// exploited-in-wild (KEV) OR critical severity. Lower-severity CVEs are real but
+    /// don't clear the foothold bar, so they aren't surfaced as entry evidence (showing
+    /// them would tell the model/operator "this is the foothold-relevant set" when it
+    /// isn't). Behaviors are returned verbatim; the entry's runtime signals are already
+    /// attributed by pod UID at ingest, so this is low-cardinality.
+    ///
+    /// Returns empty vecs for an unknown key or a non-workload node.
+    pub fn entry_evidence(&self, entry_key: &NodeKey) -> (Vec<Vulnerability>, Vec<Behavior>) {
+        let Some(entry) = self.index_of(entry_key) else {
+            return (Vec::new(), Vec::new());
+        };
+        let behaviors: Vec<Behavior> = match self.graph.node_weight(entry) {
+            Some(Node::Workload(w)) => w.runtime.iter().map(|s| s.behavior.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let mut cves = Vec::new();
+        for edge in self.graph.edges(entry) {
+            if matches!(edge.weight().relation, Relation::RunsImage)
+                && let Some(Node::Image(image)) = self.graph.node_weight(edge.target())
+            {
+                cves.extend(
+                    image
+                        .vulnerabilities
+                        .iter()
+                        // Same bar as the deterministic foothold (compromisable): KEV or
+                        // critical. Keeps the model's "no CVE" and the operator's CVE block
+                        // honest about the foothold-relevant set.
+                        .filter(|v| v.exploited_in_wild || v.severity == Severity::Critical)
+                        .cloned(),
+                );
+            }
+        }
+        (cves, behaviors)
     }
 }
 

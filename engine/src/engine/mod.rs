@@ -492,8 +492,12 @@ impl Engine {
         // shows the carried-forward verdict, and when the judging loop below writes a
         // fresh verdict into the store it is visible IMMEDIATELY — no end-of-pass
         // re-publish is needed to surface it.
-        self.findings
-            .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
+        self.findings.replace(
+            chains
+                .iter()
+                .map(|c| dashboard::Finding::from_chain(c, &graph))
+                .collect(),
+        );
 
         // Snapshot gauges for this pass.
         self.metrics.chains.record(chains.len() as u64, &[]);
@@ -733,8 +737,12 @@ impl Engine {
         // what this re-publish is for (it was already written to the shared store the
         // instant each entry was judged, and `/findings` reads it from there) — this only
         // refreshes the structural enrichment of the rows.
-        self.findings
-            .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
+        self.findings.replace(
+            chains
+                .iter()
+                .map(|c| dashboard::Finding::from_chain(c, &graph))
+                .collect(),
+        );
 
         if structurally_changed && !chains.is_empty() {
             tracing::info!(count = chains.len(), "proven chains");

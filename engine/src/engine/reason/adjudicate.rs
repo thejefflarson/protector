@@ -33,13 +33,10 @@
 //! The prompt-building and verdict-parsing are pure and tested; the model call is
 //! the shared glue in [`crate::engine::model`].
 
-use petgraph::visit::EdgeRef;
 use serde_json::Value;
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{
-    Behavior, Node, NodeKey, Relation, SecurityGraph, Severity, Vulnerability,
-};
+use crate::engine::graph::{Behavior, NodeKey, Relation, SecurityGraph, Vulnerability};
 
 /// The model's judgement on a proven chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,42 +202,22 @@ fn cve_evidence(v: &Vulnerability) -> String {
 }
 
 /// The evidence behind an entry: the CVEs its image carries and the runtime signals
-/// observed on it — what the model needs to judge contextual realness.
+/// observed on it — what the model needs to judge contextual realness. The raw evidence
+/// (structured `Vulnerability` + `Behavior`) comes from [`SecurityGraph::entry_evidence`],
+/// the single source of truth shared with the dashboard's per-finding evidence blocks
+/// (JEF-133), so the model and the operator can never see a different set of facts. Here
+/// the CVEs are rendered into the prompt-string form:
+///
+/// each line widens the CVE's evidence (JEF-51 + JEF-66): id, severity, reachability, and
+/// a fix-availability indication so the model can reason about exploitability — "a fix
+/// exists but the workload is still on the vulnerable version" vs "no fix available". The
+/// short advisory title (untrusted free-text) is appended when present; the WHOLE string
+/// is fenced+sanitized by `fence_list` at prompt-build time, so the title can't inject
+/// prompt structure. The string flows verbatim into both the prompt and the verdict
+/// fingerprint, so any of these fields changing busts the cache and re-judges that entry.
 fn entry_evidence(graph: &SecurityGraph, entry_key: &NodeKey) -> (Vec<String>, Vec<Behavior>) {
-    let g = graph.inner();
-    let Some(entry) = graph.index_of(entry_key) else {
-        return (Vec::new(), Vec::new());
-    };
-    let behaviors: Vec<Behavior> = match g.node_weight(entry) {
-        Some(Node::Workload(w)) => w.runtime.iter().map(|s| s.behavior.clone()).collect(),
-        _ => Vec::new(),
-    };
-    let mut cves = Vec::new();
-    for edge in g.edges(entry) {
-        if matches!(edge.weight().relation, Relation::RunsImage)
-            && let Some(Node::Image(image)) = g.node_weight(edge.target())
-        {
-            cves.extend(
-                image
-                    .vulnerabilities
-                    .iter()
-                    // Surface the same evidence the deterministic foothold uses
-                    // (exploited-in-wild OR critical), so the model isn't told
-                    // "no CVE" for a critical-but-not-KEV foothold.
-                    .filter(|v| v.exploited_in_wild || v.severity == Severity::Critical)
-                    // Widen each CVE's evidence (JEF-51 + JEF-66): id, severity,
-                    // reachability, and a fix-availability indication so the model can
-                    // reason about exploitability — "a fix exists but the workload is
-                    // still on the vulnerable version" vs "no fix available". The short
-                    // advisory title (untrusted free-text) is appended when present; the
-                    // WHOLE string is fenced+sanitized by `fence_list` at prompt-build
-                    // time, so the title can't inject prompt structure. The string flows
-                    // verbatim into both the prompt and the verdict fingerprint, so any
-                    // of these fields changing busts the cache and re-judges that entry.
-                    .map(cve_evidence),
-            );
-        }
-    }
+    let (vulns, behaviors) = graph.entry_evidence(entry_key);
+    let cves = vulns.iter().map(cve_evidence).collect();
     (cves, behaviors)
 }
 
