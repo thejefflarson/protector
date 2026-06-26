@@ -18,6 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use super::journal::{Decision, DecisionJournal, JournalEntry};
+use super::reason::adjudicate::Verdict;
 use super::reason::proof::ProvenChain;
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
@@ -95,6 +96,10 @@ impl Finding {
                 .map(super::respond::cut_signature),
             breach_relevant: chain.is_breach_relevant(),
             killchain: killchain(chain),
+            // The verdict is NOT stamped per-chain any more (JEF-157): it is the
+            // model's per-ENTRY call, held in the shared verdict store and resolved by
+            // [`Findings::snapshot`] at read time. `chain.verdict` is carried along only
+            // as a fallback for the timer path (no dashboard) / direct callers.
             verdict: chain.verdict.clone(),
             path: chain
                 .links
@@ -200,11 +205,158 @@ impl BakeStats {
     }
 }
 
+/// One internet-facing entry's verdict state — the SINGLE source of truth for the
+/// model's call on that entry (JEF-157). Collapses what used to be four separate
+/// per-entry maps in the engine (`last_verdict` / `verdict_cache` / `restored_verdicts`
+/// / `journaled_verdicts`) into one record, so `/findings` and `/judgements` can never
+/// disagree on an entry's verdict and the dashboard reflects a verdict the instant it
+/// lands — not only at end-of-pass.
+#[derive(Debug, Clone, Default)]
+pub struct VerdictEntry {
+    /// The current DISPLAY verdict, typed — the carry-forward + Uncertain-fallback
+    /// memory (formerly `last_verdict`). `None` until a live verdict has been displayed
+    /// this run; a journal-restored entry carries [`restored`](Self::restored) instead.
+    pub display: Option<Verdict>,
+    /// A verdict restored from the durable journal on boot (JEF-141), its summary string
+    /// — shown until a live verdict supersedes it (formerly `restored_verdicts`). Cleared
+    /// once `display` lands a live verdict for the entry.
+    pub restored: Option<String>,
+    /// The cached DECISIVE verdict and the evidence fingerprint it was judged against —
+    /// the re-judge gate (formerly `verdict_cache`). Present only for a decisive verdict;
+    /// an unchanged fingerprint serves this without calling the (slow CPU) model again.
+    pub cached: Option<(String, Verdict)>,
+    /// The last verdict summary journaled + notified for this entry — the dedup key
+    /// (formerly `journaled_verdicts`), so a steady-state cluster writes/notifies once
+    /// per change, not per pass.
+    pub journaled: Option<String>,
+}
+
+impl VerdictEntry {
+    /// The summary string to DISPLAY for this entry: the live display verdict if one
+    /// has landed this run, else the journal-restored summary, else nothing. This is
+    /// exactly the carry-forward precedence the engine used to apply at publish time —
+    /// a live verdict supersedes a restored one — now in one place.
+    fn display_summary(&self) -> Option<String> {
+        self.display
+            .as_ref()
+            .map(Verdict::summary)
+            .or_else(|| self.restored.clone())
+    }
+}
+
+/// The single per-entry verdict store (JEF-157): the one source of truth for the
+/// model's verdict per internet-facing entry, shared (`Arc`) between the engine (the
+/// writer) and the dashboard (the reader). Both `/findings` (via [`Findings::snapshot`])
+/// and the per-pass display derive each finding's verdict by looking its entry up here
+/// at render time, so a verdict is visible the moment it is written — there is no
+/// end-of-pass re-publish lag (the bug JEF-157 fixes: `/judgements` showing a verdict
+/// `/findings` didn't yet have). Keyed by the entry's node key.
+#[derive(Default)]
+pub struct VerdictStore {
+    entries: Mutex<BTreeMap<String, VerdictEntry>>,
+}
+
+impl VerdictStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The display summary for an entry, if any — what `/findings` shows for a chain
+    /// from that entry (a live verdict, or a journal-restored one). `None` when the
+    /// entry has no verdict yet (the model hasn't reached it).
+    pub fn display_summary(&self, entry: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(VerdictEntry::display_summary)
+    }
+
+    /// Apply a mutation to an entry's record (inserting a default first), under one lock.
+    /// The engine's writes go through this so each is atomic and visible immediately.
+    fn update(&self, entry: &str, f: impl FnOnce(&mut VerdictEntry)) {
+        let mut entries = self.entries.lock().expect("verdict store mutex poisoned");
+        f(entries.entry(entry.to_string()).or_default());
+    }
+
+    /// Seed a journal-restored verdict summary for an entry (JEF-141) — shown until a
+    /// live verdict supersedes it. Does not touch the cache or the journaled-dedup key.
+    pub fn seed_restored(&self, entry: &str, summary: String) {
+        self.update(entry, |e| e.restored = Some(summary));
+    }
+
+    /// The cached decisive verdict for an entry whose fingerprint matches — the re-judge
+    /// gate. `Some(verdict)` serves the cache (no model call); `None` means re-judge.
+    pub fn cached_for(&self, entry: &str, fingerprint: &str) -> Option<Verdict> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(|e| match &e.cached {
+                Some((fp, v)) if fp == fingerprint => Some(v.clone()),
+                _ => None,
+            })
+    }
+
+    /// Cache a fresh DECISIVE verdict + its fingerprint for the re-judge gate.
+    pub fn cache_decisive(&self, entry: &str, fingerprint: String, verdict: Verdict) {
+        self.update(entry, |e| e.cached = Some((fingerprint, verdict)));
+    }
+
+    /// The entry's current typed DISPLAY verdict (the carry-forward + Uncertain-fallback
+    /// memory), if a live one has landed this run.
+    pub fn display_verdict(&self, entry: &str) -> Option<Verdict> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(|e| e.display.clone())
+    }
+
+    /// Record the entry's DISPLAY verdict the instant it is decided — making it visible
+    /// on `/findings` immediately (the JEF-157 no-lag fix). A live verdict supersedes any
+    /// journal-restored one for the entry.
+    pub fn set_display(&self, entry: &str, verdict: Verdict) {
+        self.update(entry, |e| {
+            e.display = Some(verdict);
+            e.restored = None;
+        });
+    }
+
+    /// The last verdict summary journaled/notified for an entry — the dedup key.
+    pub fn journaled(&self, entry: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(|e| e.journaled.clone())
+    }
+
+    /// Record the verdict summary just journaled/notified for an entry (the dedup key).
+    pub fn set_journaled(&self, entry: &str, summary: String) {
+        self.update(entry, |e| e.journaled = Some(summary));
+    }
+
+    /// Drop entries that are no longer present in the live cluster (ephemeral workloads,
+    /// removed exposure), so the store tracks the live cluster rather than growing
+    /// forever — the prune the engine ran across all four maps each pass.
+    pub fn retain_present(&self, present: &std::collections::HashSet<String>) {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .retain(|entry, _| present.contains(entry));
+    }
+}
+
 /// The current findings snapshot, shared between the engine (writer) and the HTTP
 /// server (reader).
 #[derive(Default)]
 pub struct Findings {
     rows: Mutex<Vec<Finding>>,
+    /// The single per-entry verdict store (JEF-157): each finding's verdict is derived
+    /// from this at [`snapshot`](Self::snapshot) time, so `/findings` reflects a verdict
+    /// the instant the engine writes it — never only at end-of-pass.
+    verdicts: Arc<VerdictStore>,
     /// Whether any action class is armed (`engine.enable` non-empty). Drives the
     /// remediations section title: "Active" when armed, "Proposed" in shadow.
     armed: std::sync::atomic::AtomicBool,
@@ -232,13 +384,34 @@ impl Findings {
         self.armed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The single per-entry verdict store (JEF-157), shared with the engine. The engine
+    /// writes verdicts here the instant they land; [`snapshot`](Self::snapshot) reads
+    /// them, so the dashboard never lags behind a judgement.
+    pub fn verdicts(&self) -> Arc<VerdictStore> {
+        self.verdicts.clone()
+    }
+
     /// Replace the snapshot with this pass's findings.
     pub fn replace(&self, findings: Vec<Finding>) {
         *self.rows.lock().expect("findings mutex poisoned") = findings;
     }
 
+    /// The current findings, each with its verdict resolved from the shared verdict
+    /// store (JEF-157) at read time. The published rows carry no verdict of their own;
+    /// the verdict is looked up per entry here, so a verdict the engine just wrote is
+    /// visible immediately — there is no end-of-pass re-publish needed to surface it.
     pub fn snapshot(&self) -> Vec<Finding> {
-        self.rows.lock().expect("findings mutex poisoned").clone()
+        let mut rows = self.rows.lock().expect("findings mutex poisoned").clone();
+        for f in &mut rows {
+            // A breach-relevant finding's verdict is the model's per-entry call, the one
+            // source of truth. Non-breach-relevant rows are never judged, so they keep
+            // their (absent) verdict. Resolving here means publishing the rows once is
+            // enough — the verdict tracks the store, not the last `replace`.
+            if f.breach_relevant {
+                f.verdict = self.verdicts.display_summary(&f.entry);
+            }
+        }
+        rows
     }
 
     /// Replace the behavioral-bake snapshot (JEF-48) with this pass's figures.
@@ -1644,6 +1817,109 @@ mod tests {
             snap.last().unwrap().entry,
             "entry-1",
             "the oldest (entry-0) was evicted"
+        );
+    }
+
+    /// A breach-relevant finding for one entry with no verdict of its own — the shape the
+    /// engine publishes (the verdict is resolved from the shared store at snapshot time).
+    fn breach_finding(entry: &str) -> Finding {
+        Finding {
+            entry: entry.into(),
+            objective: "secret/app/session-key".into(),
+            tactic: "TA0006".into(),
+            tactic_name: "Credential Access".into(),
+            technique: "T1552".into(),
+            technique_name: "Unsecured Credentials".into(),
+            foothold: false,
+            corroborated: false,
+            adjudicated: true,
+            promoted: false,
+            disposition: "no-cut".into(),
+            cut: None,
+            breach_relevant: true,
+            killchain: "T1552 Unsecured Credentials".into(),
+            verdict: None,
+            path: Vec::new(),
+        }
+    }
+
+    /// JEF-157 (the no-lag fix): a verdict written to the shared store is visible on the
+    /// `/findings` snapshot WITHOUT re-publishing the rows. This is exactly the bug the
+    /// ticket fixes — `/findings` used to update only at the end-of-pass re-publish, so a
+    /// just-judged entry showed in `/judgements` but not yet on the dashboard. With the
+    /// single store, the same rows published once reflect the verdict the instant it lands.
+    #[test]
+    fn findings_snapshot_reflects_a_store_write_without_republishing() {
+        let findings = Findings::new();
+        let verdicts = findings.verdicts();
+
+        // Publish the rows ONCE, with no verdict (what the engine does before judging).
+        findings.replace(vec![breach_finding("workload/app/Pod/web")]);
+        assert!(
+            findings.snapshot()[0].verdict.is_none(),
+            "no verdict before the model has judged the entry"
+        );
+
+        // The model judges the entry: write its verdict to the store. NO `replace` follows.
+        verdicts.set_display(
+            "workload/app/Pod/web",
+            Verdict::Exploitable("RCE reaches the secret".into()),
+        );
+
+        // The verdict is visible on the very next snapshot — no re-publish needed.
+        let snap = findings.snapshot();
+        assert_eq!(
+            snap[0].verdict.as_deref(),
+            Some("exploitable — RCE reaches the secret"),
+            "a store write surfaces on /findings immediately, mid-pass"
+        );
+    }
+
+    /// JEF-157 carry-forward: a journal-restored verdict shows until a live verdict
+    /// supersedes it, and the live verdict then wins — the precedence the engine used to
+    /// apply per-chain at publish time, now in one place.
+    #[test]
+    fn restored_verdict_shows_until_a_live_verdict_supersedes_it() {
+        let store = VerdictStore::new();
+        store.seed_restored(
+            "workload/app/Pod/web",
+            "exploitable — from before restart".into(),
+        );
+        assert_eq!(
+            store.display_summary("workload/app/Pod/web").as_deref(),
+            Some("exploitable — from before restart"),
+            "the restored verdict shows on boot"
+        );
+
+        // A live verdict supersedes the restored one (and clears the restored slot).
+        store.set_display(
+            "workload/app/Pod/web",
+            Verdict::Refuted("benign on review".into()),
+        );
+        assert_eq!(
+            store.display_summary("workload/app/Pod/web").as_deref(),
+            Some("not exploitable — benign on review"),
+            "a live verdict supersedes the restored one"
+        );
+    }
+
+    /// JEF-157 cache: a decisive verdict is served from the store for a matching
+    /// fingerprint (no re-judge), and a changed fingerprint misses (re-judge).
+    #[test]
+    fn cache_serves_a_matching_fingerprint_and_misses_a_changed_one() {
+        let store = VerdictStore::new();
+        store.cache_decisive("e", "fp-1".into(), Verdict::Refuted("r".into()));
+        assert!(
+            store.cached_for("e", "fp-1").is_some(),
+            "an unchanged fingerprint serves the cached verdict"
+        );
+        assert!(
+            store.cached_for("e", "fp-2").is_none(),
+            "a changed fingerprint misses (re-judge)"
+        );
+        assert!(
+            store.cached_for("other", "fp-1").is_none(),
+            "an unknown entry misses"
         );
     }
 

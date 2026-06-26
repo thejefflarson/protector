@@ -230,34 +230,27 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
-    /// Cross-pass verdict cache, keyed by internet-facing ENTRY → (evidence
-    /// fingerprint, the model's verdict). The model judges each breach-relevant entry
-    /// holistically over everything it reaches (ADR-0013), but a CPU-only local model
-    /// is far too slow to re-run on every watch event; an entry is re-judged only when
-    /// its fingerprint changes (its CVEs/runtime OR its reachable-objective set — so a
-    /// misconfig that newly exposes something re-triggers it). Pruned to present
-    /// entries each pass (ephemeral workloads, removed exposure).
-    verdict_cache: HashMap<String, (String, reason::adjudicate::Verdict)>,
-    /// The most recent verdict per internet-facing ENTRY, of *any* kind (decisive or
-    /// inconclusive) — distinct from [`verdict_cache`], which holds only decisive
-    /// verdicts and governs re-judging. This is the **display** memory: each pass
-    /// republishes findings with `verdict: None` *before* the (slow) judging loop runs,
-    /// so without carrying the last-known verdict forward the dashboard blanks every
-    /// pass. Seeded onto fresh chains at publish time so a judgement — even "uncertain
-    /// — model unavailable" — stays visible while the model re-judges. Pruned to present
-    /// entries each pass.
-    last_verdict: HashMap<String, reason::adjudicate::Verdict>,
-    /// Verdict summaries restored from the durable journal on boot (JEF-141), keyed by
-    /// entry. Display-only and verbatim (the model's own words from before the restart),
-    /// so a breach path shows its prior judgement IMMEDIATELY — before the slow CPU model
-    /// re-judges. Used only to seed `verdict` at publish time when there's no live
-    /// `last_verdict` yet; cleared for an entry once the model produces a fresh verdict,
-    /// and pruned to present entries each pass.
-    restored_verdicts: HashMap<String, String>,
-    /// The last breach-verdict summary written to the journal per entry, so a steady-state
-    /// cluster doesn't append an identical line every pass (JEF-141). Pruned to present
-    /// entries each pass.
-    journaled_verdicts: HashMap<String, String>,
+    /// The SINGLE per-entry verdict store (JEF-157), shared (`Arc`) with the dashboard's
+    /// [`dashboard::Findings`]. One record per internet-facing ENTRY collapses what used
+    /// to be four parallel maps:
+    /// - the cross-pass verdict CACHE (evidence fingerprint → decisive verdict): the
+    ///   model judges each breach-relevant entry holistically (ADR-0013), but a CPU-only
+    ///   local model is too slow to re-run every watch event, so an entry is re-judged
+    ///   only when its fingerprint changes (its CVEs/runtime OR its reachable-objective
+    ///   set — a misconfig that newly exposes something re-triggers it);
+    /// - the DISPLAY memory (the last verdict shown, decisive or inconclusive): carried
+    ///   forward so the dashboard never blanks while the slow model re-judges;
+    /// - the journal-RESTORED summary (JEF-141): the model's prior words shown on boot
+    ///   until a live verdict supersedes them;
+    /// - the JOURNALED-summary dedup key: a decisive verdict is journaled + notified only
+    ///   when it changed for the entry.
+    ///
+    /// Because both `/findings` (via [`dashboard::Findings::snapshot`]) and `/judgements`
+    /// derive an entry's verdict from this one store, they cannot disagree, and a verdict
+    /// is visible on the dashboard the instant the judging loop writes it here — there is
+    /// no end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral
+    /// workloads, removed exposure).
+    verdicts: std::sync::Arc<dashboard::VerdictStore>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -281,6 +274,10 @@ impl Engine {
         }
         let findings = std::sync::Arc::new(dashboard::Findings::new());
         findings.set_armed(!active.is_empty());
+        // The verdict store (JEF-157) is OWNED by the findings handle and SHARED with the
+        // engine: both write/read the same `Arc`, so a verdict the judging loop writes is
+        // visible on `/findings` immediately.
+        let verdicts = findings.verdicts();
         Self {
             adapters: observe::adapter::default_adapters(),
             active,
@@ -299,10 +296,7 @@ impl Engine {
             previous: GraphSnapshot::default(),
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
-            verdict_cache: HashMap::new(),
-            last_verdict: HashMap::new(),
-            restored_verdicts: HashMap::new(),
-            journaled_verdicts: HashMap::new(),
+            verdicts,
             metrics: EngineMetrics::new(),
         }
     }
@@ -361,7 +355,7 @@ impl Engine {
                     // one is computed. Replayed in chronological order, so the final write
                     // per entry wins. Display-only: the action logic still uses the live
                     // verdict, never this restored string.
-                    self.restored_verdicts.insert(key.clone(), verdict.clone());
+                    self.verdicts.seed_restored(key, verdict.clone());
                     restored_verdicts += 1;
                 }
                 journal::Decision::Revert { cut, reason } => {
@@ -489,29 +483,15 @@ impl Engine {
             }
         }
 
-        // Carry the last-known verdict forward onto each breach-relevant chain so the
-        // dashboard shows the most recent judgement IMMEDIATELY — the judging loop below
-        // is slow on a CPU model, and publishing with verdict=None first would blank the
-        // UI every pass. Both decisive and inconclusive verdicts are carried (seeing
-        // "uncertain — model unavailable" is the point — it shows the model was asked).
-        for c in chains.iter_mut() {
-            if c.is_breach_relevant() {
-                if let Some(v) = self.last_verdict.get(&c.entry.0) {
-                    c.verdict = Some(v.summary());
-                } else if let Some(restored) = self.restored_verdicts.get(&c.entry.0) {
-                    // No live verdict yet this run, but the durable journal carried one
-                    // forward from before the restart (JEF-141) — show it so the dashboard
-                    // isn't blank while the slow CPU model re-judges.
-                    c.verdict = Some(restored.clone());
-                }
-            }
-        }
-
         // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
-        // unreachable) adjudication. The dashboard must always reflect the current
-        // graph even while the model is judging or down — model latency must never
-        // blank the findings view. The judging loop below enriches verdicts and
-        // re-publishes; until it does, paths show the carried-forward verdict above.
+        // unreachable) adjudication. The dashboard must always reflect the current graph
+        // even while the model is judging or down — model latency must never blank the
+        // findings view. JEF-157: the rows carry NO per-chain verdict; each finding's
+        // verdict is resolved from the shared verdict store at snapshot time (the last-
+        // known live verdict, or a journal-restored one). So this single publish already
+        // shows the carried-forward verdict, and when the judging loop below writes a
+        // fresh verdict into the store it is visible IMMEDIATELY — no end-of-pass
+        // re-publish is needed to surface it.
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
@@ -593,12 +573,12 @@ impl Engine {
             objectives.dedup_by(|a, b| a.0 == b.0);
 
             let fingerprint = reason::adjudicate::entry_fingerprint(&graph, &entry, &objectives);
-            let verdict = match self.verdict_cache.get(entry_key) {
-                Some((fp, v)) if *fp == fingerprint => {
+            let verdict = match self.verdicts.cached_for(entry_key, &fingerprint) {
+                Some(v) => {
                     cached += 1;
-                    v.clone()
+                    v
                 }
-                _ => {
+                None => {
                     judged += 1;
                     // Time the (slow, CPU-bound) model call so its latency tail is
                     // observable in shadow (JEF-100). Recorded for every fresh call,
@@ -620,8 +600,8 @@ impl Engine {
                         }
                         decisive => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), verdict = ?decisive, "adjudicated entry");
-                            self.verdict_cache
-                                .insert(entry_key.clone(), (fingerprint, v.clone()));
+                            self.verdicts
+                                .cache_decisive(entry_key, fingerprint, v.clone());
                             "ok"
                         }
                     };
@@ -635,19 +615,19 @@ impl Engine {
             // model timeout — "model unavailable") but we have a prior decisive verdict,
             // keep showing the decisive one rather than regressing the dashboard to
             // "uncertain". The action logic below still uses this pass's real `verdict`.
-            let display = match (&verdict, self.last_verdict.get(entry_key)) {
+            let display = match (&verdict, self.verdicts.display_verdict(entry_key)) {
                 (reason::adjudicate::Verdict::Uncertain(_), Some(prior))
                     if !matches!(prior, reason::adjudicate::Verdict::Uncertain(_)) =>
                 {
-                    prior.clone()
+                    prior
                 }
                 _ => verdict.clone(),
             };
-            // Remember the displayed verdict for the carry-forward seed above, so the
-            // next pass shows it instead of blanking. A live verdict supersedes any
-            // journal-restored one for this entry.
-            self.last_verdict.insert(entry_key.clone(), display.clone());
-            self.restored_verdicts.remove(entry_key);
+            // Write the displayed verdict to the single source of truth (JEF-157) the
+            // MOMENT it's decided — so `/findings` shows it immediately, not only after
+            // an end-of-pass re-publish. A live verdict supersedes any journal-restored
+            // one for this entry (handled inside `set_display`).
+            self.verdicts.set_display(entry_key, display.clone());
             // Append the breach decision to the durable journal (JEF-141) — but only a
             // DECISIVE verdict, and only when it changed from the last line we wrote for
             // this entry, so a steady-state cluster doesn't append an identical line every
@@ -655,15 +635,14 @@ impl Engine {
             // discipline. A no-op when the journal is disabled (no volume).
             let summary = display.summary();
             if !matches!(display, reason::adjudicate::Verdict::Uncertain(_))
-                && self.journaled_verdicts.get(entry_key) != Some(&summary)
+                && self.verdicts.journaled(entry_key).as_ref() != Some(&summary)
             {
                 self.journal.record(journal::Decision::Breach {
                     entry: entry_key.clone(),
                     objectives: objectives.len(),
                     verdict: summary.clone(),
                 });
-                self.journaled_verdicts
-                    .insert(entry_key.clone(), summary.clone());
+                self.verdicts.set_journaled(entry_key, summary.clone());
                 // The ONE sanctioned outbound notification (JEF-144, ADR-0018), fired on the
                 // SAME decision identity as the journal write above — a decisive verdict whose
                 // summary changed for this entry — so dedupe and durability share one key and
@@ -681,8 +660,9 @@ impl Engine {
                     })
                     .await;
             }
-            // The entry's verdict applies to every chain from it. Keep the model's call
-            // — positive *and* negative — on each so the dashboard shows why it acted.
+            // The entry's verdict applies to every chain from it. The dashboard derives
+            // the verdict from the shared store (JEF-157); this per-chain stamp is kept
+            // for the timer path's `chain.emit()` log and as the `from_chain` fallback.
             for &i in idxs {
                 *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
                 chains[i].verdict = Some(display.summary());
@@ -696,15 +676,8 @@ impl Engine {
             }
         }
         // Drop verdicts for entries that no longer exist (ephemeral workloads, removed
-        // exposure), so the cache tracks the live cluster rather than growing forever.
-        self.verdict_cache
-            .retain(|entry, _| current_entries.contains(entry));
-        self.last_verdict
-            .retain(|entry, _| current_entries.contains(entry));
-        self.restored_verdicts
-            .retain(|entry, _| current_entries.contains(entry));
-        self.journaled_verdicts
-            .retain(|entry, _| current_entries.contains(entry));
+        // exposure), so the store tracks the live cluster rather than growing forever.
+        self.verdicts.retain_present(&current_entries);
         // Current verdict distribution over breach paths (per-label gauge).
         for (verdict, count) in &verdict_counts {
             self.metrics
@@ -747,8 +720,11 @@ impl Engine {
                 "adjudication pass (model calls = judged)"
             );
         }
-        // Re-publish with the model's verdicts now attached — the enriched view
-        // (promotions move into remediations; judged paths show the model's words).
+        // Re-publish the enriched chains — promotions move into remediations, vetoes flip
+        // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
+        // what this re-publish is for (it was already written to the shared store the
+        // instant each entry was judged, and `/findings` reads it from there) — this only
+        // refreshes the structural enrichment of the rows.
         self.findings
             .replace(chains.iter().map(dashboard::Finding::from_chain).collect());
 
@@ -1299,6 +1275,126 @@ mod tests {
             calls.load(Ordering::SeqCst),
             before,
             "an unchanged path must not be re-judged (cache hit)"
+        );
+    }
+
+    /// An adjudicator that returns a fixed verdict and never re-judges issues a `judged`
+    /// only on a fingerprint miss.
+    struct FixedAdjudicator(Verdict);
+
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for FixedAdjudicator {
+        async fn judge(
+            &self,
+            _entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+        ) -> Verdict {
+            self.0.clone()
+        }
+    }
+
+    fn engine_with_adjudicator(adj: Box<dyn reason::adjudicate::Adjudicator>) -> Engine {
+        Engine::new(
+            EnabledActions::from_names(std::iter::empty::<&str>()),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(reason::hypothesis::NullHypothesizer),
+            adj,
+        )
+    }
+
+    /// JEF-157 (the no-lag fix): a judged entry's verdict is carried on `/findings` by the
+    /// single shared verdict STORE, resolved at snapshot time — not stamped onto the rows
+    /// by an end-of-pass re-publish. We prove the store is the source of truth: after a
+    /// pass the verdict is on `/findings`, AND it equals the store's value for that entry
+    /// (the same `Arc` the dashboard reads). With the store, a verdict written the instant
+    /// the judging loop decides it is visible immediately — it never lags behind
+    /// `/judgements` (the confirmed-live bug: `/judgements`=N while `/findings`=0).
+    #[tokio::test]
+    async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
+        let mut engine = engine_with_adjudicator(Box::new(FixedAdjudicator(Verdict::Exploitable(
+            "RCE reaches the secret".into(),
+        ))));
+        engine.process(&exposed_snapshot(true)).await;
+
+        let findings = engine.findings();
+        // The verdict is on /findings, in the model's own words.
+        let snap = findings.snapshot();
+        assert!(
+            snap.iter().any(|f| f.breach_relevant
+                && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+            "the judged verdict is on /findings (via the store)"
+        );
+        // And it is the SAME value the shared store holds for that entry — proving
+        // /findings derives the verdict from the store, the one source of truth, rather
+        // than a separately-stamped per-row copy. The dashboard reads this exact `Arc`.
+        let entry = snap
+            .iter()
+            .find(|f| f.breach_relevant)
+            .map(|f| f.entry.clone())
+            .expect("a breach-relevant finding");
+        assert_eq!(
+            findings.verdicts().display_summary(&entry).as_deref(),
+            Some("exploitable — RCE reaches the secret"),
+            "/findings and the store agree on the entry's verdict"
+        );
+    }
+
+    /// JEF-157 carry-forward: when a later pass comes back Uncertain (a transient model
+    /// timeout), the dashboard keeps showing the prior DECISIVE verdict rather than
+    /// regressing to "uncertain" — the store holds the carried-forward display verdict.
+    #[tokio::test]
+    async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
+        // An adjudicator that's decisive on the first call and Uncertain after — the
+        // shape of a model that judged once, then timed out on a re-judge.
+        struct FlakyAdjudicator(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl reason::adjudicate::Adjudicator for FlakyAdjudicator {
+            async fn judge(
+                &self,
+                _entry: &NodeKey,
+                _objectives: &[(NodeKey, AttackRef)],
+                _graph: &SecurityGraph,
+            ) -> Verdict {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Verdict::Exploitable("RCE reaches the secret".into())
+                } else {
+                    Verdict::Uncertain("model unavailable".into())
+                }
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = engine_with_adjudicator(Box::new(FlakyAdjudicator(calls.clone())));
+
+        // Pass 1: decisive Exploitable, shown on /findings.
+        engine.process(&exposed_snapshot(true)).await;
+        assert!(
+            engine
+                .findings()
+                .snapshot()
+                .iter()
+                .any(|f| f.breach_relevant
+                    && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+            "the first decisive verdict shows"
+        );
+
+        // Pass 2 with DIFFERENT evidence (no CVE) so the fingerprint changes and the model
+        // is re-consulted — and this time it returns Uncertain. The dashboard must keep
+        // the prior decisive verdict, not regress to "uncertain".
+        engine.process(&exposed_snapshot(false)).await;
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "the changed fingerprint forced a re-judge"
+        );
+        assert!(
+            engine
+                .findings()
+                .snapshot()
+                .iter()
+                .any(|f| f.breach_relevant
+                    && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+            "an Uncertain re-judge keeps the prior decisive verdict on /findings"
         );
     }
 
