@@ -205,6 +205,74 @@ impl BakeStats {
     }
 }
 
+/// The LIVE health of the model adjudicator, derived cheaply by piggybacking the LAST
+/// adjudication outcome (JEF-160) — NOT a fresh model call. The judging loop stamps this
+/// on every fresh call (cache misses): a decisive verdict is [`Ok`](Self::Ok); an
+/// inconclusive one ("model unavailable" — a CPU-model timeout / down endpoint) is
+/// [`Timeout`](Self::Timeout). [`Unknown`](Self::Unknown) until the model has actually
+/// been called this run (cold start, or no model configured — see [`ReadinessConfig`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelHealth {
+    /// No fresh model call has landed yet this run (cold start), or no model is
+    /// configured at all (the absence is reported via [`ReadinessConfig::model_attached`]).
+    #[default]
+    Unknown,
+    /// The most recent fresh adjudication returned a decisive verdict — the model answered.
+    Ok,
+    /// The most recent fresh adjudication came back inconclusive ("model unavailable") —
+    /// the CPU model timed out or the endpoint is down. The decision still falls through
+    /// to the skeptic default, but the model is not currently answering.
+    Timeout,
+}
+
+impl ModelHealth {
+    /// The `u8` wire form for the atomic store on [`Findings`] (no extra deps for an enum
+    /// atomic). Round-trips through [`from_u8`](Self::from_u8).
+    fn as_u8(self) -> u8 {
+        match self {
+            ModelHealth::Unknown => 0,
+            ModelHealth::Ok => 1,
+            ModelHealth::Timeout => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => ModelHealth::Ok,
+            2 => ModelHealth::Timeout,
+            _ => ModelHealth::Unknown,
+        }
+    }
+}
+
+/// The engine's **config summary** for the readiness panel (JEF-160): presence/absence of
+/// each decision input, NOT a config echo. This carries no secret names, no endpoints, no
+/// values — only whether an input is wired and (for the file-backed stores) how many
+/// entries loaded, which is a non-sensitive coverage figure. Captured once at dashboard
+/// boot from the same env/handles the engine already reads, and threaded into
+/// [`render_html`] so the panel reports LIVE presence rather than guessing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadinessConfig {
+    /// A model adjudicator is configured (`PROTECTOR_ENGINE_MODEL` set). When false, NO
+    /// exploitability calls are made — every breach-relevant chain falls through to the
+    /// deterministic skeptic default, the single most load-bearing coverage gap (ADR-0016).
+    pub model_attached: bool,
+    /// How many KEV/advisory CVE ids loaded from the mounted catalogue. `0` ⇒ the store is
+    /// absent or empty, so no known-exploited enrichment reaches the model.
+    pub kev_count: usize,
+    /// How many advisory records loaded from the mounted snapshot. `0` ⇒ no CVE summary /
+    /// fix-version enrichment is available.
+    pub advisory_count: usize,
+    /// The decision journal is durable (a writable `PROTECTOR_ENGINE_JOURNAL_PATH` volume
+    /// is mounted). `false` ⇒ in-memory only: verdicts and the would-have-acted report
+    /// don't survive a restart.
+    pub journal_durable: bool,
+    /// Any action class is armed (`engine.enable` non-empty) — enforcing vs shadow. This
+    /// is posture, not a gap: shadow is the safe default, reported so the operator can SEE
+    /// it rather than infer it.
+    pub armed: bool,
+}
+
 /// One internet-facing entry's verdict state — the SINGLE source of truth for the
 /// model's call on that entry (JEF-157). Collapses what used to be four separate
 /// per-entry maps in the engine (`last_verdict` / `verdict_cache` / `restored_verdicts`
@@ -367,6 +435,14 @@ pub struct Findings {
     /// so a quiet/loading dashboard reads as *fresh*, not broken. `None` until the first
     /// pass completes (or is seeded from the journal on boot).
     last_pass: Mutex<Option<SystemTime>>,
+    /// The engine's config summary for the readiness panel (JEF-160) — presence/absence of
+    /// each decision input, captured once at dashboard boot. Defaults to all-absent until
+    /// set, so the panel reads as "unconfigured" rather than falsely "ready".
+    readiness: Mutex<ReadinessConfig>,
+    /// The LIVE model health (JEF-160), stamped by the judging loop from the LAST
+    /// adjudication outcome — `0`/`1`/`2` per [`ModelHealth::as_u8`]. Cheap: no extra model
+    /// call, just the result of the call the engine already makes.
+    model_health: std::sync::atomic::AtomicU8,
 }
 
 impl Findings {
@@ -434,6 +510,32 @@ impl Findings {
     /// seed). The dashboard renders this as a relative "NNs ago".
     pub fn last_pass(&self) -> Option<SystemTime> {
         *self.last_pass.lock().expect("last_pass mutex poisoned")
+    }
+
+    /// Record the engine's config summary for the readiness panel (JEF-160) — set once at
+    /// dashboard boot from the env/handles the engine already reads. Presence/absence only;
+    /// no secret names, no values.
+    pub fn set_readiness_config(&self, config: ReadinessConfig) {
+        *self.readiness.lock().expect("readiness mutex poisoned") = config;
+    }
+
+    /// The engine's config summary for the readiness panel. Defaults to all-absent until
+    /// [`set_readiness_config`](Self::set_readiness_config) is called.
+    pub fn readiness_config(&self) -> ReadinessConfig {
+        *self.readiness.lock().expect("readiness mutex poisoned")
+    }
+
+    /// Stamp the LIVE model health from the LAST adjudication outcome (JEF-160). Called by
+    /// the judging loop on every fresh model call (cache miss) — cheap, no extra call.
+    pub fn set_model_health(&self, health: ModelHealth) {
+        self.model_health
+            .store(health.as_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The LIVE model health — the last adjudication outcome, or [`ModelHealth::Unknown`]
+    /// until the model has been called this run (cold start / no model configured).
+    pub fn model_health(&self) -> ModelHealth {
+        ModelHealth::from_u8(self.model_health.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -1495,6 +1597,379 @@ fn render_report_html(report: &Report) -> String {
     )
 }
 
+// ===========================================================================
+// The readiness / coverage panel (JEF-160)
+// ===========================================================================
+//
+// When the model, KEV/advisory file, Falco feed, eBPF agent, or journal volume is
+// unconfigured or down, protector degrades SILENTLY — a cluster with no model renders the
+// same "quiet" empty page as a genuinely clean one (ADR-0016: enrichment coverage is
+// load-bearing). This panel lists each enrichment/decision input and its LIVE state, so
+// the operator can tell "all clear" from "blind", and a new operator gets a guided start.
+// Read-only, zero-egress: presence/health only — no secret names, no graph data, no values.
+
+/// The LIVE state of one decision input — present, absent, or degraded. Distinct from a
+/// config echo: an input is `Absent` only when it is genuinely unconfigured/empty, and
+/// `Degraded` when configured but not currently answering (e.g. a model that timed out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputState {
+    /// Wired and live — contributing to decisions this pass.
+    Present,
+    /// Not configured (or loaded empty). For an enrichment input this is a coverage gap
+    /// that weakens the model's decision (ADR-0016); rendered visually distinct.
+    Absent,
+    /// Configured but not currently healthy — e.g. the model is attached but its last call
+    /// timed out, or signals were expected this pass but none arrived.
+    Degraded,
+}
+
+impl InputState {
+    /// The status WORD shown in text (never glyph-only — accessibility). The state's
+    /// meaning is carried by this word; color only reinforces it.
+    fn word(self) -> &'static str {
+        match self {
+            InputState::Present => "present",
+            InputState::Absent => "absent",
+            InputState::Degraded => "degraded",
+        }
+    }
+
+    /// The CSS tone class — maps to the readiness tokens in the dashboard `<style>` block:
+    /// green for present (the JEF-159 `#1a7f37` token), red for an absent input that
+    /// weakens decisions, amber for degraded.
+    fn tone(self) -> &'static str {
+        match self {
+            InputState::Present => "ok",
+            InputState::Absent => "absent",
+            InputState::Degraded => "degraded",
+        }
+    }
+}
+
+/// One readiness row: a decision input, its LIVE state, a one-line "why it matters", the
+/// single env var / mount that enables it, and the live detail (a count, "last call ok",
+/// "shadow"). `weakens_decisions` is true when this input being absent degrades the model's
+/// call (the enrichment inputs of ADR-0016) — those absent rows are visually distinct.
+/// JSON-serializable so `/readiness` returns exactly the panel's data.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadinessRow {
+    /// A stable, machine-readable id for the input (`model` / `kev` / `advisory` /
+    /// `falco` / `ebpf-agent` / `journal` / `arm-state`).
+    pub id: &'static str,
+    /// The human label shown in the panel.
+    pub label: &'static str,
+    /// The LIVE state of this input.
+    pub state: InputState,
+    /// One-line "why it matters" — what protector loses without this input.
+    pub why: &'static str,
+    /// The single env var or mount to enable it (the "how to fix" the checklist links to).
+    /// Empty for arm-state, which is a posture toggle, not a missing input.
+    pub enable: &'static str,
+    /// A short live detail: a count, "last call ok", "shadow mode", etc. — never a value
+    /// or secret name.
+    pub detail: String,
+    /// Whether this input being absent WEAKENS the model's decision (the enrichment /
+    /// adjudication inputs — ADR-0016). Drives the "absent input that weakens decisions is
+    /// visually distinct" acceptance criterion.
+    pub weakens_decisions: bool,
+}
+
+/// The whole readiness snapshot (JEF-160): every decision input's LIVE state plus the
+/// cold-start flag. JSON-serializable for `/readiness`; the HTML panel renders the same
+/// data. `warming_up` mirrors the banner's [`ClusterStatus::WarmingUp`]: no pass has
+/// completed, so the first verdicts are still loading (expected on a CPU model).
+#[derive(Debug, Clone, Serialize)]
+pub struct Readiness {
+    /// One row per decision input, in a stable, decision-ordered sequence.
+    pub inputs: Vec<ReadinessRow>,
+    /// No pass has completed yet — the bake window (first verdicts can take minutes on a
+    /// CPU model) is still open. Drives the cold-start note.
+    pub warming_up: bool,
+}
+
+impl Readiness {
+    /// How many enrichment/decision inputs are absent or degraded — the count the
+    /// first-run discrimination keys on. Arm-state is posture, not an input gap, so it
+    /// never counts here.
+    pub fn unmet_count(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter(|r| r.id != "arm-state" && r.state != InputState::Present)
+            .count()
+    }
+
+    /// Whether ANY decision input is unmet (absent or degraded) — the first-run gate.
+    pub fn has_unmet(&self) -> bool {
+        self.unmet_count() > 0
+    }
+}
+
+/// Derive the readiness snapshot (JEF-160) from the engine's config summary and LIVE
+/// state. PURE and total — no model call, no I/O: the model row reads the piggybacked
+/// last-adjudication outcome, the behavioral rows read this pass's [`BakeStats`], and the
+/// cold-start flag reads `last_pass`. This is the tested core; the panel and `/readiness`
+/// both render its output.
+fn derive_readiness(
+    config: &ReadinessConfig,
+    model_health: ModelHealth,
+    bake: &BakeStats,
+    last_pass: Option<SystemTime>,
+) -> Readiness {
+    let warming_up = last_pass.is_none();
+
+    // The behavioral split (JEF-48 variant labels): Falco arrives as the `alert` variant;
+    // every other variant is an eBPF-agent signal. We report each feed's "signals last
+    // pass" from the per-variant counts the bake already holds.
+    let falco_signals: u64 = bake.signals_by_variant.get("alert").copied().unwrap_or(0);
+    let ebpf_signals: u64 = bake
+        .signals_by_variant
+        .iter()
+        .filter(|(variant, _)| variant.as_str() != "alert")
+        .map(|(_, n)| n)
+        .sum();
+
+    // The model row: attached or not, and (if attached) its last-call health. A timeout is
+    // Degraded, not Absent — the model IS configured, it just isn't answering right now.
+    let (model_state, model_detail) = if !config.model_attached {
+        (
+            InputState::Absent,
+            "no model configured — no exploitability calls are made".to_string(),
+        )
+    } else {
+        match model_health {
+            ModelHealth::Ok => (InputState::Present, "attached · last call ok".to_string()),
+            ModelHealth::Timeout => (
+                InputState::Degraded,
+                "attached · last call timed out (CPU model warming or endpoint down)".to_string(),
+            ),
+            ModelHealth::Unknown => (
+                // Attached but not yet exercised: cold start, not a fault. Degraded so the
+                // operator sees "no verdict yet" rather than a false "present".
+                InputState::Degraded,
+                "attached · no call yet this run (warming up)".to_string(),
+            ),
+        }
+    };
+
+    // A file-backed enrichment store is Present iff it loaded >=1 entry, else Absent.
+    let kev_state = present_if(config.kev_count > 0);
+    let advisory_state = present_if(config.advisory_count > 0);
+
+    // A behavioral feed is Present iff it delivered >=1 signal this pass, else Absent. (A
+    // genuinely quiet cluster reads as Absent for the pass — the panel's "signals last
+    // pass" detail and the cold-start note keep that honest rather than alarming.)
+    let falco_state = present_if(falco_signals > 0);
+    let ebpf_state = present_if(ebpf_signals > 0);
+
+    let journal_state = present_if(config.journal_durable);
+
+    let inputs = vec![
+        ReadinessRow {
+            id: "model",
+            label: "Model adjudicator",
+            state: model_state,
+            why: "decides whether a proven chain is a real breach — without it, nothing is judged exploitable",
+            enable: "PROTECTOR_ENGINE_MODEL",
+            detail: model_detail,
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "kev",
+            label: "KEV catalogue",
+            state: kev_state,
+            why: "flags known-exploited CVEs so the model weighs active threats first",
+            enable: "PROTECTOR_KEV_FILE",
+            detail: coverage_detail(config.kev_count, "known-exploited CVE id"),
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "advisory",
+            label: "Advisory store",
+            state: advisory_state,
+            why: "adds CVE summaries + fix versions — the enrichment the model reasons over (ADR-0016)",
+            enable: "PROTECTOR_ADVISORY_FILE",
+            detail: coverage_detail(config.advisory_count, "advisory record"),
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "falco",
+            label: "Falco feed",
+            state: falco_state,
+            why: "live rule-fired alerts corroborate a chain is being exploited right now",
+            enable: "runtime ingest (falcosidekick -> /alert)",
+            detail: signals_detail(falco_state, falco_signals),
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "ebpf-agent",
+            label: "eBPF agent",
+            state: ebpf_state,
+            why: "in-kernel behavioral signals (exec, secret reads, connections) corroborate live activity",
+            enable: "deploy the agent DaemonSet (-> /behavior)",
+            detail: signals_detail(ebpf_state, ebpf_signals),
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "journal",
+            label: "Decision journal",
+            state: journal_state,
+            why: "durable verdicts survive a restart and back the would-have-acted report — without it, history resets",
+            enable: "PROTECTOR_ENGINE_JOURNAL_PATH",
+            detail: if config.journal_durable {
+                "durable volume mounted".to_string()
+            } else {
+                "in-memory only — resets on restart".to_string()
+            },
+            weakens_decisions: false,
+        },
+        ReadinessRow {
+            id: "arm-state",
+            label: "Arm state",
+            // Posture, never a gap: shadow is the safe default. Always Present (the engine
+            // is always in one of the two states); the detail says which.
+            state: InputState::Present,
+            why: "shadow proposes cuts only; enforcing applies the reversible isolation automatically",
+            enable: "",
+            detail: if config.armed {
+                "enforcing (acting)".to_string()
+            } else {
+                "shadow (proposing only)".to_string()
+            },
+            weakens_decisions: false,
+        },
+    ];
+
+    Readiness { inputs, warming_up }
+}
+
+/// Present iff the condition holds, else Absent.
+fn present_if(present: bool) -> InputState {
+    if present {
+        InputState::Present
+    } else {
+        InputState::Absent
+    }
+}
+
+/// The live detail for a file-backed store: "N records loaded" or the honest absent line.
+fn coverage_detail(count: usize, noun: &str) -> String {
+    if count == 0 {
+        format!("not loaded — no {noun} enrichment available")
+    } else {
+        format!("{count} {noun}{} loaded", if count == 1 { "" } else { "s" })
+    }
+}
+
+/// The live detail for a behavioral feed: "N signals last pass", or an honest "none this
+/// pass" when absent (no sensor reporting, or a quiet cluster).
+fn signals_detail(state: InputState, signals: u64) -> String {
+    match state {
+        InputState::Present => format!(
+            "{signals} signal{} last pass",
+            if signals == 1 { "" } else { "s" }
+        ),
+        _ => "no signals last pass (no sensor reporting, or a quiet cluster)".to_string(),
+    }
+}
+
+/// The readiness / coverage panel (JEF-160): an ordered `<ol>` of every decision input
+/// with its LIVE state IN TEXT (not glyph-only — accessibility), the one-line why, the
+/// live detail, and (when unmet) the single env var / mount to enable it. An absent input
+/// that weakens decisions is visually distinct (the red `absent` tone + a "weakens
+/// decisions" tag). Pure over the derived [`Readiness`].
+fn readiness_panel(readiness: &Readiness) -> String {
+    let rows: String = readiness
+        .inputs
+        .iter()
+        .map(|r| {
+            // The enable hint shows only when the input is not Present — a met input needs
+            // no instruction. Arm-state has no enable hint (it's a posture toggle).
+            let enable = if r.state != InputState::Present && !r.enable.is_empty() {
+                format!(
+                    " <span class=\"r-enable\">enable: <code>{}</code></span>",
+                    escape(r.enable)
+                )
+            } else {
+                String::new()
+            };
+            // An absent input that weakens decisions is called out distinctly (text tag, not
+            // color alone) so a coverage gap can't hide as a benign "off".
+            let weak = if r.weakens_decisions && r.state != InputState::Present {
+                " <span class=\"r-weak\">weakens decisions</span>".to_string()
+            } else {
+                String::new()
+            };
+            format!(
+                "<li class=\"r-row r-{tone}\"><span class=\"r-label\">{label}</span> \
+                 <span class=\"r-state r-state-{tone}\">{state}</span>{weak}<br>\
+                 <span class=\"r-why\">{why}</span> \
+                 <span class=\"r-detail\">— {detail}</span>{enable}</li>",
+                tone = r.state.tone(),
+                label = escape(r.label),
+                state = r.state.word(),
+                why = escape(r.why),
+                detail = escape(&r.detail),
+            )
+        })
+        .collect();
+
+    let cold = if readiness.warming_up {
+        "<p class=\"r-cold\">warming up — the first pass hasn't completed; first verdicts can \
+         take a few minutes on a CPU model, so a quiet dashboard right after start is expected.</p>"
+    } else {
+        ""
+    };
+
+    format!("{cold}<ol class=\"readiness\">{rows}</ol>")
+}
+
+/// The instructional first-run checklist (JEF-160): when the engine has no findings AND
+/// inputs are unmet, this REPLACES the empty findings body — never a bare/error-looking
+/// page. Each unmet input is an actionable line linking the one env var / mount to enable
+/// it (status IN TEXT, ordered list — accessibility). A met input reads as a done check.
+fn first_run_checklist(readiness: &Readiness) -> String {
+    let items: String = readiness
+        .inputs
+        .iter()
+        // Arm-state is posture, not a setup step — skip it in the checklist.
+        .filter(|r| r.id != "arm-state")
+        .map(|r| {
+            if r.state == InputState::Present {
+                format!(
+                    "<li class=\"r-done\"><b>done</b> — {label}: {detail}</li>",
+                    label = escape(r.label),
+                    detail = escape(&r.detail),
+                )
+            } else {
+                let enable = if r.enable.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — set <code>{}</code>", escape(r.enable))
+                };
+                format!(
+                    "<li class=\"r-todo\"><b>to&nbsp;do</b> — {label}: {why}{enable}</li>",
+                    label = escape(r.label),
+                    why = escape(r.why),
+                )
+            }
+        })
+        .collect();
+
+    let cold = if readiness.warming_up {
+        "<p class=\"r-cold\">warming up — first verdicts can take a few minutes on a CPU model.</p>"
+    } else {
+        ""
+    };
+
+    format!(
+        "<div class=\"firstrun\"><p class=\"sum\">No findings yet, and some decision inputs \
+         aren't configured. protector degrades quietly when an input is missing — this \
+         checklist is the guided start, not a blank page. Wire each input below to give the \
+         model the full picture (ADR-0016).</p>{cold}<ol class=\"checklist\">{items}</ol></div>"
+    )
+}
+
 /// The glanceable cluster verdict (JEF-159): the one-word answer the status banner
 /// carries, so the operator reads "is my cluster OK right now?" without synthesizing it
 /// from the engine-internal counts below. Each state is a distinct word + glyph + color
@@ -1698,6 +2173,7 @@ fn render_html(
     bake: &BakeStats,
     reversions: &[ReversionRecord],
     last_pass: Option<SystemTime>,
+    readiness: &Readiness,
 ) -> String {
     // One pass over the breach-relevant findings: the auto-eligible ones are
     // remediations; the rest group by endpoint (entry) for the attack-path graphs.
@@ -1738,7 +2214,21 @@ fn render_html(
     let vectors_body = attack_vectors(findings);
     let bake_body = bake_panel(bake);
     let reversions_body = reversions_panel(reversions);
+    let readiness_body = readiness_panel(readiness);
     let freshness = relative_time(last_pass);
+
+    // The instructional first-run state (JEF-160): when the engine has NO breach-relevant
+    // findings AND a decision input is unmet, the empty findings body would otherwise read
+    // as a (possibly false) "all clear". Replace it with the guided checklist so a blind
+    // cluster is never indistinguishable from a clean one. A clean cluster with every input
+    // wired keeps the existing honest-empty idiom ("no internet-facing exposure ...").
+    let no_breach_findings = !findings.iter().any(|f| f.breach_relevant);
+    let first_run = no_breach_findings && readiness.has_unmet();
+    let path_body = if first_run {
+        first_run_checklist(readiness)
+    } else {
+        path_body
+    };
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
@@ -1798,6 +2288,28 @@ fn render_html(
          .banner-isolated .banner-glyph,.banner-isolated .banner-word{{color:#b00000}}\
          .banner-warming{{background:#f4f4f4;border-color:#ccc;color:#555}}\
          .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#777}}\
+         ol.readiness{{list-style:none;padding:0;margin:.2rem 0 .6rem;font-size:.85rem}}\
+         ol.readiness li.r-row{{padding:.4rem .6rem;margin:.3rem 0;border:1px solid #e3e3e3;border-left-width:3px}}\
+         ol.readiness li.r-ok{{border-left-color:#1a7f37}}\
+         ol.readiness li.r-absent{{border-left-color:#b00000;background:#fdf3f3}}\
+         ol.readiness li.r-degraded{{border-left-color:#9a5b00;background:#fbf6ee}}\
+         .r-label{{font-weight:600}}\
+         .r-state{{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:0 .3rem;border-radius:2px}}\
+         .r-state-ok{{color:#155f29}}\
+         .r-state-absent{{color:#7a0000}}\
+         .r-state-degraded{{color:#7a4a00}}\
+         .r-weak{{font-size:.72rem;font-weight:600;color:#7a0000;border:1px solid #b00000;border-radius:2px;padding:0 .25rem}}\
+         .r-why{{color:#444}}\
+         .r-detail{{color:#666}}\
+         .r-enable{{color:#444}}\
+         .r-enable code{{background:#f4f4f4;padding:0 .2rem}}\
+         .r-cold{{font-size:.82rem;color:#555;background:#f4f4f4;border-left:3px solid #ccc;padding:.4rem .6rem;margin:.3rem 0}}\
+         .firstrun{{border:1px solid #e3e3e3;border-radius:0;padding:.7rem .9rem;margin:.6rem 0;background:#fafafa}}\
+         ol.checklist{{font-size:.85rem;margin:.3rem 0;padding-left:1.3rem}}\
+         ol.checklist li{{margin:.3rem 0}}\
+         ol.checklist li.r-done{{color:#155f29}}\
+         ol.checklist li.r-todo{{color:#333}}\
+         ol.checklist code{{background:#f4f4f4;padding:0 .2rem}}\
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
@@ -1815,6 +2327,12 @@ fn render_html(
          <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
          possible attack paths · last pass <b>{freshness}</b> \
          &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
+         <h2>Coverage &amp; readiness <span class=\"muted\">(decision inputs)</span></h2>\
+         <p class=\"sum\">Each decision input and its LIVE state — so an unconfigured or down \
+         input is visible, not silent. An <b>absent</b> input that weakens decisions is called \
+         out: the model's call is only as good as its enrichment (ADR-0016). \
+         &nbsp;|&nbsp; <a href=\"/readiness\">json</a></p>\
+         {readiness_body}\
          <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
          <h2>Attack vectors <span class=\"muted\">(ATT&amp;CK)</span></h2>\
          <p class=\"sum\">ATT&amp;CK outcomes an internet-facing entry can reach. \
@@ -1857,6 +2375,18 @@ struct DashboardState {
     reversions: Arc<ReversionLog>,
 }
 
+/// The LIVE readiness snapshot (JEF-160) from the shared findings handle — the same data
+/// the HTML panel and `/readiness` render. Pure over the engine's config summary + live
+/// state (model health, this pass's bake, last-pass freshness); no model call.
+fn readiness_of(findings: &Findings) -> Readiness {
+    derive_readiness(
+        &findings.readiness_config(),
+        findings.model_health(),
+        &findings.bake(),
+        findings.last_pass(),
+    )
+}
+
 async fn html_view(State(state): State<DashboardState>) -> Html<String> {
     Html(render_html(
         &state.findings.snapshot(),
@@ -1864,7 +2394,15 @@ async fn html_view(State(state): State<DashboardState>) -> Html<String> {
         &state.findings.bake(),
         &state.reversions.snapshot(),
         state.findings.last_pass(),
+        &readiness_of(&state.findings),
     ))
+}
+
+/// The readiness / coverage panel as JSON (JEF-160) — the same per-input LIVE state the
+/// HTML panel shows, for scripting / alerting. On its own route so the `/findings`
+/// contract is unchanged. Read-only; presence/health only, no values.
+async fn readiness_view(State(findings): State<Arc<Findings>>) -> Json<Readiness> {
+    Json(readiness_of(&findings))
 }
 
 async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> {
@@ -1948,11 +2486,12 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
     )
 }
 
-/// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON) plus the
-/// diagnostic `/judgements` JSON (full prompt + raw reply + verdict per recent
-/// judgement), the `/reversions` JSON (lifted cuts + why, JEF-141), and the
+/// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON, `/readiness`
+/// JSON) plus the diagnostic `/judgements` JSON (full prompt + raw reply + verdict per
+/// recent judgement), the `/reversions` JSON (lifted cuts + why, JEF-141), and the
 /// `/report` + `/report.json` shadow would-have-acted diff (JEF-143). Read-only;
-/// cluster-facing glue around the tested classification + aggregation.
+/// cluster-facing glue around the tested classification + aggregation. The `/readiness`
+/// view (JEF-160) reports each decision input's LIVE presence/health for alerting.
 pub async fn serve_dashboard(
     addr: SocketAddr,
     findings: Arc<Findings>,
@@ -1967,6 +2506,7 @@ pub async fn serve_dashboard(
     let app = Router::new()
         .route("/findings", get(json_view))
         .route("/bake", get(bake_view))
+        .route("/readiness", get(readiness_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
         .with_state(findings)
         .merge(
@@ -2002,6 +2542,18 @@ mod tests {
     use crate::engine::graph::NodeKey;
     use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
     use crate::engine::reason::proof::Link;
+
+    /// A default readiness snapshot for the render tests that don't exercise the panel
+    /// itself — every input absent, post-warmup. The readiness-specific behavior is
+    /// covered by the dedicated JEF-160 tests below.
+    fn ready() -> Readiness {
+        derive_readiness(
+            &ReadinessConfig::default(),
+            ModelHealth::Unknown,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        )
+    }
 
     fn judgement(entry: &str) -> Judgement {
         Judgement {
@@ -2211,6 +2763,7 @@ mod tests {
             &BakeStats::default(),
             &revs,
             Some(SystemTime::now()),
+            &ready(),
         );
         assert!(
             html.contains("last pass <b>just now</b>"),
@@ -2398,6 +2951,7 @@ mod tests {
             &BakeStats::default(),
             &[],
             Some(SystemTime::now()),
+            &ready(),
         );
         // Banner is the first child of <body>, above <h1>.
         let body_at = html.find("<body>").expect("body present");
@@ -2593,11 +3147,11 @@ mod tests {
             ),
         ];
 
-        let html = render_html(&findings, false, &BakeStats::default(), &[], None);
+        let html = render_html(&findings, false, &BakeStats::default(), &[], None, &ready());
         // Shadow → "Proposed Remediations"; armed → "Active Remediations".
         assert!(html.contains("Proposed Remediations"));
         assert!(
-            render_html(&findings, true, &BakeStats::default(), &[], None)
+            render_html(&findings, true, &BakeStats::default(), &[], None, &ready())
                 .contains("Active Remediations")
         );
         assert!(html.contains("Possible attack paths"));
@@ -2684,7 +3238,7 @@ mod tests {
 
     #[test]
     fn render_html_includes_the_behavioral_bake_section() {
-        let html = render_html(&[], false, &bake(80, 20), &[], None);
+        let html = render_html(&[], false, &bake(80, 20), &[], None, &ready());
         assert!(
             html.contains("Behavioral bake"),
             "the section header is present"
@@ -3050,5 +3604,327 @@ mod tests {
         assert!(report.journal_empty);
         assert_eq!(report.would_act_count(), 0);
         assert_eq!(report.left_alone_count(), 0);
+    }
+
+    // ====================================================================
+    // The readiness / coverage panel (JEF-160)
+    // ====================================================================
+
+    /// A bake snapshot with a Falco `alert` count and one eBPF (`connection`) count, so
+    /// the two behavioral feeds can be split in the readiness rows.
+    fn feeds_bake(falco: u64, ebpf: u64) -> BakeStats {
+        let mut signals_by_variant = BTreeMap::new();
+        if falco > 0 {
+            signals_by_variant.insert("alert".to_string(), falco);
+        }
+        if ebpf > 0 {
+            signals_by_variant.insert("connection".to_string(), ebpf);
+        }
+        BakeStats {
+            signals_by_variant,
+            ..Default::default()
+        }
+    }
+
+    /// A config summary with every input wired (a fully-covered cluster).
+    fn full_config() -> ReadinessConfig {
+        ReadinessConfig {
+            model_attached: true,
+            kev_count: 1500,
+            advisory_count: 800,
+            journal_durable: true,
+            armed: false,
+        }
+    }
+
+    /// Look a readiness row up by its stable id.
+    fn rrow<'a>(r: &'a Readiness, id: &str) -> &'a ReadinessRow {
+        r.inputs
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("readiness row {id} present"))
+    }
+
+    #[test]
+    fn readiness_reports_each_input_from_live_state() {
+        // Acceptance #1: every input shows present/absent/degraded from LIVE state.
+        let r = derive_readiness(
+            &full_config(),
+            ModelHealth::Ok,
+            &feeds_bake(3, 12),
+            Some(SystemTime::now()),
+        );
+        assert!(!r.warming_up, "a pass completed");
+        assert_eq!(rrow(&r, "model").state, InputState::Present);
+        assert!(rrow(&r, "model").detail.contains("last call ok"));
+        assert_eq!(rrow(&r, "kev").state, InputState::Present);
+        assert!(rrow(&r, "kev").detail.contains("1500"));
+        assert_eq!(rrow(&r, "advisory").state, InputState::Present);
+        assert_eq!(rrow(&r, "falco").state, InputState::Present);
+        assert!(rrow(&r, "falco").detail.contains("3 signals last pass"));
+        assert_eq!(rrow(&r, "ebpf-agent").state, InputState::Present);
+        assert!(
+            rrow(&r, "ebpf-agent")
+                .detail
+                .contains("12 signals last pass")
+        );
+        assert_eq!(rrow(&r, "journal").state, InputState::Present);
+        // Arm-state is posture, always present; reports the shadow default here.
+        assert_eq!(rrow(&r, "arm-state").state, InputState::Present);
+        assert!(rrow(&r, "arm-state").detail.contains("shadow"));
+        // Fully covered ⇒ nothing unmet.
+        assert!(!r.has_unmet(), "every input wired ⇒ no unmet inputs");
+    }
+
+    #[test]
+    fn absent_enrichment_inputs_are_marked_and_flagged_as_weakening() {
+        // Acceptance #1: an absent input that weakens decisions is distinct. With nothing
+        // configured, every enrichment input is Absent AND flagged `weakens_decisions`.
+        let r = derive_readiness(
+            &ReadinessConfig::default(),
+            ModelHealth::Unknown,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        for id in ["kev", "advisory", "falco", "ebpf-agent"] {
+            assert_eq!(rrow(&r, id).state, InputState::Absent, "{id} absent");
+            assert!(rrow(&r, id).weakens_decisions, "{id} weakens decisions");
+        }
+        // The journal absent is a durability gap, NOT a decision-weakening one.
+        assert_eq!(rrow(&r, "journal").state, InputState::Absent);
+        assert!(!rrow(&r, "journal").weakens_decisions);
+        assert!(r.has_unmet());
+    }
+
+    #[test]
+    fn no_model_says_so_explicitly_and_that_no_calls_are_made() {
+        // Acceptance #3: no model configured ⇒ explicit, and that no exploitability calls
+        // are made.
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: false,
+                ..full_config()
+            },
+            ModelHealth::Unknown,
+            &feeds_bake(1, 1),
+            Some(SystemTime::now()),
+        );
+        let model = rrow(&r, "model");
+        assert_eq!(model.state, InputState::Absent);
+        assert!(model.weakens_decisions);
+        assert!(
+            model.detail.contains("no exploitability calls")
+                || model.detail.contains("no model configured"),
+            "explicit that no calls are made: {}",
+            model.detail
+        );
+        let panel = readiness_panel(&r);
+        assert!(panel.contains("no exploitability calls are made"));
+    }
+
+    #[test]
+    fn attached_model_that_timed_out_is_degraded_not_absent() {
+        // A model that's wired but whose last call timed out is Degraded — the model IS
+        // configured, it just isn't answering. Distinct from Absent.
+        let r = derive_readiness(
+            &full_config(),
+            ModelHealth::Timeout,
+            &feeds_bake(1, 1),
+            Some(SystemTime::now()),
+        );
+        let model = rrow(&r, "model");
+        assert_eq!(model.state, InputState::Degraded);
+        assert!(model.detail.contains("timed out"));
+    }
+
+    #[test]
+    fn readiness_warming_up_when_no_pass_has_completed() {
+        // Cold start: no pass ⇒ warming_up, so the bake window reads as expected.
+        let r = derive_readiness(
+            &full_config(),
+            ModelHealth::Unknown,
+            &BakeStats::default(),
+            None,
+        );
+        assert!(r.warming_up);
+        let panel = readiness_panel(&r);
+        assert!(
+            panel.contains("warming up") && panel.contains("CPU model"),
+            "cold-start note explains the bake window"
+        );
+    }
+
+    #[test]
+    fn readiness_panel_states_are_in_text_not_glyph_only() {
+        // Accessibility: the status word is IN TEXT for every row.
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                ..ReadinessConfig::default()
+            },
+            ModelHealth::Ok,
+            &feeds_bake(0, 0),
+            Some(SystemTime::now()),
+        );
+        let panel = readiness_panel(&r);
+        // It's an ordered list with the state words present as text.
+        assert!(panel.contains("<ol class=\"readiness\">"));
+        assert!(panel.contains(">present<"));
+        assert!(panel.contains(">absent<"));
+        // An absent decision-weakening input carries the explicit tag.
+        assert!(panel.contains("weakens decisions"));
+        // The enable hint for an unmet input is shown.
+        assert!(panel.contains("PROTECTOR_KEV_FILE"));
+    }
+
+    #[test]
+    fn first_run_checklist_replaces_the_empty_body_when_inputs_unmet() {
+        // Acceptance #4: empty + unmet inputs ⇒ the instructional checklist, never a bare
+        // page. No breach findings, nothing configured → the checklist, with each unmet
+        // input linking its enable var.
+        let r = derive_readiness(
+            &ReadinessConfig::default(),
+            ModelHealth::Unknown,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &r,
+        );
+        assert!(
+            html.contains(r#"class="firstrun""#) && html.contains(r#"ol class="checklist""#),
+            "the instructional checklist replaces the empty findings body"
+        );
+        assert!(
+            html.contains("PROTECTOR_ENGINE_MODEL"),
+            "model enable linked"
+        );
+        assert!(
+            html.contains("PROTECTOR_ADVISORY_FILE"),
+            "advisory enable linked"
+        );
+        // It frames itself as a guided start, never a bare/error-looking page.
+        assert!(html.contains("guided start, not a blank page"));
+    }
+
+    #[test]
+    fn clean_cluster_with_full_coverage_keeps_the_honest_empty_state() {
+        // First-run discrimination: no findings BUT every input wired ⇒ NOT first-run; the
+        // existing honest-empty idiom stands (a genuinely clean, fully-covered cluster).
+        let r = derive_readiness(
+            &full_config(),
+            ModelHealth::Ok,
+            &feeds_bake(2, 5),
+            Some(SystemTime::now()),
+        );
+        assert!(!r.has_unmet());
+        let html = render_html(
+            &[],
+            false,
+            &feeds_bake(2, 5),
+            &[],
+            Some(SystemTime::now()),
+            &r,
+        );
+        assert!(
+            html.contains("no internet-facing exposure reaches an objective"),
+            "a clean, covered cluster keeps the honest-empty state"
+        );
+        assert!(
+            !html.contains(r#"class="firstrun""#),
+            "no first-run checklist when every input is covered"
+        );
+    }
+
+    #[test]
+    fn render_html_includes_the_readiness_panel_section() {
+        let r = derive_readiness(
+            &full_config(),
+            ModelHealth::Ok,
+            &feeds_bake(1, 1),
+            Some(SystemTime::now()),
+        );
+        // A breach finding is present so the body is the normal graph (not the checklist),
+        // and the coverage panel still renders above it.
+        let findings = vec![breach_finding("workload/app/Pod/web")];
+        let html = render_html(
+            &findings,
+            false,
+            &feeds_bake(1, 1),
+            &[],
+            Some(SystemTime::now()),
+            &r,
+        );
+        assert!(html.contains("Coverage &amp; readiness"));
+        assert!(html.contains("<a href=\"/readiness\">json</a>"));
+        assert!(html.contains("Model adjudicator"));
+        assert!(html.contains("<ol class=\"readiness\">"));
+    }
+
+    #[test]
+    fn readiness_json_shape_matches_the_panel_data() {
+        // Acceptance #2: `/readiness` returns the same data as JSON. Assert the serialized
+        // shape: kebab-case states, the stable ids, and the live fields.
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                advisory_count: 7,
+                ..ReadinessConfig::default()
+            },
+            ModelHealth::Ok,
+            &feeds_bake(0, 4),
+            Some(SystemTime::now()),
+        );
+        let json = serde_json::to_value(&r).expect("readiness serializes");
+        assert_eq!(json["warming_up"], serde_json::json!(false));
+        let inputs = json["inputs"].as_array().expect("inputs array");
+        // The ids are stable and the model row serializes its present state in kebab-case.
+        let model = inputs
+            .iter()
+            .find(|r| r["id"] == "model")
+            .expect("model row in json");
+        assert_eq!(model["state"], serde_json::json!("present"));
+        assert_eq!(model["weakens_decisions"], serde_json::json!(true));
+        let kev = inputs
+            .iter()
+            .find(|r| r["id"] == "kev")
+            .expect("kev row in json");
+        assert_eq!(kev["state"], serde_json::json!("absent"));
+        let ebpf = inputs
+            .iter()
+            .find(|r| r["id"] == "ebpf-agent")
+            .expect("ebpf row in json");
+        assert_eq!(ebpf["state"], serde_json::json!("present"));
+        assert!(
+            ebpf["detail"].as_str().unwrap().contains("4 signals"),
+            "live signal count is in the json detail"
+        );
+    }
+
+    #[test]
+    fn findings_round_trips_the_readiness_config_and_model_health() {
+        // The shared findings handle carries the config summary + live model health the
+        // dashboard reads back — the engine writes them, the panel renders them.
+        let findings = Findings::new();
+        // Defaults: nothing configured, model unknown.
+        assert!(!findings.readiness_config().model_attached);
+        assert_eq!(findings.model_health(), ModelHealth::Unknown);
+        findings.set_readiness_config(ReadinessConfig {
+            model_attached: true,
+            kev_count: 10,
+            advisory_count: 5,
+            journal_durable: true,
+            armed: true,
+        });
+        findings.set_model_health(ModelHealth::Timeout);
+        let cfg = findings.readiness_config();
+        assert!(cfg.model_attached && cfg.armed && cfg.journal_durable);
+        assert_eq!(cfg.kev_count, 10);
+        assert_eq!(findings.model_health(), ModelHealth::Timeout);
     }
 }

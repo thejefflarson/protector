@@ -605,6 +605,14 @@ impl Engine {
                             "ok"
                         }
                     };
+                    // Piggyback the readiness panel's LIVE model health (JEF-160) on this
+                    // call's outcome — cheap, no extra model call. A decisive verdict means
+                    // the model answered; an Uncertain ("model unavailable") means it timed
+                    // out / the endpoint is down. The coverage panel reads this back.
+                    self.findings.set_model_health(match result {
+                        "ok" => dashboard::ModelHealth::Ok,
+                        _ => dashboard::ModelHealth::Timeout,
+                    });
                     self.metrics
                         .model_calls
                         .add(1, &[opentelemetry::KeyValue::new("result", result)]);
@@ -1009,6 +1017,18 @@ pub async fn run_watch(
         let judgements = journal.clone();
         // The durable decision journal (JEF-143) backs the `/report` would-have-acted view.
         let decisions = engine.journal();
+        // The readiness / coverage panel's config summary (JEF-160): presence/absence of
+        // each decision input, captured once here from the same env/handles the engine
+        // already reads. Presence/health only — no secret names, no endpoints, no values.
+        // The LIVE model health and behavioral-feed counts are read per render from the
+        // shared findings handle; this is the static "is it wired" half.
+        findings.set_readiness_config(dashboard::ReadinessConfig {
+            model_attached: model::config().is_some(),
+            kev_count: kev.len(),
+            advisory_count: advisory.len(),
+            journal_durable: decisions.is_enabled(),
+            armed: !active.is_empty(),
+        });
         tokio::spawn(async move {
             if let Err(error) =
                 dashboard::serve_dashboard(addr, findings, judgements, reversions, decisions).await
