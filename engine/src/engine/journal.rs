@@ -40,6 +40,37 @@ use serde::{Deserialize, Serialize};
 /// total on-disk size is at most ~`2 × MAX_BYTES`.
 const MAX_BYTES: u64 = 1024 * 1024;
 
+/// The structured enrichment-coverage behind a breach decision (JEF-145): the SAME
+/// CVE/behavioral evidence the model was handed in the adjudication prompt, persisted at
+/// journal-append time so `/report` can classify an enrichment-coverage gap from FACT
+/// rather than grepping the verdict prose for a `CVE-` token (which misclassifies both
+/// ways: a prose mention with no real backing reads as covered; a well-enriched verdict
+/// that omits the id reads as a gap).
+///
+/// "Backed" = the model had at least one CVE OR a behavioral signal to weigh. The ABSENCE
+/// of this struct on an older journal line (pre-JEF-145) is "unknown" — deliberately NOT
+/// a gap (see [`Decision::Breach::coverage`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrichmentCoverage {
+    /// The CVE ids in the entry's actual evidence that went into the prompt (the matched
+    /// advisory backing). Empty ⇒ no CVE reached the model for this entry.
+    #[serde(default)]
+    pub cves: Vec<String>,
+    /// Whether any behavioral signal (runtime telemetry, ADR-0014) was present on the
+    /// entry when it was judged — the other half of "did the model have evidence".
+    #[serde(default)]
+    pub behavioral: bool,
+}
+
+impl EnrichmentCoverage {
+    /// Whether the model had real enrichment to weigh: any CVE evidence OR a behavioral
+    /// signal. `false` ⇒ the verdict was reached blind to the vulnerability/runtime data
+    /// that would corroborate it — an enrichment-coverage gap.
+    pub fn is_backed(&self) -> bool {
+        !self.cves.is_empty() || self.behavioral
+    }
+}
+
 /// What a journal line records — the engine's decision atoms, durable across restarts.
 /// Tagged so the JSON line is self-describing and forward-compatible (an unknown future
 /// variant is skipped on reload rather than breaking the replay).
@@ -56,6 +87,12 @@ pub enum Decision {
         objectives: usize,
         /// The model's verdict summary (its own words — both positive and negative).
         verdict: String,
+        /// The structured enrichment-coverage behind this decision (JEF-145): the
+        /// CVE/behavioral evidence the model was given. `None` on records written before
+        /// JEF-145 (via `#[serde(default)]`) — back-compat "unknown", which `/report`
+        /// treats as NOT a coverage gap rather than a false positive.
+        #[serde(default)]
+        coverage: Option<EnrichmentCoverage>,
     },
     /// A mitigation applied (a cut went live), keyed by its cut signature.
     Apply {
@@ -307,6 +344,10 @@ mod tests {
                 entry: "workload/app/Pod/web".into(),
                 objectives: 3,
                 verdict: "exploitable — CVE-2021-44228 reaches the secret".into(),
+                coverage: Some(EnrichmentCoverage {
+                    cves: vec!["CVE-2021-44228".into()],
+                    behavioral: false,
+                }),
             });
             journal.record(Decision::Apply {
                 cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
@@ -456,6 +497,53 @@ mod tests {
             "two generations cap total size at ~2× MAX_BYTES"
         );
         cleanup(&path);
+    }
+
+    #[test]
+    fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
+        // Back-compat (JEF-145): a journal line written before the structured
+        // enrichment-coverage field existed has no `coverage` key. `#[serde(default)]`
+        // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per
+        // `/report`) NOT a false coverage gap.
+        let line = r#"{"at_ms":1,"kind":"breach","entry":"workload/app/Pod/web","objectives":2,"verdict":"exploitable — reaches the secret"}"#;
+        let entry: JournalEntry = serde_json::from_str(line).expect("old line still parses");
+        match entry.decision {
+            Decision::Breach { coverage, .. } => {
+                assert!(
+                    coverage.is_none(),
+                    "absent coverage degrades to unknown, not a gap"
+                );
+            }
+            other => panic!("expected a Breach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enrichment_coverage_is_backed_when_a_cve_or_behavior_is_present() {
+        assert!(
+            !EnrichmentCoverage {
+                cves: vec![],
+                behavioral: false
+            }
+            .is_backed(),
+            "no CVE and no behavior ⇒ unbacked (a gap)"
+        );
+        assert!(
+            EnrichmentCoverage {
+                cves: vec!["CVE-2021-44228".into()],
+                behavioral: false
+            }
+            .is_backed(),
+            "a CVE backs the decision"
+        );
+        assert!(
+            EnrichmentCoverage {
+                cves: vec![],
+                behavioral: true
+            }
+            .is_backed(),
+            "a behavioral signal backs the decision"
+        );
     }
 
     #[test]

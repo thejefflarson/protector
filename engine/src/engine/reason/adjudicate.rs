@@ -232,6 +232,36 @@ fn cve_ids_of(cves: &[String]) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// The structured enrichment-coverage behind an entry's breach decision (JEF-145): the
+/// CVE ids and the behavioral-signal presence that went into the model's prompt, read
+/// from the SAME evidence (`entry_evidence`) the model was handed. The journal-append
+/// site records this so `/report` classifies a coverage gap from fact, not by grepping
+/// the verdict prose for a `CVE-` token.
+///
+/// Pure and deterministic: a no-op-cheap re-derivation of the prompt evidence for an
+/// entry. The CVE id set is sorted+deduped for a stable journal line.
+pub fn entry_coverage(graph: &SecurityGraph, entry_key: &NodeKey) -> EntryCoverage {
+    let (cves, behaviors) = entry_evidence(graph, entry_key);
+    let mut ids: Vec<String> = cve_ids_of(&cves).into_iter().collect();
+    ids.sort();
+    EntryCoverage {
+        cves: ids,
+        behavioral: !behaviors.is_empty(),
+    }
+}
+
+/// The enrichment a breach decision was made over (JEF-145): the matched CVE ids and
+/// whether any behavioral signal was present. Mirrors the journal's `EnrichmentCoverage`
+/// without coupling this module to the journal type — the engine maps one to the other
+/// at the journal-append site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryCoverage {
+    /// The CVE ids in the entry's actual evidence that reached the model (sorted, deduped).
+    pub cves: Vec<String>,
+    /// Whether any behavioral signal was present on the entry when it was judged.
+    pub behavioral: bool,
+}
+
 /// Extract CVE ids (`CVE-<4-digit year>-<4+ digit sequence>`) mentioned in free text,
 /// used to check the model's `reason` against the real evidence. Endpoints are ASCII so
 /// byte slicing is safe.
@@ -717,6 +747,62 @@ mod tests {
             severity: Severity::Critical,
             ..Default::default()
         }
+    }
+
+    /// JEF-145: `entry_coverage` re-derives the structured enrichment-coverage from the
+    /// SAME evidence the model is given (`entry_evidence`) — the matched CVE ids (sorted)
+    /// and whether a behavioral signal was present. This is what the journal-append site
+    /// persists so `/report` classifies a coverage gap from fact, not verdict prose.
+    #[test]
+    fn entry_coverage_reflects_the_model_evidence() {
+        use crate::engine::graph::{Behavior, Provenance, RuntimeSignal};
+
+        // A bare entry with no CVE and no behavioral signal ⇒ unbacked (a coverage gap).
+        let mut g = SecurityGraph::new();
+        let bare = Node::Workload(Workload {
+            namespace: "app".into(),
+            name: "bare".into(),
+            kind: "Pod".into(),
+            labels: Default::default(),
+            meshed: false,
+            exposure: Exposure::Internet,
+            runtime: Vec::new(),
+            persistent: false,
+        });
+        let bare_key = bare.key();
+        g.upsert_node(bare);
+        let cov = entry_coverage(&g, &bare_key);
+        assert!(cov.cves.is_empty());
+        assert!(!cov.behavioral);
+
+        // A CVE-bearing entry ⇒ that CVE id is the structured backing.
+        let (g, key) = graph_with_vuln(critical_cve("CVE-2021-44228"));
+        let cov = entry_coverage(&g, &key);
+        assert_eq!(cov.cves, vec!["CVE-2021-44228".to_string()]);
+        assert!(!cov.behavioral);
+
+        // A behavioral signal (no CVE) ⇒ behavioral backing.
+        let mut g = SecurityGraph::new();
+        let wl = Node::Workload(Workload {
+            namespace: "app".into(),
+            name: "runtime".into(),
+            kind: "Pod".into(),
+            labels: Default::default(),
+            meshed: false,
+            exposure: Exposure::Internet,
+            runtime: vec![RuntimeSignal {
+                behavior: Behavior::Alert {
+                    rule: "Terminal shell in container".into(),
+                },
+                provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+            }],
+            persistent: false,
+        });
+        let key = wl.key();
+        g.upsert_node(wl);
+        let cov = entry_coverage(&g, &key);
+        assert!(cov.cves.is_empty());
+        assert!(cov.behavioral, "a runtime signal is behavioral backing");
     }
 
     /// JEF-103: when a CVE carries no advisory, the rendered CVE line — and the whole
