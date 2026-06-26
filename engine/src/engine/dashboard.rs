@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use super::graph::{Behavior, SecurityGraph, Vulnerability};
-use super::journal::{Decision, DecisionJournal, JournalEntry};
+use super::journal::{Decision, DecisionJournal, EnrichmentCoverage, JournalEntry};
 use super::reason::adjudicate::Verdict;
 use super::reason::proof::ProvenChain;
 
@@ -1934,12 +1934,21 @@ fn verdict_would_act(verdict: &str) -> bool {
     v.starts_with("exploitable") || v.starts_with("confirmed")
 }
 
-/// A would-act verdict that fired WITHOUT a CVE backing it is an enrichment-coverage
-/// gap: the model affirmed exploitability but no advisory enrichment matched (the
-/// verdict cites no `CVE-` id). These are the would-acts to scrutinize — the call was
-/// made blind to the very vulnerability data that would corroborate it.
-fn is_coverage_gap(verdict: &str) -> bool {
-    !verdict.to_ascii_uppercase().contains("CVE-")
+/// A would-act decision fired during an enrichment-coverage gap when the model had NO
+/// real enrichment to weigh: no CVE evidence AND no behavioral signal (JEF-145). The
+/// classification reads the breach line's STRUCTURED [`EnrichmentCoverage`] — the same
+/// evidence the model was given at decision time — never the verdict prose. A prose
+/// mention of a CVE no longer reads as covered, and a well-enriched verdict that happens
+/// not to print a CVE id no longer reads as a gap.
+///
+/// Back-compat (AC #3): a pre-JEF-145 line has no structured coverage (`None`). That is
+/// "unknown", deliberately NOT a gap — an old record never inflates the scrutinize-first
+/// count with a false positive.
+fn is_coverage_gap(coverage: Option<&EnrichmentCoverage>) -> bool {
+    match coverage {
+        Some(c) => !c.is_backed(),
+        None => false,
+    }
 }
 
 /// Aggregate the journal's breach decisions into the would-have-acted diff (JEF-143).
@@ -1968,19 +1977,28 @@ fn aggregate_report(
 
     // Collect breach decisions per entry, in time order, restricted to the window.
     // BTreeMap keeps the output stable (entry-keyed) before the final sustained-first sort.
-    type Breach<'a> = (u64, &'a str); // (at_ms, verdict)
+    // Each breach carries its structured enrichment-coverage (JEF-145) so the gap is
+    // classified from the model's actual evidence, not the verdict prose.
+    type Breach<'a> = (u64, &'a str, Option<&'a EnrichmentCoverage>); // (at_ms, verdict, coverage)
     let mut by_entry: BTreeMap<&str, Vec<Breach>> = BTreeMap::new();
     let mut sorted: Vec<&JournalEntry> = entries.iter().collect();
     sorted.sort_by_key(|e| e.at_ms);
     let mut decisions_in_window = 0usize;
     for e in sorted {
-        if let Decision::Breach { entry, verdict, .. } = &e.decision {
+        if let Decision::Breach {
+            entry,
+            verdict,
+            coverage,
+            ..
+        } = &e.decision
+        {
             any_breach = true;
             if e.at_ms >= window_start_ms {
-                by_entry
-                    .entry(entry.as_str())
-                    .or_default()
-                    .push((e.at_ms, verdict));
+                by_entry.entry(entry.as_str()).or_default().push((
+                    e.at_ms,
+                    verdict,
+                    coverage.as_ref(),
+                ));
                 decisions_in_window += 1;
             }
         }
@@ -2004,7 +2022,7 @@ fn aggregate_report(
 
         let mut i = 0usize;
         while i < decisions.len() {
-            let (start_ms, verdict) = decisions[i];
+            let (start_ms, verdict, _) = decisions[i];
             if !verdict_would_act(verdict) {
                 i += 1;
                 continue;
@@ -2015,7 +2033,7 @@ fn aggregate_report(
             let mut episode_gap = false;
             while j < decisions.len() && verdict_would_act(decisions[j].1) {
                 would_act_decisions += 1;
-                if is_coverage_gap(decisions[j].1) {
+                if is_coverage_gap(decisions[j].2) {
                     episode_gap = true;
                 }
                 last_would_act_verdict = Some(decisions[j].1);
@@ -2058,7 +2076,7 @@ fn aggregate_report(
         } else {
             // No would-act episode in the window: the entry's paths were all proven and
             // CLEARED. The trust half — surface the latest (clearing) verdict.
-            if let Some((_, verdict)) = decisions.last() {
+            if let Some((_, verdict, _)) = decisions.last() {
                 left_alone.push(LeftAloneEntry {
                     entry: entry.to_string(),
                     verdict: verdict.to_string(),
@@ -4111,8 +4129,15 @@ mod tests {
     }
 
     /// A breach journal entry for `entry` at `secs_before` seconds before [`report_now`],
-    /// carrying `verdict` (the model's own words).
-    fn breach(entry: &str, verdict: &str, secs_before: u64) -> JournalEntry {
+    /// carrying `verdict` (the model's own words) and explicit structured
+    /// enrichment-coverage (JEF-145) — the evidence the model was handed, independent of
+    /// the verdict prose.
+    fn breach_cov(
+        entry: &str,
+        verdict: &str,
+        secs_before: u64,
+        coverage: Option<EnrichmentCoverage>,
+    ) -> JournalEntry {
         let at = report_now() - Duration::from_secs(secs_before);
         JournalEntry {
             at_ms: at
@@ -4123,8 +4148,35 @@ mod tests {
                 entry: entry.to_string(),
                 objectives: 1,
                 verdict: verdict.to_string(),
+                coverage,
             },
         }
+    }
+
+    /// A breach entry whose structured coverage is derived from the verdict's CVE
+    /// mentions — convenience for the lifetime/episode/ranking tests, which only care that
+    /// a "CVE-…" verdict reads as enrichment-backed and a CVE-less one as a gap. Coverage
+    /// classification itself is exercised independently below.
+    fn breach(entry: &str, verdict: &str, secs_before: u64) -> JournalEntry {
+        let cves: Vec<String> = verdict
+            .match_indices("CVE-")
+            .map(|(i, _)| {
+                verdict[i..]
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        breach_cov(
+            entry,
+            verdict,
+            secs_before,
+            Some(EnrichmentCoverage {
+                cves,
+                behavioral: false,
+            }),
+        )
     }
 
     const WEEK: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -4145,14 +4197,26 @@ mod tests {
     }
 
     #[test]
-    fn coverage_gap_is_an_exploitable_verdict_with_no_cve() {
-        // An exploitable call with a CVE is enrichment-backed; without one it's a gap.
-        assert!(!is_coverage_gap(
-            "exploitable — CVE-2021-44228 is a remote RCE"
-        ));
-        assert!(is_coverage_gap(
-            "exploitable — a privileged container escape reaches the node"
-        ));
+    fn coverage_gap_reads_the_structured_field_not_the_verdict_prose() {
+        // JEF-145: a gap is classified from the STRUCTURED enrichment-coverage the model
+        // was given, never the verdict wording.
+        // No CVE and no behavioral signal ⇒ a gap.
+        assert!(is_coverage_gap(Some(&EnrichmentCoverage {
+            cves: vec![],
+            behavioral: false,
+        })));
+        // A CVE backs it ⇒ NOT a gap.
+        assert!(!is_coverage_gap(Some(&EnrichmentCoverage {
+            cves: vec!["CVE-2021-44228".into()],
+            behavioral: false,
+        })));
+        // A behavioral signal backs it ⇒ NOT a gap.
+        assert!(!is_coverage_gap(Some(&EnrichmentCoverage {
+            cves: vec![],
+            behavioral: true,
+        })));
+        // Back-compat: an old line with no structured coverage is "unknown", NOT a gap.
+        assert!(!is_coverage_gap(None));
     }
 
     #[test]
@@ -4296,24 +4360,96 @@ mod tests {
 
     #[test]
     fn coverage_gap_would_acts_are_counted_and_flagged() {
-        // An exploitable call with NO CVE backing it (e.g. a container-escape primitive)
-        // is the would-act to scrutinize: it fired during an enrichment-coverage gap.
-        let entries = vec![breach(
+        // JEF-145 acceptance: a breach with NO enrichment (no CVE, no behavioral signal)
+        // is flagged as a gap...
+        let gap = vec![breach_cov(
             "workload/app/Pod/escape",
             "exploitable — a privileged container escape reaches the node",
             45,
+            Some(EnrichmentCoverage {
+                cves: vec![],
+                behavioral: false,
+            }),
+        )];
+        let report = aggregate_report(&gap, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(
+            report.coverage_gap_count(),
+            1,
+            "no enrichment ⇒ coverage gap"
+        );
+        assert!(report.would_act[0].coverage_gap);
+
+        // ...and a breach WITH CVE/behavioral backing is NOT flagged — regardless of the
+        // verdict wording. Here the verdict prose mentions no CVE token at all, yet the
+        // structured coverage carries one, so the prose heuristic would have misfired.
+        let backed_cve = vec![breach_cov(
+            "workload/app/Pod/web",
+            "exploitable — a remote code-execution path reaches the secret",
+            45,
+            Some(EnrichmentCoverage {
+                cves: vec!["CVE-2021-44228".into()],
+                behavioral: false,
+            }),
+        )];
+        let r2 = aggregate_report(&backed_cve, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(
+            r2.coverage_gap_count(),
+            0,
+            "CVE backing ⇒ not a gap, even with no CVE in the prose"
+        );
+        assert!(!r2.would_act[0].coverage_gap);
+
+        // The inverse misclassification is also gone: a verdict whose PROSE cites a CVE
+        // but whose structured backing is empty IS still a gap (the old grep would have
+        // read it as covered).
+        let prose_only = vec![breach_cov(
+            "workload/app/Pod/prose",
+            "exploitable — resembles CVE-2099-0001 in shape but no advisory matched",
+            45,
+            Some(EnrichmentCoverage {
+                cves: vec![],
+                behavioral: false,
+            }),
+        )];
+        let r3 = aggregate_report(&prose_only, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(
+            r3.coverage_gap_count(),
+            1,
+            "empty structured backing ⇒ a gap, even with a CVE in the prose"
+        );
+
+        // A behavioral signal (no CVE) also backs the decision ⇒ not a gap.
+        let backed_behavioral = vec![breach_cov(
+            "workload/app/Pod/runtime",
+            "exploitable — live reverse shell observed",
+            45,
+            Some(EnrichmentCoverage {
+                cves: vec![],
+                behavioral: true,
+            }),
+        )];
+        let r4 = aggregate_report(&backed_behavioral, report_now(), WEEK, FIVE_MIN);
+        assert_eq!(r4.coverage_gap_count(), 0, "behavioral backing ⇒ not a gap");
+    }
+
+    #[test]
+    fn a_pre_jef145_breach_with_no_structured_coverage_is_not_a_false_gap() {
+        // Back-compat (AC #3): an old journal line has `coverage: None`. It is a would-act
+        // (exploitable), but its coverage is "unknown" — it must NOT be counted as a gap.
+        let entries = vec![breach_cov(
+            "workload/app/Pod/legacy",
+            "exploitable — reaches the secret",
+            45,
+            None,
         )];
         let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
-        assert_eq!(report.coverage_gap_count(), 1, "no CVE ⇒ coverage gap");
-        assert!(report.would_act[0].coverage_gap);
-        // A CVE-backed exploitable is NOT a coverage gap.
-        let backed = vec![breach(
-            "workload/app/Pod/web",
-            "exploitable — CVE-2021-44228 is a remote RCE",
-            45,
-        )];
-        let r2 = aggregate_report(&backed, report_now(), WEEK, FIVE_MIN);
-        assert_eq!(r2.coverage_gap_count(), 0);
+        assert_eq!(report.would_act_count(), 1, "still a would-act");
+        assert_eq!(
+            report.coverage_gap_count(),
+            0,
+            "unknown coverage is not a gap (no false positive on old records)"
+        );
+        assert!(!report.would_act[0].coverage_gap);
     }
 
     #[test]

@@ -649,10 +649,19 @@ impl Engine {
             if !matches!(display, reason::adjudicate::Verdict::Uncertain(_))
                 && self.verdicts.journaled(entry_key).as_ref() != Some(&summary)
             {
+                // Re-derive the structured enrichment-coverage (JEF-145) from the SAME
+                // evidence the model was given (`entry_evidence`, via `entry_coverage`),
+                // so `/report` classifies an enrichment-coverage gap from fact instead of
+                // grepping this verdict's prose for a `CVE-` token. Cheap and pure.
+                let coverage = reason::adjudicate::entry_coverage(&graph, &entry);
                 self.journal.record(journal::Decision::Breach {
                     entry: entry_key.clone(),
                     objectives: objectives.len(),
                     verdict: summary.clone(),
+                    coverage: Some(journal::EnrichmentCoverage {
+                        cves: coverage.cves,
+                        behavioral: coverage.behavioral,
+                    }),
                 });
                 self.verdicts.set_journaled(entry_key, summary.clone());
                 // The ONE sanctioned outbound notification (JEF-144, ADR-0018), fired on the
