@@ -172,14 +172,37 @@ async fn ingest_behavior(
     State((events, notify)): State<IngestState>,
     Json(observations): Json<Vec<RuntimeObservation>>,
 ) -> StatusCode {
-    let mut changed = false;
-    for obs in observations {
-        changed |= events.record(obs);
-    }
-    if changed {
+    if record_batch(&events, observations) {
         let _ = notify.try_send(());
     }
     StatusCode::OK
+}
+
+/// Upper bound on observations accepted per `/behavior` batch. Each `record()` is an
+/// O(n) scan over up to `MAX_EVENTS` entries while the store mutex is held, so an
+/// oversized batch would do O(batch x MAX_EVENTS) work under the lock — a cheap DoS
+/// (Fix 7). The agent reports in small batches, so this never truncates a legitimate
+/// report; anything past the cap is dropped (the body cap already bounds bytes, this
+/// bounds work-under-lock).
+const MAX_BATCH: usize = 256;
+
+/// Record at most [`MAX_BATCH`] observations from one batch, returning whether the
+/// store changed (so the caller wakes the engine only on a real change). Split out and
+/// pure-over-the-store so the batch cap is unit-testable without an HTTP server.
+fn record_batch(events: &RuntimeEvents, observations: Vec<RuntimeObservation>) -> bool {
+    let total = observations.len();
+    if total > MAX_BATCH {
+        tracing::warn!(
+            total,
+            cap = MAX_BATCH,
+            "behavior batch exceeds the per-batch cap; processing only the first {MAX_BATCH}"
+        );
+    }
+    let mut changed = false;
+    for obs in observations.into_iter().take(MAX_BATCH) {
+        changed |= events.record(obs);
+    }
+    changed
 }
 
 /// Serve the runtime-evidence ingest. Two routes onto the same behavioral port
@@ -259,6 +282,25 @@ mod tests {
         // A different behavior on the same workload IS a change.
         assert!(store.record_at(t0 + Duration::from_secs(400), obs("c2")));
         assert_eq!(store.current_at(t0 + Duration::from_secs(400)).len(), 2);
+    }
+
+    /// Fix 7: a batch over the per-batch cap is truncated, so a single POST can't drive
+    /// thousands of O(n) `record()` scans under the store mutex. Only the first
+    /// `MAX_BATCH` distinct observations land.
+    #[test]
+    fn oversized_behavior_batch_is_truncated() {
+        let store = RuntimeEvents::new(Duration::from_secs(300));
+        // Each distinct rule is a distinct entry, so the count is the work done.
+        let batch: Vec<RuntimeObservation> = (0..MAX_BATCH + 500)
+            .map(|i| obs(&format!("rule-{i}")))
+            .collect();
+        let changed = record_batch(&store, batch);
+        assert!(changed, "a fresh batch changes the store");
+        assert_eq!(
+            store.current_at(Instant::now()).len(),
+            MAX_BATCH,
+            "only the first MAX_BATCH observations are processed"
+        );
     }
 
     #[test]

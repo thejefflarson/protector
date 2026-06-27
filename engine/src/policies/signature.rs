@@ -167,20 +167,42 @@ impl Policy for SignaturePolicy {
     }
 }
 
-/// Lowercase the registry host (the segment before the first `/`) so a case
-/// variant like `GHCR.IO/thejefflarson/app` — which container runtimes resolve
-/// case-insensitively to the same image — normalizes to the gated form. A bare
-/// Docker Hub shorthand (`postgres:16`, `library/postgres`) has no host segment
-/// and is left untouched.
+/// Canonicalize the registry host (the segment before the first `/`) so cosmetic
+/// variants a container runtime resolves to the *same* image can't slip past the
+/// gated-prefix check:
+///
+/// - lowercase the host (`GHCR.IO/…` → `ghcr.io/…`),
+/// - strip a fully-qualified-domain trailing dot (`ghcr.io./…` → `ghcr.io/…`),
+/// - strip an explicit default port (`ghcr.io:443/…`, `ghcr.io:80/…` →
+///   `ghcr.io/…`).
+///
+/// A bare Docker Hub shorthand (`postgres:16`, `library/postgres`) has no host
+/// segment and is left untouched.
 fn normalize_registry_host(image: &str) -> String {
     match image.split_once('/') {
         // A registry host has a dot (domain) or a colon (port); a leading path
         // segment without either is a Docker Hub repo, not a host.
         Some((host, rest)) if host.contains('.') || host.contains(':') => {
-            format!("{}/{}", host.to_ascii_lowercase(), rest)
+            format!("{}/{}", canonical_host(host), rest)
         }
         _ => image.to_string(),
     }
+}
+
+/// Canonicalize a single registry-host segment: lowercase, drop an explicit
+/// default port (`:443`/`:80`), and drop a FQDN trailing dot. The port is split
+/// off the end first, then the trailing dot, so `ghcr.io.:443` reduces to
+/// `ghcr.io`. A non-default port is part of the registry identity and is kept.
+fn canonical_host(host: &str) -> String {
+    let host = host.to_ascii_lowercase();
+    let without_port = match host.rsplit_once(':') {
+        Some((h, "443" | "80")) => h,
+        _ => host.as_str(),
+    };
+    without_port
+        .strip_suffix('.')
+        .unwrap_or(without_port)
+        .to_string()
 }
 
 /// Collect every container image referenced by a Pod object: regular, init, and
@@ -230,14 +252,14 @@ impl CosignChecker {
         cache_dir: PathBuf,
         verify_timeout: Duration,
     ) -> Result<Self> {
-        // Force a start anchor: an operator-supplied pattern without `^` would
-        // otherwise match anywhere in the SAN URI, accepting a cert whose
-        // subject merely *contains* the trusted prefix.
-        let anchored = if identity_regexp.starts_with('^') {
-            identity_regexp.to_string()
-        } else {
-            format!("^(?:{identity_regexp})")
-        };
+        // Force a start anchor that binds the *whole* pattern. Wrapping the
+        // alternation in a group is essential: a bare `^a|b` parses as
+        // `(^a)|(b)`, leaving the second branch unanchored so it matches a
+        // trusted prefix mid-string in a cert SAN. Always emit `^(?:…)`,
+        // stripping one redundant leading `^` first so a pre-anchored pattern
+        // doesn't become `^(?:^…)` (which `regex` rejects).
+        let inner = identity_regexp.strip_prefix('^').unwrap_or(identity_regexp);
+        let anchored = format!("^(?:{inner})");
         // sigstore-rs reads/writes the TUF trust-root cache in `cache_dir` but does
         // not create it. Under readOnlyRootFilesystem the cache points into a /tmp
         // emptyDir subdir that doesn't exist yet, so without this every verification
@@ -422,6 +444,71 @@ mod tests {
         );
         // No host segment → left untouched.
         assert_eq!(normalize_registry_host("postgres:16"), "postgres:16");
+    }
+
+    #[test]
+    fn host_spelling_variants_canonicalize_to_the_gated_form() {
+        // A trailing FQDN dot, an explicit default port, and case all resolve to
+        // the same image at the runtime; each must reduce to the gated prefix so
+        // it can't slip past `starts_with`.
+        let canonical = "ghcr.io/thejefflarson/x";
+        for variant in [
+            "ghcr.io./thejefflarson/x",
+            "ghcr.io:443/thejefflarson/x",
+            "ghcr.io:80/thejefflarson/x",
+            "GHCR.IO/thejefflarson/x",
+            "ghcr.io.:443/thejefflarson/x",
+        ] {
+            assert_eq!(
+                normalize_registry_host(variant),
+                canonical,
+                "{variant} did not canonicalize to {canonical}"
+            );
+        }
+        // A non-default port is part of the identity — preserved.
+        assert_eq!(
+            normalize_registry_host("ghcr.io:5000/thejefflarson/x"),
+            "ghcr.io:5000/thejefflarson/x"
+        );
+    }
+
+    #[test]
+    fn host_spelling_variants_are_all_gated() {
+        let p = policy(&[], true);
+        for variant in [
+            "ghcr.io/thejefflarson/x:1",
+            "ghcr.io./thejefflarson/x:1",
+            "ghcr.io:443/thejefflarson/x:1",
+            "GHCR.IO/thejefflarson/x:1",
+        ] {
+            assert!(p.gated(variant), "{variant} escaped the gate");
+        }
+    }
+
+    #[test]
+    fn identity_regex_anchors_every_alternation_branch() {
+        // `^a|b` must NOT match `prefix-b-suffix`: the second branch has to be
+        // anchored too, or a cert SAN merely *containing* a trusted prefix is
+        // accepted.
+        let checker = CosignChecker::new(
+            "^https://github.com/org/|https://gitlab.com/org/",
+            "https://token.actions.githubusercontent.com".to_string(),
+            Auth::Anonymous,
+            std::env::temp_dir().join(format!("protector-anchor-{}", std::process::id())),
+            Duration::from_secs(5),
+        )
+        .expect("regex compiles");
+        assert!(
+            !checker
+                .identity
+                .is_match("https://evil.example/prefix-https://gitlab.com/org/-suffix"),
+            "second alternation branch matched mid-string — not anchored"
+        );
+        // The legitimate identities still match at the start.
+        assert!(checker.identity.is_match("https://github.com/org/repo"));
+        assert!(checker.identity.is_match("https://gitlab.com/org/repo"));
+        // And a SAN that merely starts with a near-miss does not match.
+        assert!(!checker.identity.is_match("https://gitlab.com/other/repo"));
     }
 
     #[test]

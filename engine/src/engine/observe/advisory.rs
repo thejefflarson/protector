@@ -37,6 +37,17 @@ const SUMMARY_CAP: usize = 280;
 /// cardinality from a pathological snapshot entry. CWEs are sorted+deduped first.
 const MAX_CWE: usize = 8;
 
+/// Hard cap on a stored `fix_ref` string (Fix 8). A fix reference is a version or a
+/// short URL; like `summary`, it's the operator-controlled-but-untrusted free text that
+/// rides into the prompt/fingerprint, so cap it at parse time so a pathological snapshot
+/// entry can't bloat them. Applied with `.chars().take(..)` so the cap is char-safe.
+const FIX_REF_CAP: usize = 64;
+
+/// Hard cap on the length of each individual CWE id string (Fix 8). A CWE id is short
+/// (`CWE-502`); bound each entry so a junk snapshot can't smuggle a long string in
+/// through the otherwise-uncapped CWE list elements.
+const CWE_CAP: usize = 32;
+
 /// A CVE-keyed advisory snapshot, mounted from a file (ADR-0015). Maps a CVE id to its
 /// structured, length-capped [`Advisory`] enrichment.
 #[derive(Debug, Default, Clone)]
@@ -116,14 +127,17 @@ impl AdvisoryStore {
             .map(|s| s.trim().chars().take(SUMMARY_CAP).collect::<String>())
             .unwrap_or_default();
 
+        // Each CWE id is capped to CWE_CAP chars (Fix 8) so a junk snapshot can't smuggle
+        // a long string in through an otherwise-uncapped list element.
+        let cap_cwe = |s: &str| s.trim().chars().take(CWE_CAP).collect::<String>();
         let mut cwe: Vec<String> = match entry.get("cwe") {
             // A single CWE id as a bare string.
-            Some(Value::String(s)) => vec![s.trim().to_string()],
+            Some(Value::String(s)) => vec![cap_cwe(s)],
             // A list of CWE ids.
             Some(Value::Array(items)) => items
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|s| s.trim().to_string())
+                .map(cap_cwe)
                 .filter(|s| !s.is_empty())
                 .collect(),
             _ => Vec::new(),
@@ -132,12 +146,13 @@ impl AdvisoryStore {
         cwe.dedup();
         cwe.truncate(MAX_CWE);
 
+        // `fix_ref` is the last free-text advisory field; cap it at parse time like
+        // `summary` (Fix 8) so it can't bloat the prompt/fingerprint.
         let fix_ref = entry
             .get("fix_ref")
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(|s| s.trim().chars().take(FIX_REF_CAP).collect::<String>())
+            .filter(|s| !s.is_empty());
 
         // Drop an entry that carries nothing usable.
         if summary.is_empty() && cwe.is_empty() && fix_ref.is_none() {
@@ -249,6 +264,29 @@ mod tests {
         let a = store.get("CVE-2026-0001").unwrap();
         assert_eq!(a.summary.chars().count(), SUMMARY_CAP);
         assert!(a.cwe.len() <= MAX_CWE);
+    }
+
+    #[test]
+    fn fix_ref_and_cwe_strings_are_length_capped() {
+        // Fix 8: `fix_ref` was the only free-text advisory field never capped, and CWE
+        // list elements were uncapped. Both must be bounded at parse time.
+        let big_fix_ref = "F".repeat(500);
+        let long_cwe = "C".repeat(200);
+        let json = format!(
+            r#"{{"CVE-2026-0003":{{"summary":"s","cwe":["{long_cwe}"],"fix_ref":"{big_fix_ref}"}}}}"#
+        );
+        let store = AdvisoryStore::parse(&json);
+        let a = store.get("CVE-2026-0003").unwrap();
+        assert_eq!(
+            a.fix_ref.as_ref().unwrap().chars().count(),
+            FIX_REF_CAP,
+            "fix_ref must be truncated to the cap"
+        );
+        assert_eq!(
+            a.cwe[0].chars().count(),
+            CWE_CAP,
+            "each CWE string must be truncated to the cap"
+        );
     }
 
     #[test]
