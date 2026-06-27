@@ -2751,24 +2751,8 @@ fn render_report_html(report: &Report) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <title>protector — would-have-acted report</title>\
-         <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
-         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
-         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
-         h3{{font-size:.9rem;font-weight:600;margin:1.2rem 0 .3rem;color:#333}}\
-         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
-         .muted{{color:#6a6a6a}}\
-         a{{color:#06c}}\
-         code{{background:#f4f4f4;padding:0 .2rem}}\
-         table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
-         table.vectors th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ddd;padding:.25rem .5rem}}\
-         table.vectors td{{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}}\
-         table.vectors code{{background:#f4f4f4;padding:0 .2rem}}\
-         table.vectors .flagged{{color:#b00000;font-weight:600}}\
-         .sustained{{color:#b00000;font-weight:600}}\
-         .shortlived{{color:#9a5b00}}\
-         .verdict-cell{{color:#333;max-width:38rem}}\
-         </style></head><body>\
+         <link rel=\"stylesheet\" href=\"/assets/dashboard.css\">\
+         </head><body>\
          <h1>protector — would-have-acted report</h1>\
          <p class=\"sum\">The shadow diff that gates exiting shadow: over a rolling \
          window, the workloads protector <b>would</b> have isolated, how often the breach \
@@ -2854,27 +2838,8 @@ fn render_judgements_html(judgements: &[Judgement]) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <title>protector — judgements</title>\
-         <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
-         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
-         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
-         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
-         .muted{{color:#6a6a6a}}\
-         a{{color:#06c}}\
-         code{{background:#f4f4f4;padding:0 .2rem}}\
-         .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
-         .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
-         .vline{{font-size:.92rem;line-height:1.4;margin:.1rem 0 .4rem}}\
-         .vwords{{color:#111}}\
-         .meta{{color:#555;font-style:italic}}\
-         .chip{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;letter-spacing:.02em;padding:.05rem .35rem;border-radius:2px;border:1px solid;margin-right:.35rem;white-space:nowrap}}\
-         .chip-breach{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
-         .chip-safe{{color:#155f29;background:#eef7f0;border-color:#1a7f37}}\
-         .chip-awaiting{{color:#555;background:#f4f4f4;border-color:#ccc}}\
-         .raw summary{{cursor:pointer;color:#06c;font-size:.8rem}}\
-         .raw-cap{{font-size:.72rem;font-weight:600;color:#444;margin:.4rem 0 .1rem}}\
-         .raw pre{{white-space:pre-wrap;word-break:break-word;background:#f7f7f7;border:1px solid #eee;padding:.4rem .5rem;font-size:.72rem;margin:0}}\
-         </style></head><body>\
+         <link rel=\"stylesheet\" href=\"/assets/dashboard.css\">\
+         </head><body>\
          <h1>protector — judgements</h1>\
          <p class=\"sum\">Why the model called each internet-facing service the way it did — \
          the posture and the model's own words first. The raw prompt+reply is behind \
@@ -2926,7 +2891,7 @@ impl InputState {
         }
     }
 
-    /// The CSS tone class — maps to the readiness tokens in the dashboard `<style>` block:
+    /// The CSS tone class — maps to the readiness tokens in `web/dist/dashboard.css`:
     /// green for present (the JEF-159 `#1a7f37` token), red for an absent input that
     /// weakens decisions, amber for degraded.
     fn tone(self) -> &'static str {
@@ -3335,7 +3300,7 @@ impl ClusterStatus {
         }
     }
 
-    /// The CSS class for the banner's tone — maps to the tokens in the `<style>` block.
+    /// The CSS class for the banner's tone — maps to the tokens in `web/dist/dashboard.css`.
     /// `ok` is the new calm/green token (the first "healthy" color); `breach` is the
     /// reserved red; `isolated` is red-border-on-calm; `warming` is muted; `unjudged` is the
     /// amber/degraded token (JEF-174) — explicitly NOT green, because nothing was cleared.
@@ -3758,235 +3723,18 @@ fn render_html(
     let reversions_body = reversions_panel(reversions);
     let readiness_body = readiness_panel(readiness);
 
-    // NOTE: this HTML is a single `\`-continued string literal, so every source-line
-    // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
-    // line comment inside the inline <script>: it would comment out the rest of the
-    // collapsed line (the import + all rendering). Use /* */ block comments only.
-    // The graph renderer is beautiful-mermaid (ELK layout), vendored + bundled into
-    // web/dist and served SAME-ORIGIN at /assets — never a third-party CDN.
+    // The page CSS + JS are self-hosted static assets (JEF-203): the stylesheet at
+    // /assets/dashboard.css and the module at /assets/dashboard.js, both served
+    // SAME-ORIGIN from the embedded `web/dist` (zero egress, no third-party CDN). The
+    // graph renderer the module imports (beautiful-mermaid, ELK layout) is likewise
+    // vendored + served at /assets. (Pre-JEF-203 these were inline <style>/<script>;
+    // the only rendered-output change is inline -> linked delivery.)
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <title>protector</title>\
-         <style>\
-         body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
-         h1{{font-size:1.2rem;font-weight:600;margin:0}}\
-         h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
-         details.diag{{margin:1.6rem 0 .4rem}}\
-         details.diag>summary,details.diag details>summary{{cursor:pointer;list-style:revert}}\
-         h2.diag-h{{display:inline-block;margin:0;border-bottom:none;padding:0}}\
-         h3.diag-h{{display:inline-block;font-size:.92rem;font-weight:600;margin:0;padding:0}}\
-         details.diag>details{{margin:.2rem 0 .2rem 1rem}}\
-         .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
-         .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
-         .kc{{font-family:ui-monospace,monospace;font-size:.85rem;font-weight:600}}\
-         .kc2{{font-size:.75rem;color:#666;margin:.15rem 0 .3rem}}\
-         .verdict{{font-size:.78rem;color:#333;background:#f4f4f4;border-left:2px solid #888;padding:.2rem .5rem;margin:.2rem 0 .4rem}}\
-         .vline{{font-size:.92rem;line-height:1.4;margin:.1rem 0 .5rem}}\
-         .vwords{{color:#111}}\
-         .chip{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;letter-spacing:.02em;padding:.05rem .35rem;border-radius:2px;border:1px solid;margin-right:.35rem;white-space:nowrap}}\
-         .chip-breach{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
-         .chip-safe{{color:#155f29;background:#eef7f0;border-color:#1a7f37}}\
-         .chip-awaiting{{color:#555;background:#f4f4f4;border-color:#ccc}}\
-         .tier-flagged{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
-         .tier-watch{{color:#7a4a00;background:#fbf6ee;border-color:#9a5b00}}\
-         .tier-context{{color:#555;background:#f4f4f4;border-color:#ccc}}\
-         .rail{{font-size:.78rem;margin:.2rem 0 .5rem;border-left:2px solid #1a7f37;padding:.1rem 0 .1rem .6rem}}\
-         .rail-cap{{font-weight:600;color:#155f29}}\
-         .rail ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
-         .rail li{{margin:.1rem 0;color:#333}}\
-         .rail code{{background:#f4f4f4;padding:0 .2rem}}\
-         .broad-lead{{font-size:.86rem;color:#155f29;margin:.1rem 0 .5rem}}\
-         .graphwrap>summary{{cursor:pointer;color:#06c;font-size:.82rem;margin:.1rem 0}}\
-         table.findings{{border-collapse:collapse;width:100%;font-size:.85rem;margin:.2rem 0 .6rem}}\
-         table.findings th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ccc;padding:.3rem .5rem;white-space:nowrap}}\
-         table.findings td{{padding:.3rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}}\
-         table.findings tr.f-row:hover>td{{background:#fafafa}}\
-         table.findings tr.f-calm>td{{border-left:3px solid #1a7f37}}\
-         table.findings td.c-entry code{{background:#f4f4f4;padding:0 .2rem}}\
-         table.findings .r-arrow{{color:#999}}\
-         table.findings td.c-verdict{{max-width:30rem}}\
-         .v-clause{{color:#333}}\
-         .lever{{font-family:ui-monospace,monospace;font-size:.74rem;color:#06c;white-space:nowrap}}\
-         tr.f-calm .lever{{color:#155f29}}\
-         table.findings td.c-age{{color:#666;white-space:nowrap}}\
-         .ev-crit{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;color:#7a0000}}\
-         .ev-live{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;color:#b00000}}\
-         button.row-toggle{{cursor:pointer;background:none;border:none;padding:0;font:inherit;text-align:left}}\
-         button.row-toggle[aria-expanded=\"true\"] .chip{{outline:2px solid #888;outline-offset:1px}}\
-         tr.f-detail>td{{background:#fafafa;padding:.6rem .8rem}}\
-         tr.ctx-summary>td{{background:#f7f7f7}}\
-         tr.ctx-row>td{{opacity:.75}}\
-         details.legend-d{{margin:.2rem 0 .6rem}}\
-         details.legend-d>summary{{cursor:pointer;color:#06c;font-size:.78rem}}\
-         details.howto{{margin:.2rem 0 1rem}}\
-         details.howto>summary{{cursor:pointer;color:#06c;font-size:.82rem}}\
-         .todo{{font-size:.82rem;color:#333;background:#f8f8f8;border-left:2px solid #06c;padding:.25rem .5rem;margin:.3rem 0 .1rem}}\
-         .todo code{{background:#eee;padding:0 .2rem}}\
-         .applied{{color:#b00000;font-weight:600}}\
-         .proposed{{color:#9a5b00;font-weight:600}}\
-         .muted{{color:#6a6a6a}}\
-         a{{color:#06c}}\
-         .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#555}}\
-         .graph svg{{max-width:100%;height:auto}}\
-         .verdict.muted{{color:#6a6a6a;border-left-color:#ccc}}\
-         .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
-         .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
-         .why li{{margin:.1rem 0}}\
-         .expand{{font-size:.78rem;margin-top:.3rem}}\
-         .expand summary{{cursor:pointer;color:#06c}}\
-         .expand ul{{margin:.15rem 0 .4rem;padding-left:1.1rem;columns:2}}\
-         .expand li{{margin:.05rem 0;font-family:ui-monospace,monospace}}\
-         .evidence{{font-size:.78rem;margin:.2rem 0 .5rem}}\
-         .ev-head{{font-weight:600;color:#444;margin:.1rem 0 .2rem}}\
-         .ev{{border-left:2px solid #ccc;padding:.1rem 0 .1rem .6rem;margin:.2rem 0}}\
-         .ev-cve{{border-left-color:#9a5b00}}\
-         .ev-runtime{{border-left-color:#b00000}}\
-         .ev-cap{{font-weight:600;color:#333}}\
-         .ev-sum{{margin:.1rem 0}}\
-         .ev ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
-         .ev li{{margin:.1rem 0;color:#333}}\
-         .ev code{{background:#f4f4f4;padding:0 .2rem}}\
-         .ev summary{{cursor:pointer;color:#06c}}\
-         .ev details ul{{margin:.1rem 0 .3rem}}\
-         .sev-critical{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
-         .sev-high{{color:#9a5b00;background:#fff3e0;border-color:#cc7a00}}\
-         .sev-medium{{color:#555;background:#f4f4f4;border-color:#bbb}}\
-         .sev-low{{color:#555;background:#f4f4f4;border-color:#ddd}}\
-         .kev{{font-family:ui-monospace,monospace;font-size:.7rem;font-weight:700;color:#7a0000;background:#fdecec;border:1px solid #b00000;border-radius:2px;padding:0 .25rem}}\
-         .legend{{font-size:.75rem;color:#555;margin:.2rem 0 .6rem}}\
-         .legend code{{background:#f4f4f4;padding:0 .2rem}}\
-         table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
-         table.vectors th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ddd;padding:.25rem .5rem}}\
-         table.vectors td{{padding:.25rem .5rem;border-bottom:1px solid #f0f0f0}}\
-         table.vectors code{{background:#f4f4f4;padding:0 .2rem}}\
-         table.vectors .flagged{{color:#b00000;font-weight:600}}\
-         .nav{{display:flex;gap:.1rem;font-size:.85rem;margin:0 0 1rem}}\
-         .nav a{{padding:.2rem .55rem;color:#06c;text-decoration:none;border-bottom:2px solid transparent}}\
-         .nav a[aria-current=\"page\"]{{color:#111;font-weight:600;border-bottom-color:#111}}\
-         .banner{{display:block;width:100%;box-sizing:border-box;border-radius:0;padding:.6rem .8rem;margin:0 0 1rem;border:1px solid #ddd}}\
-         .banner-head{{display:flex;align-items:baseline;gap:.4rem}}\
-         .banner-glyph{{font-size:1rem;line-height:1}}\
-         .banner-word{{font-size:1.05rem;font-weight:700;letter-spacing:.01em}}\
-         .banner-detail{{font-size:.85rem;margin-top:.15rem}}\
-         .banner-detail a{{color:inherit;text-decoration:underline}}\
-         .banner-sub{{font-size:.78rem;margin-top:.2rem;opacity:.85}}\
-         .banner-ok{{background:#eef7f0;border-color:#1a7f37;color:#155f29}}\
-         .banner-ok .banner-glyph,.banner-ok .banner-word{{color:#1a7f37}}\
-         .banner-breach{{background:#fdecec;border-color:#b00000;color:#7a0000}}\
-         .banner-breach .banner-glyph,.banner-breach .banner-word{{color:#b00000}}\
-         .banner-isolated{{background:#f4f4f4;border:2px solid #b00000;color:#5a2a2a}}\
-         .banner-isolated .banner-glyph,.banner-isolated .banner-word{{color:#b00000}}\
-         .banner-warming{{background:#f4f4f4;border-color:#ccc;color:#555}}\
-         .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#6a6a6a}}\
-         .banner-unjudged{{background:#fbf6ee;border-color:#9a5b00;color:#7a4a00}}\
-         .banner-unjudged .banner-glyph,.banner-unjudged .banner-word{{color:#9a5b00}}\
-         ol.readiness{{list-style:none;padding:0;margin:.2rem 0 .6rem;font-size:.85rem}}\
-         ol.readiness li.r-row{{padding:.4rem .6rem;margin:.3rem 0;border:1px solid #e3e3e3;border-left-width:3px}}\
-         ol.readiness li.r-ok{{border-left-color:#1a7f37}}\
-         ol.readiness li.r-absent{{border-left-color:#b00000;background:#fdf3f3}}\
-         ol.readiness li.r-degraded{{border-left-color:#9a5b00;background:#fbf6ee}}\
-         .r-label{{font-weight:600}}\
-         .r-state{{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:0 .3rem;border-radius:2px}}\
-         .r-state-ok{{color:#155f29}}\
-         .r-state-absent{{color:#7a0000}}\
-         .r-state-degraded{{color:#7a4a00}}\
-         .r-weak{{font-size:.72rem;font-weight:600;color:#7a0000;border:1px solid #b00000;border-radius:2px;padding:0 .25rem}}\
-         .r-why{{color:#444}}\
-         .r-detail{{color:#666}}\
-         .r-enable{{color:#444}}\
-         .r-enable code{{background:#f4f4f4;padding:0 .2rem}}\
-         .r-cold{{font-size:.82rem;color:#555;background:#f4f4f4;border-left:3px solid #ccc;padding:.4rem .6rem;margin:.3rem 0}}\
-         .firstrun{{border:1px solid #e3e3e3;border-radius:0;padding:.7rem .9rem;margin:.6rem 0;background:#fafafa}}\
-         ol.checklist{{font-size:.85rem;margin:.3rem 0;padding-left:1.3rem}}\
-         ol.checklist li{{margin:.3rem 0}}\
-         ol.checklist li.r-done{{color:#155f29}}\
-         ol.checklist li.r-todo{{color:#333}}\
-         ol.checklist code{{background:#f4f4f4;padding:0 .2rem}}\
-         </style>\
-         <script type=\"module\">\
-         import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
-         /* Render one Mermaid <pre> into an SVG, carrying the path summary as the a11y label. */\
-         function renderPre(pre) {{\
-           const aria = pre.getAttribute('data-aria');\
-           try {{\
-             const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
-             const g = document.createElement('div'); g.className = 'graph'; g.innerHTML = svg;\
-             const el = g.querySelector('svg') || g;\
-             el.setAttribute('role', 'img');\
-             if (aria) el.setAttribute('aria-label', aria);\
-             pre.replaceWith(g);\
-           }} catch (e) {{ /* leave the source text as a fallback */ if (aria) {{ pre.setAttribute('role', 'img'); pre.setAttribute('aria-label', aria); }} }}\
-         }}\
-         /* A graph laid out inside a closed <details> OR a hidden row (display:none) measures \
-            to zero, so DEFER those to first reveal; render every visible graph immediately. A \
-            row's detail <tr> carries [hidden] until its row-toggle opens it, and a context row \
-            is hidden until its group opens, so a closest('[hidden]') ancestor defers too. */\
-         function hiddenAncestor(pre) {{ if (pre.closest('[hidden]')) return pre.closest('[hidden]'); let d = pre.closest('details'); while (d) {{ if (!d.open) return d; d = d.parentElement && d.parentElement.closest('details'); }} return null; }}\
-         /* A STABLE key for a <details> so its open/closed state can survive an incremental \
-            swap: the <summary> text plus its index among same-text siblings. Card content \
-            is stable pass-to-pass, so the same card maps to the same key. */\
-         function detailsKey(d) {{\
-           const s = d.querySelector(':scope > summary');\
-           const label = (s ? s.textContent : '').replace(/\\s+/g, ' ').trim().slice(0, 80);\
-           let n = 0; for (let p = d.previousElementSibling; p; p = p.previousElementSibling) {{\
-             if (p.tagName === 'DETAILS' && p.querySelector(':scope > summary') && p.querySelector(':scope > summary').textContent.replace(/\\s+/g, ' ').trim().slice(0, 80) === label) n++;\
-           }}\
-           return 'det:' + label + '#' + n;\
-         }}\
-         function saveDetails(d) {{ try {{ localStorage.setItem(detailsKey(d), d.open ? '1' : '0'); }} catch (e) {{}} }}\
-         function restoreDetails(root) {{ for (const d of root.querySelectorAll('details')) {{ let v = null; try {{ v = localStorage.getItem(detailsKey(d)); }} catch (e) {{}} if (v === '1') d.open = true; else if (v === '0') d.open = false; }} }}\
-         /* The dense findings table's row-expand is a <button aria-controls> (a bare <details> \
-            wrapping a <tr> is invalid table markup), so it gets its OWN persistence keyed by the \
-            STABLE aria-controls id (derived from the entry key, so the same endpoint maps to the \
-            same key pass-to-pass and survives the /fragment swap). A context group toggles every \
-            .ctx-row in its table at once. */\
-         function rowKey(btn) {{ return 'row:' + (btn.getAttribute('aria-controls') || btn.getAttribute('data-ctx-group') || ''); }}\
-         function renderIn(el) {{ for (const pre of el.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }}\
-         function setRow(btn, open) {{\
-           btn.setAttribute('aria-expanded', open ? 'true' : 'false');\
-           if (btn.classList.contains('ctx-toggle')) {{\
-             const tbl = btn.closest('table'); if (tbl) for (const r of tbl.querySelectorAll('tr.ctx-row')) r.hidden = !open;\
-           }} else {{\
-             const id = btn.getAttribute('aria-controls'); const detail = id && document.getElementById(id);\
-             if (detail) {{ detail.hidden = !open; if (open) renderIn(detail); }}\
-           }}\
-           try {{ localStorage.setItem(rowKey(btn), open ? '1' : '0'); }} catch (e) {{}}\
-         }}\
-         function restoreRows(root) {{ for (const btn of root.querySelectorAll('button.row-toggle')) {{ let v = null; try {{ v = localStorage.getItem(rowKey(btn)); }} catch (e) {{}} if (v === '1') setRow(btn, true); else if (v === '0') setRow(btn, false); }} }}\
-         /* (Re)hydrate a subtree: render visible graphs now, defer hidden ones to first reveal, \
-            persist <details> AND row-toggle state, and re-render any graph revealed by opening. \
-            Idempotent and scoped to `root` so it can run on load AND after each incremental swap \
-            without double-wiring (swapped nodes are fresh; their old listeners are discarded). */\
-         function hydrate(root) {{\
-           for (const pre of root.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }}\
-           for (const d of root.querySelectorAll('details')) {{\
-             d.addEventListener('toggle', () => {{ saveDetails(d); if (!d.open) return; for (const pre of d.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }});\
-           }}\
-           for (const btn of root.querySelectorAll('button.row-toggle')) {{\
-             btn.addEventListener('click', () => {{ setRow(btn, btn.getAttribute('aria-expanded') !== 'true'); }});\
-           }}\
-         }}\
-         restoreDetails(document); restoreRows(document); hydrate(document);\
-         /* Incremental refresh: replaces the old 30s full-page reload, which reset \
-            scroll, focus, and every <details>. Poll the SAME-ORIGIN `/fragment` (zero new \
-            egress) and swap ONLY the banner + findings region; restore <details> open-state \
-            from localStorage, re-hydrate Mermaid for the new DOM, and keep scroll + focus. */\
-         async function poll() {{\
-           let html; try {{ const r = await fetch('/fragment', {{ headers: {{ 'Accept': 'text/html' }} }}); if (!r.ok) return; html = await r.text(); }} catch (e) {{ return; }}\
-           const doc = new DOMParser().parseFromString(html, 'text/html');\
-           const focusKey = (() => {{ const a = document.activeElement; if (!a) return null; if (a.classList && a.classList.contains('row-toggle')) return rowKey(a); const d = a.closest && a.closest('details'); return (a.tagName === 'SUMMARY' && d) ? detailsKey(d) : null; }})();\
-           const sx = window.scrollX, sy = window.scrollY;\
-           for (const id of ['banner-region', 'findings-region']) {{\
-             const cur = document.getElementById(id), next = doc.getElementById(id);\
-             if (cur && next) cur.replaceWith(next);\
-           }}\
-           const region = document.getElementById('findings-region');\
-           if (region) {{ restoreDetails(region); restoreRows(region); hydrate(region); }}\
-           if (focusKey && region) {{ for (const b of region.querySelectorAll('button.row-toggle')) {{ if (rowKey(b) === focusKey) {{ b.focus({{ preventScroll: true }}); break; }} }} for (const d of region.querySelectorAll('details')) {{ if (detailsKey(d) === focusKey) {{ const s = d.querySelector(':scope > summary'); if (s) s.focus({{ preventScroll: true }}); break; }} }} }}\
-           window.scrollTo(sx, sy);\
-         }}\
-         setInterval(poll, 30000);\
-         </script></head><body>\
+         <link rel=\"stylesheet\" href=\"/assets/dashboard.css\">\
+         <script type=\"module\" src=\"/assets/dashboard.js\"></script>\
+         </head><body>\
          {live}\
          <details class=\"howto\"><summary>how protector decides</summary>\
          <p class=\"sum\">It maps every real path an attacker could walk — proven from your \
@@ -4188,6 +3936,35 @@ async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1],
     )
 }
 
+/// The dashboard stylesheet (JEF-203): the page CSS extracted from the former inline
+/// `<style>` blocks into a self-hosted asset, embedded in the binary and served
+/// same-origin at `/assets/dashboard.css` (no third-party CSS, zero egress).
+const DASHBOARD_CSS: &str = include_str!("../../web/dist/dashboard.css");
+
+async fn dashboard_css() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        DASHBOARD_CSS,
+    )
+}
+
+/// The dashboard page script (JEF-203): the Mermaid-hydrate / details-persist /
+/// incremental-poll module extracted from the former inline `<script type="module">`
+/// into a self-hosted asset, embedded in the binary and served same-origin at
+/// `/assets/dashboard.js` (the import it carries resolves to the likewise self-hosted
+/// `/assets/beautiful-mermaid.js`; zero egress).
+const DASHBOARD_JS: &str = include_str!("../../web/dist/dashboard.js");
+
+async fn dashboard_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        DASHBOARD_JS,
+    )
+}
+
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON, `/readiness`
 /// JSON) plus the human `/judgements` HTML "why" view (JEF-161) with its diagnostic
 /// `/judgements.json` (full prompt + raw reply + verdict per recent judgement), the
@@ -4214,6 +3991,10 @@ pub async fn serve_dashboard(
         // replacing the 30s full-page meta-refresh. New route; no existing route changes.
         .route("/fragment", get(fragment_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
+        // JEF-203: the dashboard's self-hosted CSS + JS, served same-origin from the
+        // embedded `web/dist` (no inline <style>/<script>, no third-party assets).
+        .route("/assets/dashboard.css", get(dashboard_css))
+        .route("/assets/dashboard.js", get(dashboard_js))
         .with_state(findings)
         .merge(
             Router::new()
@@ -4823,11 +4604,64 @@ mod tests {
         );
     }
 
-    /// JEF-180 AC #1: the contrast tokens are the darkened, AA-passing values — the
-    /// Mermaid pre-render fallback (`#999`→`#555`), `.muted` (`#777`→`#6a6a6a`), and the
-    /// warming-banner word/glyph (`#777`→`#6a6a6a`) — and the old failing values are gone.
+    /// JEF-180 AC #1, carried through the JEF-203 asset extraction: the AA-passing
+    /// contrast values still gate the dashboard, only now they live in the self-hosted
+    /// stylesheet's `:root` token block and the high-traffic classes CONSUME those
+    /// tokens. We assert BOTH halves so the contract isn't weakened by the move: (a) each
+    /// token is DEFINED as its AA value in `:root`, and (b) the class still resolves to it.
+    /// The old failing raw values (`.muted{color:#777}`, mermaid `#999`) stay gone.
     #[test]
     fn render_html_uses_aa_contrast_tokens() {
+        // The page now LINKS the stylesheet rather than inlining it — the token+class
+        // contract is asserted against the served asset (DASHBOARD_CSS), the exact bytes
+        // /assets/dashboard.css serves.
+        let css = DASHBOARD_CSS;
+
+        // (a) `:root` defines the AA values verbatim (JEF-180):
+        //   muted #6a6a6a (>=4.5:1 on white), the legend/mermaid grey #555, the calm
+        //   green #1a7f37 and its AA text-on-tint #155f29.
+        assert!(
+            css.contains("--color-muted: var(--c-grey-3)") && css.contains("--c-grey-3: #6a6a6a"),
+            "muted token resolves to the AA value #6a6a6a"
+        );
+        assert!(
+            css.contains("--c-grey-1: #555"),
+            "the legend/mermaid grey token is the AA value #555"
+        );
+        assert!(
+            css.contains("--c-green: #1a7f37"),
+            "the calm green token is preserved verbatim"
+        );
+        assert!(
+            css.contains("--color-safe-text: var(--c-green-text)")
+                && css.contains("--c-green-text: #155f29"),
+            "the safe text-on-tint token is the AA value #155f29"
+        );
+
+        // (b) the high-traffic classes CONSUME the tokens (not raw hexes):
+        assert!(
+            css.contains(".muted{color:var(--color-muted)}"),
+            ".muted consumes the muted token"
+        );
+        assert!(
+            css.contains(
+                ".verdict.muted{color:var(--color-muted);border-left-color:var(--c-grey-line)}"
+            ),
+            ".verdict.muted consumes the muted token"
+        );
+        assert!(
+            css.contains(
+                ".banner-warming .banner-glyph,.banner-warming .banner-word{color:var(--color-muted)}"
+            ),
+            "the warming banner word/glyph consumes the muted token"
+        );
+        assert!(
+            css.contains(".mermaid{") && css.contains("font-size:.75rem;color:var(--c-grey-1)}"),
+            "the mermaid fallback text consumes the AA grey token"
+        );
+
+        // The old failing tokens are gone everywhere (page + stylesheet): no
+        // `.muted{color:#777}`, no mermaid `color:#999`.
         let html = render_html(
             &[],
             false,
@@ -4836,33 +4670,22 @@ mod tests {
             Some(SystemTime::now()),
             &ready(),
         );
-        assert!(
-            html.contains(".muted{color:#6a6a6a}"),
-            "muted darkened to #6a6a6a (>=4.6:1 on white)"
-        );
-        assert!(
-            html.contains("font-size:.75rem;color:#555}"),
-            "mermaid fallback text darkened to #555"
-        );
-        assert!(
-            html.contains(".verdict.muted{color:#6a6a6a;border-left-color:#ccc}"),
-            "muted verdict darkened to #6a6a6a"
-        );
-        assert!(
-            html.contains(
-                ".banner-warming .banner-glyph,.banner-warming .banner-word{color:#6a6a6a}"
-            ),
-            "warming banner word/glyph darkened to #6a6a6a"
-        );
-        // The old failing tokens are gone: no `.muted{color:#777}`, no mermaid `color:#999`.
-        assert!(
-            !html.contains(".muted{color:#777}"),
-            "old failing #777 muted token removed"
-        );
-        assert!(
-            !html.contains("font-size:.75rem;color:#999}"),
-            "old failing #999 mermaid token removed"
-        );
+        for hay in [css, html.as_str()] {
+            assert!(
+                !hay.contains(".muted{color:#777}"),
+                "old failing #777 muted token removed"
+            );
+            assert!(
+                !hay.contains("font-size:.75rem;color:#999}"),
+                "old failing #999 mermaid token removed"
+            );
+            // No raw #6a6a6a / #777 left as the muted *class* value (the AA value now
+            // only appears as the token definition).
+            assert!(
+                !hay.contains(".muted{color:#6a6a6a}"),
+                ".muted no longer carries a raw hex; it consumes the token"
+            );
+        }
     }
 
     /// JEF-180 AC #2 + the JEF-177 interaction: the page swaps the live region in place
@@ -4879,53 +4702,63 @@ mod tests {
             Some(SystemTime::now()),
             &ready(),
         );
-        // The two swap targets the poll replaces in place.
+        // The two swap targets the poll replaces in place — still emitted by the page.
         assert!(html.contains("id=\"banner-region\""), "banner region id");
         assert!(
             html.contains("id=\"findings-region\""),
             "findings region id"
         );
+        // JEF-203: the poll/hydrate logic now lives in the self-hosted module the page
+        // loads same-origin (no inline <script>). The page links it; the behavior is
+        // asserted against the served asset (DASHBOARD_JS).
+        assert!(
+            html.contains("<script type=\"module\" src=\"/assets/dashboard.js\"></script>"),
+            "page loads the self-hosted dashboard module same-origin"
+        );
+        assert!(
+            !html.contains("<script type=\"module\">"),
+            "no inline module script left in the page"
+        );
+        let js = DASHBOARD_JS;
         // Same-origin fragment fetch (zero new egress) on a 30s timer, not a doc reload.
         assert!(
-            html.contains("fetch('/fragment'"),
+            js.contains("fetch('/fragment'"),
             "polls /fragment same-origin"
         );
         assert!(
-            html.contains("setInterval(poll, 30000)"),
+            js.contains("setInterval(poll, 30000)"),
             "30s incremental poll"
         );
         assert!(
-            !html.contains("location.reload"),
+            !js.contains("location.reload"),
             "never a full document reload"
         );
         // JEF-177 deferred-Mermaid-on-open wiring is preserved and re-applied after a swap
         // via the shared `hydrate(root)` over the new DOM (not duplicated, not clobbered).
+        assert!(js.contains("function hydrate(root)"), "hydrate over a root");
         assert!(
-            html.contains("function hydrate(root)"),
-            "hydrate over a root"
-        );
-        assert!(
-            html.contains("addEventListener('toggle'"),
+            js.contains("addEventListener('toggle'"),
             "render graphs on details open"
         );
         assert!(
-            html.contains("hydrate(region)"),
+            js.contains("hydrate(region)"),
             "re-hydrate the swapped findings region"
         );
         // <details> open-state survives a swap via localStorage keyed by a stable id.
         assert!(
-            html.contains("localStorage") && html.contains("detailsKey"),
+            js.contains("localStorage") && js.contains("detailsKey"),
             "details open-state persisted across swaps"
         );
-        // SVG a11y contract (JEF-161) and banner a11y contract (JEF-159) are intact.
+        // SVG a11y contract (JEF-161) is intact in the module.
         assert!(
-            html.contains("setAttribute('role', 'img')"),
+            js.contains("setAttribute('role', 'img')"),
             "rendered graph stays role=img"
         );
         assert!(
-            html.contains("setAttribute('aria-label', aria)"),
+            js.contains("setAttribute('aria-label', aria)"),
             "rendered graph keeps its aria-label"
         );
+        // Banner a11y contract (JEF-159) stays in the page markup.
         assert!(
             html.contains("role=\"status\" aria-live=\"polite\""),
             "banner keeps role=status aria-live=polite"
@@ -4977,6 +4810,48 @@ mod tests {
         assert!(
             page.contains(frag_banner),
             "the page embeds the same banner-region markup the fragment serves"
+        );
+    }
+
+    /// JEF-203 fragment⊂page parity: the WHOLE `render_fragment` output is a substring of
+    /// `render_html` for the same inputs. The page embeds the live region verbatim, so the
+    /// `/fragment` poll can swap it in place and never drift from the page. This pins the
+    /// invariant for the later dashboard-refactor chunks (any future divergence between the
+    /// fragment and the page's live region breaks this test, not production).
+    #[test]
+    fn render_fragment_is_a_substring_of_render_html() {
+        let findings = vec![
+            finding(
+                "workload/app/Pod/web",
+                "secret/app/session-key",
+                "auto-eligible",
+                "can-do/get/secrets",
+                true,
+                Some("exploitable — RCE reaches the secret"),
+            ),
+            finding(
+                "workload/api/Pod/svc",
+                "secret/api/token",
+                "durable-fix PR",
+                "can-read",
+                true,
+                Some("not exploitable — authorized RBAC"),
+            ),
+        ];
+        let last_pass = Some(SystemTime::now());
+        let readiness = ready();
+        let frag = render_fragment(&findings, true, last_pass, &readiness);
+        let page = render_html(
+            &findings,
+            true,
+            &BakeStats::default(),
+            &[],
+            last_pass,
+            &readiness,
+        );
+        assert!(
+            page.contains(&frag),
+            "render_fragment output must be a verbatim substring of render_html"
         );
     }
 
@@ -7380,34 +7255,29 @@ mod tests {
     #[test]
     fn row_open_state_persistence_hooks_are_present() {
         // JEF-202: the row-expand button state AND the lazy graph must survive the /fragment
-        // swap — the page carries the row-toggle persistence machinery and re-applies it
-        // after the swap, alongside the existing <details> machinery (not reinvented).
-        let html = render_html(
-            &[],
-            false,
-            &BakeStats::default(),
-            &[],
-            Some(SystemTime::now()),
-            &ready(),
-        );
+        // swap — the dashboard module carries the row-toggle persistence machinery and
+        // re-applies it after the swap, alongside the existing <details> machinery (not
+        // reinvented). Since JEF-203 this module is the self-hosted /assets/dashboard.js,
+        // so the behavior is asserted against the served asset (DASHBOARD_JS).
+        let js = DASHBOARD_JS;
         // Row-toggle persistence keyed by the stable aria-controls id, in localStorage.
-        assert!(html.contains("function rowKey(btn)"), "stable row key");
+        assert!(js.contains("function rowKey(btn)"), "stable row key");
         assert!(
-            html.contains("function restoreRows(root)"),
+            js.contains("function restoreRows(root)"),
             "restore row state"
         );
         assert!(
-            html.contains("restoreRows(region)"),
+            js.contains("restoreRows(region)"),
             "re-applied after the swap"
         );
-        assert!(html.contains("localStorage"), "persisted to localStorage");
+        assert!(js.contains("localStorage"), "persisted to localStorage");
         // The hidden-row deferral so a graph in a closed row renders on first reveal.
         assert!(
-            html.contains("closest('[hidden]')"),
+            js.contains("closest('[hidden]')"),
             "graphs in a hidden row are deferred to first reveal"
         );
         // The existing <details> machinery is still there (not reinvented / clobbered).
-        assert!(html.contains("function hydrate(root)") && html.contains("detailsKey"));
+        assert!(js.contains("function hydrate(root)") && js.contains("detailsKey"));
     }
 
     fn full_judgement(
@@ -7493,9 +7363,10 @@ mod tests {
         let html = render_html(&findings, false, &BakeStats::default(), &[], None, &ready());
         assert!(html.contains("data-aria=\""));
         assert!(html.contains("Attack-path graph"));
-        // The JS wires data-aria → role="img" + aria-label on the rendered SVG.
-        assert!(html.contains("setAttribute('role', 'img')"));
-        assert!(html.contains("setAttribute('aria-label', aria)"));
+        // The JS wires data-aria → role="img" + aria-label on the rendered SVG. Since
+        // JEF-203 that JS is the self-hosted /assets/dashboard.js asset (DASHBOARD_JS).
+        assert!(DASHBOARD_JS.contains("setAttribute('role', 'img')"));
+        assert!(DASHBOARD_JS.contains("setAttribute('aria-label', aria)"));
     }
 
     #[test]
