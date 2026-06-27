@@ -142,18 +142,8 @@ fn relative_time_renders_human_freshness() {
     assert_eq!(relative_time(Some(two_h)), "2h ago");
 }
 
-#[test]
-fn reversions_panel_shows_lifted_cuts_or_a_quiet_default() {
-    // Empty ⇒ a quiet (not error) message; non-empty ⇒ the cut + reason rendered.
-    assert!(reversions_panel(&[]).contains("no cuts have been lifted"));
-    let panel = reversions_panel(&[ReversionRecord {
-        cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
-        reason: "no proven chain still justifies this control".into(),
-        at_ms: unix_now_ms(),
-    }]);
-    assert!(panel.contains("workload/app/Pod/web"));
-    assert!(panel.contains("no proven chain still justifies"));
-}
+// `reversions_panel_shows_lifted_cuts_or_a_quiet_default` migrated to
+// `components::panels::reversions` (JEF-206).
 
 #[test]
 fn render_html_shows_the_freshness_line_and_reversions_section() {
@@ -798,19 +788,5 @@ fn bake_stats_total_and_unresolved_fraction() {
     assert_eq!(BakeStats::default().unresolved_fraction(), 0.0);
 }
 
-#[test]
-fn bake_panel_renders_volume_attribution_and_corroborations() {
-    let panel = bake_panel(&bake(80, 20));
-    // Per-variant volume rows the JEF-48 "connect / secret-read / library-load" watch
-    // wants to see by name.
-    assert!(panel.contains("connection"));
-    assert!(panel.contains("secret-read"));
-    assert!(panel.contains("library-load"));
-    // The attribution line surfaces resolved + the unresolved share, highlighted.
-    assert!(panel.contains("80"), "resolved count");
-    assert!(panel.contains("class=\"flagged\""), "unresolved is flagged");
-    assert!(panel.contains("20.0%"), "unresolved fraction shown");
-    // The live store size and corroborations-fired (the bake's promotion proxy).
-    assert!(panel.contains("live store"));
-    assert!(panel.contains("corroborations"));
-}
+// `bake_panel_renders_volume_attribution_and_corroborations` migrated to
+// `components::panels::bake` (JEF-206).

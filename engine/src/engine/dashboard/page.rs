@@ -13,7 +13,10 @@ use crate::engine::dashboard::legacy::*;
 use crate::engine::dashboard::view_model::findings::{
     Tier, endpoint_attention_rank, endpoint_props, remediation_props, tier_of_priority,
 };
-use crate::engine::dashboard::view_model::{banner_props, nav_props};
+use crate::engine::dashboard::view_model::{
+    attack_vectors_props, bake_props, banner_props, first_run_props, nav_props, readiness_props,
+    reversions_props,
+};
 
 /// The per-pass "live region" (JEF-180): the status banner plus the findings region
 /// (summary line, findings body, remediations), each wrapped in a stable `id` container.
@@ -186,7 +189,7 @@ fn findings_region(
     // (JEF-200), so the explanatory preamble sentences are gone. On first run the guided
     // checklist replaces the whole region (preserving the JEF-160 path).
     let region = if first_run {
-        first_run_checklist(readiness)
+        components::panels::first_run(&first_run_props(readiness)).into_string()
     } else {
         let attention = if attention_rows.is_empty() {
             String::new()
@@ -261,10 +264,14 @@ pub(crate) fn render_html(
     readiness: &Readiness,
 ) -> String {
     let live = live_region(findings, armed, last_pass, readiness);
-    let vectors_body = attack_vectors(findings);
-    let bake_body = bake_panel(bake);
-    let reversions_body = reversions_panel(reversions);
-    let readiness_body = readiness_panel(readiness);
+    // The diagnostics panels are now maud components fed by the view-model (ADR-0019,
+    // JEF-206); `.into_string()` composes each into the page's diagnostics region.
+    let vectors_body =
+        components::panels::attack_vectors(&attack_vectors_props(findings)).into_string();
+    let bake_body = components::panels::bake(&bake_props(bake)).into_string();
+    let reversions_body =
+        components::panels::reversions(&reversions_props(reversions)).into_string();
+    let readiness_body = components::panels::readiness(&readiness_props(readiness)).into_string();
 
     // The page CSS + JS are self-hosted static assets (JEF-203): the stylesheet at
     // /assets/dashboard.css and the module at /assets/dashboard.js, both served
