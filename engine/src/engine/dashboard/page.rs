@@ -8,7 +8,11 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use crate::engine::dashboard::components;
+use crate::engine::dashboard::components::findings::FINDINGS_COLS as COMPONENT_FINDINGS_COLS;
 use crate::engine::dashboard::legacy::*;
+use crate::engine::dashboard::view_model::findings::{
+    Tier, endpoint_attention_rank, endpoint_props, remediation_props, tier_of_priority,
+};
 use crate::engine::dashboard::view_model::{banner_props, nav_props};
 
 /// The per-pass "live region" (JEF-180): the status banner plus the findings region
@@ -45,23 +49,14 @@ fn live_region(
 
 /// The number of columns in the dense findings table (JEF-202):
 /// `tier · entry → reaches · verdict · evidence · next lever · age`. The detail row's
-/// `<td colspan>` spans all of them.
-pub(crate) const FINDINGS_COLS: usize = 6;
+/// `<td colspan>` spans all of them. Canonical home is `components::findings`; re-exported
+/// here for the page composition and the still-legacy render tests.
+pub(crate) const FINDINGS_COLS: usize = COMPONENT_FINDINGS_COLS;
 
-/// Wrap a set of endpoint rows in the dense findings `<table>` (JEF-202) — real table
-/// semantics: a `<thead>` of `<th scope="col">` over the decisive columns, then the rows in
-/// a `<tbody>`. The columns lead with the most-decisive (tier) and end with age.
+/// Wrap pre-rendered endpoint rows in the dense findings `<table>` (JEF-202) — the maud
+/// `components::findings::findings_table` over the already-rendered rows.
 fn findings_table(rows: &str) -> String {
-    format!(
-        "<table class=\"findings\"><thead><tr>\
-         <th scope=\"col\">tier</th>\
-         <th scope=\"col\">entry → reaches</th>\
-         <th scope=\"col\">verdict</th>\
-         <th scope=\"col\">evidence</th>\
-         <th scope=\"col\">next lever</th>\
-         <th scope=\"col\">age</th>\
-         </tr></thead><tbody>{rows}</tbody></table>"
-    )
+    components::findings::findings_table(maud::PreEscaped(rows.to_string())).into_string()
 }
 
 /// The edge-legend glossary, collapsed behind a closed `<details>` (JEF-200) — the token
@@ -111,7 +106,7 @@ fn findings_region(
     } else {
         remediations
             .iter()
-            .map(|f| remediation_card(f, armed))
+            .map(|f| components::findings::remediation(&remediation_props(f, armed)).into_string())
             .collect()
     };
 
@@ -146,13 +141,13 @@ fn findings_region(
     let mut exposed_n = 0usize; // watch + context: exposed, not flagged
     for (entry, fs) in &ranked {
         let (priority, tier) = endpoint_attention_rank(fs);
-        let row = endpoint_row(
+        let row = components::findings::endpoint(&endpoint_props(
             entry,
             fs,
             tier_of_priority(priority),
             last_pass,
-            FINDINGS_COLS,
-        );
+        ))
+        .into_string();
         match tier {
             Tier::Flagged => {
                 flagged_n += 1;

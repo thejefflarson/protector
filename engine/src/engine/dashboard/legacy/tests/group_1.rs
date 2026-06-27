@@ -706,14 +706,8 @@ fn disposition_keys_on_what_the_cut_can_actually_do() {
     );
 }
 
-#[test]
-fn mm_strips_html_metacharacters_to_prevent_xss() {
-    // A malicious label can't break out of the <pre> or inject into the SVG.
-    let evil = mm("</pre><img src=x onerror=\"alert(1)\">&");
-    for c in ['<', '>', '&', '"'] {
-        assert!(!evil.contains(c), "mm must strip {c:?}");
-    }
-}
+// The `mm()` XSS-strip test migrated to `components::graph` (JEF-205), the canonical home
+// of the Mermaid sink + its `PreEscaped` guard.
 
 #[test]
 fn renders_two_graph_sections_and_drops_internal_paths() {

@@ -181,16 +181,23 @@ pub(super) fn finding(
 }
 
 /// The expandable card BODY for an endpoint (JEF-202) — the detail-row target. Most card
-/// tests inspect this body (the verbatim verdict, rail, evidence, graph, what-to-do).
+/// tests inspect this body (the verbatim verdict, rail, evidence, graph, what-to-do). Since
+/// JEF-205 the findings core renders through the maud `components`; this wraps the migrated
+/// `detail` component over the `detail_props` data so the render-level assertions hold.
 pub(super) fn card_body(entry: &str, fs: &[&Finding]) -> String {
-    endpoint_card_body(entry, fs).0
+    use crate::engine::dashboard::components::findings::detail;
+    use crate::engine::dashboard::view_model::findings::detail_props;
+    detail(&detail_props(entry, fs).0).into_string()
 }
 
 /// The full dense-table row pair (summary `<tr>` + detail `<tr>`) for an endpoint, at the
-/// tier the ranking assigns — what `findings_region` emits per endpoint (JEF-202).
+/// tier the ranking assigns — what `findings_region` emits per endpoint (JEF-202). Renders
+/// through the migrated `endpoint` component (JEF-205).
 pub(super) fn row_html(entry: &str, fs: &[&Finding]) -> String {
+    use crate::engine::dashboard::components::findings::endpoint;
+    use crate::engine::dashboard::view_model::findings::{endpoint_attention_rank, endpoint_props};
     let tier = endpoint_attention_rank(fs).1;
-    endpoint_row(entry, fs, tier, Some(SystemTime::now()), FINDINGS_COLS)
+    endpoint(&endpoint_props(entry, fs, tier, Some(SystemTime::now()))).into_string()
 }
 
 pub(super) fn bake(resolved: u64, unresolved: u64) -> BakeStats {

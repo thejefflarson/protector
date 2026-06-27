@@ -744,29 +744,5 @@ fn findings_round_trips_the_readiness_config_and_model_health() {
     assert_eq!(findings.model_health(), ModelHealth::Timeout);
 }
 
-// ===================================================================
-// JEF-161 — verdict-first card + human /judgements view
-// ===================================================================
-
-#[test]
-fn posture_chip_selection_per_verdict_state() {
-    // The model's affirmation → [BREACH]; a "not exploitable" call → [SAFE]; no
-    // verdict yet → [awaiting judgement]. The Debug form (capitalized) maps too.
-    assert_eq!(Posture::of(None), Posture::Awaiting);
-    assert_eq!(Posture::of(None).label(), "[awaiting judgement]");
-    assert_eq!(
-        Posture::of(Some("exploitable — RCE reaches the secret")),
-        Posture::Breach
-    );
-    assert_eq!(
-        Posture::of(Some("Exploitable(\"reason\")")),
-        Posture::Breach
-    );
-    assert_eq!(Posture::Breach.label(), "[BREACH]");
-    assert_eq!(
-        Posture::of(Some("not exploitable — authorized RBAC, no CVE")),
-        Posture::Safe
-    );
-    assert_eq!(Posture::of(Some("Refuted(\"benign\")")), Posture::Safe);
-    assert_eq!(Posture::Safe.label(), "[SAFE]");
-}
+// JEF-161 posture-chip selection migrated to `view_model::findings` tests
+// (`posture_maps_each_verdict_state`) with the rest of the findings core (JEF-205).
