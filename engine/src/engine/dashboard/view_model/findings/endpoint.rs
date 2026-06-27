@@ -11,7 +11,7 @@ use super::{
     terminal_reach_clause, verdict_gist, what_to_do,
 };
 use crate::engine::dashboard::components::graph::{kind, short};
-use crate::engine::dashboard::legacy::{EntryEvidence, Finding, relative_time};
+use crate::engine::dashboard::model::{EntryEvidence, Finding, relative_time};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One graph edge to draw, in render order. `cut` dashes the severing edge; `aggregate`
@@ -107,6 +107,10 @@ pub struct RowProps {
     /// The pass-age phrase ("as of Nm ago") — already humanized.
     pub age: String,
     pub calm: bool,
+    /// Whether this summary row belongs to the collapsed Context group (JEF-202): the page
+    /// composition sets it for context-tier endpoints so the row renders `hidden` behind the
+    /// single `ctx-summary` toggle. Default `false` (a standalone attention/watch row).
+    pub context: bool,
 }
 
 /// A finding-pair (summary + detail) for one endpoint, the full Props pair the
@@ -293,6 +297,9 @@ pub fn endpoint_props(
         lever,
         age: relative_time(last_pass),
         calm: meta.calm,
+        // Set by the page composition for context-tier endpoints (JEF-202); a row built here
+        // is a standalone attention/watch row until the page groups it.
+        context: false,
     };
     EndpointProps { row, detail }
 }

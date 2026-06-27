@@ -3,7 +3,7 @@
 //! renderer consumes. No maud, no markup — it resolves each record's relative-time phrase
 //! (the only logic) and hands the renderer plain strings to escape and lay out.
 
-use crate::engine::dashboard::legacy::{ReversionRecord, relative_time};
+use crate::engine::dashboard::model::{ReversionRecord, relative_time};
 use std::time::{Duration, SystemTime};
 
 /// One lifted-cut row, fully resolved for rendering: the cut signature, the reason it was

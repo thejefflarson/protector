@@ -1,11 +1,17 @@
-//! Transitional legacy module (pre-ADR-0019 string-concat rendering).
+//! The report DATA layer (ADR-0019): the would-have-acted [`Report`] aggregation and its
+//! shapes ([`WouldActEntry`] / [`LeftAloneEntry`]), the [`ReportQuery`] window parsing, and
+//! the [`aggregate_report`] fold over the journal's breach decisions.
 //!
-//! Migrated piecemeal in tickets 3–6; extracted here only so each file
-//! stays under the 1,000-line cap (repo CLAUDE.md). New work goes in the
-//! `components`/`view_model` maud layers, not here.
-#![allow(dead_code)]
+//! This is data, not markup — it holds NO rendering. `/report.json` serializes [`Report`]
+//! directly, and `view_model::report` shapes the same aggregation into the `Props` the
+//! `components::report` renderer consumes.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+
+use serde::{Deserialize, Serialize};
+
+use crate::engine::journal::{Decision, EnrichmentCoverage, JournalEntry};
 
 /// Default rolling window for `/report`, in hours (7 days). The journal's own
 /// rotation bounds how far back history actually reaches; this is the default the

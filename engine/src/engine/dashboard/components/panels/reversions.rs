@@ -34,7 +34,7 @@ pub fn reversions(props: &ReversionsProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::ReversionRecord;
+    use crate::engine::dashboard::model::ReversionRecord;
     use crate::engine::dashboard::view_model::reversions_props;
     use std::time::SystemTime;
 

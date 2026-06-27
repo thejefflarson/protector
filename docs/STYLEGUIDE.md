@@ -4,7 +4,8 @@ The dashboard is an operator's situation board, not a marketing page. This guide
 source of truth for its visual system: the design tokens, the component→token map, and the
 accessibility gate the tests assert. It was introduced by JEF-203, which extracted the
 formerly inline CSS/JS into self-hosted static assets and layered a token system over the
-existing palette **with zero behavior change**.
+existing palette **with zero behavior change**. JEF-208 completed the raw-value→token sweep:
+every raw hex now lives ONLY in the `:root` primitive palette, and a guard test enforces it.
 
 ## Where the code lives
 
@@ -13,8 +14,10 @@ existing palette **with zero behavior change**.
   binary via `include_str!` and served same-origin at `/assets/dashboard.css`.
 - `engine/web/dist/dashboard.js` — the page module (Mermaid hydrate, `<details>`/row
   persistence, the same-origin `/fragment` poll). Embedded + served at `/assets/dashboard.js`.
-- `engine/src/engine/dashboard.rs` — the Rust render functions that emit the HTML and link
-  the two assets (`<link rel="stylesheet" …>` + `<script type="module" src="…">`).
+- `engine/src/engine/dashboard/` — the maud component tree (ADR-0019) that renders the HTML
+  and links the two assets (`<link rel="stylesheet" …>` + `<script type="module" src="…">`):
+  `page.rs` composes the page/fragment, `components/` are the pure maud renderers, and
+  `view_model/` shapes the engine data into their `Props`.
 
 **Zero egress.** No web fonts, no CDNs, no third-party CSS/JS. The graph renderer
 (beautiful-mermaid + ELK) is vendored into `web/dist` and served same-origin too. The font
@@ -35,9 +38,16 @@ stacks are the system stacks only (`system-ui, sans-serif` and `ui-monospace, mo
 The token block at the top of `dashboard.css` is the palette's source of truth. It is two
 layers: a **small primitive palette** (deduped from the ~34 ad-hoc hexes the three inline
 blocks carried — near-duplicate greys/reds/ambers collapsed) and **semantic tokens** layered
-over it. A full raw-value→token sweep of every rule body is a later sprint chunk (JEF-208);
-this round defines the `:root` block, preserves every AA value verbatim, and routes the
-high-traffic classes (`.muted`, banner states, chips) through tokens.
+over it. As of JEF-208 the sweep is complete: **every** rule body consumes a token, and a
+raw hex appears ONLY in the `:root` primitive palette — the
+`no_raw_hex_outside_root_in_dashboard_css` guard test fails the build otherwise. Every AA
+value is preserved verbatim.
+
+The neutral greys span a primitive ramp: `--c-grey-1 #555` (AA on white) · `--c-grey-2 #666`
+· `--c-grey-3 #6a6a6a` (the muted token) · `--c-grey-4 #888` (expanded-chip outline / verdict
+accent border) · `--c-grey-5 #999` (the decorative entry→ arrow only) · `--c-grey-6 #bbb`
+(low-emphasis border) · `--c-grey-line #ccc` · `--c-grey-border #ddd` · `--c-grey-hair-2 #eee`
+(hairline border / inline-code fill) · `--c-grey-hair #f0f0f0`.
 
 ### Colors — surfaces
 
@@ -102,8 +112,8 @@ the flat/square default) and `--radius-chip` (`2px`). Border widths: `--border-1
 
 ## Accessibility gate
 
-The render tests (`engine/src/engine/dashboard.rs`) assert the AA contract — they don't just
-eyeball it. Specifically, `render_html_uses_aa_contrast_tokens` asserts, for each AA pair,
+The render tests (`engine/src/engine/dashboard/tests`) assert the AA contract — they don't
+just eyeball it. Specifically, `render_html_uses_aa_contrast_tokens` asserts, for each AA pair,
 **(a)** the token is defined as its AA value in `:root`, AND **(b)** the high-traffic class
 consumes that token (not a raw hex):
 
@@ -118,5 +128,8 @@ The old failing values are asserted **absent** from both the served CSS and the 
 HTML (no `.muted{color:#777}`, no Mermaid `color:#999`). Every state also carries its status
 as a **word** plus an ARIA role (`role="status" aria-live="polite"` on the banner; rendered
 graphs get `role="img"` + an `aria-label`), so the a11y contract never depends on color
-alone. The XSS/escape contract (`escape()` / `mm()` on every interpolated value) and the
-no-`ADR-`/`JEF-`-leak contract are likewise test-gated and unchanged by this work.
+alone. The XSS/escape contract is now carried by maud's auto-escaping braces (ADR-0019) —
+the legacy `escape()` helper is gone; the only un-escaped sink is `mm()`-sanitized Mermaid
+source. A dashboard guard test additionally fails the build if a raw hex escapes `:root`, an
+inline `<style>` reappears in a render path, or a presentational component imports an
+`engine::` domain type. The no-`ADR-`/`JEF-`-leak contract is likewise test-gated.

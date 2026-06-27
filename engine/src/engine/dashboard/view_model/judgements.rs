@@ -6,9 +6,11 @@
 //! here) that the component tucks behind the `<details>` expander.
 //!
 //! The [`Judgement`] shape itself (and so the `/judgements.json` contract) stays in
-//! `legacy` — this layer only reshapes it for the human view, never changes it.
+//! the data layer — this layer only reshapes it for the human view, never changes it.
 
-use crate::engine::dashboard::legacy::{Judgement, Posture, short};
+use crate::engine::dashboard::components::graph::short;
+use crate::engine::dashboard::model::Judgement;
+use crate::engine::dashboard::view_model::findings::Posture;
 
 /// The honest meta-state a judgement card leads with (JEF-161 AC #3): the deterministic
 /// pre-filter decided without the model, the model timed out (safe fallback), or the model

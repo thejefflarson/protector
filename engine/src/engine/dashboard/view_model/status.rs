@@ -4,7 +4,8 @@
 //! `components::nav` renderers consume. No maud here, and no presentation markup — only
 //! the glanceable cluster verdict and the data the components turn into HTML.
 
-use crate::engine::dashboard::legacy::{Finding, flagged};
+use crate::engine::dashboard::model::Finding;
+use crate::engine::dashboard::view_model::findings::flagged;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -112,7 +113,7 @@ pub fn cluster_status(
             live_breach = true;
             // A cut is in force for a flagged breach only when the engine is armed AND the
             // chain is auto-eligible (it would render "applied", not "would apply").
-            if armed && f.disposition == crate::engine::dashboard::legacy::AUTO_ELIGIBLE {
+            if armed && f.disposition == crate::engine::dashboard::model::AUTO_ELIGIBLE {
                 cut_applied = true;
             }
         }

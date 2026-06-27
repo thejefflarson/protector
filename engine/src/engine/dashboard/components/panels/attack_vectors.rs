@@ -52,7 +52,7 @@ pub fn attack_vectors(props: &AttackVectorsProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{EntryEvidence, Finding};
+    use crate::engine::dashboard::model::{EntryEvidence, Finding};
     use crate::engine::dashboard::view_model::attack_vectors_props;
 
     fn finding(objective: &str, breach_relevant: bool, verdict: Option<&str>) -> Finding {

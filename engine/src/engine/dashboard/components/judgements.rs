@@ -111,7 +111,7 @@ pub fn judgements(props: &JudgementsProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::Judgement;
+    use crate::engine::dashboard::model::Judgement;
     use crate::engine::dashboard::view_model::judgements_props;
 
     fn full(entry: &str, verdict: &str, prompt: Option<&str>, reply: Option<&str>) -> Judgement {

@@ -4,7 +4,8 @@
 //! the aggregation (distinct objectives reachable vs model-flagged, by ATT&CK technique)
 //! lives here; the renderer only escapes + lays out the resulting rows.
 
-use crate::engine::dashboard::legacy::{Finding, flagged};
+use crate::engine::dashboard::model::Finding;
+use crate::engine::dashboard::view_model::findings::flagged;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One attack-vector row: a tactic→technique pair with how many distinct objectives are
@@ -75,7 +76,7 @@ pub fn attack_vectors_props(findings: &[Finding]) -> AttackVectorsProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::EntryEvidence;
+    use crate::engine::dashboard::model::EntryEvidence;
 
     fn finding(objective: &str, breach_relevant: bool, verdict: Option<&str>) -> Finding {
         Finding {

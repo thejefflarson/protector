@@ -5,9 +5,11 @@
 //! logic (verdict gist, attention rank, what-to-do, CVE blocks) lives in the
 //! `view_model::findings` and `components::findings` test modules.
 use super::*;
-use crate::engine::dashboard::legacy::*;
+use crate::engine::dashboard::model::*;
 use crate::engine::dashboard::page::FINDINGS_COLS;
 use crate::engine::dashboard::page::{render_fragment, render_html};
+use crate::engine::dashboard::view_model::readiness_data::*;
+use crate::engine::dashboard::view_model::report_data::*;
 use crate::engine::dashboard::{DASHBOARD_CSS, DASHBOARD_JS, default_window_report};
 use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{Advisory, NodeKey, Reachability, Severity, Vulnerability};

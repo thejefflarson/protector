@@ -8,7 +8,7 @@
 //! "enable: <var>" hint shown only for an unmet input, and the cold-start note. These are
 //! honesty, not fluff — the view-model decides them so the renderer stays presentation-only.
 
-use crate::engine::dashboard::legacy::{InputState, Readiness};
+use crate::engine::dashboard::view_model::readiness_data::{InputState, Readiness};
 
 /// One row of the readiness panel, fully resolved for rendering: the label, the state WORD
 /// (never glyph-only — accessibility), the CSS tone class, the one-line "why it matters",
@@ -149,8 +149,8 @@ pub fn first_run_props(readiness: &Readiness) -> FirstRunProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::BakeStats;
-    use crate::engine::dashboard::legacy::{ModelHealth, ReadinessConfig, derive_readiness};
+    use crate::engine::dashboard::model::{BakeStats, ModelHealth, ReadinessConfig};
+    use crate::engine::dashboard::view_model::readiness_data::derive_readiness;
     use std::collections::BTreeMap;
     use std::time::SystemTime;
 

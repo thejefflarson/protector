@@ -4,7 +4,7 @@
 //! (signal volume by variant, attribution resolved/unresolved, the live store, and
 //! corroborations fired).
 
-use crate::engine::dashboard::legacy::BakeStats;
+use crate::engine::dashboard::model::BakeStats;
 
 /// One per-variant volume row: the signal variant name and its count this pass.
 #[derive(Debug, Clone, PartialEq, Eq)]

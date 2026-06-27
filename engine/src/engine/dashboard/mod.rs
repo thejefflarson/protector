@@ -7,15 +7,15 @@
 //! reads the shared `Findings` / journals, and re-exports the public surface other engine
 //! modules import from `dashboard`. The presentation is split React-style:
 //!
-//! - [`view_model`] shapes engine domain state into plain `Props` (the data layer).
+//! - [`model`] holds the shared domain DATA the engine writes and the dashboard reads.
+//! - [`view_model`] shapes that domain state into plain `Props` (the data layer), and hosts
+//!   the readiness / report aggregation that `/readiness` + `/report.json` serialize.
 //! - [`components`] are pure `maud` renderers (`Props -> Markup`); they import no
 //!   `engine::` domain type.
-//! - [`page`] composes components + the (transitional) [`legacy`] panels into the full
-//!   page and the `/fragment` live region.
+//! - [`page`] composes components into the full page and the `/fragment` live region.
 //!
-//! JEF-204 migrates the nav + status banner onto this split as the proof-of-pattern; the
-//! remaining panels still render via the string-concat helpers in [`legacy`] and migrate
-//! in tickets 3–6.
+//! The dashboard is now fully on the maud component split — there is no remaining
+//! string-concat `legacy` module; every rendered surface is auto-escaped maud (ADR-0019).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,22 +29,27 @@ use axum::{Json, Router};
 use crate::engine::journal::DecisionJournal;
 
 pub mod components;
-mod legacy;
+pub(crate) mod model;
 mod page;
 pub mod view_model;
 
-// The public surface other engine modules import from `dashboard` (mod.rs is the only
-// place engine domain state is touched). Re-exported from the transitional `legacy`
-// module so external imports keep resolving across the JEF-204 split; as tickets 3–6
-// migrate panels, these re-exports move to their permanent homes without changing the
-// `dashboard::` paths callers use.
-pub use legacy::{
-    BakeStats, Finding, Findings, Judgement, JudgementLog, ModelHealth, Readiness, ReadinessConfig,
-    Report, ReportQuery, ReversionLog, ReversionRecord, VerdictStore,
-};
+#[cfg(test)]
+mod tests;
 
-use legacy::{DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report, derive_readiness};
+// The public surface other engine modules import from `dashboard` (mod.rs is the only place
+// engine domain state is touched). The engine-facing DATA types live in `model`; the
+// readiness / report aggregation lives in the `view_model` data layer. Re-exported here so
+// the stable `dashboard::` paths callers use keep resolving (ADR-0019).
+pub use model::{
+    BakeStats, Finding, Findings, Judgement, JudgementLog, ModelHealth, ReadinessConfig,
+    ReversionLog, ReversionRecord, VerdictStore,
+};
+pub use view_model::readiness_data::Readiness;
+pub use view_model::report_data::{Report, ReportQuery};
+
 use page::{render_fragment, render_html};
+use view_model::readiness_data::derive_readiness;
+use view_model::report_data::{DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report};
 use view_model::{judgements_props, report_props};
 
 /// Shared state for the dashboard's HTML view: the findings handle plus the reversions

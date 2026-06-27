@@ -44,9 +44,16 @@ fn glyphs(g: &GlyphProps) -> Markup {
 /// the evidence glyphs, the next lever, and the pass-age. The row class carries `f-calm` for
 /// a model-cleared broad entry. `aria-controls` / the detail id wire the hidden detail row.
 pub fn row(props: &RowProps) -> Markup {
-    let row_class = if props.calm { "f-row f-calm" } else { "f-row" };
+    let base = if props.calm { "f-row f-calm" } else { "f-row" };
+    // A context-group row (JEF-202) renders `hidden` and prepends `ctx-row` so the single
+    // `ctx-summary` toggle reveals the group; a standalone attention/watch row does neither.
+    let row_class = if props.context {
+        format!("ctx-row {base}")
+    } else {
+        base.to_string()
+    };
     html! {
-        tr class=(row_class) {
+        tr hidden[props.context] class=(row_class) {
             td class="c-tier" {
                 button class="row-toggle" aria-expanded="false"
                     aria-controls=(props.detail_id) {

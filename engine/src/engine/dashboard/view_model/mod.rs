@@ -2,18 +2,21 @@
 //! into the plain `Props` structs the `components` renderers consume. No maud, no markup —
 //! just the mapping from `Finding`s / readiness / arm-state into component-shaped data.
 //!
-//! This ticket (JEF-204) migrates the status banner and the nav (`status`); the findings
-//! table, cards, report, and judgements view-models land in tickets 3–6.
+//! Two of its submodules hold the aggregations the JSON routes serialize directly — the
+//! readiness snapshot ([`readiness_data`]: `/readiness`) and the would-have-acted report
+//! ([`report_data`]: `/report.json`). They are pure data with no rendering; the `_props`
+//! mappers turn them into the component `Props`.
 
 pub mod attack_vectors;
 pub mod bake;
 pub mod findings;
 pub mod judgements;
+pub mod readiness;
+pub mod readiness_data;
 pub mod report;
+pub mod report_data;
 pub mod reversions;
 pub mod status;
-// The readiness / first-run view-model (JEF-206 panel migration).
-pub mod readiness;
 
 pub use attack_vectors::{AttackVectorRow, AttackVectorsProps, attack_vectors_props};
 pub use bake::{BakeProps, BakeVariantRow, bake_props};
