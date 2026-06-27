@@ -956,7 +956,7 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     let evidence = evidence_blocks(&f.evidence);
     let todo_line = format!(
         "<div class=\"todo\"><b>what to do:</b> {}</div>",
-        what_to_do(&f.disposition)
+        what_to_do(f)
     );
     let aria = escape(&path_aria_label(&f.entry, one));
     format!(
@@ -1372,20 +1372,110 @@ fn cve_id(s: &str) -> Option<&str> {
     (end > start + 4).then(|| &s[start..end])
 }
 
-/// The "what to do" line, derived ONLY from the finding's mechanical `disposition`
-/// (JEF-161 AC #1) — no new model call, no new action. The disposition already encodes
-/// the cut type (see [`classify`]); this translates it to the operator's next step.
-fn what_to_do(disposition: &str) -> &'static str {
-    match disposition {
+/// The "what to do" line, derived from the finding's mechanical `disposition` AND the
+/// concrete object/edge on its proven `path` (JEF-161 AC #1, JEF-179) — no new model
+/// call, no new action, no enforcement. The disposition encodes the cut type (see
+/// [`classify`]); for the manual classes the proven path above names the exact offending
+/// object/edge, so a solo operator (who has no security team to hand "manual" to) gets a
+/// concrete next step. All path-derived names are untrusted node keys, so every injected
+/// substring is HTML-[`escape`]d. When the path lacks the specific names this degrades to
+/// the prior generic text rather than printing empty `<>` placeholders.
+fn what_to_do(f: &Finding) -> String {
+    match f.disposition.as_str() {
         AUTO_ELIGIBLE
         | "latent foothold — propose"
         | "structural — propose"
-        | "vetoed — propose" => "would cut in shadow; arm `network` to act",
-        "durable-fix PR" => "revoke the grant / remove the mount (durable fix)",
-        "forbidden" => "manual — the only cut is an irreversible escape primitive",
-        "no-cut" => "manual — no single-edge cut severs this path",
+        | "vetoed — propose" => "would cut in shadow; arm `network` to act".to_string(),
+        // The durable fix is at the terminal hop: the secret-bearing edge into the
+        // objective. `can-read` is a mounted secret (remove the mount); `can-do/<verb>/…`
+        // is an RBAC grant (revoke it). Name the secret, the workload that holds it, and
+        // the grant — then say protector re-checks on its own next pass.
+        "durable-fix PR" => durable_fix_todo(f)
+            .unwrap_or_else(|| "revoke the grant / remove the mount (durable fix)".to_string()),
+        // The blocking edge is the single hop that can't be safely severed in-place — for
+        // `forbidden` an irreversible escape primitive, for `no-cut` the un-cuttable hop.
+        // Name it and state that protector clears the finding by itself once it's gone
+        // (the self-revert behaviour — said in plain words).
+        "forbidden" => blocking_edge_todo(f, true).unwrap_or_else(|| {
+            "manual — the only cut is an irreversible escape primitive; \
+             protector clears this finding on its own once the escape primitive is removed"
+                .to_string()
+        }),
+        "no-cut" => blocking_edge_todo(f, false).unwrap_or_else(|| {
+            "manual — no single-edge cut severs this path; \
+             protector clears this finding on its own once the misconfig is gone"
+                .to_string()
+        }),
         // "unclassified" and any future disposition: the safe, conservative default.
-        _ => "manual — no automatic cut classified for this path",
+        _ => "manual — no automatic cut classified for this path".to_string(),
+    }
+}
+
+/// The concrete durable-fix instruction for a `durable-fix PR` finding: name the secret,
+/// the workload that holds it, and how it's reached (mounted secret vs RBAC grant), from
+/// the terminal hop of the proven path. Returns `None` when the path has no terminal step
+/// (degrade to the generic line). Injected node names are HTML-escaped.
+fn durable_fix_todo(f: &Finding) -> Option<String> {
+    // The objective-bearing hop: the last step whose `to` is the objective, else the last
+    // step of the path.
+    let step = f
+        .path
+        .iter()
+        .rev()
+        .find(|s| s.to == f.objective)
+        .or_else(|| f.path.last())?;
+    let secret = escape(&short(&step.to));
+    let workload = escape(&short(&step.from));
+    if let Some(rest) = step.relation.strip_prefix("can-do/") {
+        // An RBAC grant: `can-do/get/secrets` → "get/secrets". Revoke the grant.
+        let grant = escape(rest);
+        Some(format!(
+            "Revoke the `{grant}` RBAC grant from `{workload}` (it reaches `{secret}`) \
+             — then protector re-checks next pass."
+        ))
+    } else {
+        // A mounted secret (`can-read`) or other direct hold: remove the mount.
+        Some(format!(
+            "Remove the secret mount `{secret}` from `{workload}` — then protector \
+             re-checks next pass."
+        ))
+    }
+}
+
+/// The concrete manual instruction for a `no-cut`/`forbidden` finding: name the specific
+/// blocking edge (the un-cuttable hop) and state that protector clears the finding by
+/// itself once the misconfig is gone. `escape_primitive` picks the `forbidden` phrasing
+/// (an irreversible escape) vs the `no-cut` phrasing (no single-edge cut). Returns `None`
+/// when no informative hop exists (degrade to the generic line). Names are HTML-escaped.
+fn blocking_edge_todo(f: &Finding, escape_primitive: bool) -> Option<String> {
+    // The blocking edge: for `forbidden` the escape hop if the path has one, else the
+    // terminal hop; for `no-cut` the terminal hop into the objective.
+    let step = if escape_primitive {
+        f.path
+            .iter()
+            .find(|s| s.relation.starts_with("escapes-to/"))
+            .or_else(|| f.path.last())?
+    } else {
+        f.path
+            .iter()
+            .rev()
+            .find(|s| s.to == f.objective)
+            .or_else(|| f.path.last())?
+    };
+    let from = escape(&short(&step.from));
+    let to = escape(&short(&step.to));
+    let edge = escape(&humanize_relation(&step.relation));
+    if escape_primitive {
+        Some(format!(
+            "manual — the only cut is the irreversible escape primitive on `{from}` → \
+             `{to}` ({edge}); protector clears this finding on its own once that escape \
+             primitive is removed."
+        ))
+    } else {
+        Some(format!(
+            "manual — no single-edge cut severs the `{from}` → `{to}` hop ({edge}); \
+             protector clears this finding on its own once that misconfig is gone."
+        ))
     }
 }
 
@@ -1527,13 +1617,14 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         (String::new(), false)
     };
 
-    // What to do — derived from the disposition class only (no model call). The endpoint
-    // card groups many findings; they share the entry's posture, so take the disposition
-    // of the first as the representative next step for this entry's paths.
+    // What to do — derived from the disposition class plus the finding's own proven path
+    // (no model call). The endpoint card groups many findings; they share the entry's
+    // posture, so take the first as the representative next step for this entry's paths —
+    // its concrete object/edge names the operator's fix (JEF-179).
     let todo = fs
         .first()
-        .map(|f| what_to_do(&f.disposition))
-        .unwrap_or("manual — no automatic cut classified for this path");
+        .map(|f| what_to_do(f))
+        .unwrap_or_else(|| "manual — no automatic cut classified for this path".to_string());
     let todo_line = format!("<div class=\"todo\"><b>what to do:</b> {todo}</div>");
 
     let aria = escape(&path_aria_label(entry, fs));
@@ -5531,25 +5622,161 @@ mod tests {
 
     #[test]
     fn what_to_do_per_disposition_class() {
-        // AC #1: the "what to do" line is derived per disposition class, no model call.
+        // AC #1/#3: the "what to do" line is derived per disposition class plus the
+        // finding's path, no model call. Auto-eligible classes are unchanged.
+        let auto = |d: &str| {
+            finding(
+                "workload/app/Pod/web",
+                "secret/app/k",
+                d,
+                "can-read",
+                true,
+                None,
+            )
+        };
         assert_eq!(
-            what_to_do(AUTO_ELIGIBLE),
+            what_to_do(&auto(AUTO_ELIGIBLE)),
             "would cut in shadow; arm `network` to act"
         );
         assert_eq!(
-            what_to_do("latent foothold — propose"),
+            what_to_do(&auto("latent foothold — propose")),
             "would cut in shadow; arm `network` to act"
         );
         assert_eq!(
-            what_to_do("structural — propose"),
+            what_to_do(&auto("structural — propose")),
             "would cut in shadow; arm `network` to act"
         );
-        assert!(what_to_do("durable-fix PR").contains("revoke the grant"));
-        assert!(what_to_do("forbidden").starts_with("manual"));
-        assert!(what_to_do("no-cut").starts_with("manual"));
+
+        // durable-fix names the concrete mount and workload from the terminal hop.
+        let mount = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-read",
+            true,
+            None,
+        );
+        let m = what_to_do(&mount);
+        assert!(
+            m.contains("session-key"),
+            "durable-fix names the secret: {m}"
+        );
+        assert!(m.contains("store"), "durable-fix names the workload: {m}");
+        assert!(
+            m.contains("re-checks next pass"),
+            "durable-fix names self-recheck: {m}"
+        );
+
+        // durable-fix via an RBAC grant names the grant + the workload.
+        let rbac = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-do/get/secrets",
+            true,
+            None,
+        );
+        let r = what_to_do(&rbac);
+        assert!(
+            r.contains("get/secrets"),
+            "durable-fix names the RBAC grant: {r}"
+        );
+        assert!(r.contains("Revoke"), "durable-fix says revoke: {r}");
+
+        // forbidden names the blocking escape primitive edge + the auto-clear sentence.
+        let mut forbidden = finding(
+            "workload/app/Pod/web",
+            "host/node/worker-1",
+            "forbidden",
+            "escapes-to/CAP_SYS_ADMIN",
+            true,
+            None,
+        );
+        forbidden.path[1].to = "host/node/worker-1".into();
+        let fb = what_to_do(&forbidden);
+        assert!(fb.starts_with("manual"), "forbidden stays manual: {fb}");
+        assert!(
+            fb.contains("escapes via CAP_SYS_ADMIN"),
+            "forbidden names the edge: {fb}"
+        );
+        assert!(
+            fb.contains("clears this finding on its own"),
+            "forbidden states the finding auto-clears: {fb}"
+        );
+
+        // no-cut names the specific blocking hop + the auto-clear sentence.
+        let no_cut = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "no-cut",
+            "can-read",
+            true,
+            None,
+        );
+        let nc = what_to_do(&no_cut);
+        assert!(nc.starts_with("manual"), "no-cut stays manual: {nc}");
+        assert!(
+            nc.contains("session-key"),
+            "no-cut names the blocking edge target: {nc}"
+        );
+        assert!(
+            nc.contains("clears this finding on its own"),
+            "no-cut states the finding auto-clears: {nc}"
+        );
+
         // An unknown/future disposition falls back to the safe, conservative default.
-        assert!(what_to_do("unclassified").starts_with("manual"));
-        assert!(what_to_do("something-new").starts_with("manual"));
+        assert!(what_to_do(&auto("unclassified")).starts_with("manual"));
+        assert!(what_to_do(&auto("something-new")).starts_with("manual"));
+    }
+
+    #[test]
+    fn what_to_do_degrades_gracefully_when_path_empty() {
+        // JEF-179: a finding whose path lacks the specific object names falls back to the
+        // prior generic text rather than crashing or printing empty `<>` placeholders.
+        let mut durable = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-read",
+            true,
+            None,
+        );
+        durable.path.clear();
+        assert_eq!(
+            what_to_do(&durable),
+            "revoke the grant / remove the mount (durable fix)"
+        );
+        assert!(!what_to_do(&durable).contains("<>"));
+
+        let mut forbidden = durable.clone();
+        forbidden.disposition = "forbidden".into();
+        let fb = what_to_do(&forbidden);
+        assert!(fb.starts_with("manual") && !fb.contains("<>"));
+        assert!(fb.contains("clears this finding on its own"));
+
+        let mut no_cut = durable.clone();
+        no_cut.disposition = "no-cut".into();
+        let nc = what_to_do(&no_cut);
+        assert!(nc.starts_with("manual") && !nc.contains("<>"));
+        assert!(nc.contains("clears this finding on its own"));
+    }
+
+    #[test]
+    fn what_to_do_escapes_injected_object_names() {
+        // JEF-179: the injected names are untrusted node keys — HTML-escaped so a crafted
+        // name can't break out of the rendered <div>.
+        let mut durable = finding(
+            "workload/app/Pod/web",
+            "secret/app/<img src=x onerror=alert(1)>",
+            "durable-fix PR",
+            "can-read",
+            true,
+            None,
+        );
+        durable.path[1].to = "secret/app/<img src=x onerror=alert(1)>".into();
+        let m = what_to_do(&durable);
+        assert!(!m.contains("<img"), "raw tag must not survive: {m}");
+        assert!(m.contains("&lt;img"), "name must be HTML-escaped: {m}");
     }
 
     #[test]
@@ -5714,9 +5941,11 @@ mod tests {
         // The certainty rail and its caption.
         assert!(html.contains("what's proven"));
         assert!(html.contains("internet-reachable"));
-        // The disposition-derived "what to do".
+        // The disposition-derived "what to do" — now naming the concrete RBAC grant and
+        // workload from the path (JEF-179).
         assert!(html.contains("what to do:"));
-        assert!(html.contains("revoke the grant"));
+        assert!(html.contains("Revoke the `get/secrets` RBAC grant"));
+        assert!(html.contains("re-checks next pass"));
         // The graph's aria-label (data-aria on the <pre>, applied to the SVG by the JS).
         assert!(html.contains("data-aria=\""));
         assert!(html.contains("Attack-path graph"));
