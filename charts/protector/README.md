@@ -146,6 +146,35 @@ Sync a CISA KEV list and/or a CVE-keyed advisory file into a ConfigMap out of ba
 --set engine.advisory.configMapName=advisory-snapshot
 ```
 
+### Auto-sync the KEV / advisory snapshots (feed-sync CronJob)
+
+Instead of syncing those ConfigMaps by hand, opt into the **feed-sync** CronJob — a
+dedicated, off-by-default job that downloads the public CISA KEV feed (and an optional
+advisory source) on a schedule and upserts the `kev-snapshot` / `advisory-snapshot`
+ConfigMaps the engine mounts:
+
+```sh
+--set feedSync.enabled=true \
+--set engine.kev.configMapName=kev-snapshot \
+--set engine.advisory.configMapName=advisory-snapshot \
+# optional advisory source (empty = KEV only):
+--set feedSync.advisoryUrl="https://your-internal/advisories.json"
+```
+
+**Egress boundary.** The CronJob is the **only** component the chart gives network
+egress to. It makes outbound GETs to two **public, read-only** feed URLs and writes to
+the in-cluster apiserver to upsert the two ConfigMaps — it never reads cluster state and
+never transmits any cluster data outward. The **engine stays zero-egress** (ADR-0015):
+it only mounts the resulting snapshot files and makes no advisory/KEV network call of its
+own. The job runs as its **own dedicated ServiceAccount** whose Role grants
+get/update/patch (plus the first-run create) on **only** the two named ConfigMaps in the
+release namespace — least privilege, isolated from the engine's ServiceAccount.
+
+When `feedSync.enabled=false` (the default) nothing extra is templated and the
+manual-mount path above is unchanged. Tune the cadence with `feedSync.schedule`, the
+sources with `feedSync.kevUrl` / `feedSync.advisoryUrl`, and the image (official
+`bitnami/kubectl` by default) with `feedSync.image.*`.
+
 ### Arm the engine (live actuation) — the careful two-step
 
 1. **Choose a live actuator** (still no class enabled, so still dry-run):

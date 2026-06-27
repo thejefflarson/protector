@@ -65,6 +65,18 @@ app.kubernetes.io/part-of: {{ include "protector.name" . }}
 {{- end }}
 {{- end }}
 
+{{/*
+Name of the feed-sync workload (CronJob + its dedicated ServiceAccount / Role /
+RoleBinding). The feed-sync job is the ONLY component with network egress (JEF-228):
+it fetches the public KEV + advisory feeds and upserts the two ConfigMaps the engine
+mounts. Its RBAC is scoped to get/update/patch on exactly those two named ConfigMaps —
+least privilege — and it never reads or transmits any cluster data outward. The engine
+stays zero-egress (ADR-0015): it only mounts the resulting snapshots.
+*/}}
+{{- define "protector.feedSyncName" -}}
+{{- printf "%s-feed-sync" (include "protector.fullname" .) }}
+{{- end }}
+
 {{/* Name of the cert-manager serving Certificate (and its Secret). */}}
 {{- define "protector.servingCertName" -}}
 {{- printf "%s-tls" (include "protector.fullname" .) }}

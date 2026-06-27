@@ -347,3 +347,71 @@ agent:
   # Run on every node, including tainted/control-plane ones.
   tolerations:
   - operator: Exists
+
+# --- feed-sync (JEF-228) ---
+# OPTIONAL, OFF BY DEFAULT. A dedicated CronJob that auto-syncs the CISA KEV catalogue
+# and the advisory snapshot into the two ConfigMaps the engine mounts (kevConfigMapName /
+# advisoryConfigMapName), so an operator no longer syncs them by hand. When disabled
+# (the default) NOTHING here is templated and the chart behaves exactly as the manual-
+# mount path does today — you sync the ConfigMaps yourself and point
+# engine.kev.configMapName / engine.advisory.configMapName at them.
+#
+# EGRESS POSTURE (read this before enabling). This CronJob is the ONLY component the
+# chart gives network egress to. It makes outbound calls to TWO public, READ-ONLY feed
+# URLs (kevUrl / advisoryUrl) and to the in-cluster apiserver to upsert the ConfigMaps.
+# It NEVER reads cluster state and NEVER transmits any cluster data outward — the only
+# bytes that leave are the plain GET requests for the public feeds. The ENGINE itself
+# stays ZERO-EGRESS (ADR-0015): it only mounts the resulting snapshot files and makes no
+# advisory/KEV network call of its own. The job runs as its own dedicated ServiceAccount
+# whose Role grants get/update/patch (and the first-run create) on ONLY the two named
+# ConfigMaps in this namespace — least privilege, isolated from the engine's SA.
+#
+# TO ENABLE: set feedSync.enabled=true, then point the engine at the synced ConfigMaps:
+#   engine.kev.configMapName=kev-snapshot
+#   engine.advisory.configMapName=advisory-snapshot
+# (the ConfigMap names must match feedSync.kevConfigMapName / advisoryConfigMapName).
+feedSync:
+  enabled: false
+  # Standard cron schedule. Default: once a day at 03:00. KEV/advisory feeds change at
+  # most daily; a tighter cadence buys little and spends egress + apiserver writes.
+  schedule: "0 3 * * *"
+  # The two public, READ-ONLY feed sources fetched on each run. KEV is the canonical
+  # CISA catalogue; advisory defaults to empty (no advisory enrichment) — set it to YOUR
+  # operator-curated, CVE-keyed advisory snapshot URL to opt into ADR-0015 enrichment.
+  kevUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+  advisoryUrl: ""
+  # Names of the ConfigMaps the job upserts; point engine.kev.configMapName /
+  # engine.advisory.configMapName at these same names to mount them into the engine.
+  kevConfigMapName: kev-snapshot
+  advisoryConfigMapName: advisory-snapshot
+  # Keys within each ConfigMap (must match engine.kev.key / engine.advisory.key so the
+  # engine's PROTECTOR_KEV_FILE / PROTECTOR_ADVISORY_FILE paths resolve).
+  kevKey: known_exploited_vulnerabilities.json
+  advisoryKey: advisories.json
+  # The sync image. Needs BOTH curl and kubectl. Defaults to the official bitnami/kubectl
+  # image (curl included), pinned by tag. First-party/official only — no marketplace dep.
+  image:
+    repository: docker.io/bitnami/kubectl
+    tag: "1.31"
+    pullPolicy: IfNotPresent
+  # Per-feed download wall (s) for curl --max-time, bounding a slow/hung feed host.
+  curlMaxTimeSecs: 120
+  # Job lifecycle knobs. Forbid-overlap is set in the template; these tune history +
+  # retry/deadline so a stuck or failing run can't pile up or block the next tick.
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Tiny: a curl + two small kubectl applies. Override for very large advisory snapshots.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
