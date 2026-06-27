@@ -93,52 +93,9 @@ fn row_open_state_persistence_hooks_are_present() {
     assert!(js.contains("function hydrate(root)") && js.contains("detailsKey"));
 }
 
-#[test]
-fn judgements_html_renders_the_three_meta_states_with_prose_first() {
-    // (JEF-207 surface; still in legacy.) Prose-led, three honest meta-states, raw behind
-    // an expander.
-    let rows = vec![
-        full_judgement(
-            "workload/app/Pod/web",
-            "exploitable — RCE reaches the secret",
-            Some("PROMPT TEXT the injection surface"),
-            Some("the model raw reply"),
-        ),
-        full_judgement(
-            "workload/app/Pod/api",
-            "Refuted(\"no promotion ground\")",
-            None,
-            None,
-        ),
-        full_judgement(
-            "workload/app/Pod/cache",
-            "Uncertain(\"model timed out\")",
-            Some("PROMPT TEXT"),
-            None,
-        ),
-    ];
-    let html = render_judgements_html(&rows);
-    assert!(html.contains("exploitable — RCE reaches the secret"));
-    assert!(html.contains("[BREACH]"));
-    assert!(html.contains("decided without the model (pre-filter)"));
-    assert!(html.contains("model timed out — safe fallback"));
-    assert!(html.contains("show full prompt"));
-    assert!(html.contains("<details"));
-    let prompt_at = html.find("PROMPT TEXT the injection surface").unwrap();
-    let prose_at = html.find("exploitable — RCE reaches the secret").unwrap();
-    assert!(
-        prose_at < prompt_at,
-        "the prose verdict comes before the raw prompt"
-    );
-    assert!(html.contains("/judgements.json"));
-}
-
-#[test]
-fn judgements_html_empty_state_is_honest() {
-    let html = render_judgements_html(&[]);
-    assert!(html.contains("no model judgements yet"));
-    assert!(html.contains("hasn't reached"));
-}
+// The `/judgements` HTML render (the three meta-states, prose-first, raw behind the
+// expander, and the honest-empty state) is byte-pinned in `components::judgements`'s own
+// tests (JEF-207).
 
 #[test]
 fn render_html_card_has_aria_label_on_the_graph() {
@@ -373,32 +330,8 @@ fn rendered_output_never_leaks_adr_or_jef_refs() {
     assert!(first_run.contains("checklist") || first_run.contains("done"));
     assert_no_internal_refs("first-run dashboard", &first_run);
 
-    let judgements = vec![
-        Judgement {
-            entry: "workload/app/Pod/web".into(),
-            objectives: 3,
-            verdict: "Exploitable(\"RCE\")".into(),
-            prompt: Some("system: judge this chain".into()),
-            reply: Some("exploitable".into()),
-        },
-        judgement("workload/api/Pod/svc"),
-    ];
-    let judgements_html = render_judgements_html(&judgements);
-    assert_no_internal_refs("/judgements", &judgements_html);
-    assert_no_internal_refs("/judgements empty", &render_judgements_html(&[]));
-
-    let entries = vec![
-        breach(
-            "workload/app/Pod/web",
-            "exploitable — CVE-2021-44228 RCE",
-            60,
-        ),
-        breach("workload/api/Pod/svc", "not exploitable — cleared", 120),
-    ];
-    let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
-    assert_no_internal_refs("/report", &render_report_html(&report));
-    let empty_report = aggregate_report(&[], report_now(), WEEK, FIVE_MIN);
-    assert_no_internal_refs("/report empty", &render_report_html(&empty_report));
+    // The `/judgements` and `/report` surfaces carry their own no-internal-refs guards in
+    // the `components::judgements` / `components::report` tests (JEF-207).
 }
 
 /// AC #3: the finding card's attack steps lead with the plain technique name and keep the

@@ -57,14 +57,27 @@ structure the dashboard as a React-like split.
 un-escaped HTML, and it may be used **only** for:
 
 1. **already-rendered child `Markup`** — composing a component's output into a parent
-   (the value is itself maud output, already escaped at its own braces); and
+   (the value is itself maud output, already escaped at its own braces);
 2. **`mm()`-sanitized Mermaid source** — the graph diagram text, which is passed through
    the existing `mm()` sanitizer that strips HTML metacharacters before it reaches the
-   client-side renderer.
+   client-side renderer; and
+3. **compile-time-constant structural/entity markup with no untrusted input** — fixed
+   string *literals* the read-only pages cannot express through an escaping brace: the
+   non-breaking space `&nbsp;` (which an escaping brace would emit as `&amp;nbsp;`), the
+   lowercase `<!doctype html>` (maud's built-in `DOCTYPE` renders an uppercase variant that
+   would change the rendered bytes), and a handful of static copy spans with no parameter
+   (e.g. the rail's CVE honest-empty line). The canonical home is `components/chips.rs`
+   (`nbsp()` / `sep()` / `doctype()`); new constants SHOULD be added there. Each is a literal
+   with no interpolation site, so nothing untrusted can reach it. Added during the
+   tickets-3–5 migration (JEF-205/JEF-206/JEF-207) to converge the two inconsistent
+   approaches the parallel work produced (a literal U+00A0 char vs. a `PreEscaped` entity)
+   onto one byte-stable home, so the byte-stability guarantee vs. the pre-maud output holds.
 
-Any other `PreEscaped` use is a review-blocking finding. Every other value — CVE id,
-advisory title, model verdict, prompt, objective/workload key — goes through a normal
-auto-escaping brace.
+Any other `PreEscaped` use is a review-blocking finding. In particular, allowance #3 is
+**not** a general escape hatch: it covers fixed, parameterless markup *constants* only — the
+moment a value is interpolated, it goes through a normal auto-escaping brace. Every other
+value — CVE id, advisory title, model verdict, prompt, objective/workload key — goes through
+a normal auto-escaping brace.
 
 ### The component split (the canonical UI pattern)
 

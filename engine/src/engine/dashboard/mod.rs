@@ -43,11 +43,9 @@ pub use legacy::{
     Report, ReportQuery, ReversionLog, ReversionRecord, VerdictStore,
 };
 
-use legacy::{
-    DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report, derive_readiness,
-    render_judgements_html, render_report_html,
-};
+use legacy::{DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report, derive_readiness};
 use page::{render_fragment, render_html};
+use view_model::{judgements_props, report_props};
 
 /// Shared state for the dashboard's HTML view: the findings handle plus the reversions
 /// ring (JEF-141), so the rendered page can show lifted cuts alongside the findings.
@@ -121,7 +119,7 @@ async fn bake_view(State(findings): State<Arc<Findings>>) -> Json<BakeStats> {
 /// judgement, led by the posture chip + the model's prose, the raw prompt behind an
 /// expander. The machine-readable form is `/judgements.json`.
 async fn judgements_html_view(State(journal): State<Arc<JudgementLog>>) -> Html<String> {
-    Html(render_judgements_html(&journal.snapshot()))
+    Html(components::judgements(&judgements_props(&journal.snapshot())).into_string())
 }
 
 /// The `/judgements.json` view: the diagnostic JSON (full prompt + raw reply + verdict
@@ -162,7 +160,7 @@ async fn report_html_view(
     State(journal): State<Arc<DecisionJournal>>,
     Query(query): Query<ReportQuery>,
 ) -> Html<String> {
-    Html(render_report_html(&build_report(&journal, &query)))
+    Html(components::report(&report_props(&build_report(&journal, &query))).into_string())
 }
 
 /// The `/report.json` view (JEF-143): the same aggregation as machine-readable JSON, so
