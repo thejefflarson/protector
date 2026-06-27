@@ -77,12 +77,8 @@ fn empty_journal_is_an_honest_no_decisions_state() {
     assert!(report.journal_empty, "no breach decisions ⇒ journal_empty");
     assert_eq!(report.would_act_count(), 0);
     assert_eq!(report.left_alone_count(), 0);
-    let panel = report_panel(&report);
-    assert!(panel.contains("no decisions yet"), "honest empty state");
-    // The full page wraps it and stays a valid document.
-    let page = render_report_html(&report);
-    assert!(page.contains("would-have-acted report"));
-    assert!(page.contains("no decisions yet"));
+    // The honest empty-state HTML render is asserted in `components::report`'s own tests
+    // (JEF-207); here we pin only the aggregation that drives it.
 }
 
 #[test]
@@ -330,9 +326,10 @@ fn recurring_breach_counts_multiple_episodes() {
 }
 
 #[test]
-fn report_panel_renders_the_diff_headline_and_both_tables() {
-    // The HTML panel frames the diff (isolated N / left M alone), distinguishes
-    // short-lived from sustained, and calls out the coverage-gap subset.
+fn report_aggregation_separates_would_act_short_lived_and_coverage_gap() {
+    // The aggregation behind the HTML diff: would-isolate N / left M alone, the
+    // short-lived (FP) subset, and the coverage-gap subset. The HTML render of this same
+    // data is byte-pinned in `components::report`'s tests (JEF-207).
     let entries = vec![
         // A sustained, CVE-backed would-act (cleared after 2h).
         breach(
@@ -361,29 +358,6 @@ fn report_panel_renders_the_diff_headline_and_both_tables() {
     assert_eq!(report.left_alone_count(), 1);
     assert_eq!(report.short_lived_count(), 1);
     assert_eq!(report.coverage_gap_count(), 1);
-
-    let panel = report_panel(&report);
-    // The diff headline frames both halves.
-    assert!(panel.contains("would have isolated"));
-    assert!(panel.contains("left alone") || panel.contains("left <b>1</b>"));
-    // Short-lived is visually distinct, sustained too.
-    assert!(panel.contains("short-lived"), "FP tell rendered");
-    assert!(panel.contains("class=\"shortlived\""));
-    assert!(panel.contains("class=\"sustained\""));
-    // The coverage-gap would-act is flagged for scrutiny.
-    assert!(panel.contains("coverage gap"));
-    assert!(panel.contains("class=\"flagged\""));
-    // Both workloads and the left-alone one appear (short labels).
-    assert!(panel.contains("web"));
-    assert!(panel.contains("blip"));
-    assert!(panel.contains("safe"));
-
-    // The full page is a self-contained document.
-    let page = render_report_html(&report);
-    assert!(page.contains("<!doctype html>"));
-    assert!(page.contains("would-have-acted report"));
-    assert!(page.contains("Shadow would-have-acted diff"));
-    let _ = std::fs::write("/tmp/protector-report.html", &page);
 }
 
 #[test]

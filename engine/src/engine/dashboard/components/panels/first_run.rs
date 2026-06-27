@@ -8,18 +8,15 @@
 //! bare/error-looking page; each unmet input is an actionable line linking the one env var
 //! / mount to enable it, a met input reads as a done check, and the cold-start note stands.
 //!
-//! NOTE (ADR-0019, the PreEscaped rule): the legacy panel emitted `to&nbsp;do` as a raw
-//! HTML entity. maud auto-escapes every brace and `PreEscaped` is reserved for child
-//! `Markup` / `mm()`-sanitized Mermaid only, so we render the non-breaking space as the
-//! literal U+00A0 character instead — token-equivalent (it renders as the same
-//! non-breaking space) without reaching for the `PreEscaped` allowlist.
+//! NOTE (ADR-0019, the PreEscaped rule): the "to do" label carries a non-breaking space,
+//! which the legacy panel emitted as the raw `&nbsp;` entity. The migrated tree's canonical
+//! home for that is `chips::nbsp()` (a `PreEscaped` of the compile-time entity constant,
+//! allowance #3), so the rendered bytes stay identical to the pre-maud output — every OTHER
+//! text value here still goes through an auto-escaping `( )` brace.
 
+use crate::engine::dashboard::components::chips;
 use crate::engine::dashboard::view_model::FirstRunProps;
 use maud::{Markup, html};
-
-/// The non-breaking space between "to" and "do" — U+00A0 rather than the `&nbsp;` entity,
-/// so it stays inside maud's auto-escaped tree (ADR-0019).
-const TO_DO: &str = "to\u{a0}do";
 
 /// The instructional first-run checklist: the guided-start preamble, the optional
 /// cold-start note, and the per-input checklist (done checks + to-do lines with their
@@ -46,7 +43,7 @@ pub fn first_run(props: &FirstRunProps) -> Markup {
                         }
                     } @else {
                         li class="r-todo" {
-                            b { (TO_DO) } " — " (item.label) ": " (item.text)
+                            b { "to" (chips::nbsp()) "do" } " — " (item.label) ": " (item.text)
                             @if let Some(enable) = &item.enable {
                                 " — set " code { (enable) }
                             }
@@ -89,9 +86,9 @@ mod tests {
             panel.contains("PROTECTOR_ADVISORY_FILE"),
             "advisory enable linked"
         );
-        // The "to do" line carries a non-breaking space (U+00A0), token-equivalent to the
-        // legacy `&nbsp;` entity.
-        assert!(panel.contains("to\u{a0}do"), "non-breaking 'to do' label");
+        // The "to do" line carries the non-breaking space as the `&nbsp;` entity via
+        // `chips::nbsp()` — byte-identical to the pre-maud legacy output (ADR-0019 allowance #3).
+        assert!(panel.contains("to&nbsp;do"), "non-breaking 'to do' label");
     }
 
     /// A met input reads as a done check rather than a to-do.

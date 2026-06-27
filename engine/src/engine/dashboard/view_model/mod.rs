@@ -8,6 +8,8 @@
 pub mod attack_vectors;
 pub mod bake;
 pub mod findings;
+pub mod judgements;
+pub mod report;
 pub mod reversions;
 pub mod status;
 // The readiness / first-run view-model (JEF-206 panel migration).
@@ -15,9 +17,13 @@ pub mod readiness;
 
 pub use attack_vectors::{AttackVectorRow, AttackVectorsProps, attack_vectors_props};
 pub use bake::{BakeProps, BakeVariantRow, bake_props};
+pub use judgements::{JudgementCardProps, JudgementLead, JudgementsProps, judgements_props};
 pub use readiness::{
     FirstRunItemProps, FirstRunProps, ReadinessProps, ReadinessRowProps, first_run_props,
     readiness_props,
+};
+pub use report::{
+    LeftAloneRow, Lifetime, ReportBody, ReportDiff, ReportProps, WouldActRow, report_props,
 };
 pub use reversions::{ReversionRow, ReversionsProps, reversions_props};
 pub use status::{

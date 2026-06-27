@@ -12,8 +12,12 @@ pub mod banner;
 pub mod chips;
 pub mod findings;
 pub mod graph;
+pub mod judgements;
 pub mod nav;
 pub mod panels;
+pub mod report;
 
 pub use banner::banner;
+pub use judgements::judgements;
 pub use nav::nav;
+pub use report::report;

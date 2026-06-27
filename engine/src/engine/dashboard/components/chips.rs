@@ -10,7 +10,34 @@
 //! so the chip text is auto-escaped — the XSS surface is the auto-escaped brace, not a
 //! hand-written `format!` (ADR-0019, the `PreEscaped` allowlist).
 
-use maud::{Markup, html};
+use maud::{Markup, PreEscaped, html};
+
+/// A literal non-breaking space (`&nbsp;`), the byte-stable building block the read-only
+/// pages depend on for their layout. It is the canonical home for the migrated tree's
+/// non-breaking space: the panels and report compose `chips::nbsp()` rather than emitting a
+/// raw entity or a literal U+00A0 char, so the rendered bytes stay identical to the pre-maud
+/// output (`to&nbsp;do`, `&nbsp;|&nbsp;`). This is a `PreEscaped` of a compile-time HTML
+/// constant with no untrusted input — ADR-0019 `PreEscaped` allowance #3 (constant
+/// structural/entity markup), not a value brace.
+pub fn nbsp() -> Markup {
+    PreEscaped("&nbsp;".to_string())
+}
+
+/// The page-header nav separator (`&nbsp;|&nbsp;`) the read-only pages put between the
+/// preamble sentence and the per-page links (e.g. "… | dashboard | json"), composed from
+/// [`nbsp`] around a literal pipe so the bytes match the pre-maud output. ADR-0019
+/// `PreEscaped` allowance #3 — a compile-time entity constant, no untrusted input.
+pub fn sep() -> Markup {
+    html! { (nbsp()) "|" (nbsp()) }
+}
+
+/// The HTML5 doctype the read-only pages open with, in the project's lowercase
+/// `<!doctype html>` spelling (maud's built-in `DOCTYPE` is uppercase, which would change
+/// the rendered bytes). A `PreEscaped` of a compile-time structural constant with no
+/// untrusted input — ADR-0019 `PreEscaped` allowance #3.
+pub fn doctype() -> Markup {
+    PreEscaped("<!doctype html>".to_string())
+}
 
 /// The model's posture as a chip — the `[BREACH]` / `[SAFE]` / `[awaiting judgement]`
 /// tag that leads a finding (JEF-161). `tone` is the CSS tone class
