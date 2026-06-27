@@ -27,6 +27,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::engine::journal::DecisionJournal;
+use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 
 pub mod components;
 pub(crate) mod model;
@@ -50,7 +51,7 @@ pub use view_model::report_data::{Report, ReportQuery};
 use page::{render_fragment, render_html};
 use view_model::readiness_data::derive_readiness;
 use view_model::report_data::{DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report};
-use view_model::{judgements_props, report_props};
+use view_model::{judgements_props, policy_props, report_props};
 
 /// Shared state for the dashboard's HTML view: the findings handle plus the reversions
 /// ring (JEF-141), so the rendered page can show lifted cuts alongside the findings.
@@ -132,6 +133,22 @@ async fn judgements_html_view(State(journal): State<Arc<JudgementLog>>) -> Html<
 /// moved when the human HTML view took over `/judgements` (JEF-161).
 async fn judgements_json_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
     Json(journal.snapshot())
+}
+
+/// The `/policy` HTML view (JEF-226): the webhook's recent admission decisions — signature
+/// / mesh / enforce-authz audit vs deny — one row per resolved decision. The machine-readable
+/// form is `/policy.json`. Read-only; complements the aggregate `/metrics` counter.
+async fn policy_html_view(State(log): State<Arc<PolicyDecisionLog>>) -> Html<String> {
+    Html(components::policy(&policy_props(&log.snapshot())).into_string())
+}
+
+/// The `/policy.json` view (JEF-226): the recent admission decisions as machine-readable
+/// JSON (policy / decision / subject / namespace / reason / timestamp per record), so the
+/// per-event decision log can be scraped/asserted, not only eyeballed.
+async fn policy_json_view(
+    State(log): State<Arc<PolicyDecisionLog>>,
+) -> Json<Vec<PolicyDecisionRecord>> {
+    Json(log.snapshot())
 }
 
 /// Replay the durable decision journal and aggregate the would-have-acted report over
@@ -224,8 +241,9 @@ async fn dashboard_js() -> ([(axum::http::HeaderName, &'static str); 1], &'stati
 /// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON, `/readiness`
 /// JSON) plus the human `/judgements` HTML "why" view (JEF-161) with its diagnostic
 /// `/judgements.json` (full prompt + raw reply + verdict per recent judgement), the
-/// `/reversions` JSON (lifted cuts + why, JEF-141), and the
-/// `/report` + `/report.json` shadow would-have-acted diff (JEF-143). Read-only;
+/// `/reversions` JSON (lifted cuts + why, JEF-141), the
+/// `/report` + `/report.json` shadow would-have-acted diff (JEF-143), and the
+/// `/policy` HTML + `/policy.json` admission-decision log (JEF-226). Read-only;
 /// cluster-facing glue around the tested classification + aggregation. The `/readiness`
 /// view (JEF-160) reports each decision input's LIVE presence/health for alerting.
 pub async fn serve_dashboard(
@@ -234,6 +252,7 @@ pub async fn serve_dashboard(
     judgements: Arc<JudgementLog>,
     reversions: Arc<ReversionLog>,
     journal: Arc<DecisionJournal>,
+    admission: Arc<PolicyDecisionLog>,
 ) -> anyhow::Result<()> {
     let html_state = DashboardState {
         findings: findings.clone(),
@@ -262,6 +281,14 @@ pub async fn serve_dashboard(
             Router::new()
                 .route("/reversions", get(reversions_view))
                 .with_state(reversions),
+        )
+        // JEF-226: the webhook's admission-decision log (HTML + JSON). New routes; no
+        // existing route changes. Its own state handle (the shared decision ring).
+        .merge(
+            Router::new()
+                .route("/policy", get(policy_html_view))
+                .route("/policy.json", get(policy_json_view))
+                .with_state(admission),
         )
         .merge(
             Router::new()

@@ -8,7 +8,9 @@
 use std::time::Duration;
 
 use super::respond::actuator::{ActuationScope, Actuator, DryRunActuator, EnabledActions};
-use super::{Engine, Snapshot, dashboard, journal, model, notify, observe, reason, respond};
+use super::{
+    Engine, Snapshot, dashboard, journal, model, notify, observe, policy_log, reason, respond,
+};
 
 /// Poll loop: re-list the whole cluster every `interval`, assemble a snapshot, and
 /// process it. The simple fallback for environments where a watch isn't available;
@@ -142,6 +144,11 @@ fn build_adjudicator(
 /// The graph-building, proof, and response logic is identical to [`run`]; only the
 /// trigger differs (event stream vs. timer). This path is exercised against a real
 /// cluster, not unit tests — the analysis it drives is what the tests cover.
+// This is the engine's top-level entrypoint: each argument is an independent wired-in
+// capability (client, arm-state, scope, the optional feed/dashboard addrs, the intel
+// snapshots, the admission-decision ring). Bundling them into a config struct belongs to
+// the JEF-218 split of this orchestrator, not this additive wiring (JEF-226).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_watch(
     client: kube::Client,
     active: EnabledActions,
@@ -150,6 +157,9 @@ pub async fn run_watch(
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
     advisory: observe::advisory::AdvisoryStore,
+    // The webhook's admission-decision ring (JEF-226), shared so the dashboard's `/policy`
+    // view can read the same decisions the webhook engine writes.
+    policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
@@ -199,9 +209,12 @@ pub async fn run_watch(
             journal_durable: decisions.is_enabled(),
             armed: !active.is_empty(),
         });
+        let admission = policy_log.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                dashboard::serve_dashboard(addr, findings, judgements, reversions, decisions).await
+            if let Err(error) = dashboard::serve_dashboard(
+                addr, findings, judgements, reversions, decisions, admission,
+            )
+            .await
             {
                 tracing::error!(%error, "dashboard stopped");
             }

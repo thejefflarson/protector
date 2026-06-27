@@ -32,11 +32,12 @@ mod tests {
     #[test]
     fn nav_marks_the_current_page_and_lists_the_trimmed_links() {
         let html = nav(&nav_props("/")).into_string();
-        // Answer-first trim (JEF-175): dashboard · why · shadow log only.
+        // Answer-first trim (JEF-175): dashboard · why · shadow log · admission (JEF-226).
         assert!(html.contains("<a href=\"/\" aria-current=\"page\">dashboard</a>"));
         assert!(html.contains("<a href=\"/judgements\">why</a>"));
         assert!(html.contains("<a href=\"/report\">shadow log</a>"));
-        assert_eq!(html.matches("<a ").count(), 3, "exactly three nav items");
+        assert!(html.contains("<a href=\"/policy\">admission</a>"));
+        assert_eq!(html.matches("<a ").count(), 4, "exactly four nav items");
         // De-listed routes never appear in the nav.
         assert!(
             !html.contains("href=\"/reversions\""),
@@ -67,6 +68,7 @@ mod tests {
                     <a href=\"/\" aria-current=\"page\">dashboard</a>\
                     <a href=\"/judgements\">why</a>\
                     <a href=\"/report\">shadow log</a>\
+                    <a href=\"/policy\">admission</a>\
                     </nav>";
         assert_eq!(got, want);
     }

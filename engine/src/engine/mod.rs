@@ -33,6 +33,10 @@ pub mod journal;
 pub mod model;
 pub mod notify;
 pub mod observe;
+// JEF-226: the bounded admission-decision ring (written by the webhook engine, read by
+// the dashboard's `/policy` view). Standalone module to stay clear of the JEF-218
+// file-split refactor of this orchestrator.
+pub mod policy_log;
 pub mod reason;
 pub mod respond;
 

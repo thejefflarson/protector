@@ -197,14 +197,16 @@ pub struct NavProps {
     pub items: Vec<NavItem>,
 }
 
-/// Build the nav props for the page at `current`. Trimmed to answer-first (JEF-175):
-/// dashboard · why · shadow log. `/readiness`, `/bake`, and `/reversions` are de-listed
-/// from the nav (their routes stay reachable elsewhere).
+/// Build the nav props for the page at `current`. Answer-first (JEF-175):
+/// dashboard · why · shadow log · admission. `/readiness`, `/bake`, and `/reversions` are
+/// de-listed from the nav (their routes stay reachable elsewhere). `admission` is the
+/// webhook's per-event policy-decision log (JEF-226).
 pub fn nav_props(current: &str) -> NavProps {
-    const LINKS: [(&str, &str); 3] = [
+    const LINKS: [(&str, &str); 4] = [
         ("/", "dashboard"),
         ("/judgements", "why"),
         ("/report", "shadow log"),
+        ("/policy", "admission"),
     ];
     NavProps {
         items: LINKS
