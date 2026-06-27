@@ -1378,6 +1378,14 @@ fn path_aria_label(entry: &str, fs: &[&Finding]) -> String {
     )
 }
 
+/// Whether an entry's reach is "broad" — the threshold the wide-reach-≠-break-in
+/// treatment keys on (ADR-0016, the argocd case). Reuses the long-standing inline
+/// `objectives >= 20` bar so the calm-card lead and any future caller agree; factored
+/// into one place so the threshold is never duplicated.
+fn is_broad(objectives: usize) -> bool {
+    objectives >= 20
+}
+
 fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     let mut m = Mermaid::default();
     m.add_internet(entry);
@@ -1421,6 +1429,11 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         }
     }
 
+    // The number of edges actually drawn in the collapsed graph (deduped intermediate hops
+    // + one edge per terminal group) — the "N hops" the watch-tier collapse summary names,
+    // so the operator knows how deep the hidden path is before opening it.
+    let hops = seen_intermediate.len() + groups.len();
+
     // ONE model judgement for the whole endpoint — the model judges per internet-facing
     // entry, over everything it reaches, in a single call (ADR-0013); it is NOT a
     // per-edge or per-objective verdict. So show the entry's one verdict (the model's
@@ -1456,15 +1469,28 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         .map(|f| evidence_blocks(&f.evidence))
         .unwrap_or_default();
 
-    // Severity ≠ breach (ADR-0016): a broad, calm [SAFE] entry with a huge graph is the
-    // INTENDED picture — breadth is severity, not urgency. Call it out so the wide graph
-    // doesn't read as alarming. Only when the model judged it safe AND the reach is broad.
-    let breadth = if posture == Posture::Safe && objectives >= 20 {
-        "<div class=\"breadth muted\">wide reach, but not a break-in — wide access isn't a \
-         break-in.</div>"
-            .to_string()
+    // Wide reach ≠ break-in (ADR-0016, the argocd case): a broadly-privileged entry fans
+    // out to a huge graph that LOOKS alarming, but breadth is the intended picture, not a
+    // break-in. Make that a FIRST-CLASS, NON-muted lead right under the verdict — and give
+    // the card a calm green treatment — so the wide graph doesn't read as scary. Two
+    // honest variants: when the model judged it safe, and when it hasn't finished judging.
+    let broad = is_broad(objectives);
+    let (broad_lead, calm_card) = if broad && posture == Posture::Safe {
+        (
+            "<p class=\"broad-lead\"><b>Broadly privileged, working as intended</b> — wide \
+             access is its job, not a break-in. The model found nothing being exploited.</p>"
+                .to_string(),
+            true,
+        )
+    } else if broad && posture == Posture::Awaiting {
+        (
+            "<p class=\"broad-lead\">Broad reach — the model hasn't finished judging this \
+             one. Wide access isn't itself a break-in.</p>"
+                .to_string(),
+            false,
+        )
     } else {
-        String::new()
+        (String::new(), false)
     };
 
     // What to do — derived from the disposition class only (no model call). The endpoint
@@ -1510,17 +1536,52 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         tier.label()
     );
 
-    // The card inner — identical regardless of tier; only the wrapper differs so the
-    // lowest (context) tier is de-emphasized AND collapsible (AC #3).
-    let inner = format!(
-        "{tier_chip}{verdict_line}{rail}{evidence}{breadth}\
-         <div class=\"kc2\">the picture of those facts — \
-         <span class=\"muted\">{} ({} target{} reachable)</span></div>\
-         <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}",
+    // The caption + the Mermaid source. The big graph is the most intimidating element on
+    // the card, so collapse it by attention tier (and force-collapse it whenever reach is
+    // broad, where the graph is biggest and least alarming):
+    //   flagged      → EXPANDED inline (the operator needs the path).
+    //   safe-broad   → collapsed, regardless of tier ("show what it can reach (N targets)").
+    //   watch        → collapsed behind "show attack path (N hops)".
+    //   context      → inline (the whole card is already collapsed below).
+    // A collapsed graph stays inside a native <details>, so the <summary> control is
+    // keyboard-reachable for free; the Mermaid hydration re-renders it on first open (a
+    // graph laid out while display:none gets zero dimensions), see the page <script>.
+    let caption = format!(
+        "<div class=\"kc2\">the picture of those facts — \
+         <span class=\"muted\">{} ({} target{} reachable)</span></div>",
         escape(&short(entry)),
         objectives,
         if objectives == 1 { "" } else { "s" },
-        m.finish(),
+    );
+    let pre = format!(
+        "<pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>",
+        m.finish()
+    );
+    let graph_block = if broad {
+        // Wide reach: the graph is biggest and least alarming — collapse it everywhere.
+        format!(
+            "{caption}<details class=\"graphwrap\"><summary>show what it can reach \
+             ({objectives} target{})</summary>{pre}</details>",
+            if objectives == 1 { "" } else { "s" },
+        )
+    } else {
+        match tier {
+            Tier::Watch => format!(
+                "{caption}<details class=\"graphwrap\"><summary>show attack path \
+                 ({hops} hop{})</summary>{pre}</details>",
+                if hops == 1 { "" } else { "s" },
+            ),
+            // Flagged renders expanded inline; context's whole card is already collapsed.
+            Tier::Flagged | Tier::Context => format!("{caption}{pre}"),
+        }
+    };
+
+    // The card inner — identical regardless of tier; only the wrapper differs so the
+    // lowest (context) tier is de-emphasized AND collapsible (AC #3). The broad-reach lead
+    // sits right under the verdict, NON-muted (AC #1/#2), before the proof rail.
+    let inner = format!(
+        "{tier_chip}{verdict_line}{broad_lead}{rail}{evidence}\
+         {graph_block}{todo_line}{}",
         if expand.is_empty() {
             String::new()
         } else {
@@ -1529,10 +1590,17 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     );
 
     // Context-tier cards collapse behind a <details> so the operator's eye lands on the
-    // flagged/watch cards first; flagged/watch render expanded as before.
+    // flagged/watch cards first; flagged/watch render expanded as before. A calm,
+    // working-as-intended card gets a green left-border (the chip-safe `#1a7f37` token).
+    let card_class = if calm_card { "card card-calm" } else { "card" };
     if tier == Tier::Context {
+        let ctx_class = if calm_card {
+            "card card-context card-calm"
+        } else {
+            "card card-context"
+        };
         format!(
-            "<details class=\"card card-context\"><summary>{tier_chip}\
+            "<details class=\"{ctx_class}\"><summary>{tier_chip}\
              <span class=\"muted\">{} — background, not flagged ({} target{} reachable)</span>\
              </summary>{inner}</details>",
             escape(&short(entry)),
@@ -1540,7 +1608,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
             if objectives == 1 { "" } else { "s" },
         )
     } else {
-        format!("<div class=\"card\">{inner}</div>")
+        format!("<div class=\"{card_class}\">{inner}</div>")
     }
 }
 
@@ -3110,11 +3178,22 @@ fn render_html(
     let no_breach_findings = !findings.iter().any(|f| f.breach_relevant);
     let first_run = no_breach_findings && readiness.has_unmet();
 
+    // The one persistent trust explainer — rendered ONCE at the top of the findings region
+    // in EVERY state (including first-run / all-clear), so the operator always has the
+    // mental model: protector maps only PROVEN paths, then a local model judges
+    // exploitation. It cannot invent a path; a red call needs proof + exploitation
+    // evidence. Plain words, no internal refs.
+    let trust_line = "<p class=\"trust\"><b>How protector decides:</b> it maps every real \
+         path an attacker could walk — proven from your cluster's config and live traffic, \
+         it can't invent one — then a local model judges whether each is actually being \
+         exploited. A red call means proven path + the model saw exploitation evidence.</p>";
+
     // The findings region (JEF-175) — first content below the banner. Answer-first:
     // "Needs attention" (flagged endpoints; OMITTED entirely when there are none, AC #2)
     // then "Watching" (watch + the collapsed context cards). On first run the guided
-    // checklist replaces the whole region (preserving the JEF-160 path, AC #1).
-    let findings_body = if first_run {
+    // checklist replaces the whole region (preserving the JEF-160 path, AC #1). The trust
+    // line leads the region in all states.
+    let region = if first_run {
         first_run_checklist(readiness)
     } else {
         let attention = if attention_cards.is_empty() {
@@ -3148,6 +3227,7 @@ fn render_html(
              <code>escapes via</code>: a container-escape primitive to the host node</p>"
         )
     };
+    let findings_body = format!("{trust_line}{region}");
 
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
@@ -3190,7 +3270,11 @@ fn render_html(
          .rail ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
          .rail li{{margin:.1rem 0;color:#333}}\
          .rail code{{background:#f4f4f4;padding:0 .2rem}}\
-         .breadth{{font-size:.78rem;margin:.1rem 0 .4rem}}\
+         .broad-lead{{font-size:.86rem;color:#155f29;margin:.1rem 0 .5rem}}\
+         .card-calm{{border-left:3px solid #1a7f37}}\
+         details.card-context.card-calm{{border-left:3px solid #1a7f37}}\
+         .graphwrap>summary{{cursor:pointer;color:#06c;font-size:.82rem;margin:.1rem 0}}\
+         .trust{{font-size:.84rem;color:#333;background:#f4f7f5;border-left:3px solid #1a7f37;padding:.4rem .6rem;margin:.4rem 0 .8rem}}\
          .todo{{font-size:.82rem;color:#333;background:#f8f8f8;border-left:2px solid #06c;padding:.25rem .5rem;margin:.3rem 0 .1rem}}\
          .todo code{{background:#eee;padding:0 .2rem}}\
          .applied{{color:#b00000;font-weight:600}}\
@@ -3276,17 +3360,24 @@ fn render_html(
          </style>\
          <script type=\"module\">\
          import {{ renderMermaidSVG }} from '/assets/beautiful-mermaid.js';\
-         for (const pre of document.querySelectorAll('pre.mermaid')) {{\
+         /* Render one Mermaid <pre> into an SVG, carrying the path summary as the a11y label. */\
+         function renderPre(pre) {{\
            const aria = pre.getAttribute('data-aria');\
            try {{\
              const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
              const g = document.createElement('div'); g.className = 'graph'; g.innerHTML = svg;\
-             /* a11y: the client-rendered SVG carries the path summary in words */\
              const el = g.querySelector('svg') || g;\
              el.setAttribute('role', 'img');\
              if (aria) el.setAttribute('aria-label', aria);\
              pre.replaceWith(g);\
            }} catch (e) {{ /* leave the source text as a fallback */ if (aria) {{ pre.setAttribute('role', 'img'); pre.setAttribute('aria-label', aria); }} }}\
+         }}\
+         /* A graph laid out inside a closed <details> (display:none) measures to zero, so DEFER \
+            those to the details' first open; render every visible graph immediately. */\
+         function hiddenAncestor(pre) {{ let d = pre.closest('details'); while (d) {{ if (!d.open) return d; d = d.parentElement && d.parentElement.closest('details'); }} return null; }}\
+         for (const pre of document.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }}\
+         for (const d of document.querySelectorAll('details')) {{\
+           d.addEventListener('toggle', () => {{ if (!d.open) return; for (const pre of d.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }});\
          }}\
          </script></head><body>\
          {banner}\
@@ -5542,50 +5633,121 @@ mod tests {
         assert!(html.contains("hasn't reached this entry yet"));
     }
 
-    #[test]
-    fn endpoint_card_calls_out_breadth_when_safe_and_wide() {
-        // ADR-0016 severity ≠ breach: a broad, calm [SAFE] entry is the intended picture.
-        let fs: Vec<Finding> = (0..25)
+    /// Build a broad (>= 20 objectives) endpoint's findings, with the given verdict.
+    fn broad_findings(entry: &str, verdict: Option<&str>) -> Vec<Finding> {
+        (0..25)
             .map(|n| {
                 finding(
-                    "workload/argocd/Pod/argocd-server",
+                    entry,
                     &format!("secret/argocd/secret-{n}"),
                     "durable-fix PR",
                     "can-do/get/secrets",
                     true,
-                    Some("not exploitable — authorized RBAC, no CVE, no behavior"),
+                    verdict,
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn safe_broad_card_leads_with_positive_line_and_calm_class() {
+        // JEF-177 AC #1: a Safe + broad card leads with the positive, NON-muted
+        // "working as intended" line and a calm green treatment; no retired severity/
+        // urgency wording, no internal ref.
+        let entry = "workload/argocd/Pod/argocd-server";
+        let fs = broad_findings(
+            entry,
+            Some("not exploitable — authorized RBAC, no CVE, no behavior"),
+        );
         let refs: Vec<&Finding> = fs.iter().collect();
-        let html = endpoint_card(
-            "workload/argocd/Pod/argocd-server",
-            &refs,
-            endpoint_attention_rank(&refs).1,
+        let html = endpoint_card(entry, &refs, endpoint_attention_rank(&refs).1);
+        // The positive lead, verbatim and NON-muted.
+        assert!(
+            html.contains("Broadly privileged, working as intended"),
+            "leads with the positive line: {html}"
         );
         assert!(
-            html.contains("wide access isn't a break-in"),
-            "a wide [SAFE] entry is framed as breadth, not a break-in"
+            html.contains("class=\"broad-lead\""),
+            "the lead carries the non-muted broad-lead class"
         );
-        // The same breadth, but BREACH, is not softened.
-        let breach: Vec<Finding> = (0..25)
-            .map(|n| {
-                finding(
-                    "workload/argocd/Pod/argocd-server",
-                    &format!("secret/argocd/secret-{n}"),
-                    "auto-eligible",
-                    "can-do/get/secrets",
-                    true,
-                    Some("exploitable — CVE-2021-44228 reaches everything"),
-                )
-            })
-            .collect();
+        assert!(
+            !html.contains("broad-lead muted") && !html.contains("breadth muted"),
+            "the lead is not muted, and the old muted breadth div is gone"
+        );
+        // Calm green card treatment.
+        assert!(html.contains("card-calm"), "calm card class applied");
+        // The lead sits under the verdict, above the proof rail.
+        let verdict_at = html.find("[SAFE]").unwrap();
+        let lead_at = html.find("Broadly privileged").unwrap();
+        let rail_at = html.find("what's proven").unwrap();
+        assert!(
+            verdict_at < lead_at && lead_at < rail_at,
+            "verdict → broad lead → proof rail order"
+        );
+        // No retired severity-vs-urgency axis phrasing, no internal ref. (The plain word
+        // "severity" still legitimately appears in the CVE evidence block — only the
+        // retired AXIS framing is banned.)
+        assert!(
+            !html.contains("breadth is severity"),
+            "no retired axis wording"
+        );
+        assert!(
+            !html.contains("severity, not urgency"),
+            "no retired axis wording"
+        );
+        assert!(!html.contains("not urgency"), "no retired urgency framing");
+        assert!(
+            !html.contains("ADR-") && !html.contains("JEF-"),
+            "no internal ref"
+        );
+    }
+
+    #[test]
+    fn awaiting_broad_card_shows_the_honest_broad_note() {
+        // JEF-177 AC #2: the Awaiting + broad case shows the honest broad-reach note,
+        // and does NOT claim "working as intended" (the model hasn't judged it).
+        let entry = "workload/argocd/Pod/argocd-server";
+        let fs = broad_findings(entry, None);
+        let refs: Vec<&Finding> = fs.iter().collect();
+        let html = endpoint_card(entry, &refs, endpoint_attention_rank(&refs).1);
+        assert!(
+            html.contains("Broad reach — the model hasn't finished judging this one"),
+            "honest broad-reach note: {html}"
+        );
+        assert!(
+            html.contains("Wide access isn't itself a break-in"),
+            "honest note frames wide access as not-a-break-in"
+        );
+        assert!(
+            !html.contains("working as intended"),
+            "an unjudged entry does NOT claim working as intended"
+        );
+        // Awaiting is honest, not calm-green (only a Safe verdict earns the calm card).
+        assert!(!html.contains("card-calm"), "awaiting is not a calm card");
+        assert!(!html.contains("breadth is severity") && !html.contains("not urgency"));
+        assert!(!html.contains("ADR-") && !html.contains("JEF-"));
+    }
+
+    #[test]
+    fn breach_broad_card_is_not_softened() {
+        // Wide reach softens only a Safe/Awaiting card — a BREACH the model flagged keeps
+        // no calm treatment and no "working as intended" lead, broad or not.
+        let entry = "workload/argocd/Pod/argocd-server";
+        let breach = broad_findings(
+            entry,
+            Some("exploitable — CVE-2021-44228 reaches everything"),
+        );
         let brefs: Vec<&Finding> = breach.iter().collect();
-        let bhtml = endpoint_card(
-            "workload/argocd/Pod/argocd-server",
-            &brefs,
-            endpoint_attention_rank(&brefs).1,
+        let bhtml = endpoint_card(entry, &brefs, endpoint_attention_rank(&brefs).1);
+        assert!(
+            !bhtml.contains("working as intended"),
+            "a breach is not softened"
         );
+        assert!(
+            !bhtml.contains("card-calm"),
+            "a breach card is not calm-green"
+        );
+        // No retired severity/urgency phrasing leaks anywhere.
         assert!(!bhtml.contains("breadth is severity"));
     }
 
@@ -5797,6 +5959,137 @@ mod tests {
         let wrefs = vec![&w];
         let whtml = endpoint_card("workload/app/Pod/web", &wrefs, Tier::Watch);
         assert!(whtml.contains(">watch<"), "the watch tier label shows");
+    }
+
+    /// The graph's `<pre class="mermaid">` is collapsed when it sits inside a
+    /// `details.graphwrap`; flagged renders it inline (no graphwrap details wrapping it).
+    fn graph_is_collapsed(html: &str) -> bool {
+        // The mermaid <pre> follows the graphwrap <details>/<summary> open with no
+        // intervening closing of that details, i.e. the summary precedes the pre.
+        match (html.find("graphwrap"), html.find("class=\"mermaid\"")) {
+            (Some(g), Some(p)) => g < p,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn graph_collapse_follows_the_attention_tier() {
+        // JEF-177 AC #3: flagged → graph EXPANDED; watch → graph behind a "show attack
+        // path (N hops)" details; safe-broad → collapsed ("show what it can reach").
+        let entry = "workload/app/Pod/web";
+
+        // Flagged: graph inline, no graphwrap collapse.
+        let f = ranked_finding(
+            entry,
+            "latent foothold — propose",
+            false,
+            Some("exploitable — boom"),
+        );
+        let fhtml = endpoint_card(entry, &[&f], Tier::Flagged);
+        assert!(
+            fhtml.contains("class=\"mermaid\""),
+            "flagged still has a graph"
+        );
+        assert!(
+            !fhtml.contains("graphwrap"),
+            "flagged graph is expanded inline"
+        );
+
+        // Watch (NOT broad): graph behind "show attack path (N hops)".
+        let w = ranked_finding(entry, "structural — propose", true, None);
+        let whtml = endpoint_card(entry, &[&w], Tier::Watch);
+        assert!(graph_is_collapsed(&whtml), "watch graph is collapsed");
+        assert!(
+            whtml.contains("show attack path"),
+            "watch summary names the attack path: {whtml}"
+        );
+
+        // Safe + broad: collapsed regardless of tier, "show what it can reach (N targets)".
+        let entry_b = "workload/argocd/Pod/argocd-server";
+        let broad = broad_findings(entry_b, Some("not exploitable — authorized RBAC"));
+        let brefs: Vec<&Finding> = broad.iter().collect();
+        // Force the highest (flagged-style) tier to prove broad collapses it ANYWAY.
+        let bhtml = endpoint_card(entry_b, &brefs, Tier::Flagged);
+        assert!(
+            graph_is_collapsed(&bhtml),
+            "safe-broad graph is collapsed even at flagged tier"
+        );
+        assert!(
+            bhtml.contains("show what it can reach"),
+            "safe-broad summary names the reach: {bhtml}"
+        );
+        // The SVG a11y wiring (data-aria on the <pre>) survives the collapse.
+        assert!(
+            bhtml.contains("data-aria=\""),
+            "aria label preserved through collapse"
+        );
+    }
+
+    #[test]
+    fn trust_line_renders_exactly_once_in_every_state() {
+        // JEF-177 AC #4: the one-line "how protector decides" explainer renders EXACTLY
+        // once near the top of findings, in all states — populated and all-clear.
+        let needle = "How protector decides:";
+
+        // Populated dashboard.
+        let f = ranked_finding(
+            "workload/app/Pod/web",
+            "latent foothold — propose",
+            false,
+            Some("exploitable — boom"),
+        );
+        let html = render_html(
+            &[f],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert_eq!(
+            html.matches(needle).count(),
+            1,
+            "trust line appears exactly once on a populated dashboard"
+        );
+        // It leads the findings region (before the first findings heading).
+        let trust_at = html.find(needle).unwrap();
+        let watching_at = html.find("Watching").unwrap();
+        assert!(
+            trust_at < watching_at,
+            "trust line is near the top of findings"
+        );
+
+        // All-clear: no findings, every input met (not the first-run path).
+        let clear = render_html(
+            &[],
+            true,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert_eq!(
+            clear.matches(needle).count(),
+            1,
+            "trust line still renders exactly once in the all-clear state"
+        );
+
+        // First-run (no findings + an unmet input): the explainer still renders once.
+        let first = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        assert_eq!(
+            first.matches(needle).count(),
+            1,
+            "trust line renders once even on the first-run checklist"
+        );
+        // No internal refs leak from the new copy.
+        assert!(!html.contains("ADR-") && !html.contains("JEF-"));
     }
 
     #[test]
