@@ -177,7 +177,10 @@ fn what_to_do_escapes_injected_object_names_in_the_card() {
     );
     durable.path[1].to = "secret/app/<img src=x onerror=alert(1)>".into();
     let html = card_body("workload/app/Pod/web", &[&durable]);
-    assert!(html.contains("what to do:"), "breach surfaces advice: {html}");
+    assert!(
+        html.contains("what to do:"),
+        "breach surfaces advice: {html}"
+    );
     assert!(!html.contains("<img"), "raw tag must not survive: {html}");
     assert!(
         html.contains("&lt;img"),
