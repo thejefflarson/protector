@@ -2466,7 +2466,7 @@ fn render_report_html(report: &Report) -> String {
          h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
          h3{{font-size:.9rem;font-weight:600;margin:1.2rem 0 .3rem;color:#333}}\
          .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
-         .muted{{color:#777}}\
+         .muted{{color:#6a6a6a}}\
          a{{color:#06c}}\
          code{{background:#f4f4f4;padding:0 .2rem}}\
          table.vectors{{border-collapse:collapse;font-size:.82rem;margin:.2rem 0 .6rem;width:100%}}\
@@ -2568,7 +2568,7 @@ fn render_judgements_html(judgements: &[Judgement]) -> String {
          h1{{font-size:1.2rem;font-weight:600;margin:0}}\
          h2{{font-size:1rem;font-weight:600;margin:1.6rem 0 .4rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}}\
          .sum{{margin:.4rem 0 1rem;color:#444;font-size:.9rem}}\
-         .muted{{color:#777}}\
+         .muted{{color:#6a6a6a}}\
          a{{color:#06c}}\
          code{{background:#f4f4f4;padding:0 .2rem}}\
          .card{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0}}\
@@ -3210,17 +3210,41 @@ fn nav_bar(current: &str) -> String {
     format!("<nav class=\"nav\" aria-label=\"views\">{items}</nav>")
 }
 
-/// Render the dashboard: graph-based sections plus the freshness line and the
-/// recent-reversions panel (JEF-141).
-///   1. Remediations the engine applies (or proposes, in shadow), each a graph with
-///      the cut marked.
-///   2. Possible attack paths, one coalesced graph per internet-facing endpoint,
-///      each terminal edge labeled with why it isn't remediated.
-fn render_html(
+/// The per-pass "live region" (JEF-180): the status banner plus the findings region
+/// (summary line, findings body, remediations), each wrapped in a stable `id` container.
+/// The full page embeds this verbatim; the same-origin `/fragment` poll fetches THIS and
+/// swaps only these two containers in place, so a timer never reloads the whole document
+/// (which used to reset scroll, focus, and every `<details>` open/closed state). Sharing
+/// one builder keeps the page and the incrementally-swapped fragment from ever drifting.
+fn live_region(
     findings: &[Finding],
     armed: bool,
-    bake: &BakeStats,
-    reversions: &[ReversionRecord],
+    last_pass: Option<SystemTime>,
+    readiness: &Readiness,
+) -> String {
+    let findings_region = findings_region(findings, armed, last_pass, readiness);
+    let banner = status_banner(
+        findings,
+        armed,
+        last_pass,
+        &relative_time(last_pass),
+        readiness.model_judging,
+    );
+    format!(
+        "<div id=\"banner-region\">{banner}</div>\
+         <h1>protector</h1>\
+         {nav}\
+         <div id=\"findings-region\">{findings_region}</div>",
+        nav = nav_bar("/"),
+    )
+}
+
+/// The findings region's inner HTML (JEF-175 answer-first content): the summary line, the
+/// trust explainer + findings body, and the remediations section. Pure over the findings
+/// and arm-state; reused by [`live_region`] for both the full page and the poll fragment.
+fn findings_region(
+    findings: &[Finding],
+    armed: bool,
     last_pass: Option<SystemTime>,
     readiness: &Readiness,
 ) -> String {
@@ -3289,10 +3313,6 @@ fn render_html(
         }
     }
 
-    let vectors_body = attack_vectors(findings);
-    let bake_body = bake_panel(bake);
-    let reversions_body = reversions_panel(reversions);
-    let readiness_body = readiness_panel(readiness);
     let freshness = relative_time(last_pass);
 
     // The instructional first-run state (JEF-160): when the engine has NO breach-relevant
@@ -3354,6 +3374,40 @@ fn render_html(
     };
     let findings_body = format!("{trust_line}{region}");
 
+    // The summary line + findings body + remediations section — the per-pass content the
+    // poll swaps in place (JEF-180). The wrapping `#findings-region` div is added by the
+    // caller ([`live_region`]).
+    format!(
+        "<p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
+         possible attack paths · last pass <b>{freshness}</b> \
+         &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
+         {findings_body}\
+         <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}",
+        rem_n = remediations.len(),
+        rem_word = if armed { "active" } else { "proposed" },
+        ep_n = endpoints.len(),
+        ep_plural = if endpoints.len() == 1 { "" } else { "s" },
+    )
+}
+
+/// Render the dashboard: the live region (banner + findings, [`live_region`]) plus the
+/// collapsed engine-and-coverage diagnostics (readiness, attack vectors, behavioral bake,
+/// recent reversions). The live region is swapped in place by the same-origin poll; the
+/// diagnostics block is served once with the full page (JEF-141, JEF-160, JEF-175).
+fn render_html(
+    findings: &[Finding],
+    armed: bool,
+    bake: &BakeStats,
+    reversions: &[ReversionRecord],
+    last_pass: Option<SystemTime>,
+    readiness: &Readiness,
+) -> String {
+    let live = live_region(findings, armed, last_pass, readiness);
+    let vectors_body = attack_vectors(findings);
+    let bake_body = bake_panel(bake);
+    let reversions_body = reversions_panel(reversions);
+    let readiness_body = readiness_panel(readiness);
+
     // NOTE: this HTML is a single `\`-continued string literal, so every source-line
     // newline is STRIPPED — the whole thing collapses to one line. Never put a `//`
     // line comment inside the inline <script>: it would comment out the rest of the
@@ -3362,7 +3416,6 @@ fn render_html(
     // web/dist and served SAME-ORIGIN at /assets — never a third-party CDN.
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
-         <meta http-equiv=\"refresh\" content=\"30\">\
          <title>protector</title>\
          <style>\
          body{{font-family:system-ui,sans-serif;margin:2rem;color:#111}}\
@@ -3404,11 +3457,11 @@ fn render_html(
          .todo code{{background:#eee;padding:0 .2rem}}\
          .applied{{color:#b00000;font-weight:600}}\
          .proposed{{color:#9a5b00;font-weight:600}}\
-         .muted{{color:#777}}\
+         .muted{{color:#6a6a6a}}\
          a{{color:#06c}}\
-         .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#999}}\
+         .mermaid{{margin:.2rem 0;white-space:pre;font-family:ui-monospace,monospace;font-size:.75rem;color:#555}}\
          .graph svg{{max-width:100%;height:auto}}\
-         .verdict.muted{{color:#777;border-left-color:#ccc}}\
+         .verdict.muted{{color:#6a6a6a;border-left-color:#ccc}}\
          .why{{font-size:.78rem;color:#333;margin-top:.3rem}}\
          .why ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
          .why li{{margin:.1rem 0}}\
@@ -3457,7 +3510,7 @@ fn render_html(
          .banner-isolated{{background:#f4f4f4;border:2px solid #b00000;color:#5a2a2a}}\
          .banner-isolated .banner-glyph,.banner-isolated .banner-word{{color:#b00000}}\
          .banner-warming{{background:#f4f4f4;border-color:#ccc;color:#555}}\
-         .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#777}}\
+         .banner-warming .banner-glyph,.banner-warming .banner-word{{color:#6a6a6a}}\
          .banner-unjudged{{background:#fbf6ee;border-color:#9a5b00;color:#7a4a00}}\
          .banner-unjudged .banner-glyph,.banner-unjudged .banner-word{{color:#9a5b00}}\
          ol.readiness{{list-style:none;padding:0;margin:.2rem 0 .6rem;font-size:.85rem}}\
@@ -3500,19 +3553,51 @@ fn render_html(
          /* A graph laid out inside a closed <details> (display:none) measures to zero, so DEFER \
             those to the details' first open; render every visible graph immediately. */\
          function hiddenAncestor(pre) {{ let d = pre.closest('details'); while (d) {{ if (!d.open) return d; d = d.parentElement && d.parentElement.closest('details'); }} return null; }}\
-         for (const pre of document.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }}\
-         for (const d of document.querySelectorAll('details')) {{\
-           d.addEventListener('toggle', () => {{ if (!d.open) return; for (const pre of d.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }});\
+         /* A STABLE key for a <details> so its open/closed state can survive an incremental \
+            swap: the <summary> text plus its index among same-text siblings. Card content \
+            is stable pass-to-pass, so the same card maps to the same key. */\
+         function detailsKey(d) {{\
+           const s = d.querySelector(':scope > summary');\
+           const label = (s ? s.textContent : '').replace(/\\s+/g, ' ').trim().slice(0, 80);\
+           let n = 0; for (let p = d.previousElementSibling; p; p = p.previousElementSibling) {{\
+             if (p.tagName === 'DETAILS' && p.querySelector(':scope > summary') && p.querySelector(':scope > summary').textContent.replace(/\\s+/g, ' ').trim().slice(0, 80) === label) n++;\
+           }}\
+           return 'det:' + label + '#' + n;\
          }}\
+         function saveDetails(d) {{ try {{ localStorage.setItem(detailsKey(d), d.open ? '1' : '0'); }} catch (e) {{}} }}\
+         function restoreDetails(root) {{ for (const d of root.querySelectorAll('details')) {{ let v = null; try {{ v = localStorage.getItem(detailsKey(d)); }} catch (e) {{}} if (v === '1') d.open = true; else if (v === '0') d.open = false; }} }}\
+         /* (Re)hydrate a subtree: render visible graphs now, defer hidden ones to first open, \
+            persist <details> state, and re-render any graph revealed by opening. Idempotent and \
+            scoped to `root` so it can run on load AND after each incremental swap without \
+            double-wiring (swapped nodes are fresh; their old listeners are discarded). */\
+         function hydrate(root) {{\
+           for (const pre of root.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }}\
+           for (const d of root.querySelectorAll('details')) {{\
+             d.addEventListener('toggle', () => {{ saveDetails(d); if (!d.open) return; for (const pre of d.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }});\
+           }}\
+         }}\
+         restoreDetails(document); hydrate(document);\
+         /* Incremental refresh: replaces the old 30s full-page reload, which reset \
+            scroll, focus, and every <details>. Poll the SAME-ORIGIN `/fragment` (zero new \
+            egress) and swap ONLY the banner + findings region; restore <details> open-state \
+            from localStorage, re-hydrate Mermaid for the new DOM, and keep scroll + focus. */\
+         async function poll() {{\
+           let html; try {{ const r = await fetch('/fragment', {{ headers: {{ 'Accept': 'text/html' }} }}); if (!r.ok) return; html = await r.text(); }} catch (e) {{ return; }}\
+           const doc = new DOMParser().parseFromString(html, 'text/html');\
+           const focusKey = (() => {{ const a = document.activeElement; if (!a) return null; const d = a.closest && a.closest('details'); return (a.tagName === 'SUMMARY' && d) ? detailsKey(d) : null; }})();\
+           const sx = window.scrollX, sy = window.scrollY;\
+           for (const id of ['banner-region', 'findings-region']) {{\
+             const cur = document.getElementById(id), next = doc.getElementById(id);\
+             if (cur && next) cur.replaceWith(next);\
+           }}\
+           const region = document.getElementById('findings-region');\
+           if (region) {{ restoreDetails(region); hydrate(region); }}\
+           if (focusKey && region) {{ for (const d of region.querySelectorAll('details')) {{ if (detailsKey(d) === focusKey) {{ const s = d.querySelector(':scope > summary'); if (s) s.focus({{ preventScroll: true }}); break; }} }} }}\
+           window.scrollTo(sx, sy);\
+         }}\
+         setInterval(poll, 30000);\
          </script></head><body>\
-         {banner}\
-         <h1>protector</h1>\
-         {nav}\
-         <p class=\"sum\"><b>{rem_n}</b> {rem_word} · <b>{ep_n}</b> exposed endpoint{ep_plural} with \
-         possible attack paths · last pass <b>{freshness}</b> \
-         &nbsp;|&nbsp; <a href=\"/findings\">json</a></p>\
-         {findings_body}\
-         <h2>{rem_title} <span class=\"muted\">({rem_n})</span></h2>{rem_body}\
+         {live}\
          <details class=\"diag\"{readiness_open_outer}>\
          <summary><h2 class=\"diag-h\">Engine &amp; coverage</h2></summary>\
          <details id=\"coverage\"{readiness_open}>\
@@ -3547,24 +3632,28 @@ fn render_html(
          </details>\
          </details>\
          </body></html>",
-        banner = status_banner(
-            findings,
-            armed,
-            last_pass,
-            &freshness,
-            readiness.model_judging
-        ),
-        nav = nav_bar("/"),
-        rem_n = remediations.len(),
-        rem_word = if armed { "active" } else { "proposed" },
-        ep_n = endpoints.len(),
-        ep_plural = if endpoints.len() == 1 { "" } else { "s" },
+        live = live,
         // AC #3: a degraded/absent decision-weakening input must still surface — the
         // Readiness section (and its enclosing diagnostics region) auto-open ONLY when
         // `has_unmet()`; a healthy cluster gets a one-line summary it can expand.
         readiness_open = if readiness.has_unmet() { " open" } else { "" },
         readiness_open_outer = if readiness.has_unmet() { " open" } else { "" },
     )
+}
+
+/// The incremental-refresh fragment (JEF-180): JUST the live region — the `#banner-region`
+/// and `#findings-region` containers, byte-for-byte the same markup the full page embeds
+/// (both come from [`live_region`]). The same-origin poll fetches this and swaps those two
+/// containers in place, so the page is never reloaded on a timer. This is a NEW route that
+/// changes no existing route or its JSON contract; it carries the same presentation-only,
+/// no-internal-refs data the page already serves (no new egress, same origin).
+fn render_fragment(
+    findings: &[Finding],
+    armed: bool,
+    last_pass: Option<SystemTime>,
+    readiness: &Readiness,
+) -> String {
+    live_region(findings, armed, last_pass, readiness)
 }
 
 /// Shared state for the dashboard's HTML view: the findings handle plus the reversions
@@ -3595,6 +3684,17 @@ async fn html_view(State(state): State<DashboardState>) -> Html<String> {
         &state.reversions.snapshot(),
         state.findings.last_pass(),
         &readiness_of(&state.findings),
+    ))
+}
+
+/// The same-origin incremental-refresh fragment (JEF-180): the banner + findings live
+/// region the page poll swaps in place. Read-only, presentation-only; no new egress.
+async fn fragment_view(State(findings): State<Arc<Findings>>) -> Html<String> {
+    Html(render_fragment(
+        &findings.snapshot(),
+        findings.is_armed(),
+        findings.last_pass(),
+        &readiness_of(&findings),
     ))
 }
 
@@ -3718,6 +3818,9 @@ pub async fn serve_dashboard(
         .route("/findings", get(json_view))
         .route("/bake", get(bake_view))
         .route("/readiness", get(readiness_view))
+        // JEF-180: the same-origin live-region fragment the page poll swaps in place,
+        // replacing the 30s full-page meta-refresh. New route; no existing route changes.
+        .route("/fragment", get(fragment_view))
         .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
         .with_state(findings)
         .merge(
@@ -4277,9 +4380,9 @@ mod tests {
     }
 
     #[test]
-    fn render_html_includes_the_banner_nav_and_meta_refresh() {
+    fn render_html_includes_the_banner_and_nav_without_a_meta_refresh() {
         // The dashboard leads with the status banner, has a persistent nav with the
-        // current page marked, and a 30s meta-refresh.
+        // current page marked, and (JEF-180) does NOT do a full-page meta-refresh.
         let html = render_html(
             &[],
             false,
@@ -4315,8 +4418,174 @@ mod tests {
         assert!(!nav.contains("href=\"/readiness\""), "readiness de-listed");
         assert!(!nav.contains("href=\"/bake\""), "bake de-listed");
         assert_eq!(nav.matches("<a ").count(), 3, "exactly three nav items");
-        // 30s meta-refresh.
-        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
+        // JEF-180 AC #2: the 30s full-page meta-refresh is GONE — no http-equiv refresh
+        // of any kind. A timer must never reload the whole document (resetting scroll,
+        // focus, and every <details>).
+        assert!(
+            !html.contains("http-equiv=\"refresh\""),
+            "no meta-refresh of any kind"
+        );
+        assert!(
+            !html.contains("http-equiv"),
+            "no http-equiv directive at all"
+        );
+    }
+
+    /// JEF-180 AC #1: the contrast tokens are the darkened, AA-passing values — the
+    /// Mermaid pre-render fallback (`#999`→`#555`), `.muted` (`#777`→`#6a6a6a`), and the
+    /// warming-banner word/glyph (`#777`→`#6a6a6a`) — and the old failing values are gone.
+    #[test]
+    fn render_html_uses_aa_contrast_tokens() {
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        assert!(
+            html.contains(".muted{color:#6a6a6a}"),
+            "muted darkened to #6a6a6a (>=4.6:1 on white)"
+        );
+        assert!(
+            html.contains("font-size:.75rem;color:#555}"),
+            "mermaid fallback text darkened to #555"
+        );
+        assert!(
+            html.contains(".verdict.muted{color:#6a6a6a;border-left-color:#ccc}"),
+            "muted verdict darkened to #6a6a6a"
+        );
+        assert!(
+            html.contains(
+                ".banner-warming .banner-glyph,.banner-warming .banner-word{color:#6a6a6a}"
+            ),
+            "warming banner word/glyph darkened to #6a6a6a"
+        );
+        // The old failing tokens are gone: no `.muted{color:#777}`, no mermaid `color:#999`.
+        assert!(
+            !html.contains(".muted{color:#777}"),
+            "old failing #777 muted token removed"
+        );
+        assert!(
+            !html.contains("font-size:.75rem;color:#999}"),
+            "old failing #999 mermaid token removed"
+        );
+    }
+
+    /// JEF-180 AC #2 + the JEF-177 interaction: the page swaps the live region in place
+    /// via a same-origin poll instead of a full reload. Assert the markup carries the
+    /// swap hooks — the two id'd regions, the `/fragment` poll, no full `location.reload`,
+    /// and that the deferred Mermaid-on-open wiring is preserved (re-run via `hydrate`).
+    #[test]
+    fn render_html_carries_the_incremental_poll_hooks() {
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        // The two swap targets the poll replaces in place.
+        assert!(html.contains("id=\"banner-region\""), "banner region id");
+        assert!(
+            html.contains("id=\"findings-region\""),
+            "findings region id"
+        );
+        // Same-origin fragment fetch (zero new egress) on a 30s timer, not a doc reload.
+        assert!(
+            html.contains("fetch('/fragment'"),
+            "polls /fragment same-origin"
+        );
+        assert!(
+            html.contains("setInterval(poll, 30000)"),
+            "30s incremental poll"
+        );
+        assert!(
+            !html.contains("location.reload"),
+            "never a full document reload"
+        );
+        // JEF-177 deferred-Mermaid-on-open wiring is preserved and re-applied after a swap
+        // via the shared `hydrate(root)` over the new DOM (not duplicated, not clobbered).
+        assert!(
+            html.contains("function hydrate(root)"),
+            "hydrate over a root"
+        );
+        assert!(
+            html.contains("addEventListener('toggle'"),
+            "render graphs on details open"
+        );
+        assert!(
+            html.contains("hydrate(region)"),
+            "re-hydrate the swapped findings region"
+        );
+        // <details> open-state survives a swap via localStorage keyed by a stable id.
+        assert!(
+            html.contains("localStorage") && html.contains("detailsKey"),
+            "details open-state persisted across swaps"
+        );
+        // SVG a11y contract (JEF-161) and banner a11y contract (JEF-159) are intact.
+        assert!(
+            html.contains("setAttribute('role', 'img')"),
+            "rendered graph stays role=img"
+        );
+        assert!(
+            html.contains("setAttribute('aria-label', aria)"),
+            "rendered graph keeps its aria-label"
+        );
+        assert!(
+            html.contains("role=\"status\" aria-live=\"polite\""),
+            "banner keeps role=status aria-live=polite"
+        );
+    }
+
+    /// JEF-180: the `/fragment` endpoint returns JUST the live region (banner + findings),
+    /// byte-for-byte the swap targets the page poll replaces — and NOT a whole document.
+    #[test]
+    fn render_fragment_is_the_live_region_only() {
+        let findings = [];
+        let readiness = ready();
+        let frag = render_fragment(&findings, false, Some(SystemTime::now()), &readiness);
+        assert!(
+            frag.contains("id=\"banner-region\""),
+            "fragment has the banner region"
+        );
+        assert!(
+            frag.contains("id=\"findings-region\""),
+            "fragment has the findings region"
+        );
+        // The banner inside the fragment keeps its a11y contract.
+        assert!(
+            frag.contains("role=\"status\" aria-live=\"polite\""),
+            "fragment banner keeps role=status aria-live=polite"
+        );
+        // It is a FRAGMENT, not a page: no doctype/head/style/script.
+        assert!(
+            !frag.contains("<!doctype"),
+            "fragment is not a full document"
+        );
+        assert!(!frag.contains("<style>"), "fragment carries no <style>");
+        assert!(!frag.contains("<script"), "fragment carries no <script>");
+        // The fragment's banner region is identical to the one the full page embeds, so
+        // the in-place swap can never drift from the page.
+        let page = render_html(
+            &findings,
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &readiness,
+        );
+        let frag_banner = {
+            let s = frag.find("<div id=\"banner-region\">").unwrap();
+            let e = frag.find("<h1>protector</h1>").unwrap();
+            &frag[s..e]
+        };
+        assert!(
+            page.contains(frag_banner),
+            "the page embeds the same banner-region markup the fragment serves"
+        );
     }
 
     // -- JEF-175: answer-first reorder (findings on top, engine internals collapsed) -----
