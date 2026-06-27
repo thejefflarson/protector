@@ -23,21 +23,20 @@ pub(crate) use crate::engine::journal::{Decision, EnrichmentCoverage, JournalEnt
 pub(crate) use crate::engine::reason::adjudicate::Verdict;
 pub(crate) use crate::engine::reason::proof::ProvenChain;
 
-mod cards;
-mod mermaid;
+// The findings core (cards / rows / mermaid) migrated to the maud `components` +
+// `view_model` layers (JEF-205); the cross-cutting helpers the remaining panels still need
+// live in `base` (re-exporting from the new canonical homes).
+mod base;
 mod model;
 mod panels;
 mod readiness;
 mod report;
-mod rows;
 
-pub(crate) use cards::*;
-pub(crate) use mermaid::*;
+pub(crate) use base::*;
 pub use model::*;
 pub(crate) use panels::*;
 pub use readiness::*;
 pub use report::*;
-pub use rows::*;
 
 #[cfg(test)]
 mod tests;
