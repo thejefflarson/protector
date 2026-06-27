@@ -1,0 +1,278 @@
+//! The findings dashboard: a read-only view of the engine's current proven chains and
+//! their disposition — built mainly to surface the **latent-foothold** case (ADR-0009),
+//! the exposable front doors that are propose-only and want a human.
+//!
+//! This is the dashboard's module root and its ONLY layer that touches engine domain
+//! state (ADR-0019): it owns the axum `Router`, the route handlers, and `DashboardState`,
+//! reads the shared `Findings` / journals, and re-exports the public surface other engine
+//! modules import from `dashboard`. The presentation is split React-style:
+//!
+//! - [`view_model`] shapes engine domain state into plain `Props` (the data layer).
+//! - [`components`] are pure `maud` renderers (`Props -> Markup`); they import no
+//!   `engine::` domain type.
+//! - [`page`] composes components + the (transitional) [`legacy`] panels into the full
+//!   page and the `/fragment` live region.
+//!
+//! JEF-204 migrates the nav + status banner onto this split as the proof-of-pattern; the
+//! remaining panels still render via the string-concat helpers in [`legacy`] and migrate
+//! in tickets 3–6.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use axum::extract::{Query, State};
+use axum::response::Html;
+use axum::routing::get;
+use axum::{Json, Router};
+
+use crate::engine::journal::DecisionJournal;
+
+pub mod components;
+mod legacy;
+mod page;
+pub mod view_model;
+
+// The public surface other engine modules import from `dashboard` (mod.rs is the only
+// place engine domain state is touched). Re-exported from the transitional `legacy`
+// module so external imports keep resolving across the JEF-204 split; as tickets 3–6
+// migrate panels, these re-exports move to their permanent homes without changing the
+// `dashboard::` paths callers use.
+pub use legacy::{
+    BakeStats, Finding, Findings, Judgement, JudgementLog, ModelHealth, Readiness, ReadinessConfig,
+    Report, ReportQuery, ReversionLog, ReversionRecord, VerdictStore,
+};
+
+use legacy::{
+    DEFAULT_SHORT_LIVED_SECS, DEFAULT_WINDOW_HOURS, aggregate_report, derive_readiness,
+    render_judgements_html, render_report_html,
+};
+use page::{render_fragment, render_html};
+
+/// Shared state for the dashboard's HTML view: the findings handle plus the reversions
+/// ring (JEF-141), so the rendered page can show lifted cuts alongside the findings.
+#[derive(Clone)]
+struct DashboardState {
+    findings: Arc<Findings>,
+    reversions: Arc<ReversionLog>,
+}
+
+/// The LIVE readiness snapshot (JEF-160) from the shared findings handle — the same data
+/// the HTML panel and `/readiness` render. Pure over the engine's config summary + live
+/// state (model health, this pass's bake, last-pass freshness); no model call.
+fn readiness_of(findings: &Findings) -> Readiness {
+    derive_readiness(
+        &findings.readiness_config(),
+        findings.model_health(),
+        &findings.bake(),
+        findings.last_pass(),
+    )
+}
+
+async fn html_view(State(state): State<DashboardState>) -> Html<String> {
+    Html(render_html(
+        &state.findings.snapshot(),
+        state.findings.is_armed(),
+        &state.findings.bake(),
+        &state.reversions.snapshot(),
+        state.findings.last_pass(),
+        &readiness_of(&state.findings),
+    ))
+}
+
+/// The same-origin incremental-refresh fragment (JEF-180): the banner + findings live
+/// region the page poll swaps in place. Read-only, presentation-only; no new egress.
+async fn fragment_view(State(findings): State<Arc<Findings>>) -> Html<String> {
+    Html(render_fragment(
+        &findings.snapshot(),
+        findings.is_armed(),
+        findings.last_pass(),
+        &readiness_of(&findings),
+    ))
+}
+
+/// The readiness / coverage panel as JSON (JEF-160) — the same per-input LIVE state the
+/// HTML panel shows, for scripting / alerting. On its own route so the `/findings`
+/// contract is unchanged. Read-only; presence/health only, no values.
+async fn readiness_view(State(findings): State<Arc<Findings>>) -> Json<Readiness> {
+    Json(readiness_of(&findings))
+}
+
+async fn json_view(State(findings): State<Arc<Findings>>) -> Json<Vec<Finding>> {
+    Json(findings.snapshot())
+}
+
+/// The recent-reversions view as JSON (JEF-141) — the machine-readable form of the
+/// lifted-cuts panel, on its own route so the `/findings` contract is unchanged.
+async fn reversions_view(
+    State(reversions): State<Arc<ReversionLog>>,
+) -> Json<Vec<ReversionRecord>> {
+    Json(reversions.snapshot())
+}
+
+/// The behavioral-bake snapshot as JSON (JEF-48) — the machine-readable form of the
+/// dashboard panel, so the bake's exit criteria can be scraped/asserted, not only
+/// eyeballed. Kept on its own route so the `/findings` array contract is unchanged.
+async fn bake_view(State(findings): State<Arc<Findings>>) -> Json<BakeStats> {
+    Json(findings.bake())
+}
+
+/// The `/judgements` HTML view (JEF-161): the human "why" — one card per recent
+/// judgement, led by the posture chip + the model's prose, the raw prompt behind an
+/// expander. The machine-readable form is `/judgements.json`.
+async fn judgements_html_view(State(journal): State<Arc<JudgementLog>>) -> Html<String> {
+    Html(render_judgements_html(&journal.snapshot()))
+}
+
+/// The `/judgements.json` view: the diagnostic JSON (full prompt + raw reply + verdict
+/// per recent judgement), unchanged from the prior `/judgements` contract — only the path
+/// moved when the human HTML view took over `/judgements` (JEF-161).
+async fn judgements_json_view(State(journal): State<Arc<JudgementLog>>) -> Json<Vec<Judgement>> {
+    Json(journal.snapshot())
+}
+
+/// Replay the durable decision journal and aggregate the would-have-acted report over
+/// the request's window (JEF-143). Read-only; the journal is append-only, so each
+/// request sees the current durable history (pre-restart on disk + this run's writes).
+fn build_report(journal: &DecisionJournal, query: &ReportQuery) -> Report {
+    aggregate_report(
+        &journal.replay(),
+        SystemTime::now(),
+        query.window(),
+        query.short_lived(),
+    )
+}
+
+/// Aggregate the would-have-acted report over the DEFAULT window from a journal handle
+/// (JEF-143), for the engine to mirror its headline counts to OTLP per pass — the same
+/// figures `/report` shows by default, the in-process mirror like the bake counts. A
+/// disabled journal replays nothing, so this is an empty report (all-zero headline).
+pub fn default_window_report(journal: &DecisionJournal) -> Report {
+    aggregate_report(
+        &journal.replay(),
+        SystemTime::now(),
+        Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+        Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+    )
+}
+
+/// The `/report` HTML view (JEF-143): the shadow would-have-acted diff over a rolling
+/// window. Window + thresholds come from the query string (see [`ReportQuery`]).
+async fn report_html_view(
+    State(journal): State<Arc<DecisionJournal>>,
+    Query(query): Query<ReportQuery>,
+) -> Html<String> {
+    Html(render_report_html(&build_report(&journal, &query)))
+}
+
+/// The `/report.json` view (JEF-143): the same aggregation as machine-readable JSON, so
+/// the would-have-acted diff can be scraped/asserted, not only eyeballed.
+async fn report_json_view(
+    State(journal): State<Arc<DecisionJournal>>,
+    Query(query): Query<ReportQuery>,
+) -> Json<Report> {
+    Json(build_report(&journal, &query))
+}
+
+/// The vendored, self-hosted graph renderer (beautiful-mermaid + elkjs, bundled in
+/// `web/dist` and embedded in the binary). Served same-origin so the dashboard never
+/// loads third-party JS — see the import in [`render_html`].
+const BEAUTIFUL_MERMAID_JS: &str = include_str!("../../../web/dist/beautiful-mermaid.js");
+
+async fn beautiful_mermaid_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        BEAUTIFUL_MERMAID_JS,
+    )
+}
+
+/// The dashboard stylesheet (JEF-203): the page CSS extracted from the former inline
+/// `<style>` blocks into a self-hosted asset, embedded in the binary and served
+/// same-origin at `/assets/dashboard.css` (no third-party CSS, zero egress).
+pub(crate) const DASHBOARD_CSS: &str = include_str!("../../../web/dist/dashboard.css");
+
+async fn dashboard_css() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        DASHBOARD_CSS,
+    )
+}
+
+/// The dashboard page script (JEF-203): the Mermaid-hydrate / details-persist /
+/// incremental-poll module extracted from the former inline `<script type="module">`
+/// into a self-hosted asset, embedded in the binary and served same-origin at
+/// `/assets/dashboard.js` (the import it carries resolves to the likewise self-hosted
+/// `/assets/beautiful-mermaid.js`; zero egress).
+pub(crate) const DASHBOARD_JS: &str = include_str!("../../../web/dist/dashboard.js");
+
+async fn dashboard_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        DASHBOARD_JS,
+    )
+}
+
+/// Serve the findings dashboard (`/` HTML, `/findings` JSON, `/bake` JSON, `/readiness`
+/// JSON) plus the human `/judgements` HTML "why" view (JEF-161) with its diagnostic
+/// `/judgements.json` (full prompt + raw reply + verdict per recent judgement), the
+/// `/reversions` JSON (lifted cuts + why, JEF-141), and the
+/// `/report` + `/report.json` shadow would-have-acted diff (JEF-143). Read-only;
+/// cluster-facing glue around the tested classification + aggregation. The `/readiness`
+/// view (JEF-160) reports each decision input's LIVE presence/health for alerting.
+pub async fn serve_dashboard(
+    addr: SocketAddr,
+    findings: Arc<Findings>,
+    judgements: Arc<JudgementLog>,
+    reversions: Arc<ReversionLog>,
+    journal: Arc<DecisionJournal>,
+) -> anyhow::Result<()> {
+    let html_state = DashboardState {
+        findings: findings.clone(),
+        reversions: reversions.clone(),
+    };
+    let app = Router::new()
+        .route("/findings", get(json_view))
+        .route("/bake", get(bake_view))
+        .route("/readiness", get(readiness_view))
+        // JEF-180: the same-origin live-region fragment the page poll swaps in place,
+        // replacing the 30s full-page meta-refresh. New route; no existing route changes.
+        .route("/fragment", get(fragment_view))
+        .route("/assets/beautiful-mermaid.js", get(beautiful_mermaid_js))
+        // JEF-203: the dashboard's self-hosted CSS + JS, served same-origin from the
+        // embedded `web/dist` (no inline <style>/<script>, no third-party assets).
+        .route("/assets/dashboard.css", get(dashboard_css))
+        .route("/assets/dashboard.js", get(dashboard_js))
+        .with_state(findings)
+        .merge(
+            Router::new()
+                .route("/judgements", get(judgements_html_view))
+                .route("/judgements.json", get(judgements_json_view))
+                .with_state(judgements),
+        )
+        .merge(
+            Router::new()
+                .route("/reversions", get(reversions_view))
+                .with_state(reversions),
+        )
+        .merge(
+            Router::new()
+                .route("/report", get(report_html_view))
+                .route("/report.json", get(report_json_view))
+                .with_state(journal),
+        )
+        .merge(
+            Router::new()
+                .route("/", get(html_view))
+                .with_state(html_state),
+        );
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "findings dashboard listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
