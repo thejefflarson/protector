@@ -941,7 +941,7 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     // the rail/aria are built over that single finding.
     let one = std::slice::from_ref(&f);
     let verdict_line = verdict_line(f.verdict.as_deref());
-    let facts: String = proven_facts(&f.entry, one)
+    let facts: String = proven_facts(&f.entry, one, &f.evidence)
         .iter()
         .map(|b| format!("<li>{b}</li>"))
         .collect();
@@ -1091,7 +1091,7 @@ fn verdict_line(verdict: Option<&str>) -> String {
 ///   2. how it reaches each objective kind — by RBAC vs mount, via [`humanize_relation`].
 ///   3. CVE presence — surfaced ONLY from a `CVE-` id the model cited in its verdict
 ///      (JEF-133 builds the real per-path evidence feed; here we read existing fields).
-fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
+fn proven_facts(entry: &str, fs: &[&Finding], ev: &EntryEvidence) -> Vec<String> {
     let mut facts = Vec::new();
 
     // 1. Internet-reachability is the entry-level fact (only breach-relevant chains from
@@ -1113,23 +1113,54 @@ fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
         facts.push(format!("reaches a target by <b>{}</b>", escape(rel)));
     }
 
-    // 3. CVE presence — from a `CVE-` id the model cited in its verdict (existing field
-    // only; NOT JEF-133's per-path feed). Absence reads "no CVE cited", never implied.
-    let cve = fs
-        .iter()
-        .find_map(|f| f.verdict.as_deref().and_then(cve_id).map(str::to_string));
-    match cve {
-        Some(id) => facts.push(format!(
-            "CVE present: the model cited <code>{}</code>",
-            escape(&id)
-        )),
-        None => facts.push(
-            "CVE: <span class=\"muted\">none cited in this verdict (CVE coverage unknown)</span>"
-                .to_string(),
-        ),
-    }
+    // 3. CVE presence — read from the SAME per-entry evidence the card lists below (the
+    // entry's KEV-or-critical CVEs, what the adjudicator reads), NOT scraped from the
+    // model's prose verdict. A short counts-only summary; the full per-CVE list lives in
+    // the evidence block one section down, so the rail names the shape, not the detail.
+    facts.push(cve_fact(ev));
 
     facts
+}
+
+/// The certainty-rail CVE fact, derived from the entry's real `EntryEvidence.cves` — a
+/// SHORT counts-only summary (critical + KEV tallies), never the full list (that is the
+/// evidence block's job, right below the rail). This is the breach-relevant subset only
+/// (KEV-or-critical, the same selection the adjudicator reads), so the honest-empty state
+/// says exactly that — "no KEV/critical CVE on this image" — and never claims the image is
+/// vulnerability-free, nor "none cited / coverage unknown" when CVEs ARE present.
+fn cve_fact(ev: &EntryEvidence) -> String {
+    let n = ev.cves.len();
+    if n == 0 {
+        // Honest-empty: distinguishes "no breach-relevant CVE present" from "CVE data
+        // absent". This block only ever carries KEV-or-critical CVEs, so an empty list is
+        // the genuine no-high-severity-CVE state, not a missing-scan blank — but lower-
+        // severity CVEs are out of this subset, so we don't claim the image is clean.
+        return "CVE: <span class=\"muted\">no KEV or critical CVE on this service's image \
+                (lower-severity CVEs not shown here)</span>"
+            .to_string();
+    }
+
+    let critical = ev.cves.iter().filter(|c| c.severity == "critical").count();
+    let kev = ev.cves.iter().filter(|c| c.kev).count();
+
+    let mut parts: Vec<String> = Vec::new();
+    if critical > 0 {
+        parts.push(format!("{critical} critical"));
+    }
+    if kev > 0 {
+        parts.push(format!("{kev} KEV-listed"));
+    }
+    let detail = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", parts.join(", "))
+    };
+
+    format!(
+        "CVE present: <b>{n}</b> known vuln{}{} on this image (full list below)",
+        if n == 1 { "" } else { "s" },
+        detail,
+    )
 }
 
 /// How many CVEs to list inline before the rest go behind a "show all" `<details>`
@@ -1447,9 +1478,20 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     let posture = Posture::of(verdict);
     let verdict_line = verdict_line(verdict);
 
+    // The per-path evidence (JEF-133): the entry's CVEs + runtime alerts, the two ADR-0016
+    // blocks. The model judges per ENTRY over everything it reaches, so the whole card
+    // shares ONE entry's evidence — take it from the first finding (all `fs` are this
+    // entry's paths). Behaviors are attributed by pod UID, so this is the entry's own
+    // low-cardinality signal set, no per-objective sprawl. The certainty rail reads this
+    // SAME evidence for its CVE fact, so the rail and the block below it never disagree.
+    let entry_evidence = fs.first().map(|f| &f.evidence);
+
     // The certainty rail — deterministic facts, captioned so the model's call (above) is
-    // clearly the judgement and these are the proof (ADR-0016 proof-vs-judgement line).
-    let facts: String = proven_facts(entry, fs)
+    // clearly the judgement and these are the proof (ADR-0016 proof-vs-judgement line). The
+    // CVE fact is derived from `entry_evidence`, not the prose verdict. With no findings at
+    // all (no entry to read evidence from) the rail falls back to the honest-empty state.
+    let empty_evidence = EntryEvidence::default();
+    let facts: String = proven_facts(entry, fs, entry_evidence.unwrap_or(&empty_evidence))
         .iter()
         .map(|b| format!("<li>{b}</li>"))
         .collect();
@@ -1459,15 +1501,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
          <ul>{facts}</ul></div>"
     );
 
-    // The per-path evidence (JEF-133): the entry's CVEs + runtime alerts, the two ADR-0016
-    // blocks. The model judges per ENTRY over everything it reaches, so the whole card
-    // shares ONE entry's evidence — take it from the first finding (all `fs` are this
-    // entry's paths). Behaviors are attributed by pod UID, so this is the entry's own
-    // low-cardinality signal set, no per-objective sprawl.
-    let evidence = fs
-        .first()
-        .map(|f| evidence_blocks(&f.evidence))
-        .unwrap_or_default();
+    let evidence = entry_evidence.map(evidence_blocks).unwrap_or_default();
 
     // Wide reach ≠ break-in (ADR-0016, the argocd case): a broadly-privileged entry fans
     // out to a huge graph that LOOKS alarming, but breadth is the intended picture, not a
@@ -5532,8 +5566,9 @@ mod tests {
     }
 
     #[test]
-    fn certainty_rail_reads_unknown_when_no_cve_cited() {
-        // AC #2: missing evidence reads "unknown", never implied-absent.
+    fn certainty_rail_carries_entry_and_relation_facts() {
+        // The non-CVE rail facts (internet-reachability + the humanized terminal relation)
+        // still come through; the CVE fact now reads from `EntryEvidence`, not the verdict.
         let f = finding(
             "workload/app/Pod/web",
             "secret/app/session-key",
@@ -5542,8 +5577,7 @@ mod tests {
             true,
             Some("not exploitable — authorized RBAC, nothing concerning"),
         );
-        let facts = proven_facts(&f.entry, std::slice::from_ref(&&f));
-        let joined = facts.join(" ");
+        let joined = proven_facts(&f.entry, std::slice::from_ref(&&f), &f.evidence).join(" ");
         assert!(
             joined.contains("internet-reachable"),
             "the entry's internet-reachability is a proven fact"
@@ -5552,27 +5586,107 @@ mod tests {
             joined.contains("mounts (direct read)"),
             "the terminal relation is humanized into the rail"
         );
+    }
+
+    #[test]
+    fn certainty_rail_honest_empty_distinguishes_none_present_from_data_absent() {
+        // AC #3: with no KEV/critical CVE on the entry, the rail says exactly that —
+        // never "none cited / coverage unknown", and never claims the image is clean
+        // (lower-severity CVEs are out of this subset, so coverage honesty is preserved).
+        let f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "no-cut",
+            "can-read",
+            true,
+            // A prose verdict that happens to mention a CVE id MUST NOT drive the rail.
+            Some("not exploitable — even though CVE-2021-44228 is on the image, RBAC denies it"),
+        );
         assert!(
-            joined.contains("none cited") && joined.contains("unknown"),
-            "no CVE cited reads as unknown, not implied-absent: {joined}"
+            f.evidence.cves.is_empty(),
+            "this finding has no CVE evidence"
+        );
+        let joined = proven_facts(&f.entry, std::slice::from_ref(&&f), &f.evidence).join(" ");
+        assert!(
+            joined.contains("no KEV or critical CVE"),
+            "honest-empty names the breach-relevant subset: {joined}"
+        );
+        assert!(
+            joined.contains("lower-severity CVEs not shown"),
+            "honest-empty keeps coverage-gap honesty (doesn't claim the image is clean): {joined}"
+        );
+        assert!(
+            !joined.contains("none cited") && !joined.contains("coverage unknown"),
+            "the verdict-scrape phrasing is gone: {joined}"
+        );
+        // The prose CVE id is NOT scraped into the rail fact.
+        assert!(
+            !joined.contains("CVE present"),
+            "a CVE id in the prose must not fabricate a 'CVE present' fact: {joined}"
         );
     }
 
     #[test]
-    fn certainty_rail_surfaces_a_cited_cve() {
-        let f = finding(
+    fn certainty_rail_reads_real_cve_counts_from_evidence() {
+        // AC #1 + #2: the CVE fact derives from `EntryEvidence.cves`, with real counts —
+        // and when the evidence block lists CVEs the rail NEVER says "none cited".
+        let mut f = finding(
             "workload/app/Pod/web",
             "secret/app/session-key",
             "auto-eligible",
             "can-read",
             true,
-            Some("exploitable — CVE-2021-44228 is a remote RCE reaching the secret"),
+            // Deliberately a verdict with NO CVE id — the rail must still report the CVEs,
+            // proving it reads the evidence, not the prose.
+            Some("exploitable — reachable over the network"),
         );
-        let joined = proven_facts(&f.entry, std::slice::from_ref(&&f)).join(" ");
+        f.evidence = EntryEvidence {
+            cves: vec![
+                cve("CVE-2021-0001", Severity::Critical, true),
+                cve("CVE-2021-0002", Severity::Critical, false),
+                cve("CVE-2021-0003", Severity::High, false),
+            ],
+            runtime: vec![],
+        };
+        let joined = proven_facts(&f.entry, std::slice::from_ref(&&f), &f.evidence).join(" ");
         assert!(
-            joined.contains("CVE present") && joined.contains("CVE-2021-44228"),
-            "a cited CVE surfaces on the rail: {joined}"
+            joined.contains("CVE present") && joined.contains("<b>3</b> known vulns"),
+            "the rail reports the real CVE count from evidence: {joined}"
         );
+        assert!(
+            joined.contains("2 critical") && joined.contains("1 KEV-listed"),
+            "the rail tallies critical and KEV from the evidence: {joined}"
+        );
+        // The block below lists CVEs, so the rail must NOT claim none / unknown coverage.
+        assert!(
+            !joined.contains("none cited") && !joined.contains("coverage unknown"),
+            "rail never says 'none cited' when CVEs exist on the entry: {joined}"
+        );
+    }
+
+    #[test]
+    fn certainty_rail_cve_fact_matches_the_evidence_block_count() {
+        // AC #4 (alignment): the rail's count and the evidence block's count agree because
+        // both read the SAME `EntryEvidence`. A KEV-but-not-critical CVE still tallies KEV.
+        let ev = EntryEvidence {
+            cves: vec![cve("CVE-2022-0001", Severity::High, true)],
+            runtime: vec![],
+        };
+        let fact = cve_fact(&ev);
+        assert!(
+            fact.contains("<b>1</b> known vuln "),
+            "singular, count 1: {fact}"
+        );
+        assert!(
+            fact.contains("1 KEV-listed"),
+            "the KEV tally surfaces: {fact}"
+        );
+        assert!(
+            !fact.contains("critical"),
+            "no critical when none are: {fact}"
+        );
+        // The evidence block over the same data also reports one CVE.
+        assert!(cve_block(&ev).contains("<b>1</b> CVE"));
     }
 
     #[test]
