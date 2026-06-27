@@ -946,8 +946,7 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
         .map(|b| format!("<li>{b}</li>"))
         .collect();
     let rail = format!(
-        "<div class=\"rail\"><div class=\"rail-cap\">what's proven \
-         <span class=\"muted\">— deterministic facts; the model's call is above</span></div>\
+        "<div class=\"rail\"><div class=\"rail-cap\">proven facts</div>\
          <ul>{facts}</ul></div>"
     );
     // The per-path evidence (JEF-133): the entry's CVEs (severity input) and runtime
@@ -1507,7 +1506,233 @@ fn is_broad(objectives: usize) -> bool {
     objectives >= 20
 }
 
-fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
+/// The crisp verdict GIST for the dense findings table (JEF-199): the posture TAG plus ONE
+/// decisive clause — never the model's paragraph (that stays VERBATIM in the expanded row
+/// and at `/judgements`; ADR-0013 forbids paraphrasing the judgement itself). A pure
+/// function over the verdict string and the entry's structured [`EntryEvidence`], so the
+/// clause is derived DETERMINISTICALLY from facts, not by blindly truncating prose. The
+/// clause is chosen in decisiveness order:
+///   1. a cited KEV/critical CVE (from the evidence, else a `CVE-…` the verdict cited),
+///   2. runtime-corroboration (a live signal on the entry),
+///   3. the terminal relation the verdict's facts prove ("reaches N targets via …"),
+///   4. LAST resort only: the verdict's first clause, truncated (≤ ~90 chars, trailing `…`).
+///
+/// Returns `(tag, clause)`; `tag` is the `Posture::label`. The clause may be empty (awaiting
+/// with no facts), and is plain text — escape at the call site.
+fn verdict_gist(
+    verdict: Option<&str>,
+    ev: &EntryEvidence,
+    fs: &[&Finding],
+) -> (&'static str, String) {
+    let tag = Posture::of(verdict).label();
+
+    // 1. A cited KEV/critical CVE — the most decisive enrichment. Prefer the evidence's
+    // own worst CVE (it carries the KEV/severity fields); fall back to a `CVE-…` id the
+    // model cited in its verdict when the structured evidence is empty.
+    if let Some(c) = ev
+        .cves
+        .iter()
+        .filter(|c| c.kev || c.severity == "critical")
+        .min_by_key(|c| severity_rank(c))
+    {
+        let kind = if c.kev { "KEV" } else { "critical CVE" };
+        return (tag, format!("{} ({kind})", c.id));
+    }
+    if let Some(id) = verdict.and_then(cve_id) {
+        return (tag, format!("cites {id}"));
+    }
+
+    // 2. Runtime-corroborated — a live signal demonstrated the chain now.
+    if fs.iter().any(|f| f.corroborated) || ev.corroborating().next().is_some() {
+        return (tag, "runtime-corroborated".to_string());
+    }
+
+    // 3. The terminal relation the proof establishes — the dominant objective kind, count,
+    // and how it's reached (RBAC vs mount vs network). Deterministic, from the path.
+    if let Some(summary) = terminal_reach_clause(fs) {
+        return (tag, summary);
+    }
+
+    // 4. Last resort: the verdict's first clause, truncated. Only when nothing structured
+    // applied (e.g. an awaiting/odd verdict with no path facts).
+    match verdict {
+        Some(v) => (tag, truncate_clause(first_clause(v))),
+        None => (tag, String::new()),
+    }
+}
+
+/// The deterministic "reaches" clause from the proven paths: the dominant terminal
+/// objective kind + count, and the relation that reaches it ("reaches 120 secrets via
+/// authorized RBAC"). `None` when there are no terminal hops to summarize.
+fn terminal_reach_clause(fs: &[&Finding]) -> Option<String> {
+    // Count distinct terminal objectives by kind, and tally the relations used to reach
+    // them, so the dominant kind and its dominant relation surface.
+    let mut by_kind: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut rel_for_kind: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for f in fs {
+        if let Some(step) = f.path.iter().find(|s| s.to == f.objective) {
+            let k = kind(&step.to).to_string();
+            by_kind
+                .entry(k.clone())
+                .or_default()
+                .insert(step.to.clone());
+            *rel_for_kind
+                .entry(k)
+                .or_default()
+                .entry(step.relation.clone())
+                .or_default() += 1;
+        }
+    }
+    // Dominant kind = the one with the most distinct objectives (ties broken by kind name
+    // for determinism).
+    let (kind, objs) = by_kind
+        .iter()
+        .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(a.0)))?;
+    let n = objs.len();
+    // Dominant relation for that kind.
+    let rel = rel_for_kind
+        .get(kind)
+        .and_then(|m| m.iter().max_by_key(|(_, c)| **c).map(|(r, _)| r.clone()))
+        .map(|r| reach_relation_phrase(&r))
+        .unwrap_or_default();
+    let via = if rel.is_empty() {
+        String::new()
+    } else {
+        format!(" via {rel}")
+    };
+    Some(format!("reaches {n} {}{via}", plural(kind, n)))
+}
+
+/// A terse phrase for the terminal relation used in the verdict gist's "reaches … via …"
+/// clause — calmer than the full graph edge label, naming the authorization mechanism.
+fn reach_relation_phrase(rel: &str) -> String {
+    if rel == "can-read" {
+        return "a mounted secret".to_string();
+    }
+    if rel.starts_with("can-do/") {
+        return "authorized RBAC".to_string();
+    }
+    if let Some(via) = rel.strip_prefix("escapes-to/") {
+        return format!("a {via} escape");
+    }
+    if rel.starts_with("reaches") {
+        return "network reach".to_string();
+    }
+    humanize_relation(rel)
+}
+
+/// The first clause of a verdict string — up to the first sentence/dash break — the LAST-
+/// resort gist fallback (JEF-199) when no structured clause applies.
+fn first_clause(v: &str) -> &str {
+    let v = v.trim();
+    let end = v
+        .char_indices()
+        .find(|(_, c)| matches!(c, '.' | ';' | '—'))
+        .map(|(i, _)| i)
+        .unwrap_or(v.len());
+    v[..end].trim_end()
+}
+
+/// Truncate a clause to ~90 chars at a char boundary, appending an ellipsis when cut.
+fn truncate_clause(s: &str) -> String {
+    const CAP: usize = 90;
+    if s.chars().count() <= CAP {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(CAP).collect();
+    out.push('…');
+    out
+}
+
+/// The terse "next lever" disposition tag for the dense table (JEF-202) — what the operator
+/// would do next, in two-or-three words, derived from the finding's mechanical
+/// `disposition` (see [`classify`]). The full concrete instruction stays in the expanded
+/// row's [`what_to_do`]; this is the at-a-glance lever. A broadly-privileged, model-cleared
+/// entry reads "working as intended" (the calm case), handled by the caller.
+fn next_lever_tag(f: &Finding) -> &'static str {
+    match f.disposition.as_str() {
+        AUTO_ELIGIBLE
+        | "latent foothold — propose"
+        | "structural — propose"
+        | "vetoed — propose" => "arm network",
+        "durable-fix PR" => "durable fix",
+        "forbidden" => "manual (escape)",
+        "no-cut" => "manual (no cut)",
+        _ => "manual",
+    }
+}
+
+/// The compact evidence-glyph cell for the dense table (JEF-202): `N CVE`, a `K·KEV` badge
+/// (reusing the `.kev` idiom), a `crit` count, and `◆live` when runtime-corroborated. `—`
+/// when there is no evidence at all; `unjudged` when the model hasn't reached the entry yet
+/// (an honest awaiting state, JEF-161 — never an implied "no evidence"). Plain glyphs;
+/// the verbose per-CVE / per-signal blocks stay in the expanded row. CVE ids are a closed
+/// catalogue shape, but the cell carries only counts, so nothing untrusted is emitted here.
+fn evidence_glyphs(ev: &EntryEvidence, corroborated: bool, awaiting: bool) -> String {
+    let n = ev.cves.len();
+    let kev = ev.cves.iter().filter(|c| c.kev).count();
+    let crit = ev.cves.iter().filter(|c| c.severity == "critical").count();
+    let live = corroborated || ev.corroborating().next().is_some();
+
+    let mut parts: Vec<String> = Vec::new();
+    if n > 0 {
+        parts.push(format!("{n} CVE"));
+    }
+    if kev > 0 {
+        parts.push(format!("<span class=\"kev\">{kev}·KEV</span>"));
+    }
+    if crit > 0 {
+        parts.push(format!("<span class=\"ev-crit\">{crit} crit</span>"));
+    }
+    if live {
+        parts.push("<span class=\"ev-live\">◆live</span>".to_string());
+    }
+
+    if !parts.is_empty() {
+        parts.join(" ")
+    } else if awaiting {
+        "<span class=\"muted\">unjudged</span>".to_string()
+    } else {
+        "<span class=\"muted\">—</span>".to_string()
+    }
+}
+
+/// A stable, HTML-id-safe token for an endpoint ROW (JEF-202), derived from the entry key,
+/// so the row-expand `<button aria-controls>` → detail `<tr id>` pair and its persisted
+/// open-state survive the `/fragment` swap (the same content maps to the same id pass to
+/// pass). Non-`[A-Za-z0-9_-]` chars become `-`; prefixed so it is never empty / digit-led.
+fn row_id(entry: &str) -> String {
+    let slug: String = entry
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("row-{slug}")
+}
+
+/// The computed metadata for one endpoint's dense table ROW (JEF-202), produced alongside
+/// the expandable card body so the summary row's cells and the detail body never drift.
+struct RowMeta {
+    /// The model's posture for the entry (one judgement per entry, ADR-0013).
+    posture: Posture,
+    /// How many distinct targets the entry reaches — the blast radius.
+    objectives: usize,
+    /// Whether the model cleared a broad entry → the calm "working as intended" row.
+    calm: bool,
+}
+
+/// The expandable card BODY for one endpoint (JEF-202) — TODAY's full finding card,
+/// UNCHANGED (the verbatim verdict prose, the certainty rail, both ADR-0016 evidence
+/// blocks, the Mermaid graph, the disposition "what to do", and the fan-out expanders). It
+/// is the EXPAND TARGET of the dense findings table's row; the at-a-glance cells live in the
+/// summary row ([`endpoint_row`]). The graph stays collapsed-by-default even for a flagged
+/// entry (open on demand) — the whole body is already one click behind the row.
+fn endpoint_card_body(entry: &str, fs: &[&Finding]) -> (String, RowMeta) {
     let mut m = Mermaid::default();
     m.add_internet(entry);
     let mut seen_intermediate: BTreeSet<String> = BTreeSet::new();
@@ -1586,8 +1811,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         .map(|b| format!("<li>{b}</li>"))
         .collect();
     let rail = format!(
-        "<div class=\"rail\"><div class=\"rail-cap\">what's proven \
-         <span class=\"muted\">— deterministic facts; the model's call is above</span></div>\
+        "<div class=\"rail\"><div class=\"rail-cap\">proven facts</div>\
          <ul>{facts}</ul></div>"
     );
 
@@ -1595,17 +1819,13 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
 
     // Wide reach ≠ break-in (ADR-0016, the argocd case): a broadly-privileged entry fans
     // out to a huge graph that LOOKS alarming, but breadth is the intended picture, not a
-    // break-in. Make that a FIRST-CLASS, NON-muted lead right under the verdict — and give
-    // the card a calm green treatment — so the wide graph doesn't read as scary. Two
-    // honest variants: when the model judged it safe, and when it hasn't finished judging.
+    // break-in. The verbose reassurance prose is GONE (JEF-200) — the "working as intended"
+    // next-lever tag and the calm row styling carry it now. A Safe + broad entry is the calm
+    // case; an Awaiting + broad entry keeps a one-line honest note that the model hasn't
+    // finished (and is NOT calm-green, since it isn't cleared).
     let broad = is_broad(objectives);
     let (broad_lead, calm_card) = if broad && posture == Posture::Safe {
-        (
-            "<p class=\"broad-lead\"><b>Broadly privileged, working as intended</b> — wide \
-             access is its job, not a break-in. The model found nothing being exploited.</p>"
-                .to_string(),
-            true,
-        )
+        (String::new(), true)
     } else if broad && posture == Posture::Awaiting {
         (
             "<p class=\"broad-lead\">Broad reach — the model hasn't finished judging this \
@@ -1652,25 +1872,14 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         })
         .collect();
 
-    // The attention tier (JEF-163): a small chip — reusing the card chip idiom — that
-    // says WHY this card is where it is in the "look at this first" order. View-only; it
-    // labels the already-decided card and gates nothing (ADR-0016).
-    let tier_chip = format!(
-        "<span class=\"chip {}\" title=\"attention tier\">{}</span>",
-        tier.chip_class(),
-        tier.label()
-    );
-
-    // The caption + the Mermaid source. The big graph is the most intimidating element on
-    // the card, so collapse it by attention tier (and force-collapse it whenever reach is
-    // broad, where the graph is biggest and least alarming):
-    //   flagged      → EXPANDED inline (the operator needs the path).
-    //   safe-broad   → collapsed, regardless of tier ("show what it can reach (N targets)").
-    //   watch        → collapsed behind "show attack path (N hops)".
-    //   context      → inline (the whole card is already collapsed below).
-    // A collapsed graph stays inside a native <details>, so the <summary> control is
-    // keyboard-reachable for free; the Mermaid hydration re-renders it on first open (a
-    // graph laid out while display:none gets zero dimensions), see the page <script>.
+    // The caption + the Mermaid source. The graph is the most intimidating element on the
+    // card, and the whole card is already one expand behind its table row, so it stays
+    // collapsed-by-default for EVERY tier (open on demand, JEF-202). A collapsed graph sits
+    // inside a native <details>, so its <summary> control is keyboard-reachable for free and
+    // the Mermaid hydration re-renders it on first open (a graph laid out while display:none
+    // gets zero dimensions), see the page <script>. The summary names the reach when broad
+    // ("show what it can reach (N targets)") and the depth otherwise ("show attack path (N
+    // hops)").
     let caption = format!(
         "<div class=\"kc2\">the picture of those facts — \
          <span class=\"muted\">{} ({} target{} reachable)</span></div>",
@@ -1682,31 +1891,26 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         "<pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>",
         m.finish()
     );
-    let graph_block = if broad {
-        // Wide reach: the graph is biggest and least alarming — collapse it everywhere.
+    let graph_summary = if broad {
         format!(
-            "{caption}<details class=\"graphwrap\"><summary>show what it can reach \
-             ({objectives} target{})</summary>{pre}</details>",
+            "show what it can reach ({objectives} target{})",
             if objectives == 1 { "" } else { "s" },
         )
     } else {
-        match tier {
-            Tier::Watch => format!(
-                "{caption}<details class=\"graphwrap\"><summary>show attack path \
-                 ({hops} hop{})</summary>{pre}</details>",
-                if hops == 1 { "" } else { "s" },
-            ),
-            // Flagged renders expanded inline; context's whole card is already collapsed.
-            Tier::Flagged | Tier::Context => format!("{caption}{pre}"),
-        }
+        format!(
+            "show attack path ({hops} hop{})",
+            if hops == 1 { "" } else { "s" },
+        )
     };
+    let graph_block = format!(
+        "{caption}<details class=\"graphwrap\"><summary>{graph_summary}</summary>{pre}</details>"
+    );
 
-    // The card inner — identical regardless of tier; only the wrapper differs so the
-    // lowest (context) tier is de-emphasized AND collapsible (AC #3). The broad-reach lead
-    // sits right under the verdict, NON-muted (AC #1/#2), before the proof rail.
-    let inner = format!(
-        "{tier_chip}{verdict_line}{broad_lead}{rail}{evidence}\
-         {graph_block}{todo_line}{}",
+    // The card body — the full finding card, verdict-first (the verbatim model prose leads),
+    // then the broad-reach lead (NON-muted, ADR-0016), the proof rail, both evidence blocks,
+    // the collapsed graph, the disposition "what to do", and the fan-out expanders.
+    let body = format!(
+        "{verdict_line}{broad_lead}{rail}{evidence}{graph_block}{todo_line}{}",
         if expand.is_empty() {
             String::new()
         } else {
@@ -1714,28 +1918,115 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
         },
     );
 
-    // Context-tier cards collapse behind a <details> so the operator's eye lands on the
-    // flagged/watch cards first; flagged/watch render expanded as before. A calm,
-    // working-as-intended card gets a green left-border (the chip-safe `#1a7f37` token).
-    let card_class = if calm_card { "card card-calm" } else { "card" };
-    if tier == Tier::Context {
-        let ctx_class = if calm_card {
-            "card card-context card-calm"
-        } else {
-            "card card-context"
-        };
-        format!(
-            "<details class=\"{ctx_class}\"><summary>{tier_chip}\
-             <span class=\"muted\">{} — background, not flagged ({} target{} reachable)</span>\
-             </summary>{inner}</details>",
-            escape(&short(entry)),
+    (
+        body,
+        RowMeta {
+            posture,
             objectives,
-            if objectives == 1 { "" } else { "s" },
-        )
-    } else {
-        format!("<div class=\"{card_class}\">{inner}</div>")
-    }
+            calm: calm_card,
+        },
+    )
 }
+
+/// One endpoint as a pair of dense-table rows (JEF-202): a SUMMARY `<tr>` of decisive cells
+/// (`tier · entry → reaches · verdict(tag+clause) · evidence · next lever · age`) whose tier
+/// cell is the row-expand control, and a hidden DETAIL `<tr><td colspan>` carrying TODAY's
+/// full card body ([`endpoint_card_body`]). The expand control is a real
+/// `<button aria-expanded aria-controls>` (a bare `<details>` wrapping a `<tr>` is invalid
+/// table markup), toggling the detail row; its open-state AND the lazy graph survive the
+/// `/fragment` swap via a STABLE [`row_id`] and the page's persistence machinery. `cols` is
+/// the table's column count, for the detail row's `colspan`.
+fn endpoint_row(
+    entry: &str,
+    fs: &[&Finding],
+    tier: Tier,
+    last_pass: Option<SystemTime>,
+    cols: usize,
+) -> String {
+    let (body, meta) = endpoint_card_body(entry, fs);
+    let id = row_id(entry);
+    let detail_id = format!("{id}-detail");
+
+    // tier cell — the existing chip idiom, doubling as the expand control's label.
+    let tier_chip = format!(
+        "<span class=\"chip {}\">{}</span>",
+        tier.chip_class(),
+        tier.label()
+    );
+
+    // entry → reaches: the short entry name + the dominant terminal reach ("N secrets"),
+    // the aggregate form the card body also computes.
+    let reaches = terminal_reach_clause(fs).unwrap_or_else(|| {
+        format!(
+            "{} target{}",
+            meta.objectives,
+            if meta.objectives == 1 { "" } else { "s" }
+        )
+    });
+    let entry_cell = format!(
+        "<code>{}</code> <span class=\"r-arrow\">→</span> <span class=\"muted\">{}</span>",
+        escape(&short(entry)),
+        escape(&reaches),
+    );
+
+    // verdict: the TAG + ONE decisive clause (JEF-199) — never the paragraph (that is in the
+    // expanded body, verbatim).
+    let verdict = fs.iter().find_map(|f| f.verdict.as_deref());
+    let (tag, clause) = verdict_gist(
+        verdict,
+        fs.first().map_or(&EMPTY_EVIDENCE, |f| &f.evidence),
+        fs,
+    );
+    let tag_class = meta.posture.tone();
+    let clause_html = if clause.is_empty() {
+        String::new()
+    } else {
+        format!(" <span class=\"v-clause\">{}</span>", escape(&clause))
+    };
+    let verdict_cell = format!("<span class=\"chip {tag_class}\">{tag}</span>{clause_html}");
+
+    // evidence glyphs — compact CVE/KEV/crit/live badges, or — / unjudged.
+    let awaiting = meta.posture == Posture::Awaiting;
+    let corroborated = fs.iter().any(|f| f.corroborated);
+    let evidence_cell = evidence_glyphs(
+        fs.first().map_or(&EMPTY_EVIDENCE, |f| &f.evidence),
+        corroborated,
+        awaiting,
+    );
+
+    // next lever — the terse disposition tag; the calm "working as intended" case wins for a
+    // broadly-privileged, model-cleared entry (ADR-0016).
+    let lever = if meta.calm {
+        "working as intended"
+    } else {
+        fs.first().map_or("manual", |f| next_lever_tag(f))
+    };
+    let lever_cell = format!("<span class=\"lever\">{lever}</span>");
+
+    // age — the pass-age ("as of Nm ago"); the richer per-finding Δ column is JEF-201.
+    let age_cell = format!("as of {}", escape(&relative_time(last_pass)));
+
+    let row_class = if meta.calm { "f-row f-calm" } else { "f-row" };
+    format!(
+        "<tr class=\"{row_class}\">\
+         <td class=\"c-tier\"><button class=\"row-toggle\" aria-expanded=\"false\" \
+         aria-controls=\"{detail_id}\">{tier_chip}</button></td>\
+         <td class=\"c-entry\">{entry_cell}</td>\
+         <td class=\"c-verdict\">{verdict_cell}</td>\
+         <td class=\"c-ev\">{evidence_cell}</td>\
+         <td class=\"c-lever\">{lever_cell}</td>\
+         <td class=\"c-age\">{age_cell}</td>\
+         </tr>\
+         <tr id=\"{detail_id}\" class=\"f-detail\" hidden><td colspan=\"{cols}\">{body}</td></tr>"
+    )
+}
+
+/// A shared empty evidence set for entries with no findings to read evidence from (keeps
+/// the row builders allocation-free in that degenerate case).
+static EMPTY_EVIDENCE: EntryEvidence = EntryEvidence {
+    cves: Vec::new(),
+    runtime: Vec::new(),
+};
 
 /// A model verdict counts as a flag only when the model affirmed exploitability —
 /// its own words begin with "exploitable" (a "not exploitable — …" verdict does not).
@@ -3239,9 +3530,43 @@ fn live_region(
     )
 }
 
-/// The findings region's inner HTML (JEF-175 answer-first content): the summary line, the
-/// trust explainer + findings body, and the remediations section. Pure over the findings
-/// and arm-state; reused by [`live_region`] for both the full page and the poll fragment.
+/// The number of columns in the dense findings table (JEF-202):
+/// `tier · entry → reaches · verdict · evidence · next lever · age`. The detail row's
+/// `<td colspan>` spans all of them.
+const FINDINGS_COLS: usize = 6;
+
+/// Wrap a set of endpoint rows in the dense findings `<table>` (JEF-202) — real table
+/// semantics: a `<thead>` of `<th scope="col">` over the decisive columns, then the rows in
+/// a `<tbody>`. The columns lead with the most-decisive (tier) and end with age.
+fn findings_table(rows: &str) -> String {
+    format!(
+        "<table class=\"findings\"><thead><tr>\
+         <th scope=\"col\">tier</th>\
+         <th scope=\"col\">entry → reaches</th>\
+         <th scope=\"col\">verdict</th>\
+         <th scope=\"col\">evidence</th>\
+         <th scope=\"col\">next lever</th>\
+         <th scope=\"col\">age</th>\
+         </tr></thead><tbody>{rows}</tbody></table>"
+    )
+}
+
+/// The edge-legend glossary, collapsed behind a closed `<details>` (JEF-200) — the token
+/// names stay reachable on demand, but no longer crowd the findings region as inline prose.
+fn edge_legend() -> &'static str {
+    "<details class=\"legend-d\"><summary>edge legend</summary>\
+     <p class=\"legend\">\
+     <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
+     <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
+     <code>network reach</code>: a NetworkPolicy- or Linkerd-authorized connection · \
+     <code>runs as</code>: assumes the ServiceAccount identity · \
+     <code>escapes via</code>: a container-escape primitive to the host node</p></details>"
+}
+
+/// The findings region's inner HTML (JEF-202 dense table): the summary line, the dense
+/// findings TABLE(s) (the primary view — one row per endpoint, the verbose card body behind
+/// each row's expand), and the remediations section. Pure over the findings and arm-state;
+/// reused by [`live_region`] for both the full page and the poll fragment.
 fn findings_region(
     findings: &[Finding],
     armed: bool,
@@ -3295,21 +3620,45 @@ fn findings_region(
             .then_with(|| a.0.cmp(b.0)) // then entry key, for a stable total order
     });
 
-    // Answer-first split (JEF-175): the findings lead the page, partitioned into the two
-    // operator questions. "Needs attention" is the Flagged tier (the model judged a real
-    // breach); "Watching" is everything else (watch + the already-collapsed context cards).
-    // The partition keys on the SAME `endpoint_attention_rank` tier the cards already
-    // carry, so a card's section and its tier chip can never drift, and the stable, total
+    // Partition the ranked endpoints into the answer-first split, as dense table ROWS
+    // (JEF-202): "Needs attention" is the Flagged tier (the model judged a real breach);
+    // "Watching" holds the Watch tier directly plus the Context tier collapsed behind a
+    // single summary row. The partition keys on the SAME `endpoint_attention_rank` tier the
+    // rows carry, so a row's section and its tier cell can never drift; the stable, total
     // sort above is preserved within each section.
-    let mut attention_cards = String::new();
-    let mut watching_cards = String::new();
+    let mut attention_rows = String::new();
+    let mut watch_rows = String::new();
+    let mut context_rows = String::new();
+    let mut flagged_n = 0usize;
+    let mut exposed_n = 0usize; // watch + context: exposed, not flagged
     for (entry, fs) in &ranked {
         let (priority, tier) = endpoint_attention_rank(fs);
-        let card = endpoint_card(entry, fs, tier_of_priority(priority));
-        if tier == Tier::Flagged {
-            attention_cards.push_str(&card);
-        } else {
-            watching_cards.push_str(&card);
+        let row = endpoint_row(
+            entry,
+            fs,
+            tier_of_priority(priority),
+            last_pass,
+            FINDINGS_COLS,
+        );
+        match tier {
+            Tier::Flagged => {
+                flagged_n += 1;
+                attention_rows.push_str(&row);
+            }
+            Tier::Watch => {
+                exposed_n += 1;
+                watch_rows.push_str(&row);
+            }
+            Tier::Context => {
+                exposed_n += 1;
+                // Context detail-group rows: HIDDEN by default behind the single context
+                // summary row, marked so its group toggle reveals them as a group (JEF-202).
+                // (The per-row f-detail body stays behind its own row-toggle.) Attribute
+                // order is irrelevant in HTML, so prepend `hidden` to the summary <tr>.
+                context_rows.push_str(
+                    &row.replace("<tr class=\"f-row", "<tr hidden class=\"ctx-row f-row"),
+                );
+            }
         }
     }
 
@@ -3323,56 +3672,57 @@ fn findings_region(
     let no_breach_findings = !findings.iter().any(|f| f.breach_relevant);
     let first_run = no_breach_findings && readiness.has_unmet();
 
-    // The one persistent trust explainer — rendered ONCE at the top of the findings region
-    // in EVERY state (including first-run / all-clear), so the operator always has the
-    // mental model: protector maps only PROVEN paths, then a local model judges
-    // exploitation. It cannot invent a path; a red call needs proof + exploitation
-    // evidence. Plain words, no internal refs.
-    let trust_line = "<p class=\"trust\"><b>How protector decides:</b> it maps every real \
-         path an attacker could walk — proven from your cluster's config and live traffic, \
-         it can't invent one — then a local model judges whether each is actually being \
-         exploited. A red call means proven path + the model saw exploitation evidence.</p>";
-
-    // The findings region (JEF-175) — first content below the banner. Answer-first:
-    // "Needs attention" (flagged endpoints; OMITTED entirely when there are none, AC #2)
-    // then "Watching" (watch + the collapsed context cards). On first run the guided
-    // checklist replaces the whole region (preserving the JEF-160 path, AC #1). The trust
-    // line leads the region in all states.
+    // The dense findings region (JEF-202) — the primary view, leading below the banner.
+    // Answer-first: a "Needs attention — N flagged" table (OMITTED entirely when nothing is
+    // flagged) then a "Watching — N exposed, not flagged" table. Counts live in the headers
+    // (JEF-200), so the explanatory preamble sentences are gone. On first run the guided
+    // checklist replaces the whole region (preserving the JEF-160 path).
     let region = if first_run {
         first_run_checklist(readiness)
     } else {
-        let attention = if attention_cards.is_empty() {
+        let attention = if attention_rows.is_empty() {
             String::new()
         } else {
             format!(
-                "<h2 id=\"attack-paths\">Needs attention</h2>\
-                 <p class=\"sum\">Internet-facing endpoints the model judged a real breach — \
-                 look here first.</p>{attention_cards}"
+                "<h2 id=\"attack-paths\">Needs attention <span class=\"muted\">— {flagged_n} flagged</span></h2>\
+                 {}",
+                findings_table(&attention_rows),
             )
         };
+        // The Context tier collapses to ONE summary row that expands to its rows (JEF-202).
+        let context_block = if context_rows.is_empty() {
+            String::new()
+        } else {
+            let ctx_n = context_rows.matches("ctx-row f-row").count();
+            format!(
+                "<tr class=\"ctx-summary\"><td colspan=\"{FINDINGS_COLS}\">\
+                 <button class=\"row-toggle ctx-toggle\" aria-expanded=\"false\" \
+                 data-ctx-group=\"watching\">\
+                 <span class=\"chip tier-context\">context</span> \
+                 <span class=\"muted\">{ctx_n} background path{} — proven-reachable, neither \
+                 flagged nor seen live</span></button></td></tr>{context_rows}",
+                if ctx_n == 1 { "" } else { "s" },
+            )
+        };
+        let watching_rows = if watch_rows.is_empty() && context_block.is_empty() {
+            format!(
+                "<tr><td colspan=\"{FINDINGS_COLS}\" class=\"muted\">no internet-facing \
+                 service can reach a target</td></tr>"
+            )
+        } else {
+            format!("{watch_rows}{context_block}")
+        };
         let watching = format!(
-            "<h2 id=\"watching\">Watching</h2>\
-             <p class=\"sum\">Exposed paths the model is watching but has not flagged — a way \
-             in that's only a risk if exploited, carrying a CVE, or seen happening live. \
-             Background paths (proven-reachable, neither flagged nor seen live) are collapsed \
-             below.</p>{}",
-            if watching_cards.is_empty() {
-                "<p class=\"muted\">no internet-facing service can reach a target</p>".to_string()
-            } else {
-                watching_cards
-            }
+            "<h2 id=\"watching\">Watching <span class=\"muted\">— {exposed_n} exposed, not \
+             flagged</span></h2>{}",
+            findings_table(&watching_rows),
         );
         format!(
-            "{attention}{watching}\
-             <p class=\"legend\">edge legend — \
-             <code>mounts (direct read)</code>: the secret is mounted into the pod, read with no API call (just that one secret) · \
-             <code>RBAC … (API)</code>: the pod's ServiceAccount can read via the Kubernetes API (often any secret in scope) · \
-             <code>network reach</code>: a NetworkPolicy- or Linkerd-authorized connection · \
-             <code>runs as</code>: assumes the ServiceAccount identity · \
-             <code>escapes via</code>: a container-escape primitive to the host node</p>"
+            "{attention}{watching}{edge_legend}",
+            edge_legend = edge_legend()
         )
     };
-    let findings_body = format!("{trust_line}{region}");
+    let findings_body = region;
 
     // The summary line + findings body + remediations section — the per-pass content the
     // poll swaps in place (JEF-180). The wrapping `#findings-region` div is added by the
@@ -3440,19 +3790,36 @@ fn render_html(
          .tier-flagged{{color:#7a0000;background:#fdecec;border-color:#b00000}}\
          .tier-watch{{color:#7a4a00;background:#fbf6ee;border-color:#9a5b00}}\
          .tier-context{{color:#555;background:#f4f4f4;border-color:#ccc}}\
-         details.card-context{{border:1px solid #e3e3e3;border-radius:0;padding:.5rem .7rem;margin:.6rem 0;opacity:.7}}\
-         details.card-context summary{{cursor:pointer;color:#555;font-size:.85rem}}\
-         details.card-context[open]{{opacity:1}}\
          .rail{{font-size:.78rem;margin:.2rem 0 .5rem;border-left:2px solid #1a7f37;padding:.1rem 0 .1rem .6rem}}\
          .rail-cap{{font-weight:600;color:#155f29}}\
          .rail ul{{margin:.15rem 0 0;padding-left:1.1rem}}\
          .rail li{{margin:.1rem 0;color:#333}}\
          .rail code{{background:#f4f4f4;padding:0 .2rem}}\
          .broad-lead{{font-size:.86rem;color:#155f29;margin:.1rem 0 .5rem}}\
-         .card-calm{{border-left:3px solid #1a7f37}}\
-         details.card-context.card-calm{{border-left:3px solid #1a7f37}}\
          .graphwrap>summary{{cursor:pointer;color:#06c;font-size:.82rem;margin:.1rem 0}}\
-         .trust{{font-size:.84rem;color:#333;background:#f4f7f5;border-left:3px solid #1a7f37;padding:.4rem .6rem;margin:.4rem 0 .8rem}}\
+         table.findings{{border-collapse:collapse;width:100%;font-size:.85rem;margin:.2rem 0 .6rem}}\
+         table.findings th{{text-align:left;font-weight:600;color:#444;border-bottom:1px solid #ccc;padding:.3rem .5rem;white-space:nowrap}}\
+         table.findings td{{padding:.3rem .5rem;border-bottom:1px solid #f0f0f0;vertical-align:top}}\
+         table.findings tr.f-row:hover>td{{background:#fafafa}}\
+         table.findings tr.f-calm>td{{border-left:3px solid #1a7f37}}\
+         table.findings td.c-entry code{{background:#f4f4f4;padding:0 .2rem}}\
+         table.findings .r-arrow{{color:#999}}\
+         table.findings td.c-verdict{{max-width:30rem}}\
+         .v-clause{{color:#333}}\
+         .lever{{font-family:ui-monospace,monospace;font-size:.74rem;color:#06c;white-space:nowrap}}\
+         tr.f-calm .lever{{color:#155f29}}\
+         table.findings td.c-age{{color:#666;white-space:nowrap}}\
+         .ev-crit{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;color:#7a0000}}\
+         .ev-live{{font-family:ui-monospace,monospace;font-size:.72rem;font-weight:700;color:#b00000}}\
+         button.row-toggle{{cursor:pointer;background:none;border:none;padding:0;font:inherit;text-align:left}}\
+         button.row-toggle[aria-expanded=\"true\"] .chip{{outline:2px solid #888;outline-offset:1px}}\
+         tr.f-detail>td{{background:#fafafa;padding:.6rem .8rem}}\
+         tr.ctx-summary>td{{background:#f7f7f7}}\
+         tr.ctx-row>td{{opacity:.75}}\
+         details.legend-d{{margin:.2rem 0 .6rem}}\
+         details.legend-d>summary{{cursor:pointer;color:#06c;font-size:.78rem}}\
+         details.howto{{margin:.2rem 0 1rem}}\
+         details.howto>summary{{cursor:pointer;color:#06c;font-size:.82rem}}\
          .todo{{font-size:.82rem;color:#333;background:#f8f8f8;border-left:2px solid #06c;padding:.25rem .5rem;margin:.3rem 0 .1rem}}\
          .todo code{{background:#eee;padding:0 .2rem}}\
          .applied{{color:#b00000;font-weight:600}}\
@@ -3550,9 +3917,11 @@ fn render_html(
              pre.replaceWith(g);\
            }} catch (e) {{ /* leave the source text as a fallback */ if (aria) {{ pre.setAttribute('role', 'img'); pre.setAttribute('aria-label', aria); }} }}\
          }}\
-         /* A graph laid out inside a closed <details> (display:none) measures to zero, so DEFER \
-            those to the details' first open; render every visible graph immediately. */\
-         function hiddenAncestor(pre) {{ let d = pre.closest('details'); while (d) {{ if (!d.open) return d; d = d.parentElement && d.parentElement.closest('details'); }} return null; }}\
+         /* A graph laid out inside a closed <details> OR a hidden row (display:none) measures \
+            to zero, so DEFER those to first reveal; render every visible graph immediately. A \
+            row's detail <tr> carries [hidden] until its row-toggle opens it, and a context row \
+            is hidden until its group opens, so a closest('[hidden]') ancestor defers too. */\
+         function hiddenAncestor(pre) {{ if (pre.closest('[hidden]')) return pre.closest('[hidden]'); let d = pre.closest('details'); while (d) {{ if (!d.open) return d; d = d.parentElement && d.parentElement.closest('details'); }} return null; }}\
          /* A STABLE key for a <details> so its open/closed state can survive an incremental \
             swap: the <summary> text plus its index among same-text siblings. Card content \
             is stable pass-to-pass, so the same card maps to the same key. */\
@@ -3566,17 +3935,38 @@ fn render_html(
          }}\
          function saveDetails(d) {{ try {{ localStorage.setItem(detailsKey(d), d.open ? '1' : '0'); }} catch (e) {{}} }}\
          function restoreDetails(root) {{ for (const d of root.querySelectorAll('details')) {{ let v = null; try {{ v = localStorage.getItem(detailsKey(d)); }} catch (e) {{}} if (v === '1') d.open = true; else if (v === '0') d.open = false; }} }}\
-         /* (Re)hydrate a subtree: render visible graphs now, defer hidden ones to first open, \
-            persist <details> state, and re-render any graph revealed by opening. Idempotent and \
-            scoped to `root` so it can run on load AND after each incremental swap without \
-            double-wiring (swapped nodes are fresh; their old listeners are discarded). */\
+         /* The dense findings table's row-expand is a <button aria-controls> (a bare <details> \
+            wrapping a <tr> is invalid table markup), so it gets its OWN persistence keyed by the \
+            STABLE aria-controls id (derived from the entry key, so the same endpoint maps to the \
+            same key pass-to-pass and survives the /fragment swap). A context group toggles every \
+            .ctx-row in its table at once. */\
+         function rowKey(btn) {{ return 'row:' + (btn.getAttribute('aria-controls') || btn.getAttribute('data-ctx-group') || ''); }}\
+         function renderIn(el) {{ for (const pre of el.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }}\
+         function setRow(btn, open) {{\
+           btn.setAttribute('aria-expanded', open ? 'true' : 'false');\
+           if (btn.classList.contains('ctx-toggle')) {{\
+             const tbl = btn.closest('table'); if (tbl) for (const r of tbl.querySelectorAll('tr.ctx-row')) r.hidden = !open;\
+           }} else {{\
+             const id = btn.getAttribute('aria-controls'); const detail = id && document.getElementById(id);\
+             if (detail) {{ detail.hidden = !open; if (open) renderIn(detail); }}\
+           }}\
+           try {{ localStorage.setItem(rowKey(btn), open ? '1' : '0'); }} catch (e) {{}}\
+         }}\
+         function restoreRows(root) {{ for (const btn of root.querySelectorAll('button.row-toggle')) {{ let v = null; try {{ v = localStorage.getItem(rowKey(btn)); }} catch (e) {{}} if (v === '1') setRow(btn, true); else if (v === '0') setRow(btn, false); }} }}\
+         /* (Re)hydrate a subtree: render visible graphs now, defer hidden ones to first reveal, \
+            persist <details> AND row-toggle state, and re-render any graph revealed by opening. \
+            Idempotent and scoped to `root` so it can run on load AND after each incremental swap \
+            without double-wiring (swapped nodes are fresh; their old listeners are discarded). */\
          function hydrate(root) {{\
            for (const pre of root.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }}\
            for (const d of root.querySelectorAll('details')) {{\
              d.addEventListener('toggle', () => {{ saveDetails(d); if (!d.open) return; for (const pre of d.querySelectorAll('pre.mermaid')) {{ if (!hiddenAncestor(pre)) renderPre(pre); }} }});\
            }}\
+           for (const btn of root.querySelectorAll('button.row-toggle')) {{\
+             btn.addEventListener('click', () => {{ setRow(btn, btn.getAttribute('aria-expanded') !== 'true'); }});\
+           }}\
          }}\
-         restoreDetails(document); hydrate(document);\
+         restoreDetails(document); restoreRows(document); hydrate(document);\
          /* Incremental refresh: replaces the old 30s full-page reload, which reset \
             scroll, focus, and every <details>. Poll the SAME-ORIGIN `/fragment` (zero new \
             egress) and swap ONLY the banner + findings region; restore <details> open-state \
@@ -3584,27 +3974,31 @@ fn render_html(
          async function poll() {{\
            let html; try {{ const r = await fetch('/fragment', {{ headers: {{ 'Accept': 'text/html' }} }}); if (!r.ok) return; html = await r.text(); }} catch (e) {{ return; }}\
            const doc = new DOMParser().parseFromString(html, 'text/html');\
-           const focusKey = (() => {{ const a = document.activeElement; if (!a) return null; const d = a.closest && a.closest('details'); return (a.tagName === 'SUMMARY' && d) ? detailsKey(d) : null; }})();\
+           const focusKey = (() => {{ const a = document.activeElement; if (!a) return null; if (a.classList && a.classList.contains('row-toggle')) return rowKey(a); const d = a.closest && a.closest('details'); return (a.tagName === 'SUMMARY' && d) ? detailsKey(d) : null; }})();\
            const sx = window.scrollX, sy = window.scrollY;\
            for (const id of ['banner-region', 'findings-region']) {{\
              const cur = document.getElementById(id), next = doc.getElementById(id);\
              if (cur && next) cur.replaceWith(next);\
            }}\
            const region = document.getElementById('findings-region');\
-           if (region) {{ restoreDetails(region); hydrate(region); }}\
-           if (focusKey && region) {{ for (const d of region.querySelectorAll('details')) {{ if (detailsKey(d) === focusKey) {{ const s = d.querySelector(':scope > summary'); if (s) s.focus({{ preventScroll: true }}); break; }} }} }}\
+           if (region) {{ restoreDetails(region); restoreRows(region); hydrate(region); }}\
+           if (focusKey && region) {{ for (const b of region.querySelectorAll('button.row-toggle')) {{ if (rowKey(b) === focusKey) {{ b.focus({{ preventScroll: true }}); break; }} }} for (const d of region.querySelectorAll('details')) {{ if (detailsKey(d) === focusKey) {{ const s = d.querySelector(':scope > summary'); if (s) s.focus({{ preventScroll: true }}); break; }} }} }}\
            window.scrollTo(sx, sy);\
          }}\
          setInterval(poll, 30000);\
          </script></head><body>\
          {live}\
+         <details class=\"howto\"><summary>how protector decides</summary>\
+         <p class=\"sum\">It maps every real path an attacker could walk — proven from your \
+         cluster's config and live traffic, it can't invent one — then a local model judges \
+         whether each is actually being exploited. A flagged breach means proven path + the \
+         model saw exploitation evidence.</p></details>\
          <details class=\"diag\"{readiness_open_outer}>\
          <summary><h2 class=\"diag-h\">Engine &amp; coverage</h2></summary>\
          <details id=\"coverage\"{readiness_open}>\
          <summary><h3 class=\"diag-h\">Readiness <span class=\"muted\">(decision inputs)</span></h3></summary>\
-         <p class=\"sum\">Each decision input and its LIVE state — so an unconfigured or down \
-         input is visible, not silent. An <b>absent</b> input that weakens decisions is called \
-         out: the model's call is only as good as the evidence it judges with. \
+         <p class=\"sum\">Each decision input and its LIVE state; an <b>absent</b> input that \
+         <b>weakens decisions</b> is called out. \
          &nbsp;|&nbsp; <a href=\"/readiness\">json</a></p>\
          {readiness_body}\
          </details>\
@@ -3617,10 +4011,8 @@ fn render_html(
          </details>\
          <details>\
          <summary><h3 class=\"diag-h\">Live activity the sensors saw <span class=\"muted\">(shadow)</span></h3></summary>\
-         <p class=\"sum\">What the behavioral agent observed last pass — protector is only \
-         watching, not acting. A sanity check before relying on these signals: volume looks \
-         reasonable, most events map to a workload (low unresolved), and <b>corroborations</b> \
-         counts findings a live signal backed up.</p>\
+         <p class=\"sum\">What the behavioral agent observed last pass (shadow — only watching); \
+         <b>corroborations</b> counts findings a live signal backed up.</p>\
          {bake_body}\
          </details>\
          <details>\
@@ -4907,6 +5299,19 @@ mod tests {
         }
     }
 
+    /// The expandable card BODY for an endpoint (JEF-202) — the detail-row target. Most card
+    /// tests inspect this body (the verbatim verdict, rail, evidence, graph, what-to-do).
+    fn card_body(entry: &str, fs: &[&Finding]) -> String {
+        endpoint_card_body(entry, fs).0
+    }
+
+    /// The full dense-table row pair (summary `<tr>` + detail `<tr>`) for an endpoint, at the
+    /// tier the ranking assigns — what `findings_region` emits per endpoint (JEF-202).
+    fn row_html(entry: &str, fs: &[&Finding]) -> String {
+        let tier = endpoint_attention_rank(fs).1;
+        endpoint_row(entry, fs, tier, Some(SystemTime::now()), FINDINGS_COLS)
+    }
+
     #[test]
     fn mm_strips_html_metacharacters_to_prevent_xss() {
         // A malicious label can't break out of the <pre> or inject into the SVG.
@@ -6186,9 +6591,11 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_card_is_verdict_first_with_chip_rail_todo_and_aria() {
-        // AC #1 + #4: chip + model words + proven rail + what-to-do, and the SVG carries
-        // an aria-label summarizing the path in words.
+    fn expanded_card_body_is_verdict_first_with_rail_todo_and_aria() {
+        // JEF-202: the EXPANDED row body keeps today's full card UNCHANGED — the verbatim
+        // model words lead, then the proof rail, then the what-to-do, then the graph (now
+        // collapsed-by-default, with its aria-label preserved). The crisp tag lives in the
+        // summary row (asserted separately).
         let f = finding(
             "workload/app/Pod/web",
             "secret/app/session-key",
@@ -6197,20 +6604,16 @@ mod tests {
             true,
             Some("not exploitable — authorized RBAC, no CVE"),
         );
-        let html = endpoint_card(
-            "workload/app/Pod/web",
-            &[&f],
-            endpoint_attention_rank(&[&f]).1,
-        );
+        let html = card_body("workload/app/Pod/web", &[&f]);
         // Posture chip TEXT (not color/glyph alone).
         assert!(html.contains("[SAFE]"), "the posture chip carries text");
         assert!(html.contains("chip-safe"));
         // The model's words VERBATIM.
         assert!(html.contains("not exploitable — authorized RBAC, no CVE"));
-        // The certainty rail and its caption.
-        assert!(html.contains("what's proven"));
+        // The certainty rail and its compressed caption (JEF-200).
+        assert!(html.contains("proven facts"));
         assert!(html.contains("internet-reachable"));
-        // The disposition-derived "what to do" — now naming the concrete RBAC grant and
+        // The disposition-derived "what to do" — naming the concrete RBAC grant and
         // workload from the path (JEF-179).
         assert!(html.contains("what to do:"));
         assert!(html.contains("Revoke the `get/secrets` RBAC grant"));
@@ -6218,15 +6621,15 @@ mod tests {
         // The graph's aria-label (data-aria on the <pre>, applied to the SVG by the JS).
         assert!(html.contains("data-aria=\""));
         assert!(html.contains("Attack-path graph"));
-        // The verdict-first chip must come BEFORE the graph in source order.
+        // The verbatim verdict still leads the body, before the graph.
         let chip_at = html.find("[SAFE]").unwrap();
         let graph_at = html.find("class=\"mermaid\"").unwrap();
-        assert!(chip_at < graph_at, "the verdict leads the card");
+        assert!(chip_at < graph_at, "the verdict leads the card body");
     }
 
     #[test]
-    fn endpoint_card_awaiting_state_is_honest_not_clear() {
-        // AC #2 coverage-gap honesty: no verdict yet reads "awaiting", never "clear".
+    fn expanded_card_body_awaiting_state_is_honest_not_clear() {
+        // Coverage-gap honesty: no verdict yet reads "awaiting", never "clear".
         let f = finding(
             "workload/app/Pod/web",
             "secret/app/session-key",
@@ -6235,11 +6638,7 @@ mod tests {
             true,
             None,
         );
-        let html = endpoint_card(
-            "workload/app/Pod/web",
-            &[&f],
-            endpoint_attention_rank(&[&f]).1,
-        );
+        let html = card_body("workload/app/Pod/web", &[&f]);
         assert!(html.contains("[awaiting judgement]"));
         assert!(html.contains("chip-awaiting"));
         assert!(html.contains("hasn't reached this entry yet"));
@@ -6262,66 +6661,47 @@ mod tests {
     }
 
     #[test]
-    fn safe_broad_card_leads_with_positive_line_and_calm_class() {
-        // JEF-177 AC #1: a Safe + broad card leads with the positive, NON-muted
-        // "working as intended" line and a calm green treatment; no retired severity/
-        // urgency wording, no internal ref.
+    fn safe_broad_row_reads_working_as_intended_and_calm_class() {
+        // JEF-200/202: a Safe + broad endpoint's ROW carries the terse "working as intended"
+        // next-lever tag and the calm row class — the verbose broad-lead paragraph is gone.
+        // No retired severity/urgency wording, no internal ref.
         let entry = "workload/argocd/Pod/argocd-server";
         let fs = broad_findings(
             entry,
             Some("not exploitable — authorized RBAC, no CVE, no behavior"),
         );
         let refs: Vec<&Finding> = fs.iter().collect();
-        let html = endpoint_card(entry, &refs, endpoint_attention_rank(&refs).1);
-        // The positive lead, verbatim and NON-muted.
+        let html = row_html(entry, &refs);
+        // The terse next-lever tag carries the wide-reach reassurance now.
         assert!(
-            html.contains("Broadly privileged, working as intended"),
-            "leads with the positive line: {html}"
+            html.contains("working as intended"),
+            "the next-lever tag reads working as intended: {html}"
         );
+        // The retired verbose paragraph is gone.
         assert!(
-            html.contains("class=\"broad-lead\""),
-            "the lead carries the non-muted broad-lead class"
+            !html.contains("Broadly privileged, working as intended"),
+            "no verbose broad-lead paragraph: {html}"
         );
-        assert!(
-            !html.contains("broad-lead muted") && !html.contains("breadth muted"),
-            "the lead is not muted, and the old muted breadth div is gone"
-        );
-        // Calm green card treatment.
-        assert!(html.contains("card-calm"), "calm card class applied");
-        // The lead sits under the verdict, above the proof rail.
-        let verdict_at = html.find("[SAFE]").unwrap();
-        let lead_at = html.find("Broadly privileged").unwrap();
-        let rail_at = html.find("what's proven").unwrap();
-        assert!(
-            verdict_at < lead_at && lead_at < rail_at,
-            "verdict → broad lead → proof rail order"
-        );
-        // No retired severity-vs-urgency axis phrasing, no internal ref. (The plain word
-        // "severity" still legitimately appears in the CVE evidence block — only the
-        // retired AXIS framing is banned.)
-        assert!(
-            !html.contains("breadth is severity"),
-            "no retired axis wording"
-        );
-        assert!(
-            !html.contains("severity, not urgency"),
-            "no retired axis wording"
-        );
-        assert!(!html.contains("not urgency"), "no retired urgency framing");
-        assert!(
-            !html.contains("ADR-") && !html.contains("JEF-"),
-            "no internal ref"
-        );
+        assert!(!html.contains("broad-lead muted") && !html.contains("breadth muted"));
+        // Calm row treatment.
+        assert!(html.contains("f-calm"), "calm row class applied");
+        // The expanded body still leads with the verbatim verdict tag.
+        assert!(html.contains("[SAFE]"));
+        // No retired severity-vs-urgency axis phrasing, no internal ref.
+        assert!(!html.contains("breadth is severity"));
+        assert!(!html.contains("severity, not urgency"));
+        assert!(!html.contains("not urgency"));
+        assert!(!html.contains("ADR-") && !html.contains("JEF-"));
     }
 
     #[test]
     fn awaiting_broad_card_shows_the_honest_broad_note() {
-        // JEF-177 AC #2: the Awaiting + broad case shows the honest broad-reach note,
+        // The Awaiting + broad case keeps the honest one-line broad-reach note in the body,
         // and does NOT claim "working as intended" (the model hasn't judged it).
         let entry = "workload/argocd/Pod/argocd-server";
         let fs = broad_findings(entry, None);
         let refs: Vec<&Finding> = fs.iter().collect();
-        let html = endpoint_card(entry, &refs, endpoint_attention_rank(&refs).1);
+        let html = card_body(entry, &refs);
         assert!(
             html.contains("Broad reach — the model hasn't finished judging this one"),
             "honest broad-reach note: {html}"
@@ -6332,33 +6712,32 @@ mod tests {
         );
         assert!(
             !html.contains("working as intended"),
-            "an unjudged entry does NOT claim working as intended"
+            "an unjudged entry body does NOT claim working as intended"
         );
-        // Awaiting is honest, not calm-green (only a Safe verdict earns the calm card).
-        assert!(!html.contains("card-calm"), "awaiting is not a calm card");
+        // Awaiting is honest, not calm-green (only a Safe verdict earns the calm row).
+        let row = row_html(entry, &refs);
+        assert!(!row.contains("f-calm"), "awaiting is not a calm row");
+        assert!(!row.contains("working as intended"));
         assert!(!html.contains("breadth is severity") && !html.contains("not urgency"));
         assert!(!html.contains("ADR-") && !html.contains("JEF-"));
     }
 
     #[test]
-    fn breach_broad_card_is_not_softened() {
-        // Wide reach softens only a Safe/Awaiting card — a BREACH the model flagged keeps
-        // no calm treatment and no "working as intended" lead, broad or not.
+    fn breach_broad_row_is_not_softened() {
+        // Wide reach softens only a Safe/Awaiting row — a BREACH the model flagged keeps
+        // no calm treatment and no "working as intended" lever, broad or not.
         let entry = "workload/argocd/Pod/argocd-server";
         let breach = broad_findings(
             entry,
             Some("exploitable — CVE-2021-44228 reaches everything"),
         );
         let brefs: Vec<&Finding> = breach.iter().collect();
-        let bhtml = endpoint_card(entry, &brefs, endpoint_attention_rank(&brefs).1);
+        let bhtml = row_html(entry, &brefs);
         assert!(
             !bhtml.contains("working as intended"),
             "a breach is not softened"
         );
-        assert!(
-            !bhtml.contains("card-calm"),
-            "a breach card is not calm-green"
-        );
+        assert!(!bhtml.contains("f-calm"), "a breach row is not calm-green");
         // No retired severity/urgency phrasing leaks anywhere.
         assert!(!bhtml.contains("breadth is severity"));
     }
@@ -6539,45 +6918,77 @@ mod tests {
     }
 
     #[test]
-    fn context_tier_card_is_collapsible_and_de_emphasized() {
-        // AC #3: the lowest tier is rendered behind a collapsible <details>, marked with
-        // the de-emphasis class and the "context" tier label.
-        let f = ranked_finding("workload/app/Pod/web", "structural — propose", false, None);
-        let refs = vec![&f];
-        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Context);
-        assert!(html.contains("<details"), "context cards collapse");
-        assert!(html.contains("card-context"), "de-emphasis class applied");
-        assert!(html.contains(">context<"), "the tier label shows");
+    fn context_tier_collapses_to_one_summary_row() {
+        // JEF-202: the context tier collapses behind a SINGLE summary row (a row-toggle
+        // button) that expands to its hidden ctx-rows; the row still carries the "context"
+        // tier label, and the verbose body lives behind each row's own expand.
+        let f = ranked_finding("workload/argo/Pod/ctx", "structural — propose", false, None);
+        let html = render_html(
+            &[f],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert!(
+            html.contains("ctx-summary"),
+            "context collapses to a summary row"
+        );
+        assert!(html.contains("ctx-toggle"), "with a group toggle");
+        assert!(
+            html.contains("ctx-row"),
+            "the context rows ride behind the group"
+        );
+        assert!(html.contains(">context<"), "the context tier label shows");
+        // The context rows are HIDDEN by default (revealed by the group toggle).
+        assert!(
+            html.contains("<tr hidden class=\"ctx-row f-row"),
+            "context rows are hidden until the group is opened: {html}"
+        );
     }
 
     #[test]
-    fn flagged_and_watch_cards_render_expanded_with_their_tier_label() {
+    fn rows_carry_their_tier_label_and_expand_control() {
+        // JEF-202: each endpoint is a summary <tr> with the tier chip doubling as the
+        // row-expand <button aria-expanded aria-controls>, plus a hidden detail <tr>.
         let f = ranked_finding(
             "workload/app/Pod/web",
             "auto-eligible",
             false,
             Some("exploitable — boom"),
         );
-        let refs = vec![&f];
-        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Flagged);
-        assert!(
-            html.contains("<div class=\"card\">"),
-            "flagged cards stay open"
-        );
-        assert!(!html.contains("card-context"));
+        let html = row_html("workload/app/Pod/web", &[&f]);
         assert!(html.contains(">flagged<"), "the flagged tier label shows");
+        // A real button expand control, not a <details> wrapping a <tr>.
+        assert!(
+            html.contains("<button class=\"row-toggle\""),
+            "button expand control"
+        );
+        assert!(
+            html.contains("aria-expanded=\"false\""),
+            "aria-expanded present"
+        );
+        assert!(
+            html.contains("aria-controls=\""),
+            "aria-controls wires the detail row"
+        );
+        // The detail row is hidden until expanded and spans every column.
+        assert!(
+            html.contains(&format!(
+                "class=\"f-detail\" hidden><td colspan=\"{FINDINGS_COLS}\""
+            )),
+            "hidden colspan detail row: {html}"
+        );
 
         let w = ranked_finding("workload/app/Pod/web", "structural — propose", true, None);
-        let wrefs = vec![&w];
-        let whtml = endpoint_card("workload/app/Pod/web", &wrefs, Tier::Watch);
+        let whtml = row_html("workload/app/Pod/web", &[&w]);
         assert!(whtml.contains(">watch<"), "the watch tier label shows");
     }
 
     /// The graph's `<pre class="mermaid">` is collapsed when it sits inside a
-    /// `details.graphwrap`; flagged renders it inline (no graphwrap details wrapping it).
+    /// `details.graphwrap` (the summary precedes the pre with no intervening close).
     fn graph_is_collapsed(html: &str) -> bool {
-        // The mermaid <pre> follows the graphwrap <details>/<summary> open with no
-        // intervening closing of that details, i.e. the summary precedes the pre.
         match (html.find("graphwrap"), html.find("class=\"mermaid\"")) {
             (Some(g), Some(p)) => g < p,
             _ => false,
@@ -6585,52 +6996,49 @@ mod tests {
     }
 
     #[test]
-    fn graph_collapse_follows_the_attention_tier() {
-        // JEF-177 AC #3: flagged → graph EXPANDED; watch → graph behind a "show attack
-        // path (N hops)" details; safe-broad → collapsed ("show what it can reach").
+    fn graph_is_collapsed_by_default_in_every_card_body() {
+        // JEF-202: the graph stays collapsed-by-default for EVERY tier (the whole body is
+        // already one expand behind its row), open on demand. The summary names the reach
+        // when broad and the depth otherwise; the SVG a11y wiring survives the collapse.
         let entry = "workload/app/Pod/web";
 
-        // Flagged: graph inline, no graphwrap collapse.
+        // Flagged: graph collapsed behind "show attack path (N hops)".
         let f = ranked_finding(
             entry,
             "latent foothold — propose",
             false,
             Some("exploitable — boom"),
         );
-        let fhtml = endpoint_card(entry, &[&f], Tier::Flagged);
+        let fhtml = card_body(entry, &[&f]);
         assert!(
             fhtml.contains("class=\"mermaid\""),
             "flagged still has a graph"
         );
         assert!(
-            !fhtml.contains("graphwrap"),
-            "flagged graph is expanded inline"
+            graph_is_collapsed(&fhtml),
+            "flagged graph is collapsed by default"
         );
-
-        // Watch (NOT broad): graph behind "show attack path (N hops)".
-        let w = ranked_finding(entry, "structural — propose", true, None);
-        let whtml = endpoint_card(entry, &[&w], Tier::Watch);
-        assert!(graph_is_collapsed(&whtml), "watch graph is collapsed");
         assert!(
-            whtml.contains("show attack path"),
-            "watch summary names the attack path: {whtml}"
+            fhtml.contains("show attack path"),
+            "names the attack path: {fhtml}"
         );
 
-        // Safe + broad: collapsed regardless of tier, "show what it can reach (N targets)".
+        // Watch: also collapsed behind "show attack path (N hops)".
+        let w = ranked_finding(entry, "structural — propose", true, None);
+        let whtml = card_body(entry, &[&w]);
+        assert!(graph_is_collapsed(&whtml), "watch graph is collapsed");
+        assert!(whtml.contains("show attack path"));
+
+        // Broad: collapsed, "show what it can reach (N targets)".
         let entry_b = "workload/argocd/Pod/argocd-server";
         let broad = broad_findings(entry_b, Some("not exploitable — authorized RBAC"));
         let brefs: Vec<&Finding> = broad.iter().collect();
-        // Force the highest (flagged-style) tier to prove broad collapses it ANYWAY.
-        let bhtml = endpoint_card(entry_b, &brefs, Tier::Flagged);
-        assert!(
-            graph_is_collapsed(&bhtml),
-            "safe-broad graph is collapsed even at flagged tier"
-        );
+        let bhtml = card_body(entry_b, &brefs);
+        assert!(graph_is_collapsed(&bhtml), "broad graph is collapsed");
         assert!(
             bhtml.contains("show what it can reach"),
-            "safe-broad summary names the reach: {bhtml}"
+            "names the reach: {bhtml}"
         );
-        // The SVG a11y wiring (data-aria on the <pre>) survives the collapse.
         assert!(
             bhtml.contains("data-aria=\""),
             "aria label preserved through collapse"
@@ -6638,18 +7046,29 @@ mod tests {
     }
 
     #[test]
-    fn trust_line_renders_exactly_once_in_every_state() {
-        // JEF-177 AC #4: the one-line "how protector decides" explainer renders EXACTLY
-        // once near the top of findings, in all states — populated and all-clear.
-        let needle = "How protector decides:";
-
-        // Populated dashboard.
+    fn trust_line_is_absent_from_the_polled_region() {
+        // JEF-200: the verbose "How protector decides" trust line is GONE from the live /
+        // /fragment region entirely; only ONE compact "how it decides" pointer remains in
+        // the static page header (outside #findings-region), never in the polled fragment.
+        let trust_needle = "How protector decides:"; // the retired verbose line
         let f = ranked_finding(
             "workload/app/Pod/web",
             "latent foothold — propose",
             false,
             Some("exploitable — boom"),
         );
+        // The /fragment (the polled region) carries no trust explainer at all.
+        let frag = render_fragment(
+            std::slice::from_ref(&f),
+            false,
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        assert!(
+            !frag.contains(trust_needle) && !frag.contains("how protector decides"),
+            "no trust line in the polled region: {frag}"
+        );
+        // The full page keeps ONE compact header pointer, outside the findings region.
         let html = render_html(
             &[f],
             false,
@@ -6659,57 +7078,33 @@ mod tests {
             &ready_all_met(),
         );
         assert_eq!(
-            html.matches(needle).count(),
+            html.matches("how protector decides").count(),
             1,
-            "trust line appears exactly once on a populated dashboard"
+            "exactly one header pointer in the full page"
         );
-        // It leads the findings region (before the first findings heading).
-        let trust_at = html.find(needle).unwrap();
-        let watching_at = html.find("Watching").unwrap();
+        // The pointer is a header <details class="howto">, sitting AFTER the polled
+        // findings-region container (which itself carries no trust copy — proven above).
         assert!(
-            trust_at < watching_at,
-            "trust line is near the top of findings"
+            html.contains("<details class=\"howto\">"),
+            "header pointer present"
         );
-
-        // All-clear: no findings, every input met (not the first-run path).
-        let clear = render_html(
-            &[],
-            true,
-            &BakeStats::default(),
-            &[],
-            Some(SystemTime::now()),
-            &ready_all_met(),
-        );
-        assert_eq!(
-            clear.matches(needle).count(),
-            1,
-            "trust line still renders exactly once in the all-clear state"
-        );
-
-        // First-run (no findings + an unmet input): the explainer still renders once.
-        let first = render_html(
-            &[],
-            false,
-            &BakeStats::default(),
-            &[],
-            Some(SystemTime::now()),
-            &ready(),
-        );
-        assert_eq!(
-            first.matches(needle).count(),
-            1,
-            "trust line renders once even on the first-run checklist"
+        let pointer_at = html.find("<details class=\"howto\">").unwrap();
+        let region_at = html.find("id=\"findings-region\"").unwrap();
+        assert!(
+            region_at < pointer_at,
+            "the pointer sits after the findings region container, in the static header"
         );
         // No internal refs leak from the new copy.
         assert!(!html.contains("ADR-") && !html.contains("JEF-"));
     }
 
     #[test]
-    fn render_html_splits_findings_into_attention_and_watching_with_tier_labels() {
-        // Answer-first (JEF-175): a flagged endpoint heads "Needs attention"; a context
-        // endpoint lands collapsed under "Watching". The tier labels still render. The
-        // flagged finding uses a NON-auto-eligible disposition so it stays an endpoint
-        // card (auto-eligible findings are pulled into the remediations section instead).
+    fn render_html_splits_findings_into_attention_and_watching_tables() {
+        // JEF-202: a flagged endpoint heads the "Needs attention" table; a context endpoint
+        // lands behind the collapsed context group in the "Watching" table. Both are dense
+        // tables with the tier labels in their rows. The flagged finding uses a NON-auto-
+        // eligible disposition so it stays an endpoint row (auto-eligible findings are pulled
+        // into the remediations section instead).
         let flagged = ranked_finding(
             "workload/app/Pod/web",
             "latent foothold — propose",
@@ -6731,18 +7126,288 @@ mod tests {
             Some(SystemTime::now()),
             &ready(),
         );
-        // Both answer-first sections render; Needs attention comes first.
+        // Both answer-first sections render as tables; Needs attention comes first.
         let needs = html
             .find("Needs attention")
             .expect("needs-attention section");
         let watching = html.find("Watching").expect("watching section");
         assert!(needs < watching, "Needs attention precedes Watching");
+        // Real table semantics with a header.
+        assert!(html.contains("<table class=\"findings\">"), "dense table");
+        assert!(html.contains("<th scope=\"col\">tier</th>"), "table header");
         assert!(html.contains(">flagged<"), "the flagged tier label appears");
-        // The context-tier endpoint collapses behind <details class=\"card card-context\">.
+        // The context-tier endpoint collapses behind the context group summary row.
         assert!(
-            html.contains("card-context"),
-            "the context tier is de-emphasized/collapsible"
+            html.contains("ctx-summary") && html.contains("ctx-row"),
+            "the context tier collapses to one group summary row"
         );
+    }
+
+    #[test]
+    fn table_is_primary_no_full_card_until_a_row_is_expanded() {
+        // JEF-202: the dense table leads; the verbose card body (rail, evidence, what-to-do)
+        // is ONLY in the hidden detail row, never rendered as a standalone open card.
+        let f = ranked_finding(
+            "workload/app/Pod/web",
+            "latent foothold — propose",
+            false,
+            Some("exploitable — boom"),
+        );
+        let html = render_html(
+            &[f],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready_all_met(),
+        );
+        // The verbose body content exists, but only inside the hidden detail row.
+        let body_at = html
+            .find("what to do:")
+            .expect("body present (in detail row)");
+        let detail_at = html
+            .find("class=\"f-detail\" hidden")
+            .expect("hidden detail row");
+        // The detail row opens BEFORE the body content it wraps.
+        assert!(
+            detail_at < body_at,
+            "the card body lives inside the hidden detail row"
+        );
+        // No old-style standalone open endpoint card wrapper survives.
+        assert!(!html.contains("card-context"), "no old card wrapper");
+    }
+
+    // ---- JEF-199: verdict gist = crisp tag + one decisive clause ----
+
+    /// A `Finding` whose evidence carries the given CVEs, for the verdict-gist tests.
+    fn finding_with_cves(verdict: Option<&str>, cves: Vec<CveEvidence>) -> Finding {
+        let mut f = finding(
+            "workload/app/Pod/web",
+            "secret/app/session-key",
+            "durable-fix PR",
+            "can-do/get/secrets",
+            true,
+            verdict,
+        );
+        f.corroborated = false;
+        f.evidence = EntryEvidence {
+            cves,
+            runtime: vec![],
+        };
+        f
+    }
+
+    #[test]
+    fn verdict_gist_tag_mirrors_posture() {
+        // The tag is the Posture label, never the prose.
+        let safe = finding_with_cves(Some("not exploitable — authorized RBAC"), vec![]);
+        assert_eq!(
+            verdict_gist(safe.verdict.as_deref(), &safe.evidence, &[&safe]).0,
+            "[SAFE]"
+        );
+        let breach = finding_with_cves(Some("exploitable — RCE"), vec![]);
+        assert_eq!(
+            verdict_gist(breach.verdict.as_deref(), &breach.evidence, &[&breach]).0,
+            "[BREACH]"
+        );
+        let awaiting = finding_with_cves(None, vec![]);
+        assert_eq!(
+            verdict_gist(
+                awaiting.verdict.as_deref(),
+                &awaiting.evidence,
+                &[&awaiting]
+            )
+            .0,
+            "[awaiting judgement]"
+        );
+    }
+
+    #[test]
+    fn verdict_gist_prefers_a_cited_kev_or_critical_cve() {
+        // A KEV CVE in the structured evidence wins the clause, naming the id + KEV.
+        let f = finding_with_cves(
+            Some(
+                "exploitable — reaches the secret via a long prose paragraph that should not appear",
+            ),
+            vec![cve("CVE-2021-44228", Severity::Critical, true)],
+        );
+        let (tag, clause) = verdict_gist(f.verdict.as_deref(), &f.evidence, &[&f]);
+        assert_eq!(tag, "[BREACH]");
+        assert!(clause.contains("CVE-2021-44228"), "names the CVE: {clause}");
+        assert!(clause.contains("KEV"), "flags KEV: {clause}");
+        // The prose paragraph is NEVER the clause (it stays verbatim in the body).
+        assert!(
+            !clause.contains("long prose paragraph"),
+            "not a prose dump: {clause}"
+        );
+    }
+
+    #[test]
+    fn verdict_gist_falls_back_to_a_cited_cve_id_when_no_structured_cve() {
+        // No structured CVE, but the verdict cites one → name it.
+        let f = finding_with_cves(Some("uncertain — CVE-2023-1234 may be reachable"), vec![]);
+        let (_, clause) = verdict_gist(f.verdict.as_deref(), &f.evidence, &[&f]);
+        assert!(clause.contains("CVE-2023-1234"), "cites the id: {clause}");
+    }
+
+    #[test]
+    fn verdict_gist_reads_runtime_corroboration_when_no_cve() {
+        let mut f = finding_with_cves(Some("exploitable — live shell"), vec![]);
+        f.corroborated = true;
+        let (_, clause) = verdict_gist(f.verdict.as_deref(), &f.evidence, &[&f]);
+        assert_eq!(clause, "runtime-corroborated");
+    }
+
+    #[test]
+    fn verdict_gist_falls_back_to_the_terminal_reach_clause() {
+        // No CVE, no corroboration → the deterministic terminal relation from the path.
+        let entry = "workload/argocd/Pod/argocd-server";
+        let fs: Vec<Finding> = (0..3)
+            .map(|n| {
+                let mut f = finding(
+                    entry,
+                    &format!("secret/argocd/secret-{n}"),
+                    "durable-fix PR",
+                    "can-do/get/secrets",
+                    true,
+                    Some("not exploitable — authorized RBAC"),
+                );
+                f.corroborated = false;
+                f
+            })
+            .collect();
+        let refs: Vec<&Finding> = fs.iter().collect();
+        let ev = EntryEvidence::default();
+        let (_, clause) = verdict_gist(Some("not exploitable — authorized RBAC"), &ev, &refs);
+        assert!(clause.starts_with("reaches "), "reaches clause: {clause}");
+        assert!(
+            clause.contains("secret"),
+            "names the objective kind: {clause}"
+        );
+        assert!(
+            clause.contains("authorized RBAC"),
+            "names the relation: {clause}"
+        );
+    }
+
+    #[test]
+    fn verdict_gist_last_resort_truncates_the_first_clause() {
+        // No structured fact and no path facts → truncate the verdict's first clause.
+        let long = "uncertain because the analysis ran out of budget and a very long winded \
+                    explanation with no structured fact whatsoever keeps going and going past ninety";
+        let ev = EntryEvidence::default();
+        let (_, clause) = verdict_gist(Some(long), &ev, &[]);
+        assert!(clause.ends_with('…'), "truncated with ellipsis: {clause}");
+        assert!(clause.chars().count() <= 91, "respects the cap: {clause}");
+    }
+
+    #[test]
+    fn verdict_cell_is_a_tag_plus_clause_not_a_paragraph() {
+        // JEF-199: the row's verdict cell shows the tag + one clause; the model's PARAGRAPH
+        // is only in the expanded body (verbatim).
+        let f = finding_with_cves(
+            Some(
+                "exploitable — a long verbatim model paragraph that explains the whole chain in detail",
+            ),
+            vec![cve("CVE-2021-44228", Severity::Critical, true)],
+        );
+        let row = row_html("workload/app/Pod/web", &[&f]);
+        // The summary cell carries the tag + the crisp CVE clause.
+        assert!(row.contains("c-verdict"), "verdict cell present");
+        assert!(row.contains("[BREACH]"));
+        assert!(row.contains("CVE-2021-44228"));
+        // The paragraph is in the detail body, not the summary cell.
+        let cell_start = row.find("c-verdict").unwrap();
+        let detail_start = row.find("class=\"f-detail\"").unwrap();
+        let para = "long verbatim model paragraph";
+        let para_at = row.find(para).expect("paragraph present in body");
+        assert!(para_at > detail_start, "paragraph lives in the detail body");
+        assert!(
+            !row[cell_start..detail_start].contains(para),
+            "the summary verdict cell is not the paragraph"
+        );
+    }
+
+    // ---- JEF-202: evidence glyphs + next-lever tag ----
+
+    #[test]
+    fn evidence_glyphs_render_compact_badges() {
+        let ev = EntryEvidence {
+            cves: vec![
+                cve("CVE-2021-0001", Severity::Critical, true),
+                cve("CVE-2021-0002", Severity::High, false),
+            ],
+            runtime: vec![],
+        };
+        let g = evidence_glyphs(&ev, true, false);
+        assert!(g.contains("2 CVE"), "CVE count: {g}");
+        assert!(g.contains("1·KEV"), "KEV badge: {g}");
+        assert!(g.contains("1 crit"), "crit count: {g}");
+        assert!(g.contains("◆live"), "live glyph from corroboration: {g}");
+    }
+
+    #[test]
+    fn evidence_glyphs_dash_when_none_unjudged_when_awaiting() {
+        // No evidence, judged → an em dash.
+        let g = evidence_glyphs(&EntryEvidence::default(), false, false);
+        assert!(
+            g.contains("—") && !g.contains("CVE"),
+            "dash for no evidence: {g}"
+        );
+        // No evidence, awaiting → the honest "unjudged" (not an implied no-evidence).
+        let g2 = evidence_glyphs(&EntryEvidence::default(), false, true);
+        assert!(g2.contains("unjudged"), "awaiting reads unjudged: {g2}");
+    }
+
+    #[test]
+    fn next_lever_tag_keys_on_disposition() {
+        let cases = [
+            ("auto-eligible", "arm network"),
+            ("latent foothold — propose", "arm network"),
+            ("structural — propose", "arm network"),
+            ("vetoed — propose", "arm network"),
+            ("durable-fix PR", "durable fix"),
+            ("forbidden", "manual (escape)"),
+            ("no-cut", "manual (no cut)"),
+            ("unclassified", "manual"),
+        ];
+        for (disp, expect) in cases {
+            let f = finding("e", "secret/app/s", disp, "can-read", true, None);
+            assert_eq!(next_lever_tag(&f), expect, "disposition {disp}");
+        }
+    }
+
+    #[test]
+    fn row_open_state_persistence_hooks_are_present() {
+        // JEF-202: the row-expand button state AND the lazy graph must survive the /fragment
+        // swap — the page carries the row-toggle persistence machinery and re-applies it
+        // after the swap, alongside the existing <details> machinery (not reinvented).
+        let html = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        // Row-toggle persistence keyed by the stable aria-controls id, in localStorage.
+        assert!(html.contains("function rowKey(btn)"), "stable row key");
+        assert!(
+            html.contains("function restoreRows(root)"),
+            "restore row state"
+        );
+        assert!(
+            html.contains("restoreRows(region)"),
+            "re-applied after the swap"
+        );
+        assert!(html.contains("localStorage"), "persisted to localStorage");
+        // The hidden-row deferral so a graph in a closed row renders on first reveal.
+        assert!(
+            html.contains("closest('[hidden]')"),
+            "graphs in a hidden row are deferred to first reveal"
+        );
+        // The existing <details> machinery is still there (not reinvented / clobbered).
+        assert!(html.contains("function hydrate(root)") && html.contains("detailsKey"));
     }
 
     fn full_judgement(
@@ -7062,7 +7727,7 @@ mod tests {
             }],
         };
         let refs = vec![&f];
-        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Flagged);
+        let html = card_body("workload/app/Pod/web", &refs);
         // Both ADR-0016 blocks present, clearly labeled and distinct (plain words).
         assert!(html.contains("evidence for this path"));
         assert!(
@@ -7088,7 +7753,7 @@ mod tests {
             None,
         );
         let refs = vec![&f];
-        let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Context);
+        let html = card_body("workload/app/Pod/web", &refs);
         // Neither block is omitted; each shows its honest "none/unknown" (JEF-161 idiom).
         assert!(html.contains("none on this service's image"));
         assert!(html.contains("no live activity seen on this service"));
