@@ -222,12 +222,36 @@ impl Finding {
     }
 }
 
-/// The ATT&CK kill chain in plain terms: the Initial Access foothold (T1190), when
-/// the entry is an exploitable front door, through the objective's own technique.
+/// The attack steps in plain terms: the front-door foothold (T1190), when the entry is
+/// an exploitable front door, through the target's own technique. Plain-language leading,
+/// MITRE code in parentheses — this is the JSON-facing text form; the card renders the
+/// same steps with the code tucked into an `<abbr>` tooltip (see [`killchain_html`]).
 fn killchain(chain: &ProvenChain) -> String {
-    let goal = format!("{} {}", chain.attack.technique_id, chain.attack.technique);
+    let goal = format!("{} ({})", chain.attack.technique, chain.attack.technique_id);
     if chain.foothold.is_some() {
-        format!("T1190 Exploit Public-Facing Application → {goal}")
+        format!("break in through an internet-facing service (T1190) → {goal}")
+    } else {
+        goal
+    }
+}
+
+/// The attack steps for the finding card: leads with the plain technique name and tucks
+/// the MITRE code into an `<abbr>` tooltip so it is available without crowding the line
+/// (JEF-176 AC #3). Mirrors [`killchain`]'s steps. All values come from a closed ATT&CK
+/// catalogue (technique ids/names), so they are not untrusted free-text; escaped anyway
+/// for defence in depth.
+fn killchain_html(f: &Finding) -> String {
+    let goal = format!(
+        "<abbr title=\"{} {}\">{}</abbr>",
+        escape(&f.technique),
+        escape(&f.technique_name),
+        escape(&f.technique_name),
+    );
+    if f.foothold {
+        format!(
+            "<abbr title=\"T1190 Exploit Public-Facing Application\">break in through an \
+             internet-facing service</abbr> → {goal}"
+        )
     } else {
         goal
     }
@@ -937,9 +961,9 @@ fn remediation_card(f: &Finding, armed: bool) -> String {
     let aria = escape(&path_aria_label(&f.entry, one));
     format!(
         "<div class=\"card\">{verdict_line}{rail}{evidence}\
-         <div class=\"kc2\">the picture of those facts — kill chain: {}  {status}</div>\
+         <div class=\"kc2\">the picture of those facts — attack steps: {}  {status}</div>\
          <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}</div>",
-        escape(&f.killchain),
+        killchain_html(f),
         m.finish(),
     )
 }
@@ -1073,7 +1097,7 @@ fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
     // 1. Internet-reachability is the entry-level fact (only breach-relevant chains from
     // an internet-facing entry reach this card — ProvenChain::is_breach_relevant).
     facts.push(format!(
-        "internet-reachable: <code>{}</code> is an internet-facing entry",
+        "internet-reachable: <code>{}</code> is an internet-facing service (a front door)",
         escape(&short(entry))
     ));
 
@@ -1086,7 +1110,7 @@ fn proven_facts(entry: &str, fs: &[&Finding]) -> Vec<String> {
         }
     }
     for rel in &relations {
-        facts.push(format!("reaches an objective by <b>{}</b>", escape(rel)));
+        facts.push(format!("reaches a target by <b>{}</b>", escape(rel)));
     }
 
     // 3. CVE presence — from a `CVE-` id the model cited in its verdict (existing field
@@ -1175,8 +1199,8 @@ fn cve_li(c: &CveEvidence) -> String {
 fn cve_block(ev: &EntryEvidence) -> String {
     if ev.cves.is_empty() {
         return "<div class=\"ev ev-cve\"><div class=\"ev-cap\">CVEs \
-                <span class=\"muted\">— severity input (ADR-0016: how bad IF exploited)</span>\
-                </div><div class=\"muted\">none on the entry's image \
+                <span class=\"muted\">— how bad it would be if exploited</span>\
+                </div><div class=\"muted\">none on this service's image \
                 <span class=\"muted\">(KEV or critical; lower-severity CVEs not shown)</span>\
                 </div></div>"
             .to_string();
@@ -1224,7 +1248,7 @@ fn cve_block(ev: &EntryEvidence) -> String {
 
     format!(
         "<div class=\"ev ev-cve\"><div class=\"ev-cap\">CVEs \
-         <span class=\"muted\">— severity input (ADR-0016: how bad IF exploited)</span></div>\
+         <span class=\"muted\">— how bad it would be if exploited</span></div>\
          <div class=\"ev-sum\">{summary}</div><ul>{inline}</ul>{more}</div>"
     )
 }
@@ -1238,22 +1262,22 @@ fn runtime_block(ev: &EntryEvidence) -> String {
     let context: Vec<&Behavior> = ev.context_behaviors().collect();
 
     let body = if corroborating.is_empty() && context.is_empty() {
-        "<div class=\"muted\">no runtime signal observed on this entry \
+        "<div class=\"muted\">no live activity seen on this service \
          <span class=\"muted\">(no Falco alert, no agent behavior attributed)</span></div>"
             .to_string()
     } else {
         let mut out = String::new();
         if corroborating.is_empty() {
             out.push_str(
-                "<div class=\"muted\">no corroborating alert \
-                 (nothing flips this chain to live-exploited)</div>",
+                "<div class=\"muted\">nothing seen happening live \
+                 (no live activity backs this up as being exploited now)</div>",
             );
         } else {
             let items: String = corroborating
                 .iter()
                 .map(|b| {
                     format!(
-                        "<li><span class=\"chip chip-breach\">CORROBORATES</span> {}</li>",
+                        "<li><span class=\"chip chip-breach\">SEEN LIVE</span> {}</li>",
                         escape(&b.summary())
                     )
                 })
@@ -1272,7 +1296,7 @@ fn runtime_block(ev: &EntryEvidence) -> String {
                 })
                 .collect();
             out.push_str(&format!(
-                "<details><summary>{} agent behavior{} (context, not corroboration)</summary>\
+                "<details><summary>{} agent behavior{} (background, not seen exploited)</summary>\
                  <ul>{items}</ul></details>",
                 context.len(),
                 if context.len() == 1 { "" } else { "s" },
@@ -1282,9 +1306,8 @@ fn runtime_block(ev: &EntryEvidence) -> String {
     };
 
     format!(
-        "<div class=\"ev ev-runtime\"><div class=\"ev-cap\">runtime alerts \
-         <span class=\"muted\">— live corroboration (ADR-0016: is it being exploited NOW)\
-         </span></div>{body}</div>"
+        "<div class=\"ev ev-runtime\"><div class=\"ev-cap\">live activity \
+         <span class=\"muted\">— is it being exploited right now</span></div>{body}</div>"
     )
 }
 
@@ -1349,7 +1372,7 @@ fn path_aria_label(entry: &str, fs: &[&Finding]) -> String {
         .len();
     format!(
         "Attack-path graph: the internet reaches {entry}, which reaches {objectives} \
-         objective{}.",
+         target{} it can get to.",
         if objectives == 1 { "" } else { "s" },
         entry = short(entry),
     )
@@ -1437,8 +1460,8 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     // INTENDED picture — breadth is severity, not urgency. Call it out so the wide graph
     // doesn't read as alarming. Only when the model judged it safe AND the reach is broad.
     let breadth = if posture == Posture::Safe && objectives >= 20 {
-        "<div class=\"breadth muted\">wide reach, but not a breach — breadth is severity, \
-         not urgency.</div>"
+        "<div class=\"breadth muted\">wide reach, but not a break-in — wide access isn't a \
+         break-in.</div>"
             .to_string()
     } else {
         String::new()
@@ -1492,7 +1515,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     let inner = format!(
         "{tier_chip}{verdict_line}{rail}{evidence}{breadth}\
          <div class=\"kc2\">the picture of those facts — \
-         <span class=\"muted\">{} ({} objective{} reachable)</span></div>\
+         <span class=\"muted\">{} ({} target{} reachable)</span></div>\
          <pre class=\"mermaid\" data-aria=\"{aria}\">{}</pre>{todo_line}{}",
         escape(&short(entry)),
         objectives,
@@ -1510,7 +1533,7 @@ fn endpoint_card(entry: &str, fs: &[&Finding], tier: Tier) -> String {
     if tier == Tier::Context {
         format!(
             "<details class=\"card card-context\"><summary>{tier_chip}\
-             <span class=\"muted\">{} — context, not flagged ({} objective{} reachable)</span>\
+             <span class=\"muted\">{} — background, not flagged ({} target{} reachable)</span>\
              </summary>{inner}</details>",
             escape(&short(entry)),
             objectives,
@@ -1661,8 +1684,7 @@ fn attack_vectors(findings: &[Finding]) -> String {
     }
 
     if rows.is_empty() {
-        return "<p class=\"muted\">no internet-facing exposure reaches an objective</p>"
-            .to_string();
+        return "<p class=\"muted\">no internet-facing service can reach a target</p>".to_string();
     }
 
     let body: String = rows
@@ -1674,9 +1696,10 @@ fn attack_vectors(findings: &[Finding]) -> String {
                 format!("<span class=\"flagged\">{}</span>", flagged.len())
             };
             format!(
-                "<tr><td>{}</td><td><code>{}</code> {}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td><abbr title=\"{} {}\">{}</abbr></td><td>{}</td><td>{}</td></tr>",
                 escape(tactic),
                 escape(tid),
+                escape(tname),
                 escape(tname),
                 reachable.len(),
                 flag,
@@ -2145,8 +2168,8 @@ fn report_panel(report: &Report) -> String {
     let head = format!(
         "<div class=\"sum\">over the last <b>{window}</b> protector would have isolated \
          <b>{act}</b> workload{act_s} and deliberately left <b>{left}</b> proven-but-cleared \
-         path{left_s} alone. {short} short-lived (likely FP) · {gap} during an \
-         enrichment-coverage gap (scrutinize first).</div>",
+         path{left_s} alone. {short} short-lived (likely FP) · {gap} with thin evidence \
+         coverage (scrutinize first).</div>",
         act = report.would_act_count(),
         act_s = if report.would_act_count() == 1 {
             ""
@@ -2226,7 +2249,7 @@ fn report_panel(report: &Report) -> String {
         "{head}\
          <h3>Would have isolated <span class=\"muted\">({act})</span></h3>\
          <table class=\"vectors\"><thead><tr><th>Workload</th><th>Would-cut decisions</th>\
-         <th>Projected cut lifetime</th><th>Enrichment</th><th>Latest verdict</th></tr></thead>\
+         <th>Projected cut lifetime</th><th>Evidence coverage</th><th>Latest verdict</th></tr></thead>\
          <tbody>{would_rows}</tbody></table>\
          <h3>Left alone <span class=\"muted\">({left}) — proven, then cleared</span></h3>\
          <table class=\"vectors\"><thead><tr><th>Workload</th><th>Clearing verdict</th></tr></thead>\
@@ -2263,7 +2286,7 @@ fn render_report_html(report: &Report) -> String {
          .verdict-cell{{color:#333;max-width:38rem}}\
          </style></head><body>\
          <h1>protector — would-have-acted report</h1>\
-         <p class=\"sum\">The shadow diff that gates exiting shadow (JEF-50): over a rolling \
+         <p class=\"sum\">The shadow diff that gates exiting shadow: over a rolling \
          window, the workloads protector <b>would</b> have isolated, how often the breach \
          condition held, the projected cut lifetime (short-lived = likely false positive), and \
          the proven paths the model deliberately <b>left alone</b> — the trust evidence. \
@@ -2324,7 +2347,7 @@ fn judgement_card(j: &Judgement) -> String {
 
     format!(
         "<div class=\"card\"><div class=\"vline\">{chip} {lead}</div>\
-         <div class=\"kc2\"><code>{}</code> <span class=\"muted\">· {} objective{} weighed</span></div>\
+         <div class=\"kc2\"><code>{}</code> <span class=\"muted\">· {} target{} it can reach weighed</span></div>\
          {raw}</div>",
         escape(&short(&j.entry)),
         j.objectives,
@@ -2339,7 +2362,7 @@ fn judgement_card(j: &Judgement) -> String {
 fn render_judgements_html(judgements: &[Judgement]) -> String {
     let body = if judgements.is_empty() {
         "<p class=\"muted\">no model judgements yet (the model hasn't reached an \
-         internet-facing entry — a slow CPU model takes a few passes after a restart)</p>"
+         internet-facing service — a slow CPU model takes a few passes after a restart)</p>"
             .to_string()
     } else {
         judgements.iter().map(judgement_card).collect()
@@ -2369,10 +2392,10 @@ fn render_judgements_html(judgements: &[Judgement]) -> String {
          .raw pre{{white-space:pre-wrap;word-break:break-word;background:#f7f7f7;border:1px solid #eee;padding:.4rem .5rem;font-size:.72rem;margin:0}}\
          </style></head><body>\
          <h1>protector — judgements</h1>\
-         <p class=\"sum\">Why the model called each internet-facing entry the way it did — \
+         <p class=\"sum\">Why the model called each internet-facing service the way it did — \
          the posture and the model's own words first. The raw prompt+reply is behind \
-         <i>show full prompt</i> (a power-user diagnostic; the prompt is the injection surface, \
-         JEF-106). &nbsp;|&nbsp; <a href=\"/\">dashboard</a> &nbsp;|&nbsp; \
+         <i>show full prompt</i> (a power-user diagnostic; the prompt is the part an attacker \
+         could try to poison). &nbsp;|&nbsp; <a href=\"/\">dashboard</a> &nbsp;|&nbsp; \
          <a href=\"/judgements.json\">json</a></p>\
          <h2>Recent judgements <span class=\"muted\">({n})</span></h2>\
          {body}\
@@ -2583,7 +2606,7 @@ fn derive_readiness(
             id: "advisory",
             label: "Advisory store",
             state: advisory_state,
-            why: "adds CVE summaries + fix versions — the enrichment the model reasons over (ADR-0016)",
+            why: "adds CVE summaries + fix versions — the evidence the model judges with",
             enable: "PROTECTOR_ADVISORY_FILE",
             detail: coverage_detail(config.advisory_count, "advisory record"),
             weakens_decisions: true,
@@ -2592,7 +2615,7 @@ fn derive_readiness(
             id: "falco",
             label: "Falco feed",
             state: falco_state,
-            why: "live rule-fired alerts corroborate a chain is being exploited right now",
+            why: "live rule-fired alerts confirm a path is being exploited right now",
             enable: "runtime ingest (falcosidekick -> /alert)",
             detail: signals_detail(falco_state, falco_signals),
             weakens_decisions: true,
@@ -2601,7 +2624,7 @@ fn derive_readiness(
             id: "ebpf-agent",
             label: "eBPF agent",
             state: ebpf_state,
-            why: "in-kernel behavioral signals (exec, secret reads, connections) corroborate live activity",
+            why: "in-kernel behavioral signals (exec, secret reads, connections) show live activity",
             enable: "deploy the agent DaemonSet (-> /behavior)",
             detail: signals_detail(ebpf_state, ebpf_signals),
             weakens_decisions: true,
@@ -2655,7 +2678,7 @@ fn present_if(present: bool) -> InputState {
 /// The live detail for a file-backed store: "N records loaded" or the honest absent line.
 fn coverage_detail(count: usize, noun: &str) -> String {
     if count == 0 {
-        format!("not loaded — no {noun} enrichment available")
+        format!("not loaded — no {noun} evidence available")
     } else {
         format!("{count} {noun}{} loaded", if count == 1 { "" } else { "s" })
     }
@@ -2766,7 +2789,7 @@ fn first_run_checklist(readiness: &Readiness) -> String {
         "<div class=\"firstrun\"><p class=\"sum\">No findings yet, and some decision inputs \
          aren't configured. protector degrades quietly when an input is missing — this \
          checklist is the guided start, not a blank page. Wire each input below to give the \
-         model the full picture (ADR-0016).</p>{cold}<ol class=\"checklist\">{items}</ol></div>"
+         model the full picture.</p>{cold}<ol class=\"checklist\">{items}</ol></div>"
     )
 }
 
@@ -2945,7 +2968,7 @@ fn status_banner(
             "{exposed} exposed path{} watched, none exploitable — the model cleared them",
             if exposed == 1 { "" } else { "s" }
         ),
-        ClusterStatus::Quiet => "no internet-facing exposure reaches an objective".to_string(),
+        ClusterStatus::Quiet => "no internet-facing service can reach a target".to_string(),
     };
 
     // The arm-state half of the subtitle: shadow (proposing only) vs live (acting).
@@ -3105,12 +3128,12 @@ fn render_html(
         };
         let watching = format!(
             "<h2 id=\"watching\">Watching</h2>\
-             <p class=\"sum\">Exposed paths the model is watching but has not flagged — a \
-             latent foothold carrying a CVE, or runtime-corroborated. Context-tier paths \
-             (proven-reachable, neither flagged nor corroborated) are collapsed below.</p>{}",
+             <p class=\"sum\">Exposed paths the model is watching but has not flagged — a way \
+             in that's only a risk if exploited, carrying a CVE, or seen happening live. \
+             Background paths (proven-reachable, neither flagged nor seen live) are collapsed \
+             below.</p>{}",
             if watching_cards.is_empty() {
-                "<p class=\"muted\">no internet-facing exposure reaches an objective</p>"
-                    .to_string()
+                "<p class=\"muted\">no internet-facing service can reach a target</p>".to_string()
             } else {
                 watching_cards
             }
@@ -3258,7 +3281,7 @@ fn render_html(
            try {{\
              const svg = renderMermaidSVG(pre.textContent, {{ font: 'system-ui, sans-serif', accent: '#b00000', padding: 16, nodeSpacing: 28, layerSpacing: 52 }});\
              const g = document.createElement('div'); g.className = 'graph'; g.innerHTML = svg;\
-             /* JEF-161 a11y: the client-rendered SVG carries the path summary in words */\
+             /* a11y: the client-rendered SVG carries the path summary in words */\
              const el = g.querySelector('svg') || g;\
              el.setAttribute('role', 'img');\
              if (aria) el.setAttribute('aria-label', aria);\
@@ -3280,19 +3303,19 @@ fn render_html(
          <summary><h3 class=\"diag-h\">Readiness <span class=\"muted\">(decision inputs)</span></h3></summary>\
          <p class=\"sum\">Each decision input and its LIVE state — so an unconfigured or down \
          input is visible, not silent. An <b>absent</b> input that weakens decisions is called \
-         out: the model's call is only as good as its enrichment. \
+         out: the model's call is only as good as the evidence it judges with. \
          &nbsp;|&nbsp; <a href=\"/readiness\">json</a></p>\
          {readiness_body}\
          </details>\
          <details>\
-         <summary><h3 class=\"diag-h\">Attack surface</h3></summary>\
-         <p class=\"sum\">ATT&amp;CK outcomes an internet-facing entry can reach. \
-         <b>Reachable</b> = proven the entry can get there; <b>model-flagged</b> = the model \
+         <summary><h3 class=\"diag-h\">What an attacker could reach</h3></summary>\
+         <p class=\"sum\">What an internet-facing service can reach. \
+         <b>Reachable</b> = proven the service can get there; <b>model-flagged</b> = the model \
          judged it a real breach.</p>\
          {vectors_body}\
          </details>\
          <details>\
-         <summary><h3 class=\"diag-h\">Sensor activity <span class=\"muted\">(shadow)</span></h3></summary>\
+         <summary><h3 class=\"diag-h\">Live activity the sensors saw <span class=\"muted\">(shadow)</span></h3></summary>\
          <p class=\"sum\">What the behavioral agent observed last pass — protector is only \
          watching, not acting. A sanity check before relying on these signals: volume looks \
          reasonable, most events map to a workload (low unresolved), and <b>corroborations</b> \
@@ -4140,9 +4163,11 @@ mod tests {
             .find("Engine &amp; coverage")
             .expect("diagnostics region");
         let readiness = html.find("Readiness").expect("readiness section");
-        let surface = html.find("Attack surface").expect("attack-surface section");
+        let surface = html
+            .find("What an attacker could reach")
+            .expect("attack-surface section");
         let sensor = html
-            .find("Sensor activity")
+            .find("Live activity the sensors saw")
             .expect("sensor-activity section");
         let lifted = html
             .find("Recently lifted")
@@ -4166,8 +4191,8 @@ mod tests {
         // All four engine sub-sections live inside the diagnostics region.
         for (name, at) in [
             ("Readiness", readiness),
-            ("Attack surface", surface),
-            ("Sensor activity", sensor),
+            ("What an attacker could reach", surface),
+            ("Live activity the sensors saw", sensor),
             ("Recently lifted", lifted),
         ] {
             assert!(at > diag, "{name} is inside the diagnostics region");
@@ -4460,9 +4485,9 @@ mod tests {
         // omitted-when-empty "Needs attention").
         assert!(html.contains("Watching"));
         // The attack-vector summary names the ATT&CK outcomes reachable, with the
-        // model-flagged count (one objective was judged exploitable above). Renamed to
-        // "Attack surface" under the diagnostics region (JEF-175).
-        assert!(html.contains("Attack surface"));
+        // model-flagged count (one objective was judged exploitable above). Plain-English
+        // heading "What an attacker could reach" under the diagnostics region (JEF-176).
+        assert!(html.contains("What an attacker could reach"));
         assert!(html.contains("Credential Access"));
         assert!(html.contains("Unsecured Credentials"));
         assert!(html.contains("class=\"flagged\""));
@@ -4545,7 +4570,7 @@ mod tests {
     fn render_html_includes_the_behavioral_bake_section() {
         let html = render_html(&[], false, &bake(80, 20), &[], None, &ready());
         assert!(
-            html.contains("Sensor activity"),
+            html.contains("Live activity the sensors saw"),
             "the section header is present"
         );
         assert!(
@@ -5255,7 +5280,7 @@ mod tests {
             &r,
         );
         assert!(
-            html.contains("no internet-facing exposure reaches an objective"),
+            html.contains("no internet-facing service can reach a target"),
             "a clean, covered cluster keeps the honest-empty state"
         );
         assert!(
@@ -5539,8 +5564,8 @@ mod tests {
             endpoint_attention_rank(&refs).1,
         );
         assert!(
-            html.contains("breadth is severity, not urgency"),
-            "a wide [SAFE] entry is framed as severity, not urgency"
+            html.contains("wide access isn't a break-in"),
+            "a wide [SAFE] entry is framed as breadth, not a break-in"
         );
         // The same breadth, but BREACH, is not softened.
         let breach: Vec<Finding> = (0..25)
@@ -5968,8 +5993,8 @@ mod tests {
         assert!(html.contains("reachability: not-observed"));
         // The KEV-listed CVE is badged.
         assert!(html.contains(">KEV<"), "KEV badge: {html}");
-        // Labeled as the severity-input block (ADR-0016).
-        assert!(html.contains("severity input"));
+        // Labeled as the severity-input block (ADR-0016) in plain words.
+        assert!(html.contains("how bad it would be if exploited"));
     }
 
     #[test]
@@ -6002,11 +6027,11 @@ mod tests {
     fn cve_block_empty_state_is_honest_not_implied_absent() {
         let html = cve_block(&EntryEvidence::default());
         assert!(
-            html.contains("none on the entry's image"),
+            html.contains("none on this service's image"),
             "honest none: {html}"
         );
         // Still a labeled block, never a missing/empty box.
-        assert!(html.contains("severity input"));
+        assert!(html.contains("how bad it would be if exploited"));
         // No phantom count or list.
         assert!(!html.contains("<ul>"), "no empty list: {html}");
     }
@@ -6049,27 +6074,27 @@ mod tests {
             ],
         };
         let html = runtime_block(&ev);
-        // The alert corroborates; the connection is context (behind a details).
-        assert!(html.contains("CORROBORATES"), "alert corroborates: {html}");
+        // The alert is seen live; the connection is background (behind a details).
+        assert!(html.contains("SEEN LIVE"), "alert seen live: {html}");
         assert!(html.contains("Terminal shell in container"));
         assert!(
-            html.contains("1 agent behavior (context, not corroboration)"),
-            "context count: {html}"
+            html.contains("1 agent behavior (background, not seen exploited)"),
+            "background count: {html}"
         );
         assert!(html.contains("connects to 10.0.0.5"));
-        // Labeled as the live-corroboration block (ADR-0016).
-        assert!(html.contains("live corroboration"));
+        // Labeled as the live-activity block (ADR-0016) in plain words.
+        assert!(html.contains("is it being exploited right now"));
     }
 
     #[test]
     fn runtime_block_empty_state_is_honest() {
         let html = runtime_block(&EntryEvidence::default());
         assert!(
-            html.contains("no runtime signal observed"),
+            html.contains("no live activity seen on this service"),
             "honest none: {html}"
         );
-        assert!(html.contains("live corroboration"));
-        assert!(!html.contains("CORROBORATES"));
+        assert!(html.contains("is it being exploited right now"));
+        assert!(!html.contains("SEEN LIVE"));
     }
 
     #[test]
@@ -6082,11 +6107,8 @@ mod tests {
             }],
         };
         let html = runtime_block(&ev);
-        assert!(
-            !html.contains("CORROBORATES"),
-            "no false corroboration: {html}"
-        );
-        assert!(html.contains("no corroborating alert"));
+        assert!(!html.contains("SEEN LIVE"), "no false live signal: {html}");
+        assert!(html.contains("nothing seen happening live"));
         assert!(html.contains("reads secret db-password"));
     }
 
@@ -6136,12 +6158,18 @@ mod tests {
         };
         let refs = vec![&f];
         let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Flagged);
-        // Both ADR-0016 blocks present, clearly labeled and distinct.
+        // Both ADR-0016 blocks present, clearly labeled and distinct (plain words).
         assert!(html.contains("evidence for this path"));
-        assert!(html.contains("severity input"), "CVE block: {html}");
-        assert!(html.contains("live corroboration"), "runtime block: {html}");
+        assert!(
+            html.contains("how bad it would be if exploited"),
+            "CVE block: {html}"
+        );
+        assert!(
+            html.contains("is it being exploited right now"),
+            "runtime block: {html}"
+        );
         assert!(html.contains("CVE-2021-44228"));
-        assert!(html.contains("CORROBORATES"));
+        assert!(html.contains("SEEN LIVE"));
     }
 
     #[test]
@@ -6157,9 +6185,9 @@ mod tests {
         let refs = vec![&f];
         let html = endpoint_card("workload/app/Pod/web", &refs, Tier::Context);
         // Neither block is omitted; each shows its honest "none/unknown" (JEF-161 idiom).
-        assert!(html.contains("none on the entry's image"));
-        assert!(html.contains("no runtime signal observed"));
-        assert!(!html.contains("CORROBORATES"));
+        assert!(html.contains("none on this service's image"));
+        assert!(html.contains("no live activity seen on this service"));
+        assert!(!html.contains("SEEN LIVE"));
     }
 
     #[test]
@@ -6245,5 +6273,144 @@ mod tests {
         // The entry's runtime alert is pulled too (the live-corroboration signal).
         assert_eq!(f.evidence.runtime.len(), 1, "entry runtime signal carried");
         assert!(f.evidence.runtime[0].is_alert());
+    }
+
+    // ---- JEF-176: no ADR-/JEF- token leaks into operator-facing rendered output ----
+
+    /// Assert a rendered surface never prints an `ADR-` or `JEF-` token. Code comments
+    /// keep their refs; this is the RENDERED-output invariant (JEF-176 AC #1).
+    fn assert_no_internal_refs(label: &str, rendered: &str) {
+        assert!(
+            !rendered.contains("ADR-"),
+            "{label}: leaked an ADR- ref into operator-facing output"
+        );
+        assert!(
+            !rendered.contains("JEF-"),
+            "{label}: leaked a JEF- ref into operator-facing output"
+        );
+    }
+
+    /// A finding with full evidence (CVEs + a live alert) and an auto-eligible cut, so a
+    /// rendered page exercises the card, the certainty rail, both evidence blocks, the
+    /// attack-steps caption and the remediation card at once.
+    fn rich_finding(entry: &str, verdict: Option<&str>) -> Finding {
+        let mut f = finding(
+            entry,
+            "secret/app/session-key",
+            AUTO_ELIGIBLE,
+            "can-read",
+            true,
+            verdict,
+        );
+        f.foothold = true;
+        f.evidence = EntryEvidence {
+            cves: vec![cve("CVE-2021-44228", Severity::Critical, true)],
+            runtime: vec![Behavior::Alert {
+                rule: "Terminal shell in container".into(),
+            }],
+        };
+        f
+    }
+
+    /// AC #1: rendering every representative operator surface — a populated dashboard with
+    /// a finding card, /judgements, /report, the first-run checklist, and each banner
+    /// state — never emits an `ADR-` or `JEF-` substring.
+    #[test]
+    fn rendered_output_never_leaks_adr_or_jef_refs() {
+        // The main dashboard, populated: a flagged card (Needs attention), a watched card,
+        // remediations, and the full diagnostics region (readiness/attack-surface/sensor).
+        let findings = vec![
+            rich_finding(
+                "workload/app/Pod/web",
+                Some("exploitable — CVE-2021-44228 reaches the secret"),
+            ),
+            rich_finding(
+                "workload/api/Pod/svc",
+                Some("not exploitable — unreachable"),
+            ),
+            rich_finding("workload/argo/Pod/server", None),
+        ];
+
+        // Armed and shadow, all-met and with-unmet readiness — exercises every banner
+        // state (contained / needs-attention / unjudged / quiet) and the first-run path.
+        for armed in [false, true] {
+            for ready in [ready(), ready_all_met()] {
+                let html = render_html(
+                    &findings,
+                    armed,
+                    &bake(80, 20),
+                    &[],
+                    Some(SystemTime::now()),
+                    &ready,
+                );
+                assert_no_internal_refs("dashboard", &html);
+            }
+        }
+
+        // First-run checklist: no findings + an unmet input replaces the findings region.
+        let first_run = render_html(
+            &[],
+            false,
+            &BakeStats::default(),
+            &[],
+            Some(SystemTime::now()),
+            &ready(),
+        );
+        assert!(first_run.contains("checklist") || first_run.contains("done"));
+        assert_no_internal_refs("first-run dashboard", &first_run);
+
+        // /judgements — a model verdict, a pre-filter meta-state, and a timeout meta-state.
+        let judgements = vec![
+            Judgement {
+                entry: "workload/app/Pod/web".into(),
+                objectives: 3,
+                verdict: "Exploitable(\"RCE\")".into(),
+                prompt: Some("system: judge this chain".into()),
+                reply: Some("exploitable".into()),
+            },
+            judgement("workload/api/Pod/svc"),
+        ];
+        let judgements_html = render_judgements_html(&judgements);
+        assert_no_internal_refs("/judgements", &judgements_html);
+        // The empty state too.
+        assert_no_internal_refs("/judgements empty", &render_judgements_html(&[]));
+
+        // /report — a populated would-have-acted diff and the empty state.
+        let entries = vec![
+            breach(
+                "workload/app/Pod/web",
+                "exploitable — CVE-2021-44228 RCE",
+                60,
+            ),
+            breach("workload/api/Pod/svc", "not exploitable — cleared", 120),
+        ];
+        let report = aggregate_report(&entries, report_now(), WEEK, FIVE_MIN);
+        assert_no_internal_refs("/report", &render_report_html(&report));
+        let empty_report = aggregate_report(&[], report_now(), WEEK, FIVE_MIN);
+        assert_no_internal_refs("/report empty", &render_report_html(&empty_report));
+    }
+
+    /// AC #3: the finding card's attack steps lead with the plain technique name and keep
+    /// the MITRE code only inside an `<abbr>` tooltip — never bare on the line.
+    #[test]
+    fn killchain_leads_with_plain_name_mitre_code_in_abbr() {
+        let f = rich_finding("workload/app/Pod/web", Some("exploitable — RCE"));
+        let kc = killchain_html(&f);
+        // Plain technique name leads.
+        assert!(
+            kc.contains("Unsecured Credentials"),
+            "plain name present: {kc}"
+        );
+        assert!(
+            kc.contains("internet-facing service"),
+            "plain foothold phrasing: {kc}"
+        );
+        // The MITRE code is present but only inside an abbr title (not bare text).
+        assert!(kc.contains("<abbr title="), "code tucked in abbr: {kc}");
+        assert!(kc.contains("T1552"), "code available in tooltip: {kc}");
+        // The card caption is plain English — "attack steps", never "kill chain".
+        let card = remediation_card(&f, false);
+        assert!(card.contains("attack steps:"), "plain label: {card}");
+        assert!(!card.contains("kill chain"), "no jargon label: {card}");
     }
 }
