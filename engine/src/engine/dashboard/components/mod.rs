@@ -13,6 +13,7 @@ pub mod chips;
 pub mod findings;
 pub mod graph;
 pub mod nav;
+pub mod panels;
 
 pub use banner::banner;
 pub use nav::nav;

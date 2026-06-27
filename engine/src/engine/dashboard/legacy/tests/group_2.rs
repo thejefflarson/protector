@@ -12,20 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-#[test]
-fn bake_panel_is_quiet_when_nothing_observed() {
-    let panel = bake_panel(&BakeStats::default());
-    assert!(
-        panel.contains("no behavioral signals observed yet"),
-        "an empty bake reads as quiet, not as an error"
-    );
-    // A fully-resolved pass shows no flagged unresolved share.
-    let clean = bake_panel(&bake(15, 0));
-    assert!(
-        !clean.contains("unresolved ("),
-        "0 unresolved is not flagged"
-    );
-}
+// `bake_panel_is_quiet_when_nothing_observed` migrated to `components::panels::bake`
+// (JEF-206).
 
 #[test]
 fn render_html_includes_the_behavioral_bake_section() {
@@ -533,8 +521,8 @@ fn no_model_says_so_explicitly_and_that_no_calls_are_made() {
         "explicit that no calls are made: {}",
         model.detail
     );
-    let panel = readiness_panel(&r);
-    assert!(panel.contains("no exploitability calls are made"));
+    // The panel-render assertion ("no exploitability calls are made") moved to
+    // `components::panels::readiness` (JEF-206); the data-layer detail is asserted above.
 }
 
 #[test]
@@ -562,35 +550,12 @@ fn readiness_warming_up_when_no_pass_has_completed() {
         None,
     );
     assert!(r.warming_up);
-    let panel = readiness_panel(&r);
-    assert!(
-        panel.contains("warming up") && panel.contains("CPU model"),
-        "cold-start note explains the bake window"
-    );
+    // The cold-start note's panel rendering moved to `components::panels::readiness`
+    // (JEF-206); the `warming_up` data flag is asserted above.
 }
 
-#[test]
-fn readiness_panel_states_are_in_text_not_glyph_only() {
-    // Accessibility: the status word is IN TEXT for every row.
-    let r = derive_readiness(
-        &ReadinessConfig {
-            model_attached: true,
-            ..ReadinessConfig::default()
-        },
-        ModelHealth::Ok,
-        &feeds_bake(0, 0),
-        Some(SystemTime::now()),
-    );
-    let panel = readiness_panel(&r);
-    // It's an ordered list with the state words present as text.
-    assert!(panel.contains("<ol class=\"readiness\">"));
-    assert!(panel.contains(">present<"));
-    assert!(panel.contains(">absent<"));
-    // An absent decision-weakening input carries the explicit tag.
-    assert!(panel.contains("weakens decisions"));
-    // The enable hint for an unmet input is shown.
-    assert!(panel.contains("PROTECTOR_KEV_FILE"));
-}
+// `readiness_panel_states_are_in_text_not_glyph_only` migrated to
+// `components::panels::readiness` (JEF-206).
 
 #[test]
 fn first_run_checklist_replaces_the_empty_body_when_inputs_unmet() {
