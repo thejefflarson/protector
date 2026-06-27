@@ -45,3 +45,45 @@ jobs:
             --set otelEndpoint=http://otel.svc:4318 \
             --set engine.notify.url=https://sink.example/hook \
             --set registryAuth.dockerconfigSecret=registry
+      # Security invariants (ingest authn + webhook fail-closed). These assert the
+      # rendered manifests carry the protections the security review required, so a
+      # regression that quietly drops them fails CI rather than shipping.
+      - name: Assert webhook fail-closed for the enforcing webhook
+        run: |
+          render=$(helm template protector charts/protector --namespace protector \
+            --set webhook.enforcedNamespaceSelector.matchLabels.'protector\.dev/enforce'=true)
+          echo "$render" | grep -q 'name: pods-enforce.protector.dev' \
+            || { echo "missing enforcing webhook"; exit 1; }
+          # The enforcing webhook must fail CLOSED and be scoped to the enforced label.
+          echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
+            | grep -q 'failurePolicy: Fail' \
+            || { echo "enforcing webhook is not failurePolicy: Fail"; exit 1; }
+          echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
+            | grep -q 'operator: In' \
+            || { echo "enforcing webhook missing namespaceSelector In match"; exit 1; }
+          # The audit webhook must stay fail-open so a protector outage can't block
+          # namespaces that never opted into enforcement.
+          echo "$render" | awk '/name: pods.protector.dev/,/port:/' \
+            | grep -q 'failurePolicy: Ignore' \
+            || { echo "audit webhook is not failurePolicy: Ignore"; exit 1; }
+      - name: Assert ingest auth Secret mounts on engine AND agent
+        run: |
+          render=$(helm template protector charts/protector --namespace protector \
+            --set agent.enabled=true)
+          echo "$render" | grep -q 'name: protector-ingest-auth' \
+            || { echo "ingest Secret not provisioned"; exit 1; }
+          # Both the Deployment and the DaemonSet must read the token file.
+          count=$(echo "$render" | grep -c 'name: PROTECTOR_INGEST_TOKEN_FILE')
+          [ "$count" -ge 2 ] \
+            || { echo "ingest token not mounted on both workloads (found $count)"; exit 1; }
+      - name: Assert ingestAuth.enabled=false drops the Secret + mounts
+        run: |
+          render=$(helm template protector charts/protector --namespace protector \
+            --set agent.enabled=true --set ingestAuth.enabled=false)
+          if echo "$render" | grep -q 'PROTECTOR_INGEST_TOKEN_FILE'; then
+            echo "ingest token wired despite ingestAuth.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'protector-ingest-auth'; then
+            echo "ingest Secret rendered despite ingestAuth.enabled=false"; exit 1
+          fi
+          echo "ok"

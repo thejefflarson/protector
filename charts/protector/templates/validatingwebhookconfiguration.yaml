@@ -2,9 +2,22 @@
 # caBundle from the serving cert's CA (inject-ca-from), so we never hand-manage it; with
 # cert.create=false you must inject the caBundle yourself (annotation/patch).
 #
-# Fail-safe by construction: failurePolicy Ignore means a protector outage can't block
-# Pod creation, and the namespaceSelector excludes the control plane + protector's own
-# namespace so a bug here can't deadlock the cluster.
+# TWO webhooks, by design (security fix — webhook fail-closed):
+#
+#   * pods.protector.dev — the AUDIT webhook. Broad (every non-exempt, non-enforced
+#     namespace) and FAIL-OPEN (failurePolicy Ignore): a protector outage must never
+#     block Pod creation where enforcement was never opted into. Observe-only.
+#
+#   * pods-enforce.protector.dev — the ENFORCING webhook. Scoped to enforced namespaces
+#     via a label selector and FAIL-CLOSED (failurePolicy Fail): if protector is down or
+#     a Pod spec is oversized, Pod CREATE is BLOCKED there rather than admitting a
+#     possibly-unsigned/unmeshed image. The blast radius is exactly the namespaces you
+#     labeled in — nowhere else. When webhook.enforcedNamespaceSelector is empty it is
+#     scoped to a sentinel label no namespace carries, so it matches nothing and can
+#     never block until a namespace is opted in.
+#
+# Both exclude the control plane + protector's own namespace, so a bug here can't
+# deadlock the cluster or protector itself.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -16,6 +29,7 @@ metadata:
     cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "protector.servingCertName" . }}
   {{- end }}
 webhooks:
+  # --- AUDIT (fail-open) ---
   - name: pods.protector.dev
     admissionReviewVersions: ["v1"]
     sideEffects: None
@@ -30,6 +44,55 @@ webhooks:
             {{- range .Values.webhook.exemptNamespaces }}
             - {{ . }}
             {{- end }}
+        {{- with .Values.webhook.enforcedNamespaceSelector }}
+        {{- range $key, $value := .matchLabels }}
+        # Enforced namespaces are validated by the fail-closed webhook below instead, so
+        # exclude them here — otherwise the fail-open audit webhook would also cover them
+        # and a protector outage would silently fail those open.
+        - key: {{ $key }}
+          operator: NotIn
+          values: [{{ $value | quote }}]
+        {{- end }}
+        {{- end }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        operations: ["CREATE"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: {{ include "protector.fullname" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate
+        port: {{ .Values.service.port }}
+  # --- ENFORCING (fail-closed) ---
+  - name: pods-enforce.protector.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.enforcedFailurePolicy }}
+    matchPolicy: Equivalent
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            {{- range .Values.webhook.exemptNamespaces }}
+            - {{ . }}
+            {{- end }}
+        {{- with .Values.webhook.enforcedNamespaceSelector }}
+        {{- range $key, $value := .matchLabels }}
+        - key: {{ $key }}
+          operator: In
+          values: [{{ $value | quote }}]
+        {{- end }}
+        {{- else }}
+        # Empty selector: scope to a sentinel label no namespace carries, so the
+        # fail-closed webhook matches nothing until an operator opts a namespace in.
+        - key: protector.dev/enforce-unset-sentinel
+          operator: Exists
+        {{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]

@@ -141,8 +141,10 @@ registryAuth:
 
 # --- webhook wiring ---
 webhook:
-  # Fail-safe: a webhook outage must never block API writes. Tighten to Fail
-  # per-policy only once proven.
+  # Fail-safe for the AUDIT webhook (the broad one, below): a webhook outage must never
+  # block API writes in namespaces that have NOT opted into enforcement. Keep this
+  # Ignore — audit is observe-only, so failing it open loses a little observability, not
+  # safety. The separate ENFORCING webhook fails CLOSED (see enforcedNamespaceSelector).
   failurePolicy: Ignore
   # Keep the apiserver from stalling pod creation on a slow verify.
   timeoutSeconds: 5
@@ -155,6 +157,50 @@ webhook:
   - kube-node-lease
   - cert-manager
   - protector
+  # --- fail-closed enforcement (security fix) ---
+  # A SECOND webhook, scoped to namespaces that have opted into signature/mesh
+  # ENFORCEMENT, fails CLOSED: if protector is down or a Pod spec is oversized, Pod
+  # CREATE is BLOCKED in those namespaces rather than admitting a possibly-unsigned
+  # image. The broad audit webhook above is unaffected (still Ignore), so the rest of
+  # the cluster never blocks on a protector outage.
+  #
+  # AVAILABILITY TRADEOFF: with failurePolicy Fail, an outage of the protector
+  # Deployment (or the apiserver failing to reach it) STOPS new Pods from being created
+  # in the selected namespaces until protector recovers — including rollouts and HPA
+  # scale-ups. This is the deliberate security posture for namespaces you have decided
+  # MUST only run signed/meshed workloads: fail safe, not fail open. Keep the selector
+  # tight and align it with signature.enforceNamespaces / mesh.enforceNamespaces.
+  enforcedFailurePolicy: Fail
+  # Label selector identifying the enforced namespaces. EMPTY by default ({}) so a stock
+  # install ships with NO fail-closed blast radius: when this selector is empty the
+  # enforcing webhook is scoped to a sentinel label no namespace carries, so it renders
+  # but matches nothing and can never block. Opt a namespace in by labeling it, e.g.:
+  #   kubectl label namespace payments protector.dev/enforce=true
+  # then set:
+  #   webhook.enforcedNamespaceSelector:
+  #     matchLabels:
+  #       protector.dev/enforce: "true"
+  enforcedNamespaceSelector: {}
+
+# --- ingest authentication (security fix) ---
+# The engine's runtime/behavioral ingest (the :9999 falco-ingest port) accepts
+# observations that can make a proven attack chain ACTIONABLE (the corroborated-now
+# signal). Any caller that can reach the port could otherwise forge those. This wires a
+# shared bearer token that the engine requires and the agent presents — app-layer
+# AUTHENTICATION, complementary to the cluster's Linkerd mesh AUTHORIZATION (which
+# identities may connect). Both the engine Deployment and the agent DaemonSet read the
+# token from a mounted file (PROTECTOR_INGEST_TOKEN_FILE), file-before-env.
+#
+# DEFAULT ON: a token is provisioned so the ingest is authenticated out of the box.
+ingestAuth:
+  enabled: true
+  # Reference a Secret you manage instead of letting the chart generate one. It must
+  # have a `token` key. Empty = the chart provisions a Secret with a random token
+  # (stable across upgrades — Helm's lookup keeps the existing value; only the very
+  # first install generates it).
+  existingSecret: ""
+  # The key within the Secret holding the token (chart-generated or existing).
+  secretKey: token
 
 # cert-manager serving cert for the webhook. The chart provisions a selfSigned Issuer
 # + Certificate and lets cainjector fill the webhook caBundle — so a stock install

@@ -71,6 +71,12 @@ spec:
             # The engine's behavioral ingest base — the agent appends /behavior.
             - name: PROTECTOR_AGENT_ENDPOINT
               value: "http://{{ include "protector.fullname" . }}-falco-ingest.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.engine.falco.port }}"
+            {{- if .Values.ingestAuth.enabled }}
+            # Ingest authn (Fix A): present this bearer token on every POST so the engine
+            # accepts the agent's observations. Same Secret the engine reads.
+            - name: PROTECTOR_INGEST_TOKEN_FILE
+              value: /etc/protector/ingest/token
+            {{- end }}
             - name: RUST_LOG
               value: "protector_agent=info"
           {{- with .Values.agent.resources }}
@@ -87,6 +93,11 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.ingestAuth.enabled }}
+            - name: ingest-auth
+              mountPath: /etc/protector/ingest
+              readOnly: true
+            {{- end }}
       volumes:
         - name: cgroup
           hostPath:
@@ -96,6 +107,15 @@ spec:
             path: /sys/kernel/btf
         - name: tmp
           emptyDir: {}
+        {{- if .Values.ingestAuth.enabled }}
+        # The shared ingest bearer token (Fix A), the same Secret the engine reads.
+        - name: ingest-auth
+          secret:
+            secretName: {{ include "protector.ingestSecretName" . }}
+            items:
+              - key: {{ .Values.ingestAuth.secretKey }}
+                path: token
+        {{- end }}
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
