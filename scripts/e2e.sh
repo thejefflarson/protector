@@ -69,7 +69,7 @@ model_available() {
 
 # Isolate the kubeconfig to a throwaway file so a caller's multi-path KUBECONFIG
 # (which makes k3d refuse to write/select the context) can't break the run.
-export KUBECONFIG="$(mktemp -t protector-e2e-kubeconfig)"
+export KUBECONFIG="$(mktemp -t protector-e2e-kubeconfig.XXXXXX)"
 
 # --- output helpers -----------------------------------------------------------
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; OFF=$'\033[0m'
