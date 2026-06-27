@@ -59,7 +59,9 @@ pub fn remediation(props: &RemediationProps) -> Markup {
                 }
             }
             (mermaid_pre(&src, &props.graph.aria))
-            div class="todo" { b { "what to do:" } " " (props.todo) }
+            @if let Some(todo) = &props.todo {
+                div class="todo" { b { "what to do:" } " " (todo) }
+            }
         }
     }
 }

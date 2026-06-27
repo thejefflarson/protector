@@ -284,26 +284,51 @@ fn glyph_props_count_cve_kev_crit_and_live() {
     assert_eq!((none.cves, none.live, none.awaiting), (0, false, true));
 }
 
-// ---- next lever + what-to-do (JEF-202 / JEF-179) ------------------------------------
+// ---- next lever + what-to-do (JEF-202 / JEF-179 / JEF-225) --------------------------
 
+/// JEF-225: advice is gated on the model's POSTURE. For a FLAGGED breach the lever names the
+/// next step in plain words; the disposition only chooses WHICH plain word.
 #[test]
-fn next_lever_tag_keys_on_disposition() {
+fn next_lever_tag_for_a_breach_is_plain_per_disposition() {
     let cases = [
         (AUTO_ELIGIBLE, "arm network"),
         ("latent foothold — propose", "arm network"),
-        ("durable-fix PR", "durable fix"),
-        ("forbidden", "manual (escape)"),
-        ("no-cut", "manual (no cut)"),
-        ("unclassified", "manual"),
+        ("durable-fix PR", "permanent fix"),
+        ("forbidden", "fix by hand (escape)"),
+        ("no-cut", "fix by hand"),
+        ("unclassified", "fix by hand"),
     ];
     for (disp, expect) in cases {
         let f = finding("e", "secret/app/s", disp, "can-read", None);
-        assert_eq!(next_lever_tag(&f), expect, "{disp}");
+        assert_eq!(next_lever_tag(&f, Posture::Breach), expect, "{disp}");
+    }
+}
+
+/// JEF-225 (complaints 1 & 3): a NON-breach finding never shows a remediation verb in the
+/// lever cell — every posture other than Breach collapses to the em-dash, regardless of the
+/// mechanical disposition (the argocd SAFE+RBAC case is `durable-fix PR` + Safe here).
+#[test]
+fn next_lever_tag_is_em_dash_for_every_non_breach_posture() {
+    let dispositions = [
+        AUTO_ELIGIBLE,
+        "durable-fix PR",
+        "forbidden",
+        "no-cut",
+        "unclassified",
+    ];
+    for disp in dispositions {
+        let f = finding("e", "secret/app/s", disp, "can-do/get/secrets", None);
+        assert_eq!(next_lever_tag(&f, Posture::Safe), "—", "safe/{disp}");
+        assert_eq!(
+            next_lever_tag(&f, Posture::Awaiting),
+            "—",
+            "awaiting/{disp}"
+        );
     }
 }
 
 #[test]
-fn what_to_do_per_disposition_class() {
+fn what_to_do_per_disposition_class_for_a_breach() {
     let auto = finding(
         "workload/app/Pod/web",
         "secret/app/k",
@@ -312,8 +337,8 @@ fn what_to_do_per_disposition_class() {
         None,
     );
     assert_eq!(
-        what_to_do(&auto),
-        "would cut in shadow; arm `network` to act"
+        what_to_do(&auto, Posture::Breach).as_deref(),
+        Some("would cut in shadow; arm `network` to act")
     );
 
     let rbac = finding(
@@ -323,9 +348,12 @@ fn what_to_do_per_disposition_class() {
         "can-do/get/secrets",
         None,
     );
-    let r = what_to_do(&rbac);
+    let r = what_to_do(&rbac, Posture::Breach).expect("breach has advice");
     assert!(
-        r.contains("get/secrets") && r.contains("Revoke") && r.contains("re-checks next pass"),
+        r.starts_with("Permanent fix")
+            && r.contains("get/secrets")
+            && r.contains("revoke")
+            && r.contains("re-checks next pass"),
         "{r}"
     );
 
@@ -337,9 +365,9 @@ fn what_to_do_per_disposition_class() {
         None,
     );
     forbidden.path[1].to = "host/node/worker-1".into();
-    let fb = what_to_do(&forbidden);
+    let fb = what_to_do(&forbidden, Posture::Breach).expect("breach has advice");
     assert!(
-        fb.starts_with("manual")
+        fb.starts_with("Fix by hand")
             && fb.contains("escapes via CAP_SYS_ADMIN")
             && fb.contains("clears this finding on its own"),
         "{fb}"
@@ -352,24 +380,59 @@ fn what_to_do_per_disposition_class() {
         "can-read",
         None,
     );
-    let nc = what_to_do(&no_cut);
+    let nc = what_to_do(&no_cut, Posture::Breach).expect("breach has advice");
     assert!(
-        nc.starts_with("manual")
+        nc.starts_with("No automatic fix")
             && nc.contains("session-key")
             && nc.contains("clears this finding on its own"),
         "{nc}"
     );
 
+    let unclassified = what_to_do(
+        &finding("e", "secret/app/k", "unclassified", "can-read", None),
+        Posture::Breach,
+    )
+    .expect("breach has advice");
     assert!(
-        what_to_do(&finding(
-            "e",
-            "secret/app/k",
-            "unclassified",
-            "can-read",
-            None
-        ))
-        .starts_with("manual")
+        unclassified.starts_with("No automatic fix"),
+        "{unclassified}"
     );
+
+    // JEF-225: no raw mechanical-disposition token reaches the rendered advice text.
+    for token in ["no-cut", "durable-fix PR", "unclassified", "manual"] {
+        for disp in [
+            AUTO_ELIGIBLE,
+            "durable-fix PR",
+            "forbidden",
+            "no-cut",
+            "unclassified",
+        ] {
+            let f = finding("e", "secret/app/s", disp, "can-do/get/secrets", None);
+            let advice = what_to_do(&f, Posture::Breach).unwrap_or_default();
+            assert!(
+                !advice.contains(token),
+                "disposition {disp} leaked raw token {token:?}: {advice}"
+            );
+        }
+    }
+}
+
+/// JEF-225 core rule: a finding the model did NOT flag as a breach gets NO advice — neither a
+/// `what_to_do` line nor a lever verb — for EVERY non-breach posture and disposition.
+#[test]
+fn what_to_do_is_none_for_every_non_breach_posture() {
+    let dispositions = [
+        AUTO_ELIGIBLE,
+        "durable-fix PR",
+        "forbidden",
+        "no-cut",
+        "unclassified",
+    ];
+    for disp in dispositions {
+        let f = finding("e", "secret/app/s", disp, "can-do/get/secrets", None);
+        assert_eq!(what_to_do(&f, Posture::Safe), None, "safe/{disp}");
+        assert_eq!(what_to_do(&f, Posture::Awaiting), None, "awaiting/{disp}");
+    }
 }
 
 #[test]
@@ -383,12 +446,18 @@ fn what_to_do_degrades_gracefully_when_path_empty() {
     );
     durable.path.clear();
     assert_eq!(
-        what_to_do(&durable),
-        "revoke the grant / remove the mount (durable fix)"
+        what_to_do(&durable, Posture::Breach).as_deref(),
+        Some("Permanent fix: revoke the grant / remove the mount, then protector re-checks.")
     );
     let mut no_cut = durable.clone();
     no_cut.disposition = "no-cut".into();
-    assert!(what_to_do(&no_cut).contains("clears this finding on its own"));
+    assert!(
+        what_to_do(&no_cut, Posture::Breach)
+            .unwrap()
+            .contains("change the workload by hand")
+    );
+    // Still nothing for a non-breach even with no path.
+    assert_eq!(what_to_do(&durable, Posture::Safe), None);
 }
 
 // ---- rail / evidence / graph data ---------------------------------------------------

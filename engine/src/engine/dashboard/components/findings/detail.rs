@@ -46,8 +46,9 @@ fn broad_lead(lead: BroadLead) -> Markup {
 }
 
 /// The expandable card BODY for one endpoint (JEF-202): verdict-first, then the broad-reach
-/// lead, the proof rail, both evidence blocks, the collapsed graph, the disposition "what to
-/// do", and the fan-out expanders (last, after the what-to-do line — the legacy ordering).
+/// lead, the proof rail, both evidence blocks, the collapsed graph, the posture-gated "what to
+/// do" (JEF-225 — present ONLY for a flagged breach; a non-breach finding renders no
+/// remediation line), and the fan-out expanders (last — the legacy ordering).
 pub fn detail(props: &DetailProps) -> Markup {
     html! {
         (verdict_line(props.posture, props.verdict.as_deref()))
@@ -55,7 +56,9 @@ pub fn detail(props: &DetailProps) -> Markup {
         (rail(&props.rail))
         (evidence(&props.evidence))
         (graph(&props.graph))
-        div class="todo" { b { "what to do:" } " " (props.todo) }
+        @if let Some(todo) = &props.todo {
+            div class="todo" { b { "what to do:" } " " (todo) }
+        }
         (fanout_expanders(&props.graph.fanouts))
     }
 }

@@ -528,46 +528,63 @@ pub fn truncate_clause(s: &str) -> String {
     out
 }
 
-/// The terse "next lever" disposition tag for the dense table (JEF-202) — what the operator
-/// would do next, in two-or-three words, derived from the finding's mechanical
-/// `disposition`. The full concrete instruction stays in the expanded row's [`what_to_do`].
-pub fn next_lever_tag(f: &Finding) -> &'static str {
+/// The terse "next lever" tag for the dense table (JEF-202, JEF-225). Operator-facing advice
+/// is gated on the model's POSTURE, not the mechanical `disposition` (ADR-0016: reachability
+/// is not a breach). For a NON-breach finding (SAFE / awaiting / a "working as intended" broad
+/// row) there is no lever to pull — the cell shows an em-dash, never a remediation verb. Only
+/// a FLAGGED breach surfaces the next step, in plain words (no raw `no-cut`/`durable-fix PR`/
+/// `forbidden`/`unclassified` token). The full instruction stays in the expanded
+/// [`what_to_do`].
+pub fn next_lever_tag(f: &Finding, posture: Posture) -> &'static str {
+    if posture != Posture::Breach {
+        // Non-breach: nothing to remediate. The em-dash is the dense-table empty cell idiom.
+        return "—";
+    }
     match f.disposition.as_str() {
         AUTO_ELIGIBLE
         | "latent foothold — propose"
         | "structural — propose"
         | "vetoed — propose" => "arm network",
-        "durable-fix PR" => "durable fix",
-        "forbidden" => "manual (escape)",
-        "no-cut" => "manual (no cut)",
-        _ => "manual",
+        "durable-fix PR" => "permanent fix",
+        "forbidden" => "fix by hand (escape)",
+        _ => "fix by hand",
     }
 }
 
-/// The "what to do" line, derived from the finding's mechanical `disposition` AND the
-/// concrete object/edge on its proven `path` (JEF-161 AC #1, JEF-179) — no new model call,
-/// no new action, no enforcement. Returns plain text; the component escapes it (the
-/// path-derived names are untrusted node keys).
-pub fn what_to_do(f: &Finding) -> String {
-    match f.disposition.as_str() {
+/// The "what to do" line for a FLAGGED breach (JEF-161 AC #1, JEF-179, JEF-225). Gated on the
+/// model's POSTURE: a non-breach finding (SAFE / awaiting / "working as intended") gets NO
+/// remediation — `None`, so the card/row renders no "what to do" block (ADR-0016: a reachable
+/// path the model cleared is not a misconfig to fix). For a breach it is plain-language advice
+/// derived from the finding's mechanical `disposition` + the concrete object/edge on its
+/// proven `path`; no new model call, no new action, no enforcement, and no raw disposition
+/// token reaches the screen. Returns plain text; the component escapes it (path-derived names
+/// are untrusted node keys).
+pub fn what_to_do(f: &Finding, posture: Posture) -> Option<String> {
+    if posture != Posture::Breach {
+        return None;
+    }
+    Some(match f.disposition.as_str() {
         AUTO_ELIGIBLE
         | "latent foothold — propose"
         | "structural — propose"
         | "vetoed — propose" => "would cut in shadow; arm `network` to act".to_string(),
-        "durable-fix PR" => durable_fix_todo(f)
-            .unwrap_or_else(|| "revoke the grant / remove the mount (durable fix)".to_string()),
+        "durable-fix PR" => durable_fix_todo(f).unwrap_or_else(|| {
+            "Permanent fix: revoke the grant / remove the mount, then protector re-checks."
+                .to_string()
+        }),
         "forbidden" => blocking_edge_todo(f, true).unwrap_or_else(|| {
-            "manual — the only cut is an irreversible escape primitive; \
-             protector clears this finding on its own once the escape primitive is removed"
+            "Fix by hand — the only cut is an irreversible escape primitive; \
+             protector clears this finding on its own once the escape primitive is removed."
                 .to_string()
         }),
-        "no-cut" => blocking_edge_todo(f, false).unwrap_or_else(|| {
-            "manual — no single-edge cut severs this path; \
-             protector clears this finding on its own once the misconfig is gone"
+        // `no-cut` and `unclassified` (and any other) collapse to the same plain "change the
+        // workload by hand" guidance — no raw token reaches the operator.
+        _ => blocking_edge_todo(f, false).unwrap_or_else(|| {
+            "No automatic fix — change the workload by hand; protector clears this finding on \
+             its own once the misconfig is gone."
                 .to_string()
         }),
-        _ => "manual — no automatic cut classified for this path".to_string(),
-    }
+    })
 }
 
 /// The concrete durable-fix instruction for a `durable-fix PR` finding: name the secret, the
@@ -585,21 +602,22 @@ fn durable_fix_todo(f: &Finding) -> Option<String> {
     let workload = short(&step.from);
     if let Some(rest) = step.relation.strip_prefix("can-do/") {
         Some(format!(
-            "Revoke the `{rest}` RBAC grant from `{workload}` (it reaches `{secret}`) \
-             — then protector re-checks next pass."
+            "Permanent fix: revoke the `{rest}` RBAC grant from `{workload}` (it reaches \
+             `{secret}`) — then protector re-checks next pass."
         ))
     } else {
         Some(format!(
-            "Remove the secret mount `{secret}` from `{workload}` — then protector \
-             re-checks next pass."
+            "Permanent fix: remove the secret mount `{secret}` from `{workload}` — then \
+             protector re-checks next pass."
         ))
     }
 }
 
-/// The concrete manual instruction for a `no-cut`/`forbidden` finding: name the specific
+/// The concrete by-hand instruction for a `no-cut`/`forbidden` finding: name the specific
 /// blocking edge and state that protector clears the finding by itself once the misconfig is
-/// gone. `escape_primitive` picks the `forbidden` phrasing vs the `no-cut` phrasing. `None`
-/// when no informative hop exists. Names are NOT escaped here (the component escapes).
+/// gone, in plain language (no raw `no-cut`/`forbidden` token). `escape_primitive` picks the
+/// `forbidden` phrasing vs the `no-cut` phrasing. `None` when no informative hop exists. Names
+/// are NOT escaped here (the component escapes).
 fn blocking_edge_todo(f: &Finding, escape_primitive: bool) -> Option<String> {
     let step = if escape_primitive {
         f.path
@@ -618,13 +636,13 @@ fn blocking_edge_todo(f: &Finding, escape_primitive: bool) -> Option<String> {
     let edge = humanize_relation(&step.relation);
     if escape_primitive {
         Some(format!(
-            "manual — the only cut is the irreversible escape primitive on `{from}` → \
+            "Fix by hand — the only cut is the irreversible escape primitive on `{from}` → \
              `{to}` ({edge}); protector clears this finding on its own once that escape \
              primitive is removed."
         ))
     } else {
         Some(format!(
-            "manual — no single-edge cut severs the `{from}` → `{to}` hop ({edge}); \
+            "No automatic fix — change the `{from}` → `{to}` hop ({edge}) by hand; \
              protector clears this finding on its own once that misconfig is gone."
         ))
     }

@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 #[test]
-fn expanded_card_body_is_verdict_first_with_rail_todo_and_aria() {
+fn expanded_card_body_is_verdict_first_with_rail_and_aria() {
     // JEF-202: the EXPANDED row body keeps the full card — the verbatim model words lead,
-    // then the proof rail, then the what-to-do, then the graph (collapsed-by-default, with
-    // its aria-label preserved).
+    // then the proof rail, then the graph (collapsed-by-default, with its aria-label
+    // preserved). JEF-225: a SAFE finding renders NO remediation (see the gated test below).
     let f = finding(
         "workload/app/Pod/web",
         "secret/app/session-key",
@@ -37,14 +37,64 @@ fn expanded_card_body_is_verdict_first_with_rail_todo_and_aria() {
     assert!(html.contains("not exploitable — authorized RBAC, no CVE"));
     assert!(html.contains("proven facts"));
     assert!(html.contains("internet-reachable"));
-    assert!(html.contains("what to do:"));
-    assert!(html.contains("Revoke the `get/secrets` RBAC grant"));
-    assert!(html.contains("re-checks next pass"));
     assert!(html.contains("data-aria=\""));
     assert!(html.contains("Attack-path graph"));
     let chip_at = html.find("[SAFE]").unwrap();
     let graph_at = html.find("class=\"mermaid\"").unwrap();
     assert!(chip_at < graph_at, "the verdict leads the card body");
+}
+
+#[test]
+fn safe_finding_card_renders_no_remediation_advice() {
+    // JEF-225 (complaint 1): the argocd-style SAFE + intentional-RBAC case. The grant is
+    // reachable (the mechanical disposition is `durable-fix PR`), but the model judged it
+    // SAFE — so the card must show NO "what to do" line and, in particular, no
+    // "Revoke the `get/secrets` grant" text. Reachability ≠ breach (ADR-0016).
+    let f = finding(
+        "workload/argocd/Pod/argocd-server",
+        "secret/argocd/argocd-secret",
+        "durable-fix PR",
+        "can-do/get/secrets",
+        true,
+        Some("not exploitable — this get/secrets grant is intentional, RBAC-scoped"),
+    );
+    let html = card_body("workload/argocd/Pod/argocd-server", &[&f]);
+    assert!(html.contains("[SAFE]"), "still verdict-first");
+    assert!(
+        !html.contains("what to do:"),
+        "no remediation block on a non-breach: {html}"
+    );
+    assert!(
+        !html.contains("Revoke the `get/secrets`"),
+        "the intentional grant is not presented as a misconfig to fix: {html}"
+    );
+    assert!(!html.contains("durable-fix") && !html.contains("durable fix"));
+    assert!(!html.contains("ADR-") && !html.contains("JEF-"));
+}
+
+#[test]
+fn flagged_finding_card_shows_plain_language_advice() {
+    // JEF-225: a FLAGGED breach still gets its actionable next step — in plain words, with the
+    // concrete object names, and with no raw mechanical-disposition token on screen.
+    let f = finding(
+        "workload/app/Pod/web",
+        "secret/app/session-key",
+        "durable-fix PR",
+        "can-do/get/secrets",
+        true,
+        Some("exploitable — CVE-2021-44228 reaches the secret"),
+    );
+    let html = card_body("workload/app/Pod/web", &[&f]);
+    assert!(html.contains("[BREACH]"));
+    assert!(html.contains("what to do:"), "breach gets advice: {html}");
+    assert!(html.contains("Permanent fix"));
+    assert!(html.contains("get/secrets"));
+    assert!(html.contains("re-checks next pass"));
+    // No raw mechanical-disposition jargon reaches the screen.
+    for token in ["no-cut", "durable-fix PR", "unclassified"] {
+        assert!(!html.contains(token), "raw token {token} leaked: {html}");
+    }
+    assert!(!html.contains("ADR-") && !html.contains("JEF-"));
 }
 
 #[test]
@@ -114,17 +164,20 @@ fn certainty_rail_renders_entry_relation_and_cve_facts() {
 #[test]
 fn what_to_do_escapes_injected_object_names_in_the_card() {
     // JEF-179: the injected names are untrusted node keys — HTML-escaped by the maud detail
-    // component so a crafted name can't break out of the rendered card.
+    // component so a crafted name can't break out of the rendered card. JEF-225: the advice
+    // only renders for a flagged breach, so the injected name reaches the "what to do" line
+    // only when the model flagged the finding.
     let mut durable = finding(
         "workload/app/Pod/web",
         "secret/app/<img src=x onerror=alert(1)>",
         "durable-fix PR",
         "can-read",
         true,
-        None,
+        Some("exploitable — the mounted secret is reachable"),
     );
     durable.path[1].to = "secret/app/<img src=x onerror=alert(1)>".into();
     let html = card_body("workload/app/Pod/web", &[&durable]);
+    assert!(html.contains("what to do:"), "breach surfaces advice: {html}");
     assert!(!html.contains("<img"), "raw tag must not survive: {html}");
     assert!(
         html.contains("&lt;img"),
@@ -149,6 +202,17 @@ fn safe_broad_row_reads_working_as_intended_and_calm_class() {
     assert!(!html.contains("breadth is severity"));
     assert!(!html.contains("severity, not urgency"));
     assert!(!html.contains("not urgency"));
+    // JEF-225 (complaint 2): a "working as intended" row must NOT also carry a remediation
+    // lever — the row pair (summary + expanded detail) shows no durable-fix / revoke advice.
+    assert!(
+        !html.contains("durable fix") && !html.contains("Revoke") && !html.contains("what to do:"),
+        "no remediation lever on a working-as-intended row: {html}"
+    );
+    let body = card_body(entry, &refs);
+    assert!(
+        !body.contains("what to do:") && !body.contains("Revoke the `get/secrets`"),
+        "the calm card body shows no remediation: {body}"
+    );
     assert!(!html.contains("ADR-") && !html.contains("JEF-"));
 }
 

@@ -77,8 +77,10 @@ pub struct DetailProps {
     pub rail: RailProps,
     pub evidence: EvidenceProps,
     pub graph: GraphProps,
-    /// The disposition-derived "what to do" line (plain text, escaped at render).
-    pub todo: String,
+    /// The posture-gated "what to do" line (JEF-225): `Some` plain-language advice ONLY for a
+    /// flagged breach; `None` for a non-breach finding (SAFE / awaiting / "working as
+    /// intended"), where the detail body renders no remediation. Escaped at render.
+    pub todo: Option<String>,
 }
 
 /// The computed metadata for one endpoint's dense table ROW (JEF-202).
@@ -196,10 +198,10 @@ pub fn detail_props(entry: &str, fs: &[&Finding]) -> (DetailProps, RowMeta) {
         (BroadLead::None, false)
     };
 
-    let todo = fs
-        .first()
-        .map(|f| what_to_do(f))
-        .unwrap_or_else(|| "manual — no automatic cut classified for this path".to_string());
+    // JEF-225: advice is gated on the model's POSTURE, never the mechanical disposition. A
+    // non-breach finding (SAFE / awaiting / "working as intended") yields `None` ⇒ no "what to
+    // do" block on the card; only a flagged breach surfaces the plain-language step.
+    let todo = fs.first().and_then(|f| what_to_do(f, posture));
 
     let aria = path_aria_label(entry, fs);
 
@@ -278,10 +280,13 @@ pub fn endpoint_props(
     let corroborated = fs.iter().any(|f| f.corroborated);
     let glyphs = glyph_props(ev, corroborated, awaiting);
 
+    // JEF-225: the "working as intended" broad-Safe row keeps that calm cell (it is NOT a
+    // remediation verb); every other row's lever is posture-gated — a non-breach row shows the
+    // em-dash, only a flagged breach shows the actual next lever.
     let lever = if meta.calm {
         "working as intended"
     } else {
-        fs.first().map_or("manual", |f| next_lever_tag(f))
+        fs.first().map_or("—", |f| next_lever_tag(f, meta.posture))
     };
 
     let row = RowProps {
@@ -329,7 +334,10 @@ pub struct RemediationProps {
     pub evidence: EvidenceProps,
     pub killchain: KillchainProps,
     pub graph: GraphProps,
-    pub todo: String,
+    /// The posture-gated "what to do" line (JEF-225): `Some` only for a flagged breach; `None`
+    /// for a non-breach finding, where the card shows the proposed cut graph but no remediation
+    /// advice text. Escaped at render.
+    pub todo: Option<String>,
     /// Whether the cut is applied (armed) vs proposed (shadow) — the caption's status.
     pub armed: bool,
 }
@@ -379,7 +387,7 @@ pub fn remediation_props(f: &Finding, armed: bool) -> RemediationProps {
             technique_name: f.technique_name.clone(),
         },
         graph,
-        todo: what_to_do(f),
+        todo: what_to_do(f, Posture::of(f.verdict.as_deref())),
         armed,
     }
 }
