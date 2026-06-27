@@ -1,19 +1,40 @@
-//! Transitional legacy tests (pre-ADR-0019). The shared helper fixtures live here;
-//! the `#[test]` functions are split across `group_*` submodules purely to keep each
-//! file under the 1,000-line cap (repo CLAUDE.md). Migrated wholesale from the old
-//! single `dashboard.rs` test module; deleted as tickets 3–6 migrate the panels.
+//! The dashboard's page-composition + data render tests (ADR-0019): the `render_html` /
+//! `render_fragment` composition, the `/fragment`⊂page parity seam, the AA-contrast +
+//! incremental-poll asset hooks, and the report / readiness / store data behavior. They sit
+//! at the dashboard module root — the only layer that composes the whole page over the model
+//! and view_model data. The shared fixtures live here; each test lives in a numbered group
+//! submodule, split purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]
 
-use super::*;
-use crate::engine::dashboard::page::{FINDINGS_COLS, render_fragment, render_html};
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+
+use super::page::{FINDINGS_COLS, render_fragment, render_html};
+use super::{DASHBOARD_CSS, DASHBOARD_JS, default_window_report};
+use crate::engine::dashboard::model::{
+    AUTO_ELIGIBLE, BakeStats, CveEvidence, EntryEvidence, Finding, Findings, Judgement,
+    JudgementLog, ModelHealth, PathStep, ReadinessConfig, ReversionLog, ReversionRecord,
+    VerdictStore, relative_time,
+};
+use crate::engine::dashboard::view_model::readiness_data::{
+    InputState, Readiness, ReadinessRow, derive_readiness,
+};
+use crate::engine::dashboard::view_model::report_data::{
+    LeftAloneEntry, Report, ReportQuery, WouldActEntry, aggregate_report, human_span,
+    is_coverage_gap, verdict_would_act,
+};
 use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
-use crate::engine::graph::{Advisory, NodeKey, Reachability, Severity, Vulnerability};
-use crate::engine::reason::proof::Link;
+use crate::engine::graph::{
+    Advisory, Behavior, NodeKey, Reachability, SecurityGraph, Severity, Vulnerability,
+};
+use crate::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage, JournalEntry};
+use crate::engine::reason::proof::{Link, ProvenChain};
 
 mod group_1;
 mod group_2;
 mod group_3;
 mod group_4;
+mod guards;
 
 /// A default readiness snapshot for the render tests that don't exercise the panel
 /// itself — every input absent, post-warmup. The readiness-specific behavior is

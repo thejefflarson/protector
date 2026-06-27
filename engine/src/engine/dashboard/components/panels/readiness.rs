@@ -47,8 +47,8 @@ pub fn readiness(props: &ReadinessProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{BakeStats, Readiness};
-    use crate::engine::dashboard::legacy::{ModelHealth, ReadinessConfig, derive_readiness};
+    use crate::engine::dashboard::model::{BakeStats, ModelHealth, ReadinessConfig};
+    use crate::engine::dashboard::view_model::readiness_data::{Readiness, derive_readiness};
     use crate::engine::dashboard::view_model::readiness_props;
     use std::collections::BTreeMap;
     use std::time::SystemTime;

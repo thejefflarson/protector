@@ -81,7 +81,7 @@ pub fn banner(props: &BannerProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::Finding;
+    use crate::engine::dashboard::model::Finding;
     use crate::engine::dashboard::view_model::banner_props;
     use std::time::SystemTime;
 
@@ -99,7 +99,7 @@ mod tests {
             adjudicated: verdict.is_some(),
             promoted: false,
             disposition: if auto {
-                crate::engine::dashboard::legacy::AUTO_ELIGIBLE.to_string()
+                crate::engine::dashboard::model::AUTO_ELIGIBLE.to_string()
             } else {
                 "latent foothold".to_string()
             },

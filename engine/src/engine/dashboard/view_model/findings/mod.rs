@@ -8,7 +8,7 @@
 //! This is the only findings layer that sees an `engine::` domain type; the components it
 //! feeds see only the `Props` defined here.
 
-use crate::engine::dashboard::legacy::{AUTO_ELIGIBLE, CveEvidence, EntryEvidence, Finding};
+use crate::engine::dashboard::model::{AUTO_ELIGIBLE, CveEvidence, EntryEvidence, Finding};
 use std::collections::{BTreeMap, BTreeSet};
 
 // The graph node-key helpers live in the presentation graph module (pure over strings);

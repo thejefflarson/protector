@@ -1,11 +1,23 @@
-//! Transitional legacy module (pre-ADR-0019 string-concat rendering).
+//! The dashboard's domain DATA layer (ADR-0019): the shared types the engine writes and the
+//! dashboard reads — the [`Finding`] row and its evidence, the per-entry [`VerdictStore`],
+//! the [`Findings`] / [`JudgementLog`] / [`ReversionLog`] handles, the [`BakeStats`] /
+//! [`ModelHealth`] / [`ReadinessConfig`] coverage shapes, and the small data helpers
+//! ([`classify`], [`killchain`], [`relative_time`]).
 //!
-//! Migrated piecemeal in tickets 3–6; extracted here only so each file
-//! stays under the 1,000-line cap (repo CLAUDE.md). New work goes in the
-//! `components`/`view_model` maud layers, not here.
-#![allow(dead_code)]
+//! This is data, not markup: it holds NO rendering. The presentation reads it through the
+//! `view_model` (which shapes it into `Props`) and the `components` (which render those
+//! props); `mod.rs` owns the engine-facing handles. maud auto-escapes every value at render,
+//! so these strings are carried verbatim here and escaped where they are spliced into HTML.
 
-use super::*;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+use serde::Serialize;
+
+use crate::engine::graph::{Behavior, SecurityGraph, Vulnerability};
+use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::proof::ProvenChain;
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
 /// does with it.
@@ -210,33 +222,12 @@ impl Finding {
 /// The attack steps in plain terms: the front-door foothold (T1190), when the entry is
 /// an exploitable front door, through the target's own technique. Plain-language leading,
 /// MITRE code in parentheses — this is the JSON-facing text form; the card renders the
-/// same steps with the code tucked into an `<abbr>` tooltip (see [`killchain_html`]).
+/// same steps with the code tucked into an `<abbr>` tooltip (the maud
+/// `view_model::findings` killchain props).
 pub(crate) fn killchain(chain: &ProvenChain) -> String {
     let goal = format!("{} ({})", chain.attack.technique, chain.attack.technique_id);
     if chain.foothold.is_some() {
         format!("break in through an internet-facing service (T1190) → {goal}")
-    } else {
-        goal
-    }
-}
-
-/// The attack steps for the finding card: leads with the plain technique name and tucks
-/// the MITRE code into an `<abbr>` tooltip so it is available without crowding the line
-/// (JEF-176 AC #3). Mirrors [`killchain`]'s steps. All values come from a closed ATT&CK
-/// catalogue (technique ids/names), so they are not untrusted free-text; escaped anyway
-/// for defence in depth.
-pub(crate) fn killchain_html(f: &Finding) -> String {
-    let goal = format!(
-        "<abbr title=\"{} {}\">{}</abbr>",
-        escape(&f.technique),
-        escape(&f.technique_name),
-        escape(&f.technique_name),
-    );
-    if f.foothold {
-        format!(
-            "<abbr title=\"T1190 Exploit Public-Facing Application\">break in through an \
-             internet-facing service</abbr> → {goal}"
-        )
     } else {
         goal
     }

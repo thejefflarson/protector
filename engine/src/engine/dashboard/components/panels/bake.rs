@@ -60,7 +60,7 @@ pub fn bake(props: &BakeProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::BakeStats;
+    use crate::engine::dashboard::model::BakeStats;
     use crate::engine::dashboard::view_model::bake_props;
     use std::collections::BTreeMap;
 

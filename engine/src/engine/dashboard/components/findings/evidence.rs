@@ -131,7 +131,7 @@ pub fn evidence(props: &EvidenceProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{CveEvidence, EntryEvidence};
+    use crate::engine::dashboard::model::{CveEvidence, EntryEvidence};
     use crate::engine::dashboard::view_model::findings::{cve_block_props, runtime_block_props};
     use crate::engine::graph::{Advisory, Behavior, Reachability, Severity, Vulnerability};
 

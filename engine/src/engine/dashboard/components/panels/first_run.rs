@@ -58,10 +58,9 @@ pub fn first_run(props: &FirstRunProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{
-        BakeStats, ModelHealth, ReadinessConfig, derive_readiness,
-    };
+    use crate::engine::dashboard::model::{BakeStats, ModelHealth, ReadinessConfig};
     use crate::engine::dashboard::view_model::first_run_props;
+    use crate::engine::dashboard::view_model::readiness_data::derive_readiness;
     use std::time::SystemTime;
 
     /// JEF-160 AC #4: the checklist frames itself as a guided start (never a blank page),

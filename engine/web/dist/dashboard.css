@@ -9,8 +9,9 @@
  * Design tokens (:root) are the source of truth for the palette/scale. The AA-passing
  * values from JEF-180 are preserved verbatim here (--color-muted:#6a6a6a, the legend/
  * mermaid grey #555, the calm green #1a7f37, the breach/safe/watch text-on-tint pairs);
- * do not regress contrast. A full raw-value -> token sweep is JEF-208 (ticket 6), so some
- * rule bodies still carry a raw hex this round — that is expected and accepted.
+ * do not regress contrast. The raw-value -> token sweep is COMPLETE (JEF-208): every
+ * raw hex now lives ONLY in the :root primitive palette, and every rule body consumes a
+ * token. The `no_raw_hex_outside_root_in_dashboard_css` guard test enforces this.
  */
 
 :root {
@@ -22,10 +23,14 @@
   --c-grey-1: #555; /* AA on white; legend / mermaid fallback / italic meta */
   --c-grey-2: #666;
   --c-grey-3: #6a6a6a; /* AA on white (>=4.5:1); the muted token */
+  --c-grey-4: #888; /* chip-expanded outline / verdict accent border */
+  --c-grey-5: #999; /* decorative-only: the row entry → arrow */
+  --c-grey-6: #bbb; /* low-emphasis border (sev-medium) */
   --c-grey-line: #ccc;
   --c-grey-border: #ddd;
   --c-grey-border-soft: #e3e3e3;
   --c-grey-hair: #f0f0f0;
+  --c-grey-hair-2: #eee; /* hairline border / inline-code fill */
   --c-fill: #f4f4f4;
   --c-fill-soft: #f7f7f7;
   --c-fill-page: #fafafa;
@@ -149,7 +154,7 @@ h3{font-size:.9rem;font-weight:600;margin:1.2rem 0 .3rem;color:var(--c-ink-2)}
 .meta{color:var(--c-grey-1);font-style:italic}
 .raw summary{cursor:pointer;color:var(--color-link);font-size:var(--fs-sm)}
 .raw-cap{font-size:var(--fs-xs);font-weight:600;color:var(--c-ink-3);margin:.4rem 0 .1rem}
-.raw pre{white-space:pre-wrap;word-break:break-word;background:var(--c-fill-soft);border:var(--border-1) solid #eee;padding:.4rem .5rem;font-size:var(--fs-xs);margin:0}
+.raw pre{white-space:pre-wrap;word-break:break-word;background:var(--c-fill-soft);border:var(--border-1) solid var(--c-grey-hair-2);padding:.4rem .5rem;font-size:var(--fs-xs);margin:0}
 
 /* === / dashboard page === */
 details.diag{margin:1.6rem 0 .4rem}
@@ -158,7 +163,7 @@ h2.diag-h{display:inline-block;margin:0;border-bottom:none;padding:0}
 h3.diag-h{display:inline-block;font-size:var(--fs-lg);font-weight:600;margin:0;padding:0}
 details.diag>details{margin:.2rem 0 .2rem 1rem}
 .kc{font-family:var(--font-mono);font-size:var(--fs-md);font-weight:600}
-.verdict{font-size:var(--fs-sm);color:var(--c-ink-2);background:var(--color-surface);border-left:var(--border-2) solid #888;padding:.2rem .5rem;margin:.2rem 0 .4rem}
+.verdict{font-size:var(--fs-sm);color:var(--c-ink-2);background:var(--color-surface);border-left:var(--border-2) solid var(--c-grey-4);padding:.2rem .5rem;margin:.2rem 0 .4rem}
 .tier-flagged{color:var(--color-breach-text);background:var(--color-breach-tint);border-color:var(--color-breach)}
 .tier-watch{color:var(--color-watch-text);background:var(--color-watch-tint);border-color:var(--color-watch)}
 .tier-context{color:var(--c-grey-1);background:var(--color-surface);border-color:var(--color-awaiting-border)}
@@ -175,7 +180,7 @@ table.findings td{padding:.3rem .5rem;border-bottom:var(--border-1) solid var(--
 table.findings tr.f-row:hover>td{background:var(--c-fill-page)}
 table.findings tr.f-calm>td{border-left:var(--border-3) solid var(--color-safe)}
 table.findings td.c-entry code{background:var(--color-surface);padding:0 .2rem}
-table.findings .r-arrow{color:#999}
+table.findings .r-arrow{color:var(--c-grey-5)}
 table.findings td.c-verdict{max-width:30rem}
 .v-clause{color:var(--c-ink-2)}
 .lever{font-family:var(--font-mono);font-size:.74rem;color:var(--color-link);white-space:nowrap}
@@ -184,7 +189,7 @@ table.findings td.c-age{color:var(--c-grey-2);white-space:nowrap}
 .ev-crit{font-family:var(--font-mono);font-size:var(--fs-xs);font-weight:700;color:var(--color-breach-text)}
 .ev-live{font-family:var(--font-mono);font-size:var(--fs-xs);font-weight:700;color:var(--color-breach)}
 button.row-toggle{cursor:pointer;background:none;border:none;padding:0;font:inherit;text-align:left}
-button.row-toggle[aria-expanded="true"] .chip{outline:var(--border-2) solid #888;outline-offset:1px}
+button.row-toggle[aria-expanded="true"] .chip{outline:var(--border-2) solid var(--c-grey-4);outline-offset:1px}
 tr.f-detail>td{background:var(--c-fill-page);padding:.6rem .8rem}
 tr.ctx-summary>td{background:var(--c-fill-soft)}
 tr.ctx-row>td{opacity:.75}
@@ -193,7 +198,7 @@ details.legend-d>summary{cursor:pointer;color:var(--color-link);font-size:var(--
 details.howto{margin:.2rem 0 1rem}
 details.howto>summary{cursor:pointer;color:var(--color-link);font-size:.82rem}
 .todo{font-size:.82rem;color:var(--c-ink-2);background:var(--c-fill-page-2);border-left:var(--border-2) solid var(--color-link);padding:.25rem .5rem;margin:.3rem 0 .1rem}
-.todo code{background:#eee;padding:0 .2rem}
+.todo code{background:var(--c-grey-hair-2);padding:0 .2rem}
 .applied{color:var(--color-breach);font-weight:600}
 .proposed{color:var(--color-watch);font-weight:600}
 .mermaid{margin:.2rem 0;white-space:pre;font-family:var(--font-mono);font-size:.75rem;color:var(--c-grey-1)}
@@ -220,7 +225,7 @@ details.howto>summary{cursor:pointer;color:var(--color-link);font-size:.82rem}
 .ev details ul{margin:.1rem 0 .3rem}
 .sev-critical{color:var(--color-sev-critical-text);background:var(--color-sev-critical-tint);border-color:var(--color-sev-critical)}
 .sev-high{color:var(--color-watch);background:var(--c-amber-tint-2);border-color:var(--c-amber-strong)}
-.sev-medium{color:var(--c-grey-1);background:var(--color-surface);border-color:#bbb}
+.sev-medium{color:var(--c-grey-1);background:var(--color-surface);border-color:var(--c-grey-6)}
 .sev-low{color:var(--c-grey-1);background:var(--color-surface);border-color:var(--color-border)}
 .kev{font-family:var(--font-mono);font-size:.7rem;font-weight:700;color:var(--color-breach-text);background:var(--color-breach-tint);border:var(--border-1) solid var(--color-breach);border-radius:var(--radius-chip);padding:0 .25rem}
 .legend{font-size:.75rem;color:var(--c-grey-1);margin:.2rem 0 .6rem}

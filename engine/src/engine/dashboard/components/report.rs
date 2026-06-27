@@ -193,11 +193,10 @@ pub fn report(props: &ReportProps) -> Markup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{
-        EnrichmentCoverage, JournalEntry, Report, aggregate_report,
-    };
+    use crate::engine::dashboard::view_model::report_data::{Report, aggregate_report};
     use crate::engine::dashboard::view_model::report_props;
     use crate::engine::journal::Decision;
+    use crate::engine::journal::{EnrichmentCoverage, JournalEntry};
     use std::time::{Duration, SystemTime};
 
     const WEEK: Duration = Duration::from_secs(7 * 24 * 3600);

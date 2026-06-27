@@ -1,11 +1,15 @@
-//! Transitional legacy module (pre-ADR-0019 string-concat rendering).
+//! The readiness DATA layer (ADR-0019): the [`Readiness`] snapshot and its rows, and the
+//! pure [`derive_readiness`] that builds them from the engine's config summary + live state.
 //!
-//! Migrated piecemeal in tickets 3–6; extracted here only so each file
-//! stays under the 1,000-line cap (repo CLAUDE.md). New work goes in the
-//! `components`/`view_model` maud layers, not here.
-#![allow(dead_code)]
+//! This is data, not markup — it holds NO rendering. `/readiness` serializes [`Readiness`]
+//! directly, and `view_model::readiness` shapes the same snapshot into the panel `Props` the
+//! `components::panels::readiness` / `first_run` renderers consume.
 
-use super::*;
+use std::time::SystemTime;
+
+use serde::Serialize;
+
+use crate::engine::dashboard::model::{BakeStats, ModelHealth, ReadinessConfig};
 
 /// The LIVE state of one decision input — present, absent, or degraded. Distinct from a
 /// config echo: an input is `Absent` only when it is genuinely unconfigured/empty, and

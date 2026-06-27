@@ -1,10 +1,10 @@
 //! Tests for the findings DATA layer (JEF-205) — the pure Props-shaping migrated from the
 //! legacy `cards`/`rows` string-concat helpers. These exercise the LOGIC (verdict gist,
 //! evidence glyphs, tier/sort, the rail/evidence/graph data, what-to-do); the byte-stable
-//! HTML is asserted by the render-level tests in `legacy/tests` and the component modules.
+//! HTML is asserted by the render-level tests in `dashboard::tests` and the component modules.
 
 use super::*;
-use crate::engine::dashboard::legacy::{
+use crate::engine::dashboard::model::{
     AUTO_ELIGIBLE, CveEvidence, EntryEvidence, Finding, PathStep,
 };
 use crate::engine::graph::{Behavior, Reachability, Severity, Vulnerability};

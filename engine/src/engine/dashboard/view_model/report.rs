@@ -5,11 +5,12 @@
 //! headline counts, and the per-entry rows with their lifetime/coverage classification
 //! already resolved to plain strings).
 //!
-//! The aggregation itself ([`aggregate_report`](crate::engine::dashboard::legacy::aggregate_report))
-//! and the JSON contract ([`Report`]) stay in `legacy` — this layer only reshapes that data
-//! for the view, never recomputes it.
+//! The aggregation itself ([`aggregate_report`](super::report_data::aggregate_report)) and the
+//! JSON contract ([`Report`]) live in the `report_data` data module — this layer only reshapes
+//! that data for the view, never recomputes it.
 
-use crate::engine::dashboard::legacy::{Report, human_span, short};
+use crate::engine::dashboard::components::graph::short;
+use crate::engine::dashboard::view_model::report_data::{Report, human_span};
 
 /// The body state of `/report`: the honest empty/quiet states, or the populated diff. The
 /// component renders exactly one of these — the view-model decides which from the report.
@@ -152,7 +153,9 @@ pub fn report_props(report: &Report) -> ReportProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::dashboard::legacy::{LeftAloneEntry, Report, WouldActEntry};
+    use crate::engine::dashboard::view_model::report_data::{
+        LeftAloneEntry, Report, WouldActEntry,
+    };
 
     fn would(open: bool, short_lived: bool) -> WouldActEntry {
         WouldActEntry {
