@@ -25,6 +25,9 @@ use axum::{Json, Router};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 
+use super::ingest_guard::{
+    DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
+};
 use super::{Attribution, RuntimeObservation};
 use crate::engine::graph::Behavior;
 
@@ -215,16 +218,51 @@ pub async fn serve_runtime(
     events: Arc<RuntimeEvents>,
     notify: Sender<()>,
 ) -> anyhow::Result<()> {
-    let app = Router::new()
+    // App-layer authn (Fix A): require `Authorization: Bearer <token>` matching a
+    // configured shared secret, rejected 401 BEFORE deserialization. Resolved once at
+    // startup (file-before-env). If unconfigured the layer is omitted and we log a loud
+    // WARNING — so the engine can be deployed ahead of the Secret/agent roll out. This
+    // is authentication (who may post); the mesh's Linkerd authz (which identities may
+    // connect) is layered separately in the cluster repo.
+    let token = IngestToken::from_env();
+    // Per-peer rate limit (Fix B): bound ingest request-rate per source even with a
+    // valid token. In-process token bucket; well above legitimate agent/Falco volume.
+    let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
+
+    let mut app = Router::new()
         .route("/", post(ingest))
         .route("/behavior", post(ingest_behavior))
-        // A real alert/batch is small; cap the body so an unauthenticated client can't
-        // OOM the engine with a giant POST (mirrors the webhook server).
+        // A real alert/batch is small; cap the body so a client can't OOM the engine
+        // with a giant POST (mirrors the webhook server). The body cap, MAX_EVENTS, and
+        // the per-batch MAX_BATCH all remain in force alongside authn + rate limiting.
         .layer(DefaultBodyLimit::max(256 * 1024))
         .with_state((events, notify));
+
+    // Rate limit runs on every request, authenticated or not.
+    app = app.layer(axum::middleware::from_fn_with_state(limiter, rate_limit));
+
+    match token {
+        Some(token) => {
+            app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
+            tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior) — bearer-authenticated");
+        }
+        None => {
+            tracing::warn!(
+                %addr,
+                "runtime-evidence ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN \
+                 or PROTECTOR_INGEST_TOKEN_FILE to require a bearer token. Any caller that \
+                 can reach :9999 can post forged observations."
+            );
+        }
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior)");
-    axum::serve(listener, app).await?;
+    // ConnectInfo is required by the per-peer rate limiter — serve with peer addresses.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

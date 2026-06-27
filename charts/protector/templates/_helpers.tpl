@@ -69,3 +69,15 @@ app.kubernetes.io/part-of: {{ include "protector.name" . }}
 {{- define "protector.servingCertName" -}}
 {{- printf "%s-tls" (include "protector.fullname" .) }}
 {{- end }}
+
+{{/*
+Name of the Secret holding the ingest bearer token (Fix A). Prefers a user-supplied
+existingSecret; otherwise the chart-provisioned "<release>-ingest-auth".
+*/}}
+{{- define "protector.ingestSecretName" -}}
+{{- if .Values.ingestAuth.existingSecret }}
+{{- .Values.ingestAuth.existingSecret }}
+{{- else }}
+{{- printf "%s-ingest-auth" (include "protector.fullname" .) }}
+{{- end }}
+{{- end }}

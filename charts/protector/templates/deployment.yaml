@@ -119,6 +119,13 @@ spec:
             - name: PROTECTOR_REGISTRY_AUTH_FILE
               value: /etc/protector/registry/config.json
             {{- end }}
+            {{- if .Values.ingestAuth.enabled }}
+            # Runtime/behavioral ingest authn (Fix A): the engine REQUIRES this bearer
+            # token on :9999, rejecting forged observations. File-before-env; mounted
+            # read-only from the ingest Secret below.
+            - name: PROTECTOR_INGEST_TOKEN_FILE
+              value: /etc/protector/ingest/token
+            {{- end }}
             - name: RUST_LOG
               value: {{ .Values.logLevel | quote }}
             {{- if .Values.otelEndpoint }}
@@ -190,6 +197,11 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.ingestAuth.enabled }}
+            - name: ingest-auth
+              mountPath: /etc/protector/ingest
+              readOnly: true
+            {{- end }}
             {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
             - name: journal
               mountPath: {{ dir .Values.engine.journal.path | quote }}
@@ -215,6 +227,15 @@ spec:
             secretName: {{ include "protector.servingCertName" . }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.ingestAuth.enabled }}
+        # The ingest bearer token (Fix A), surfaced as a file the engine reads once.
+        - name: ingest-auth
+          secret:
+            secretName: {{ include "protector.ingestSecretName" . }}
+            items:
+              - key: {{ .Values.ingestAuth.secretKey }}
+                path: token
+        {{- end }}
         {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
         - name: journal
           persistentVolumeClaim:

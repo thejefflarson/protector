@@ -10,6 +10,7 @@ pub mod adapter;
 pub mod advisory;
 pub mod exploit_intel;
 pub mod health;
+pub mod ingest_guard;
 pub mod linkerd;
 pub mod runtime;
 pub mod trivy;

@@ -16,7 +16,8 @@ default-on.**
 | Property            | Default                                | Why                                                              |
 | ------------------- | -------------------------------------- | --------------------------------------------------------------- |
 | Webhook gating      | **audit-only** (`enforceNamespaces` empty) | Logs unsigned/unmeshed pods, never blocks them.             |
-| Webhook failure     | `failurePolicy: Ignore`                | A protector outage can never block API writes.                  |
+| Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes; the fail-closed enforcing webhook matches no namespace until you label one in. |
+| Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token; engine + agent share a chart-provisioned Secret. |
 | Engine              | **shadow** (`engine.enable` empty)     | Detects + proposes; the engine forces dry-run actuation while no class is armed. |
 | Actuator            | `dryrun`                               | Touches nothing even if a class is later armed (a deliberate two-step). |
 | Egress              | **none**                               | No breach-notify URL, no OTLP, no live advisory/intel fetch — advisory + KEV are mounted snapshots only (ADR-0015). |
@@ -74,6 +75,56 @@ journal / audit log at each step.
 Unsigned gated images are then **denied** in those namespaces (audit everywhere
 else). There is no enforce-everywhere wildcard by design. Same shape for mesh-
 injection: `--set mesh.enforceNamespaces=...`.
+
+### Fail closed in enforced namespaces (webhook availability tradeoff)
+
+By default the admission webhook **fails open** (`failurePolicy: Ignore`): a
+protector outage never blocks Pod creation. That is the right posture for audit, but
+it means an outage could admit an *unsigned* image into a namespace you intended to
+gate. The chart ships a second, **fail-closed** webhook (`pods-enforce.protector.dev`,
+`failurePolicy: Fail`) scoped by a label selector — empty by default, so it blocks
+nothing until you opt a namespace in:
+
+```sh
+kubectl label namespace payments protector.dev/enforce=true
+helm upgrade protector ./charts/protector --namespace protector --reuse-values \
+  --set webhook.enforcedNamespaceSelector.matchLabels.'protector\.dev/enforce'=true
+```
+
+Now in `payments`, if protector is down (or a Pod spec is oversized), Pod **CREATE is
+blocked** instead of admitting a possibly-unsigned image. **Tradeoff:** while
+protector is unavailable, new Pods (including rollouts and HPA scale-ups) cannot be
+created in the labeled namespaces until it recovers. Keep the selector tight and
+aligned with `signature.enforceNamespaces` / `mesh.enforceNamespaces`. The audit
+webhook automatically *excludes* the enforced namespaces, so they aren't
+double-validated and aren't silently failed open.
+
+### Ingest authentication (on by default) — rollout ordering
+
+The engine's runtime/behavioral ingest (the `:9999` falco-ingest port) accepts
+observations that can make a proven attack chain *actionable*. App-layer
+authentication is **on by default** (`ingestAuth.enabled: true`): the chart
+provisions a Secret with a random bearer token, the engine **requires** it, and the
+agent **presents** it. (This is authentication — *who may post*. The cluster's
+Linkerd mesh authorization — *which identities may connect* — is layered separately
+in the cluster repo; the two are complementary.)
+
+Because a token is set by default, a fresh install is authenticated end-to-end. If
+you are introducing the token onto a **running** deployment, roll it out in this
+order so the agent is never rejected mid-upgrade:
+
+1. **Engine accepts token-or-none.** The engine only *requires* a token when one is
+   configured; with none it logs a startup warning and accepts unauthenticated posts.
+   So you can deploy a build that *would* enforce without yet setting the Secret.
+2. **Deploy the Secret + agent.** Provision the ingest Secret and roll the agent so it
+   presents the token (`ingestAuth.enabled: true`, the default — both engine and agent
+   mount the same Secret).
+3. **Token enforced.** With the Secret mounted, the engine now rejects any post lacking
+   the correct bearer with `401`, before deserialization.
+
+Bring your own Secret (e.g. for rotation) with `ingestAuth.existingSecret=<name>` (it
+must have a `token` key). To run the ingest unauthenticated, set
+`ingestAuth.enabled=false` — the engine then logs a warning that the port is open.
 
 ### Enable the local-first model (recommended before arming the engine)
 
@@ -146,6 +197,10 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `engine.journal.enabled`     | `true`                               | Persistent decision journal (a PVC).               |
 | `engine.journal.storageClass`| `""` (cluster default)               | RWO; the Deployment uses the `Recreate` strategy.  |
 | `cert.create`                | `true`                               | cert-manager serving cert + caBundle injection.    |
+| `ingestAuth.enabled`         | `true`                               | Bearer-token authn on the :9999 ingest (engine + agent share a Secret). |
+| `ingestAuth.existingSecret`  | `""`                                 | Bring your own Secret (key `token`) for rotation.  |
+| `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy.        |
+| `webhook.enforcedNamespaceSelector` | `{}` (matches nothing)         | Label-select the namespaces that fail closed.      |
 | `resources`                  | 10m/64Mi → 250m/256Mi                | RAM-tight, arm64-friendly.                          |
 
 See [`values.yaml`](values.yaml) for the fully commented set.
