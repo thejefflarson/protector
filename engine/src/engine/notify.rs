@@ -125,8 +125,11 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
         .collect();
 
     // The verdict text can carry advisory-derived third-party prose (ADR-0015) — sanitize
-    // it before egress so it's inert data in the operator's sink.
-    let verdict_text = sanitize(&notice.verdict.summary());
+    // it before egress so it's inert data in the operator's sink. `sanitize` strips
+    // STRUCTURE (fences/braces) but not SEMANTICS: the model can echo a secret/peer name
+    // or a CVE id it was shown into its free-text reason, which would then egress around
+    // the ADR-0018 redaction. So also scrub those names/tokens out (Fix 6).
+    let verdict_text = scrub_decision_names(&sanitize(&notice.verdict.summary()), notice);
 
     let mut payload = json!({
         // The decision kind — a stable, low-cardinality label, never free text.
@@ -173,6 +176,62 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
     payload
 }
 
+/// The placeholder substituted for any decision-input name or CVE id scrubbed from the
+/// model's free-text verdict prose before egress.
+const REDACTED: &str = "[redacted]";
+
+/// Scrub the model's free-text verdict prose (Fix 6) of the very names that fed the
+/// decision — so a secret/peer name or CVE id the model *echoed* into its reason can't
+/// egress around the ADR-0018 redaction. Replaces, with a placeholder:
+///
+/// - the entry workload key,
+/// - each objective `NodeKey` (the decision's targets) AND the last `/`-segment of each
+///   (the bare secret/peer name, e.g. `db-password`),
+/// - any `CVE-<year>-<seq>` token (case-insensitive).
+///
+/// Order matters: longer, more-specific names are replaced first so a substring match
+/// (`secret/app/Secret/db-password` then `db-password`) doesn't leave a fragment behind.
+fn scrub_decision_names(text: &str, notice: &BreachNotice<'_>) -> String {
+    // Collect the names to scrub, longest first (so a full key is removed before its
+    // bare-name suffix, and no shorter name leaves a longer one half-scrubbed).
+    let mut names: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() {
+            names.push(s.to_string());
+        }
+    };
+    push(notice.entry);
+    for (objective, _attack) in notice.objectives {
+        push(&objective.0);
+        if let Some((_, bare)) = objective.0.rsplit_once('/') {
+            push(bare);
+        }
+    }
+    names.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    names.dedup();
+
+    let mut out = text.to_string();
+    for name in names {
+        if out.contains(&name) {
+            out = out.replace(&name, REDACTED);
+        }
+    }
+    scrub_cve_tokens(&out)
+}
+
+/// Replace every `CVE-<4-digit year>-<4+ digit sequence>` token (case-insensitive) with
+/// the redaction placeholder. The model can name a CVE it was shown in evidence; the CVE
+/// inventory is crown-jewel data ADR-0018 keeps in-cluster, so it must not ride out in
+/// the prose either.
+fn scrub_cve_tokens(text: &str) -> String {
+    static CVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = CVE.get_or_init(|| {
+        regex::Regex::new(r"(?i)CVE-\d{4}-\d{4,}").expect("static CVE regex compiles")
+    });
+    re.replace_all(text, REDACTED).into_owned()
+}
+
 /// The breach notifier. `Some(url)` when `PROTECTOR_ENGINE_NOTIFY_URL` is configured,
 /// `None` (disabled) otherwise — in which case [`notify`](Self::notify) is a no-op and
 /// the engine makes zero outbound calls (byte-identical to today). The client is the
@@ -201,6 +260,19 @@ impl BreachNotifier {
     pub fn new(url: impl Into<String>, verbose: bool) -> Self {
         let url = url.into();
         if url.trim().is_empty() {
+            return Self::disabled();
+        }
+        // Zero-egress is structural (Fix 5 / CLAUDE.md): the sink must be in-cluster
+        // unless PROTECTOR_ALLOW_EXTERNAL_NOTIFY=1 explicitly opts into an external one.
+        // Fail closed (disabled) for an external sink without the opt-in rather than POST
+        // a (redacted) breach summary off-cluster.
+        let allow_external = super::model::external_opt_in("PROTECTOR_ALLOW_EXTERNAL_NOTIFY");
+        if let Err(reason) = super::model::validate_in_cluster_endpoint(url.trim(), allow_external)
+        {
+            tracing::error!(
+                url = %url.trim(),
+                "{reason}; disabling the breach notifier (set PROTECTOR_ALLOW_EXTERNAL_NOTIFY=1 to override)"
+            );
             return Self::disabled();
         }
         let timeout = std::env::var("PROTECTOR_ENGINE_NOTIFY_TIMEOUT_SECS")
@@ -361,6 +433,86 @@ mod tests {
         );
         assert!(payload.get("topology").is_none(), "no topology field");
         assert!(payload.get("peers").is_none(), "no peer-graph field");
+    }
+
+    /// Fix 6: the model can echo a CVE id or a secret/peer name it was shown into its
+    /// free-text reason. `sanitize` strips structure but not those *semantics*, so the
+    /// redacted payload must additionally scrub the decision's own names + CVE tokens —
+    /// the verdict text and the human message must contain neither.
+    #[test]
+    fn redacted_payload_scrubs_cve_and_secret_names_from_verdict_prose() {
+        // A verdict reason that parrots a real CVE id AND a secret node-key/name.
+        let verdict = Verdict::Exploitable(
+            "CVE-2021-44228 in web reaches secret/app/Secret/db-password (db-password)".into(),
+        );
+        let objectives = secret_objectives();
+        let notice = sample_notice(&verdict, &objectives, Enforcement::Shadow);
+
+        let payload = redacted_payload(&notice, false);
+        let blob = serde_json::to_string(&payload).unwrap();
+
+        assert!(!blob.contains("CVE-2021-44228"), "CVE id must be scrubbed");
+        assert!(
+            !blob.contains("db-password"),
+            "secret name must be scrubbed from the prose"
+        );
+        assert!(
+            !blob.contains("secret/app/Secret"),
+            "objective node-key must be scrubbed from the prose"
+        );
+        // The placeholder is present where a name was, so the message is still readable.
+        assert!(
+            payload["verdict"].as_str().unwrap().contains("[redacted]"),
+            "scrubbed names are replaced with a placeholder"
+        );
+    }
+
+    /// A lowercase CVE spelling in the prose is still scrubbed (case-insensitive token).
+    #[test]
+    fn redacted_payload_scrubs_lowercase_cve() {
+        let verdict = Verdict::Exploitable("cve-2021-44228 is exploitable".into());
+        let objectives = secret_objectives();
+        let payload = redacted_payload(
+            &sample_notice(&verdict, &objectives, Enforcement::Shadow),
+            false,
+        );
+        let blob = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !blob.to_ascii_uppercase().contains("CVE-2021-44228"),
+            "a lowercase CVE token must still be scrubbed"
+        );
+    }
+
+    /// Fix 5: an external notifier URL fails closed (disabled) without the opt-in, and is
+    /// enabled with it. An in-cluster URL is enabled regardless.
+    #[test]
+    fn external_notify_url_fails_closed_without_opt_in() {
+        // In-cluster (`.svc.cluster.local`) is always allowed.
+        assert!(
+            BreachNotifier::new(
+                "http://alertmanager.monitoring.svc.cluster.local:9093/api",
+                false
+            )
+            .is_enabled(),
+            "an in-cluster sink must be enabled"
+        );
+        // External without the opt-in → disabled (fail closed).
+        unsafe {
+            std::env::remove_var("PROTECTOR_ALLOW_EXTERNAL_NOTIFY");
+        }
+        assert!(
+            !BreachNotifier::new("https://evil.com/hook", false).is_enabled(),
+            "an external sink must fail closed without the opt-in"
+        );
+        // External WITH the opt-in → enabled.
+        unsafe {
+            std::env::set_var("PROTECTOR_ALLOW_EXTERNAL_NOTIFY", "1");
+        }
+        let enabled = BreachNotifier::new("https://evil.com/hook", false).is_enabled();
+        unsafe {
+            std::env::remove_var("PROTECTOR_ALLOW_EXTERNAL_NOTIFY");
+        }
+        assert!(enabled, "the opt-in must allow an external sink");
     }
 
     /// The verbose opt-in adds the per-objective ATT&CK list (techniques), but STILL

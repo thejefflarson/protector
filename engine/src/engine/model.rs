@@ -84,9 +84,26 @@ fn record_fallback() {
         .add(1, &[]);
 }
 
+/// Upper bound on the completion the model may emit (`max_tokens`). A verdict is a
+/// small JSON object plus a one-line reason — well under this — so the cap never
+/// truncates a legitimate reply, but it stops a misbehaving or compromised endpoint
+/// from streaming an unbounded completion we then buffer and log. `keep_warm` caps
+/// to one token; the judging path needs room for the verdict JSON + reason.
+const MAX_COMPLETION_TOKENS: u32 = 1024;
+
+/// Hard cap on the response body we buffer before parsing (256 KiB). The reply is a
+/// small verdict JSON; this bounds the memory/log-amplification a large or hostile
+/// endpoint reply could cause even with `max_tokens` set (the server need not honour
+/// `max_tokens`). A body over the cap is rejected as `None` (callers degrade safely)
+/// rather than buffered whole via `response.json()`.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
 /// Send `prompt` as a single user message and return the assistant's text, or
 /// `None` on any transport/shape error (callers degrade safely on `None`).
-/// Temperature 0 for reproducible output.
+/// Temperature 0 for reproducible output. The completion is bounded two ways: a
+/// `max_tokens` cap asks the server to stop early, and the response body is read
+/// with a [`MAX_RESPONSE_BYTES`] cap so a server that ignores `max_tokens` still
+/// can't make us buffer an unbounded reply.
 pub async fn chat(
     client: &reqwest::Client,
     endpoint: &str,
@@ -96,13 +113,34 @@ pub async fn chat(
     let body = json!({
         "model": model,
         "temperature": 0,
+        "max_tokens": MAX_COMPLETION_TOKENS,
         "messages": [{ "role": "user", "content": prompt }]
     });
     let response = client.post(endpoint).json(&body).send().await.ok()?;
-    let json: Value = response.json().await.ok()?;
+    let bytes = bounded_body(response).await?;
+    let json: Value = serde_json::from_slice(&bytes).ok()?;
     json["choices"][0]["message"]["content"]
         .as_str()
         .map(str::to_string)
+}
+
+/// Read a response body with a [`MAX_RESPONSE_BYTES`] ceiling, returning `None` if it
+/// would exceed the cap (or on any transport error). Streaming the chunks lets us
+/// bail as soon as the accumulated size crosses the cap instead of buffering the
+/// whole (possibly hostile) body via `response.json()`/`response.bytes()` first.
+async fn bounded_body(mut response: reqwest::Response) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            tracing::warn!(
+                cap = MAX_RESPONSE_BYTES,
+                "model response exceeded the body cap; discarding (treated as no verdict)"
+            );
+            return None;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Some(buf)
 }
 
 /// The model endpoint + name, read once from `PROTECTOR_ENGINE_MODEL` /
@@ -110,13 +148,120 @@ pub async fn chat(
 /// null hypothesizer and adjudicator). The single source of truth for the model
 /// endpoint and the default model name, shared by the engine's model-backed builders
 /// and by [`spawn_keep_warm`] below (so keep-warm warms exactly the configured model).
+///
+/// Zero-egress is enforced structurally (CLAUDE.md invariant): the endpoint host must
+/// resolve in-cluster (loopback, an RFC1918/private range, or a cluster service domain)
+/// unless `PROTECTOR_ALLOW_EXTERNAL_MODEL=1` explicitly opts into an external endpoint.
+/// An external endpoint without the opt-in **fails closed** — the model is left
+/// unattached (deterministic-only) rather than POSTing the graph off-cluster.
 pub fn config() -> Option<(String, String)> {
     let endpoint = std::env::var("PROTECTOR_ENGINE_MODEL")
         .ok()
         .filter(|e| !e.is_empty())?;
+    let allow_external = external_opt_in("PROTECTOR_ALLOW_EXTERNAL_MODEL");
+    if let Err(reason) = validate_in_cluster_endpoint(&endpoint, allow_external) {
+        tracing::error!(
+            endpoint = %endpoint,
+            "{reason}; refusing to attach the model (set PROTECTOR_ALLOW_EXTERNAL_MODEL=1 to override). \
+             Running deterministic-only."
+        );
+        return None;
+    }
     let name =
         std::env::var("PROTECTOR_ENGINE_MODEL_NAME").unwrap_or_else(|_| "qwen2.5:3b".to_string());
     Some((endpoint, name))
+}
+
+/// Whether an external-endpoint opt-in env var is set to a truthy value (`1`/`true`/
+/// `yes`/`on`, any case). Used for both `PROTECTOR_ALLOW_EXTERNAL_MODEL` and the
+/// notifier's `PROTECTOR_ALLOW_EXTERNAL_NOTIFY`.
+pub fn external_opt_in(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Validate that `endpoint`'s host is in-cluster, honouring an explicit external
+/// opt-in. `Ok(())` when the host is loopback, an RFC1918/private range, or a cluster
+/// service domain (`.svc`, `.svc.cluster.local`, `.cluster.local`, or a plain
+/// single-label service name like `ollama`); `Err(reason)` for anything else unless
+/// `allow_external` is set. The homelab default (Ollama at a `.svc.cluster.local`
+/// address) passes unchanged.
+pub fn validate_in_cluster_endpoint(endpoint: &str, allow_external: bool) -> Result<(), String> {
+    if allow_external {
+        return Ok(());
+    }
+    let host = endpoint_host(endpoint)
+        .ok_or_else(|| format!("model endpoint {endpoint:?} has no parseable host"))?;
+    if host_is_in_cluster(&host) {
+        Ok(())
+    } else {
+        Err(format!(
+            "model endpoint host {host:?} is not in-cluster (zero-egress invariant)"
+        ))
+    }
+}
+
+/// Extract the lowercased host (no scheme, userinfo, port, path, or trailing dot)
+/// from an endpoint URL. A deliberately small hand parser — we only need the
+/// authority's host, not a full URL crate — that tolerates a missing scheme
+/// (`ollama.svc:11434`) and an IPv6 literal (`[::1]:11434`).
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    // Drop the scheme.
+    let after_scheme = endpoint
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(endpoint);
+    // The authority ends at the first `/`, `?`, or `#`.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any userinfo (`user:pass@`).
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, r)| r)
+        .unwrap_or(authority);
+    // Split host from port, handling a bracketed IPv6 literal.
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split_once(']').map(|(h, _)| h)?
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    let host = host.trim_end_matches('.');
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Whether a host is in-cluster: loopback, a private/RFC1918 (or ULA) IP, a cluster
+/// service DNS suffix, or a bare single-label service name (no dot — a same-namespace
+/// service like `ollama`). A public DNS name or a public IP is NOT in-cluster.
+fn host_is_in_cluster(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            // is_unique_local()/is_unicast_link_local() are unstable; match ULA (fc00::/7)
+            // and link-local (fe80::/10) by prefix alongside loopback.
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    if host == "localhost" {
+        return true;
+    }
+    // A bare single-label name (no dot) is a same-namespace service (`ollama`).
+    if !host.contains('.') {
+        return true;
+    }
+    const CLUSTER_SUFFIXES: [&str; 3] = [".svc", ".svc.cluster.local", ".cluster.local"];
+    CLUSTER_SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
 /// Default keep-warm interval (seconds). Ollama unloads an idle model after
@@ -364,6 +509,111 @@ mod tests {
                 "qwen2.5:3b".to_string(),
                 Duration::from_secs(120)
             ))
+        );
+    }
+
+    /// Fix 4: the chat request body must carry a `max_tokens` bound so a misbehaving or
+    /// compromised endpoint can't be asked for an unbounded completion. (The body is built
+    /// inline in `chat`; assert the constant feeds a request body of the expected shape.)
+    #[test]
+    fn chat_body_includes_a_max_tokens_bound() {
+        let body = json!({
+            "model": "m",
+            "temperature": 0,
+            "max_tokens": MAX_COMPLETION_TOKENS,
+            "messages": [{ "role": "user", "content": "p" }]
+        });
+        assert_eq!(
+            body["max_tokens"].as_u64(),
+            Some(MAX_COMPLETION_TOKENS as u64),
+            "the chat body must bound the completion with max_tokens"
+        );
+        const {
+            assert!(MAX_COMPLETION_TOKENS > 0, "the bound must be positive");
+            // The response body cap must be a sane, non-trivial bound.
+            assert!(
+                MAX_RESPONSE_BYTES >= 4 * 1024,
+                "the response cap must leave room for a verdict JSON"
+            );
+        }
+    }
+
+    /// Fix 4: a response body over the cap is rejected (returns `None`) rather than
+    /// buffered whole. Served from a localhost test server so no real model is needed.
+    #[tokio::test]
+    async fn oversized_response_is_rejected_not_buffered() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // A server that answers with a body just over the cap.
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Drain the request line(s) enough to respond; we don't need to parse it.
+                let mut buf = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                let oversized = "x".repeat(MAX_RESPONSE_BYTES + 1024);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    oversized.len(),
+                    oversized
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let client = timeout_only_client(5).unwrap();
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+        let out = chat(&client, &endpoint, "m", "p").await;
+        assert!(
+            out.is_none(),
+            "an over-cap response must be rejected as None, not buffered/parsed"
+        );
+        let _ = server.await;
+    }
+
+    /// Fix 5: in-cluster endpoints pass the zero-egress check; an external one fails closed
+    /// without the opt-in and passes with it. The homelab default (`.svc.cluster.local`)
+    /// must pass unchanged.
+    #[test]
+    fn endpoint_egress_validation() {
+        for in_cluster in [
+            "http://localhost:11434/v1/chat/completions",
+            "http://127.0.0.1:11434/v1",
+            "http://10.0.0.5:11434/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://ollama:11434/v1",
+            "http://ollama.ai.svc:11434/v1",
+            "http://ollama.ai.svc.cluster.local:11434/v1",
+            "ollama.ai.svc.cluster.local:11434/v1", // no scheme
+            "http://[::1]:11434/v1",
+        ] {
+            assert!(
+                validate_in_cluster_endpoint(in_cluster, false).is_ok(),
+                "{in_cluster} must be treated as in-cluster"
+            );
+        }
+        // External fails closed without the opt-in, passes with it.
+        assert!(validate_in_cluster_endpoint("https://evil.com/v1", false).is_err());
+        assert!(validate_in_cluster_endpoint("https://8.8.8.8/v1", false).is_err());
+        assert!(validate_in_cluster_endpoint("https://evil.com/v1", true).is_ok());
+    }
+
+    #[test]
+    fn endpoint_host_parses_authority() {
+        assert_eq!(
+            endpoint_host("http://ollama.ai.svc.cluster.local:11434/v1/chat"),
+            Some("ollama.ai.svc.cluster.local".to_string())
+        );
+        assert_eq!(
+            endpoint_host("https://user:pass@HOST.example.com:443/x"),
+            Some("host.example.com".to_string())
+        );
+        assert_eq!(endpoint_host("http://[::1]:8080/"), Some("::1".to_string()));
+        // FQDN trailing dot is stripped (matches the runtime's resolution).
+        assert_eq!(
+            endpoint_host("http://evil.com./hook"),
+            Some("evil.com".to_string())
         );
     }
 

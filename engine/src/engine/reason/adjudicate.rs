@@ -262,6 +262,43 @@ pub struct EntryCoverage {
     pub behavioral: bool,
 }
 
+/// Normalize free text before CVE extraction so a model can't dodge the
+/// anti-fabrication guard with a cosmetic spelling of a CVE id. Uppercases ASCII,
+/// folds the unicode dash family (U+2010..U+2015, U+2212) to the ASCII hyphen,
+/// and collapses any run of whitespace to a single hyphen — so `cve-2023-9999`,
+/// `CVE 2023 9999`, and `CVE‑2023‑9999` (unicode hyphen) all canonicalize to the
+/// ASCII `CVE-2023-9999` that [`extract_cve_ids`] looks for. The SAME
+/// normalization is applied to the real evidence ids, so a legitimate citation
+/// still matches. The result is used only for id matching, never for display.
+fn normalize_cve_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_ws = false;
+    for ch in text.chars() {
+        let mapped = match ch {
+            // Unicode dash family folded to the ASCII hyphen.
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => Some('-'),
+            c if c.is_whitespace() => None, // handled via run-collapsing below
+            c => Some(c.to_ascii_uppercase()),
+        };
+        match mapped {
+            Some(c) => {
+                out.push(c);
+                prev_ws = false;
+            }
+            None => {
+                // Collapse a whitespace run to a single hyphen so `CVE 2023 9999`
+                // reads as the hyphenated form.
+                if !prev_ws {
+                    out.push('-');
+                    prev_ws = true;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Extract CVE ids (`CVE-<4-digit year>-<4+ digit sequence>`) mentioned in free text,
 /// used to check the model's `reason` against the real evidence. Endpoints are ASCII so
 /// byte slicing is safe.
@@ -299,8 +336,13 @@ fn guard_exploitable(verdict: Verdict, check: impl FnOnce(&str) -> Option<Verdic
 /// the entry is re-judged next pass. A legitimate `Exploitable` via a non-CVE step (host
 /// escape, cross-tenant network) cites no CVE and passes through untouched.
 fn guard_fabricated_cve(verdict: Verdict, real_ids: &std::collections::HashSet<String>) -> Verdict {
+    // Canonicalize both sides identically (case / unicode dash / spacing) so a
+    // cosmetic spelling can neither evade detection nor cause a false positive
+    // against a legitimately-cited id.
+    let real_ids: std::collections::HashSet<String> =
+        real_ids.iter().map(|c| normalize_cve_text(c)).collect();
     guard_exploitable(verdict, |reason| {
-        let fabricated: Vec<String> = extract_cve_ids(reason)
+        let fabricated: Vec<String> = extract_cve_ids(&normalize_cve_text(reason))
             .into_iter()
             .filter(|c| !real_ids.contains(c))
             .collect();
@@ -997,6 +1039,48 @@ mod tests {
         assert!(matches!(
             guard_fabricated_cve(Verdict::Refuted("own [MOUNTED] secret".into()), &none),
             Verdict::Refuted(_)
+        ));
+    }
+
+    /// A model can dodge the literal `CVE-` match by spelling a fabricated id in
+    /// lowercase, with spaces, or with a unicode hyphen. Normalization must catch
+    /// all three so the fabricated citation still downgrades — while a real id
+    /// cited in a cosmetic variant still passes.
+    #[test]
+    fn hallucination_guard_normalizes_cosmetic_cve_spellings() {
+        use std::collections::HashSet;
+        let none: HashSet<String> = HashSet::new();
+        let real: HashSet<String> = ["CVE-2021-44228".to_string()].into_iter().collect();
+
+        // Lowercase fabricated id.
+        let lower = guard_fabricated_cve(
+            Verdict::Exploitable("Step 1: cve-2023-9999 is loaded".into()),
+            &none,
+        );
+        assert!(matches!(lower, Verdict::Uncertain(_)) && !lower.promotes());
+
+        // Space-separated fabricated id.
+        let spaced = guard_fabricated_cve(
+            Verdict::Exploitable("Step 1: CVE 2023 9999 is loaded".into()),
+            &none,
+        );
+        assert!(matches!(spaced, Verdict::Uncertain(_)) && !spaced.promotes());
+
+        // Unicode-hyphen (U+2011 non-breaking hyphen) fabricated id.
+        let unicode = guard_fabricated_cve(
+            Verdict::Exploitable("Step 1: CVE\u{2011}2023\u{2011}9999 is loaded".into()),
+            &none,
+        );
+        assert!(matches!(unicode, Verdict::Uncertain(_)) && !unicode.promotes());
+
+        // A REAL id cited with a unicode hyphen / lowercase still passes (no false
+        // positive against the evidence).
+        assert!(matches!(
+            guard_fabricated_cve(
+                Verdict::Exploitable("Step 1: cve\u{2013}2021\u{2013}44228 is loaded".into()),
+                &real,
+            ),
+            Verdict::Exploitable(_)
         ));
     }
 
