@@ -26,5 +26,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0016](0016-severity-vs-urgency.md) | The breach model: prove chains, enrich them, the model decides and isolates until clear | Accepted (amended by 0017) |
 | [0017](0017-isolation-persists-on-the-breach-condition.md) | Isolation persists on the breach condition: chain ∧ enrichment fingerprint (revert keys on `entry_fingerprint`) | Accepted |
 | [0018](0018-operator-configured-redacted-breach-notifier.md) | The breach notifier is the one sanctioned outbound path: operator-configured, off by default, redacted by default | Accepted |
+| [0019](0019-maud-templating-for-the-dashboard.md) | maud for the server-rendered dashboard: compile-time-checked, auto-escaping HTML-in-Rust, in a React-like view_model/components split (`PreEscaped` is an audited allowlist) | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.
