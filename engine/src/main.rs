@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use protector::engine::observe::epss::EpssStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::policy_log::PolicyDecisionLog;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
@@ -256,6 +257,13 @@ async fn main() -> Result<()> {
             Ok(path) => KevCatalog::from_file(&path),
             Err(_) => KevCatalog::empty(),
         };
+        // EPSS scores (the FIRST.org feed, synced into the same shared volume) for the
+        // ExploitIntel *predictive* exploitation signal (JEF-243). Unset = no EPSS evidence;
+        // a CVE's `epss` then stays `None` and the prompt omits the `[epss: …]` token.
+        let epss = match env::var("PROTECTOR_EPSS_FILE") {
+            Ok(path) => EpssStore::from_file(&path),
+            Err(_) => EpssStore::empty(),
+        };
         // The dashboard (spawned inside run_watch) reads the webhook's admission-decision
         // ring for `/policy` (JEF-226) — the same `Arc` the webhook engine writes to.
         let dashboard_policy_log = policy_log.clone();
@@ -270,6 +278,7 @@ async fn main() -> Result<()> {
                         falco_addr,
                         dashboard_addr,
                         kev,
+                        epss,
                         dashboard_policy_log,
                     )
                     .await

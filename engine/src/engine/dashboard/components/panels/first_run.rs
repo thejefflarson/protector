@@ -97,6 +97,7 @@ mod tests {
             &ReadinessConfig {
                 model_attached: true,
                 kev_count: 3,
+                epss_count: 3,
                 journal_durable: true,
                 armed: false,
             },

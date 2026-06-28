@@ -1,14 +1,17 @@
 {{- /*
-Feed-fetcher sidecar wiring (JEF-238). When feedSync is ON (the default), a native
-sidecar (an initContainer with restartPolicy: Always) fetches the FULL public CISA KEV
-catalogue into a shared emptyDir, and the engine reads that file from the SAME volume —
-no ConfigMap, no CronJob (those hit the 1 MiB ConfigMap limit; raw CISA KEV is ~1.5 MiB).
-The emptyDir has no size limit, so KEV is fetched in FULL. The engine itself stays
-zero-egress (ADR-0015): only the sidecar egresses, to one public read-only feed. With
+Feed-fetcher sidecar wiring (JEF-238, JEF-243). When feedSync is ON (the default), a native
+sidecar (an initContainer with restartPolicy: Always) fetches TWO public read-only feeds
+into a shared emptyDir, and the engine reads those files from the SAME volume — no ConfigMap,
+no CronJob (those hit the 1 MiB ConfigMap limit; raw CISA KEV is ~1.5 MiB):
+  * the FULL public CISA KEV catalogue (kev.json) — known-exploited-NOW intel; and
+  * the FIRST.org EPSS scores (epss.csv, fetched gzipped and gunzipped in place) — the
+    PREDICTIVE exploitation probability per CVE (JEF-243).
+The emptyDir has no size limit, so both feeds are fetched in FULL. The engine itself stays
+zero-egress (ADR-0015): only the sidecar egresses, to public read-only feeds. With
 feedSync OFF, no sidecar and no shared volume render, and the feed env is dropped — the
-air-gapped / manual-mount path (mount your own kev.json at the same path if you want
-enrichment offline). KEV is the ONLY feed: the NVD advisory feed was retired (JEF-242,
-redundant with Trivy's CVE metadata).
+air-gapped / manual-mount path (mount your own kev.json / epss.csv at the same paths if you
+want enrichment offline). The NVD advisory feed was retired (JEF-242, redundant with Trivy's
+CVE metadata); KEV + EPSS are the two distinct exploitation axes alongside Trivy's CVSS.
 */}}
 {{- $feeds := and .Values.engine.enabled .Values.feedSync.enabled }}
 {{- $feedsDir := include "protector.feedsDir" . }}
@@ -91,6 +94,8 @@ spec:
           env:
             - name: KEV_URL
               value: {{ .Values.feedSync.kevUrl | quote }}
+            - name: EPSS_URL
+              value: {{ .Values.feedSync.epssUrl | quote }}
             - name: FEEDS_DIR
               value: {{ $feedsDir | quote }}
             - name: INTERVAL
@@ -100,15 +105,17 @@ spec:
           command:
             - /bin/sh
             - -c
-            # Fetch the KEV feed to a TEMP file, then atomically move it into place only on a
+            # Fetch each feed to a TEMP file, then atomically move it into place only on a
             # clean download — `set -eu` + curl `--fail` mean a feed outage leaves the
             # PREVIOUS good file untouched (never a half/empty overwrite) and the loop just
             # retries next tick.
             #
-            # KEV is plain JSON, fetched in FULL (no ConfigMap size limit). It is the ONLY
-            # feed: the NVD advisory feed was retired (JEF-242, redundant with Trivy's CVE
-            # metadata). NO `jq` / NO transform / NO extra image. The engine never fetches
-            # anything itself (zero egress, ADR-0015); it only reads this file.
+            # Two feeds, both fetched in FULL (no ConfigMap size limit): KEV (plain JSON,
+            # known-exploited-NOW) and EPSS (gzipped CSV, the PREDICTIVE per-CVE probability —
+            # JEF-243). NO `jq` / NO transform / NO extra image — `gunzip` is busybox-builtin in
+            # the curl image. The NVD advisory feed was retired (JEF-242, redundant with Trivy's
+            # CVE metadata). The engine never fetches anything itself (zero egress, ADR-0015);
+            # it only reads these files.
             - |
               set -eu
               # Plain (uncompressed) feed → atomic move on a clean download.
@@ -126,8 +133,29 @@ spec:
                   echo "feed-fetcher: WARN fetch failed for $url; keeping previous $dest" >&2
                 fi
               }
+              # Gzipped feed (EPSS) → download to a temp, gunzip to a second temp, atomic move
+              # only when BOTH steps succeed (a truncated download won't gunzip, so the
+              # previous good epss.csv is kept untouched).
+              fetch_gz() {
+                name="$1"; url="$2"; dest="$FEEDS_DIR/$name"
+                gz="$dest.gz.tmp"; tmp="$dest.tmp"
+                echo "feed-fetcher: fetching $url -> $dest (gz)"
+                if curl --fail --location --silent --show-error \
+                     --retry 3 --retry-delay 5 \
+                     --max-time "$CURL_MAX_TIME" \
+                     --output "$gz" "$url" \
+                   && gunzip -c "$gz" > "$tmp"; then
+                  mv -f "$tmp" "$dest"
+                  rm -f "$gz"
+                  echo "feed-fetcher: updated $dest"
+                else
+                  rm -f "$gz" "$tmp"
+                  echo "feed-fetcher: WARN fetch failed for $url; keeping previous $dest" >&2
+                fi
+              }
               while :; do
                 fetch kev.json "$KEV_URL"
+                fetch_gz epss.csv "$EPSS_URL"
                 echo "feed-fetcher: sleeping $INTERVAL"
                 sleep "$INTERVAL"
               done
@@ -263,6 +291,13 @@ spec:
             # if it is missing/empty (the first-boot race before the sidecar's first fetch).
             - name: PROTECTOR_KEV_FILE
               value: {{ printf "%s/kev.json" $feedsDir | quote }}
+            # EPSS scores file the same sidecar writes into the shared emptyDir (JEF-243).
+            # The FIRST.org CSV (gunzipped in place) — EpssStore parses `cve,epss,percentile`
+            # rows. The engine never fetches EPSS itself (zero egress); it only reads this
+            # file, and degrades to "no exploit-prediction evidence" if it is missing/empty
+            # (the first-boot race before the sidecar's first fetch).
+            - name: PROTECTOR_EPSS_FILE
+              value: {{ printf "%s/epss.csv" $feedsDir | quote }}
             {{- end }}
             {{- with .Values.engine.model.endpoint }}
             # Local-first model (OpenAI-compatible). Unset = deterministic enumerator only.
@@ -308,8 +343,8 @@ spec:
               mountPath: {{ dir .Values.engine.journal.path | quote }}
             {{- end }}
             {{- if $feeds }}
-            # The shared feeds emptyDir the sidecar writes (JEF-238), mounted READ-ONLY in
-            # the engine — the engine only reads kev.json, never writes.
+            # The shared feeds emptyDir the sidecar writes (JEF-238, JEF-243), mounted
+            # READ-ONLY in the engine — the engine only reads kev.json / epss.csv, never writes.
             - name: feeds
               mountPath: {{ $feedsDir | quote }}
               readOnly: true
@@ -341,9 +376,9 @@ spec:
         {{- end }}
         {{- if $feeds }}
         # Shared scratch volume between the feed-fetcher sidecar (writer) and the engine
-        # (reader) — JEF-238. emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA KEV
-        # JSON (~1.5 MiB) fits. Lives for the pod's lifetime; the sidecar re-fetches on its
-        # interval and on restart.
+        # (reader) — JEF-238, JEF-243. emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA
+        # KEV JSON (~1.5 MiB) and the FIRST.org EPSS CSV both fit. Lives for the pod's lifetime;
+        # the sidecar re-fetches on its interval and on restart.
         - name: feeds
           emptyDir: {}
         {{- end }}

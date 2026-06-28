@@ -438,6 +438,8 @@ fn readiness_reports_each_input_from_live_state() {
     assert!(rrow(&r, "model").detail.contains("last call ok"));
     assert_eq!(rrow(&r, "kev").state, InputState::Present);
     assert!(rrow(&r, "kev").detail.contains("1500"));
+    assert_eq!(rrow(&r, "epss").state, InputState::Present);
+    assert!(rrow(&r, "epss").detail.contains("1500"));
     assert_eq!(rrow(&r, "falco").state, InputState::Present);
     assert!(rrow(&r, "falco").detail.contains("3 signals last pass"));
     assert_eq!(rrow(&r, "ebpf-agent").state, InputState::Present);
@@ -464,7 +466,7 @@ fn absent_enrichment_inputs_are_marked_and_flagged_as_weakening() {
         &BakeStats::default(),
         Some(SystemTime::now()),
     );
-    for id in ["kev", "falco", "ebpf-agent"] {
+    for id in ["kev", "epss", "falco", "ebpf-agent"] {
         assert_eq!(rrow(&r, id).state, InputState::Absent, "{id} absent");
         assert!(rrow(&r, id).weakens_decisions, "{id} weakens decisions");
     }
@@ -647,6 +649,11 @@ fn readiness_json_shape_matches_the_panel_data() {
         .find(|r| r["id"] == "kev")
         .expect("kev row in json");
     assert_eq!(kev["state"], serde_json::json!("absent"));
+    let epss = inputs
+        .iter()
+        .find(|r| r["id"] == "epss")
+        .expect("epss row in json");
+    assert_eq!(epss["state"], serde_json::json!("absent"));
     let ebpf = inputs
         .iter()
         .find(|r| r["id"] == "ebpf-agent")
@@ -669,6 +676,7 @@ fn findings_round_trips_the_readiness_config_and_model_health() {
     findings.set_readiness_config(ReadinessConfig {
         model_attached: true,
         kev_count: 10,
+        epss_count: 7,
         journal_durable: true,
         armed: true,
     });
@@ -676,6 +684,7 @@ fn findings_round_trips_the_readiness_config_and_model_health() {
     let cfg = findings.readiness_config();
     assert!(cfg.model_attached && cfg.armed && cfg.journal_durable);
     assert_eq!(cfg.kev_count, 10);
+    assert_eq!(cfg.epss_count, 7);
     assert_eq!(findings.model_health(), ModelHealth::Timeout);
 }
 

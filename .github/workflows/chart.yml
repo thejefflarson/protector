@@ -109,6 +109,12 @@ jobs:
             || { echo "engine not auto-wired to KEV by default"; exit 1; }
           echo "$render" | grep -q 'kev.json' \
             || { echo "engine not pointed at the sidecar kev.json"; exit 1; }
+          # Engine auto-wired to the EPSS file the same sidecar writes (JEF-243) — the
+          # predictive exploitation axis alongside KEV.
+          echo "$render" | grep -q 'PROTECTOR_EPSS_FILE' \
+            || { echo "engine not auto-wired to EPSS by default"; exit 1; }
+          echo "$render" | grep -q 'epss.csv' \
+            || { echo "engine not pointed at the sidecar epss.csv"; exit 1; }
           # The retired CronJob/ConfigMap/feed-sync RBAC path must be GONE.
           if echo "$render" | grep -q 'kind: CronJob'; then
             echo "feed-sync CronJob still rendered (should be a sidecar now)"; exit 1
@@ -137,6 +143,9 @@ jobs:
           fi
           if echo "$render" | grep -q 'PROTECTOR_KEV_FILE'; then
             echo "engine auto-wired KEV despite feedSync.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'PROTECTOR_EPSS_FILE'; then
+            echo "engine auto-wired EPSS despite feedSync.enabled=false"; exit 1
           fi
           if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
             echo "engine auto-wired advisory despite feedSync.enabled=false"; exit 1
@@ -167,9 +176,12 @@ jobs:
           if echo "$render" | grep -qE 'kubectl (apply|create|get|patch)'; then
             echo "feed-fetcher invokes kubectl (should make no apiserver call)"; exit 1
           fi
-          # It must fetch the KEV feed (the only feed — the advisory feed was retired, JEF-242).
+          # It must fetch the KEV feed and the EPSS feed (the two exploitation-intel feeds; the
+          # advisory feed was retired, JEF-242).
           echo "$render" | grep -q 'known_exploited_vulnerabilities.json' \
             || { echo "feed-fetcher does not fetch the KEV feed"; exit 1; }
+          echo "$render" | grep -q 'epss_scores-current.csv.gz' \
+            || { echo "feed-fetcher does not fetch the EPSS feed (JEF-243)"; exit 1; }
           if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
             echo "advisory env rendered despite the advisory feed being retired (JEF-242)"; exit 1
           fi
