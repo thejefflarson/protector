@@ -25,6 +25,7 @@ impl Adapter for VulnerabilityAdapter {
                 reference: None,
                 trust: Trust::Unknown,
                 vulnerabilities: vec![],
+                exposed_secrets: vec![],
             })
             .key();
             graph.update_node(&key, |node| {
@@ -668,6 +669,7 @@ mod tests {
             reference: None,
             trust: Trust::Unknown,
             vulnerabilities: vec![],
+            exposed_secrets: vec![],
         })
         .key();
         let idx = graph.index_of(&img_key).expect("image node exists");
@@ -874,6 +876,7 @@ mod tests {
             reference: None,
             trust: Trust::Unknown,
             vulnerabilities: vec![],
+            exposed_secrets: vec![],
         })
         .key();
         let idx = graph.index_of(&img_key).expect("image node exists");

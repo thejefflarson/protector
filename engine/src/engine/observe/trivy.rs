@@ -12,52 +12,13 @@ use std::time::SystemTime;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-use super::ImageVulnerabilities;
-use crate::engine::graph::{Provenance, Reachability, Severity, Vulnerability};
+use super::{ImageVulnerabilities, image_ref, opt_str, severity};
+use crate::engine::graph::{Provenance, Reachability, Vulnerability};
 
 /// Parse a trivy-operator `VulnerabilityReport` object. The report payload lives
 /// under the top-level `report` field.
 pub fn parse_report(object: &DynamicObject) -> Option<ImageVulnerabilities> {
     from_report(object.data.get("report")?)
-}
-
-/// A non-empty string field from a report entry, or `None`. Empty strings (trivy
-/// omits a fix by emitting `""`, not by dropping the key) collapse to `None`.
-fn opt_str(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn severity(label: &str) -> Severity {
-    match label {
-        "CRITICAL" => Severity::Critical,
-        "HIGH" => Severity::High,
-        "MEDIUM" => Severity::Medium,
-        _ => Severity::Low,
-    }
-}
-
-/// Reconstruct the deployed image reference (`server/repository:tag`) so the
-/// finding lands on the right Image node. Best-effort: digest-level matching would
-/// be canonical, but the report's artifact fields are what we have.
-fn image_ref(report: &Value) -> Option<String> {
-    let artifact = report.get("artifact")?;
-    let repository = artifact.get("repository")?.as_str()?;
-    let base = match report
-        .get("registry")
-        .and_then(|r| r.get("server"))
-        .and_then(Value::as_str)
-    {
-        Some(server) => format!("{server}/{repository}"),
-        None => repository.to_string(),
-    };
-    Some(match artifact.get("tag").and_then(Value::as_str) {
-        Some(tag) => format!("{base}:{tag}"),
-        None => base,
-    })
 }
 
 fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
@@ -113,6 +74,7 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::graph::Severity;
     use serde_json::json;
 
     #[test]

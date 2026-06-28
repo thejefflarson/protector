@@ -155,6 +155,7 @@ fn certainty_rail_renders_entry_relation_and_cve_facts() {
             cve("CVE-2021-0003", Severity::High, false),
         ],
         runtime: vec![],
+        ..Default::default()
     };
     let ghtml = card_body("workload/app/Pod/web", &[&g]);
     assert!(ghtml.contains("CVE present") && ghtml.contains("<b>3</b> known vulns"));

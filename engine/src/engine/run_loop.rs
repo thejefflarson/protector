@@ -343,6 +343,10 @@ pub async fn run_watch(
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;
+        // The other trivy-operator report kinds (JEF-244): exposed secrets, config-audit,
+        // and RBAC-assessment findings, listed best-effort each pass like the CVE reports.
+        let (image_secrets_now, config_audits_now, rbac_assessments_now) =
+            observe::list_trivy_findings(&client).await;
         let snapshot = Snapshot {
             pods: pods.state().iter().map(|p| (**p).clone()).collect(),
             network_policies: netpols.state().iter().map(|n| (**n).clone()).collect(),
@@ -374,6 +378,9 @@ pub async fn run_watch(
                 epss.annotate(&mut v);
                 v
             },
+            image_secrets: image_secrets_now,
+            config_audits: config_audits_now,
+            rbac_assessments: rbac_assessments_now,
             runtime_events: runtime_events.current(),
             // Linkerd authz CRDs, listed best-effort each pass (the mesh-native
             // reachability source — see LinkerdReachabilityAdapter).

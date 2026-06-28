@@ -75,6 +75,8 @@ fn pod(name: &str) -> Node {
         exposure: Exposure::Internal,
         runtime: vec![],
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     })
 }
 

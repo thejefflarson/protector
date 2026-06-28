@@ -48,6 +48,8 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
         exposure: Exposure::Internet,
         runtime: Vec::new(),
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     });
     let entry_key = wl.key();
     let e = g.upsert_node(wl);
@@ -56,6 +58,7 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
         reference: Some("web:1".into()),
         trust: Trust::Unknown,
         vulnerabilities: vulns,
+        exposed_secrets: vec![],
     }));
     g.add_edge(
         e,
@@ -92,6 +95,8 @@ pub(super) fn graph_with_behaviors(behaviors: Vec<Behavior>) -> (SecurityGraph, 
         exposure: Exposure::Internet,
         runtime,
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     });
     let entry_key = wl.key();
     g.upsert_node(wl);
@@ -134,6 +139,8 @@ pub(super) fn entry_reaching_db(
             exposure: Exposure::Internet,
             runtime: Vec::new(),
             persistent: false,
+            misconfigs: vec![],
+            rbac_findings: vec![],
         })
     };
     let mut g = SecurityGraph::new();

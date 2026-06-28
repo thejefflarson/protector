@@ -261,6 +261,8 @@ async fn real_model_judges_toxic_vs_unevidenced() {
             exposure: Exposure::Internet,
             runtime: Vec::new(),
             persistent: false,
+            misconfigs: vec![],
+            rbac_findings: vec![],
         });
         let entry_key = entry.key();
         let e = g.upsert_node(entry);

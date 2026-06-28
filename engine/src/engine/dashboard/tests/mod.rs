@@ -392,6 +392,7 @@ pub(super) fn finding_with_cves(verdict: Option<&str>, cves: Vec<CveEvidence>) -
     f.evidence = EntryEvidence {
         cves,
         runtime: vec![],
+        ..Default::default()
     };
     f
 }
@@ -458,6 +459,7 @@ pub(super) fn rich_finding(entry: &str, verdict: Option<&str>) -> Finding {
         runtime: vec![Behavior::Alert {
             rule: "Terminal shell in container".into(),
         }],
+        ..Default::default()
     };
     f
 }

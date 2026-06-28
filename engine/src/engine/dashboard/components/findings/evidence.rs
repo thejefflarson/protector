@@ -4,7 +4,7 @@
 //! `engine::` domain type.
 
 use crate::engine::dashboard::view_model::findings::{
-    CveBlockProps, CveRow, EvidenceProps, RuntimeBlockProps,
+    CveBlockProps, CveRow, EvidenceProps, FindingBlockProps, FindingRow, RuntimeBlockProps,
 };
 use maud::{Markup, html};
 
@@ -115,15 +115,70 @@ fn runtime_block(rt: &RuntimeBlockProps) -> Markup {
     }
 }
 
+/// One non-CVE findings list item (JEF-244): id, a severity chip, the category, and the
+/// untrusted title — the title rides an auto-escaping maud brace (third-party scanner text).
+fn finding_li(f: &FindingRow) -> Markup {
+    html! {
+        li {
+            code { (f.id) } " "
+            span class=(format!("chip {}", f.severity_tone)) { (f.severity) }
+            @if let Some(c) = &f.category { " " span class="muted" { "(" (c) ")" } }
+            @if let Some(t) = &f.title { @if !t.is_empty() { " — " (t) } }
+        }
+    }
+}
+
+/// A non-CVE findings block (JEF-244): a captioned count + list. Rendered only when present
+/// (`None` ⇒ nothing) — the CVE + runtime blocks already carry the entry's honest-empty
+/// narrative, so an absent scanner report adds no noise. `cap` is the human caption and `cls`
+/// the block's CSS class so the exploitation-grade exposed-secret block reads distinctly from
+/// the static-posture blocks.
+fn finding_block(block: Option<&FindingBlockProps>, cls: &str, cap: &str, note: &str) -> Markup {
+    match block {
+        None => html! {},
+        Some(b) => html! {
+            div class=(format!("ev {cls}")) {
+                div class="ev-cap" { (cap) " " span class="muted" { "— " (note) } }
+                div class="ev-sum" {
+                    b { (b.n) } " finding"
+                    @if b.n != 1 { "s" }
+                }
+                ul {
+                    @for f in &b.rows { (finding_li(f)) }
+                }
+            }
+        },
+    }
+}
+
 /// Both ADR-0016 evidence blocks wrapped as one "evidence for this path" section (JEF-133):
 /// CVEs (severity input) then runtime alerts (live corroboration), each with its own honest
-/// empty state.
+/// empty state — plus the JEF-244 scanner-finding blocks (exposed secrets first, as
+/// exploitation-grade exposure, then the static-posture misconfig / RBAC blocks) when present.
 pub fn evidence(props: &EvidenceProps) -> Markup {
     html! {
         div class="evidence" {
             div class="ev-head" { "evidence for this path" }
             (cve_block(props.cve.as_ref()))
+            (finding_block(
+                props.exposed_secrets.as_ref(),
+                "ev-secret",
+                "exposed secrets",
+                "a usable credential baked into the image (exploitation evidence)",
+            ))
             (runtime_block(&props.runtime))
+            (finding_block(
+                props.misconfigs.as_ref(),
+                "ev-misconfig",
+                "misconfigurations",
+                "config-audit checks that failed (how severe a fix would be)",
+            ))
+            (finding_block(
+                props.rbac_findings.as_ref(),
+                "ev-rbac",
+                "RBAC exposure",
+                "role checks that failed (structural authorization breadth)",
+            ))
         }
     }
 }
@@ -153,6 +208,78 @@ mod tests {
         runtime_block(&runtime_block_props(ev)).into_string()
     }
 
+    fn finding(
+        id: &str,
+        severity: &str,
+        title: &str,
+    ) -> crate::engine::dashboard::model::FindingEvidence {
+        crate::engine::dashboard::model::FindingEvidence::from_finding(
+            &crate::engine::graph::ScanFinding {
+                id: id.into(),
+                severity: match severity {
+                    "critical" => Severity::Critical,
+                    "high" => Severity::High,
+                    "medium" => Severity::Medium,
+                    _ => Severity::Low,
+                },
+                category: None,
+                title: Some(title.into()),
+                target: None,
+                sources: vec![],
+            },
+        )
+    }
+
+    fn full(ev: &EntryEvidence) -> String {
+        evidence(&crate::engine::dashboard::view_model::findings::evidence_props(ev)).into_string()
+    }
+
+    #[test]
+    fn jef244_finding_blocks_render_with_their_calibrated_captions() {
+        let ev = EntryEvidence {
+            exposed_secrets: vec![finding(
+                "aws-access-key-id",
+                "critical",
+                "AWS_ACCESS_KEY_ID=*****",
+            )],
+            misconfigs: vec![finding("KSV017", "high", "Privileged container")],
+            rbac_findings: vec![finding("KSV041", "critical", "Manage secrets")],
+            ..Default::default()
+        };
+        let html = full(&ev);
+        // Exposed-secret block: exploitation-grade caption + the redacted match (not a value).
+        assert!(html.contains("exposed secrets"), "secret caption: {html}");
+        assert!(html.contains("exploitation evidence"));
+        assert!(html.contains("aws-access-key-id"));
+        assert!(html.contains("AWS_ACCESS_KEY_ID=*****"));
+        // Misconfig + RBAC blocks render as static posture.
+        assert!(html.contains("misconfigurations"));
+        assert!(html.contains("KSV017"));
+        assert!(html.contains("RBAC exposure"));
+        assert!(html.contains("KSV041"));
+    }
+
+    #[test]
+    fn jef244_absent_finding_reports_render_nothing() {
+        // No scanner reports ⇒ no finding blocks at all (the CVE/runtime blocks carry the
+        // honest-empty narrative; absent reports must not add empty noise).
+        let html = full(&EntryEvidence::default());
+        assert!(!html.contains("exposed secrets"));
+        assert!(!html.contains("misconfigurations"));
+        assert!(!html.contains("RBAC exposure"));
+    }
+
+    #[test]
+    fn jef244_finding_title_is_html_escaped() {
+        let ev = EntryEvidence {
+            misconfigs: vec![finding("KSV017", "high", "<img src=x onerror=alert(1)>")],
+            ..Default::default()
+        };
+        let html = full(&ev);
+        assert!(!html.contains("<img"), "raw tag must not survive: {html}");
+        assert!(html.contains("&lt;img"), "title HTML-escaped: {html}");
+    }
+
     #[test]
     fn cve_block_summarizes_count_and_top_severities() {
         let ev = EntryEvidence {
@@ -162,6 +289,7 @@ mod tests {
                 cve("CVE-2021-0003", Severity::Critical, false),
             ],
             runtime: vec![],
+            ..Default::default()
         };
         let html = block(&ev);
         assert!(html.contains("<b>3</b> CVEs"), "count: {html}");
@@ -182,6 +310,7 @@ mod tests {
                 .map(|i| cve(&format!("CVE-2021-000{i}"), Severity::High, false))
                 .collect(),
             runtime: vec![],
+            ..Default::default()
         };
         let html = block(&ev);
         assert!(
@@ -225,6 +354,7 @@ mod tests {
         let html = block(&EntryEvidence {
             cves: vec![CveEvidence::from_vuln(&v)],
             runtime: vec![],
+            ..Default::default()
         });
         assert!(html.contains("CVSS 10.0"), "cvss score surfaced: {html}");
         assert!(html.contains("Log4Shell"), "title surfaced: {html}");
@@ -247,6 +377,7 @@ mod tests {
         let html = block(&EntryEvidence {
             cves: vec![CveEvidence::from_vuln(&v)],
             runtime: vec![],
+            ..Default::default()
         });
         assert!(!html.contains("<img"), "raw tag must not survive: {html}");
         assert!(html.contains("&lt;img"), "title HTML-escaped: {html}");
@@ -265,6 +396,7 @@ mod tests {
                     internet: false,
                 },
             ],
+            ..Default::default()
         };
         let html = runtime(&ev);
         assert!(html.contains("SEEN LIVE"), "alert seen live: {html}");
@@ -295,6 +427,7 @@ mod tests {
             runtime: vec![Behavior::SecretRead {
                 secret: "db-password".into(),
             }],
+            ..Default::default()
         };
         let html = runtime(&ev);
         assert!(!html.contains("SEEN LIVE"), "no false live signal: {html}");

@@ -370,20 +370,102 @@ pub fn runtime_block_props(ev: &EntryEvidence) -> RuntimeBlockProps {
     }
 }
 
+/// One scanner-finding row for a findings block (JEF-244): the structured id + severity tone,
+/// the category, and the untrusted title (auto-escaped at render). The plain-data analogue of
+/// [`CveRow`] for the non-CVE trivy report kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRow {
+    pub id: String,
+    pub severity: String,
+    pub severity_tone: &'static str,
+    pub category: Option<String>,
+    pub title: Option<String>,
+}
+
+impl FindingRow {
+    fn of(f: &crate::engine::dashboard::model::FindingEvidence) -> Self {
+        FindingRow {
+            id: f.id.clone(),
+            severity: f.severity.clone(),
+            severity_tone: tone_for(&f.severity),
+            category: f.category.clone(),
+            title: f.title.clone(),
+        }
+    }
+}
+
+/// One non-CVE findings block (JEF-244): a labeled list of [`FindingRow`]s, worst-first. The
+/// caption distinguishes the EXPLOITATION-grade exposed-secret block from the static-posture
+/// (misconfig / RBAC) blocks. `None` ⇒ the block is absent (rendered as nothing, since the CVE
+/// + runtime blocks already carry the honest-empty narrative for the entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingBlockProps {
+    pub n: usize,
+    pub rows: Vec<FindingRow>,
+}
+
+fn finding_block_props(
+    findings: &[crate::engine::dashboard::model::FindingEvidence],
+) -> Option<FindingBlockProps> {
+    if findings.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<FindingRow> = findings.iter().map(FindingRow::of).collect();
+    rows.sort_by(|a, b| {
+        sev_rank(&a.severity)
+            .cmp(&sev_rank(&b.severity))
+            .then(a.id.cmp(&b.id))
+    });
+    Some(FindingBlockProps {
+        n: rows.len(),
+        rows,
+    })
+}
+
+/// Worst-first rank for a severity label (`critical` = 0).
+fn sev_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    }
+}
+
+/// The chip tone for a severity label (matches the CVE row's tones).
+fn tone_for(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "crit",
+        "high" => "high",
+        "medium" => "med",
+        _ => "low",
+    }
+}
+
 /// The two ADR-0016 evidence blocks for a finding's entry (JEF-133): CVEs (severity input)
-/// then runtime alerts (live corroboration), each with its own honest empty state.
+/// then runtime alerts (live corroboration), each with its own honest empty state — plus the
+/// JEF-244 scanner-finding blocks (exposed secrets, misconfig, RBAC) when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceProps {
     /// `None` ⇒ the CVE block's honest-empty state.
     pub cve: Option<CveBlockProps>,
     pub runtime: RuntimeBlockProps,
+    /// Exposed secrets baked into the image (JEF-244) — exploitation-grade. `None` ⇒ absent.
+    pub exposed_secrets: Option<FindingBlockProps>,
+    /// Config-audit misconfigurations (JEF-244) — static posture. `None` ⇒ absent.
+    pub misconfigs: Option<FindingBlockProps>,
+    /// RBAC-assessment findings (JEF-244) — structural RBAC exposure. `None` ⇒ absent.
+    pub rbac_findings: Option<FindingBlockProps>,
 }
 
-/// Shape both evidence blocks for an entry (JEF-133).
+/// Shape every evidence block for an entry (JEF-133 + JEF-244).
 pub fn evidence_props(ev: &EntryEvidence) -> EvidenceProps {
     EvidenceProps {
         cve: cve_block_props(ev),
         runtime: runtime_block_props(ev),
+        exposed_secrets: finding_block_props(&ev.exposed_secrets),
+        misconfigs: finding_block_props(&ev.misconfigs),
+        rbac_findings: finding_block_props(&ev.rbac_findings),
     }
 }
 

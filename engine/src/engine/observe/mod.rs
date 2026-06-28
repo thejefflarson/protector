@@ -15,6 +15,9 @@ pub mod ingest_guard;
 pub mod linkerd;
 pub mod runtime;
 pub mod trivy;
+pub mod trivy_config;
+pub mod trivy_rbac;
+pub mod trivy_secret;
 
 use k8s_openapi::api::core::v1::{Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -22,8 +25,9 @@ use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBind
 use kube::Api;
 use kube::api::ListParams;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+use serde_json::Value;
 
-use super::graph::Vulnerability;
+use super::graph::{ScanFinding, Severity, Vulnerability};
 
 /// Just enough of a Secret to reason about: its identity. We deliberately **do
 /// not** retain secret *values* — the engine reasons about which identities can
@@ -47,6 +51,110 @@ pub struct ImageVulnerabilities {
     pub vulnerabilities: Vec<Vulnerability>,
 }
 
+/// Normalized exposed-secret findings for one image (JEF-244), keyed by the image
+/// reference as deployed — the [`trivy_secret`] adapter maps trivy-operator's
+/// `ExposedSecretReport` into this, and it lands on the same Image node as the CVEs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageScanFindings {
+    /// Image reference (must match how a workload names it — see [`ImageVulnerabilities`]).
+    pub image: String,
+    pub findings: Vec<ScanFinding>,
+}
+
+/// The identity of the workload a config-audit report describes (JEF-244) — the
+/// `trivy-operator.resource.*` coordinates the report is stamped with. The kind is carried
+/// for fidelity, but the misconfig adapter attaches by namespace + name to the matching
+/// Pod workload node(s), since the graph models workloads as Pods (owner-reference
+/// resolution to a Deployment/ReplicaSet is out of scope — see JEF-244 notes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadRef {
+    pub namespace: String,
+    pub kind: String,
+    pub name: String,
+}
+
+/// Misconfiguration findings for one audited resource (JEF-244) — the [`trivy_config`]
+/// adapter maps trivy-operator's `ConfigAuditReport` into this.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkloadFindings {
+    pub resource: WorkloadRef,
+    pub findings: Vec<ScanFinding>,
+}
+
+/// RBAC-assessment findings scoped to a namespace (JEF-244) — the [`trivy_rbac`] adapter maps
+/// trivy-operator's namespaced `RbacAssessmentReport` into this. Attached to the workloads in
+/// that namespace as structural RBAC-exposure evidence (it INFORMS the model's JEF-79
+/// authorization reasoning, it does not re-implement it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RbacFindings {
+    pub namespace: String,
+    pub findings: Vec<ScanFinding>,
+}
+
+/// A non-empty string field from a report entry, or `None`. Empty strings (trivy
+/// omits a field by emitting `""`, not by dropping the key) collapse to `None`. Shared by
+/// the trivy report adapters ([`trivy`], [`trivy_secret`], [`trivy_config`], [`trivy_rbac`]).
+pub(crate) fn opt_str(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Map trivy's severity label to the graph [`Severity`] band — shared by every trivy
+/// report adapter so the mapping can't drift between report kinds.
+pub(crate) fn severity(label: &str) -> Severity {
+    match label {
+        "CRITICAL" => Severity::Critical,
+        "HIGH" => Severity::High,
+        "MEDIUM" => Severity::Medium,
+        _ => Severity::Low,
+    }
+}
+
+/// Reconstruct the deployed image reference (`server/repository:tag`) from a trivy report's
+/// `artifact`/`registry` fields so the finding lands on the right Image node. Best-effort:
+/// digest-level matching would be canonical, but the report's artifact fields are what we
+/// have. Shared by the vulnerability and exposed-secret adapters (both describe an image).
+pub(crate) fn image_ref(report: &Value) -> Option<String> {
+    let artifact = report.get("artifact")?;
+    let repository = artifact.get("repository")?.as_str()?;
+    let base = match report
+        .get("registry")
+        .and_then(|r| r.get("server"))
+        .and_then(Value::as_str)
+    {
+        Some(server) => format!("{server}/{repository}"),
+        None => repository.to_string(),
+    };
+    Some(match artifact.get("tag").and_then(Value::as_str) {
+        Some(tag) => format!("{base}:{tag}"),
+        None => base,
+    })
+}
+
+/// Identify the resource a workload-scoped trivy report (`ConfigAuditReport` /
+/// `RbacAssessmentReport`) describes, from the `trivy-operator.resource.*` labels the
+/// operator stamps on every such CR (JEF-244). The namespace falls back to the CR's own
+/// metadata namespace when the label is absent (trivy stamps both). Returns `None` — so the
+/// report is skipped, never guessed — when the kind, name, or namespace can't be determined
+/// (e.g. a cluster-scoped report with no namespace).
+pub(crate) fn report_resource(object: &DynamicObject) -> Option<WorkloadRef> {
+    let labels = object.metadata.labels.as_ref()?;
+    let kind = labels.get("trivy-operator.resource.kind")?.clone();
+    let name = labels.get("trivy-operator.resource.name")?.clone();
+    let namespace = labels
+        .get("trivy-operator.resource.namespace")
+        .cloned()
+        .or_else(|| object.metadata.namespace.clone())?;
+    Some(WorkloadRef {
+        namespace,
+        kind,
+        name,
+    })
+}
+
 /// The behavioral port's input shape (ADR-0014), defined in the shared
 /// [`protector_behavior`] crate so the engine and the first-party agent share one
 /// definition rather than a hand-synced duplicate. Re-exported here because the Observer
@@ -68,6 +176,15 @@ pub struct Snapshot {
     /// Vulnerability findings per image (Vulnerability port). Populated from a
     /// scanner; see `observe`'s note on the live source.
     pub image_vulns: Vec<ImageVulnerabilities>,
+    /// Exposed-secret findings per image (JEF-244), from trivy-operator's
+    /// `ExposedSecretReport`. Empty when the reports are absent.
+    pub image_secrets: Vec<ImageScanFindings>,
+    /// Misconfiguration findings per audited resource (JEF-244), from trivy-operator's
+    /// `ConfigAuditReport`. Empty when the reports are absent.
+    pub config_audits: Vec<WorkloadFindings>,
+    /// RBAC-assessment findings per namespace (JEF-244), from trivy-operator's
+    /// `RbacAssessmentReport`. Empty when the reports are absent.
+    pub rbac_assessments: Vec<RbacFindings>,
     /// Live runtime events per workload (RuntimeEvidence port). Populated from a
     /// runtime sensor; see `observe`'s note on the live source.
     pub runtime_events: Vec<RuntimeObservation>,
@@ -100,6 +217,7 @@ impl Snapshot {
             cluster_roles,
             cluster_role_bindings,
             image_vulns,
+            trivy_findings,
             linkerd,
         ) = tokio::try_join!(
             async { anyhow::Ok(Api::<Pod>::all(client.clone()).list(&lp).await?.items) },
@@ -156,8 +274,12 @@ impl Snapshot {
                 )
             },
             async { anyhow::Ok(list_image_vulns(&client).await) },
+            // The other trivy-operator report kinds (JEF-244), best-effort like the CVE
+            // report — empty when their CRDs are absent, so they never fail the join.
+            async { anyhow::Ok(list_trivy_findings(&client).await) },
             async { anyhow::Ok(list_linkerd_authz(&client).await) },
         )?;
+        let (image_secrets, config_audits, rbac_assessments) = trivy_findings;
         let (linkerd_servers, linkerd_authz_policies, linkerd_mtls_auths) = linkerd;
 
         // Runtime events come from a runtime sensor (Falco/Tetragon) — typically a
@@ -177,11 +299,56 @@ impl Snapshot {
             cluster_roles,
             cluster_role_bindings,
             image_vulns,
+            image_secrets,
+            config_audits,
+            rbac_assessments,
             runtime_events,
             linkerd_servers,
             linkerd_authz_policies,
             linkerd_mtls_auths,
         })
+    }
+}
+
+/// Best-effort list of the other three trivy-operator report kinds (JEF-244):
+/// `ExposedSecretReport`, `ConfigAuditReport`, and `RbacAssessmentReport`. Each is empty
+/// when its CRD isn't installed or is unreadable, so the engine degrades to no data for that
+/// signal rather than failing. The report→graph mappings are unit-tested in the respective
+/// adapter modules; this is the cluster-facing list, shared by the poll observer and the
+/// watch assembler.
+pub async fn list_trivy_findings(
+    client: &kube::Client,
+) -> (
+    Vec<ImageScanFindings>,
+    Vec<WorkloadFindings>,
+    Vec<RbacFindings>,
+) {
+    let secrets =
+        list_trivy_report(client, "ExposedSecretReport", trivy_secret::parse_report).await;
+    let configs = list_trivy_report(client, "ConfigAuditReport", trivy_config::parse_report).await;
+    let rbac = list_trivy_report(client, "RbacAssessmentReport", trivy_rbac::parse_report).await;
+    (secrets, configs, rbac)
+}
+
+/// List an `aquasecurity.github.io/v1alpha1` report kind as `DynamicObject` and parse each
+/// item, dropping the ones that don't parse. Empty (with a debug log) when the CRD is absent
+/// — mirrors [`list_image_vulns`]'s best-effort contract.
+async fn list_trivy_report<T>(
+    client: &kube::Client,
+    kind: &str,
+    parse: fn(&DynamicObject) -> Option<T>,
+) -> Vec<T> {
+    let gvk = GroupVersionKind::gvk("aquasecurity.github.io", "v1alpha1", kind);
+    let ar = ApiResource::from_gvk(&gvk);
+    match Api::<DynamicObject>::all_with(client.clone(), &ar)
+        .list(&ListParams::default())
+        .await
+    {
+        Ok(list) => list.items.iter().filter_map(parse).collect(),
+        Err(error) => {
+            tracing::debug!(%error, kind, "no trivy reports (trivy-operator absent?)");
+            Vec::new()
+        }
     }
 }
 

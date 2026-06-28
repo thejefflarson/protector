@@ -187,6 +187,7 @@ fn verdict_gist_prefers_a_cited_kev_or_critical_cve() {
     let ev = EntryEvidence {
         cves: vec![cve("CVE-2021-44228", Severity::Critical, true)],
         runtime: vec![],
+        ..Default::default()
     };
     let (tag, clause) = verdict_gist(
         Some("exploitable — long prose that should not appear"),
@@ -274,6 +275,7 @@ fn glyph_props_count_cve_kev_crit_and_live() {
             cve("CVE-2021-0002", Severity::High, false),
         ],
         runtime: vec![],
+        ..Default::default()
     };
     let g = glyph_props(&ev, true, false);
     assert_eq!(
@@ -479,6 +481,7 @@ fn rail_facts_carry_entry_relation_and_cve_fact() {
             cve("CVE-2021-0003", Severity::High, false),
         ],
         runtime: vec![],
+        ..Default::default()
     };
     let rail = rail_facts(&f.entry, &[&f], &f.evidence);
     // `short` drops only the kind prefix (first path segment), per `NodeKey::short_of`.
@@ -515,6 +518,7 @@ fn cve_block_props_sort_tally_and_split() {
             .map(|i| cve(&format!("CVE-2021-000{i}"), Severity::High, false))
             .collect(),
         runtime: vec![],
+        ..Default::default()
     };
     let block = cve_block_props(&ev).expect("present");
     assert_eq!(block.n, 7);
@@ -540,6 +544,7 @@ fn runtime_block_props_split_corroborating_from_context() {
                 internet: false,
             },
         ],
+        ..Default::default()
     };
     let rt = runtime_block_props(&ev);
     assert_eq!(rt.corroborating.len(), 1);

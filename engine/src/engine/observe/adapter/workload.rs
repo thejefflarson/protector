@@ -43,6 +43,8 @@ impl Adapter for WorkloadAdapter {
                 exposure: Exposure::Internal,
                 runtime: vec![],
                 persistent,
+                misconfigs: vec![],
+                rbac_findings: vec![],
             }));
 
             let sa = spec
@@ -69,6 +71,7 @@ impl Adapter for WorkloadAdapter {
                         reference: Some(image),
                         trust: Trust::Unknown,
                         vulnerabilities: vec![],
+                        exposed_secrets: vec![],
                     }));
                     graph.add_edge(wl, img, observed(self.name(), Relation::RunsImage));
                 }
