@@ -83,12 +83,6 @@ impl EnabledActions {
         self
     }
 
-    /// Enable model promotion (builder-style, for tests).
-    pub fn enable_judgement(mut self) -> Self {
-        self.judgement = true;
-        self
-    }
-
     /// Build from operator-facing class names (e.g. `["network", "judgement"]`).
     /// `judgement` toggles model promotion; other unknown / non-enableable names
     /// (like `escape`) are ignored.

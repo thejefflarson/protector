@@ -113,6 +113,56 @@ pub(crate) fn severity(label: &str) -> Severity {
     }
 }
 
+/// Map one trivy-operator report entry — a `checks[]` entry (config-audit / RBAC) or a
+/// `secrets[]` entry (exposed-secret) — into a [`ScanFinding`]. One shared builder so the
+/// three adapters can't drift on the redaction/escaping discipline they all owe their
+/// untrusted free-text (the `title` is fenced/escaped downstream exactly like a CVE title).
+///
+/// The two axes that differ per report kind are passed in:
+///   * `id_key` — the entry's stable id field (`checkID` for checks, `ruleID` for secrets);
+///     an entry without it is malformed and dropped (`None`).
+///   * `title_fallback` — the field used when `title` is absent (`description` for checks,
+///     trivy's already-**redacted** `match` for secrets).
+///
+/// A `success: true` entry is a passing check and is dropped — config-audit / RBAC reports
+/// carry that flag; an exposed-secret entry has no `success` field, so the gate is a no-op
+/// there and the entry is kept (behavior identical to the per-adapter versions this
+/// replaces). `target` is read uniformly from `target`; a config-audit check carries no
+/// `target`, so it collapses to `None` — the same value the config adapter hard-coded.
+pub(crate) fn scan_finding(
+    value: &Value,
+    source: &str,
+    id_key: &str,
+    title_fallback: &str,
+) -> Option<ScanFinding> {
+    use std::time::SystemTime;
+
+    use super::graph::Provenance;
+
+    // Default-failed: a malformed entry missing `success` is treated as a finding rather
+    // than silently swallowed, but an explicit `success: true` is dropped.
+    if value.get("success").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let id = opt_str(value, id_key)?;
+    // Prefer the short `title`; fall back to the kind-specific field. Both untrusted
+    // free-text — fenced/escaped downstream like a CVE title.
+    let title = opt_str(value, "title").or_else(|| opt_str(value, title_fallback));
+    Some(ScanFinding {
+        id,
+        severity: severity(
+            value
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("LOW"),
+        ),
+        category: opt_str(value, "category"),
+        title,
+        target: opt_str(value, "target"),
+        sources: vec![Provenance::new(source, SystemTime::now())],
+    })
+}
+
 /// Reconstruct the deployed image reference (`server/repository:tag`) from a trivy report's
 /// `artifact`/`registry` fields so the finding lands on the right Image node. Best-effort:
 /// digest-level matching would be canonical, but the report's artifact fields are what we
@@ -273,7 +323,16 @@ impl Snapshot {
                         .items,
                 )
             },
-            async { anyhow::Ok(list_image_vulns(&client).await) },
+            async {
+                anyhow::Ok(
+                    list_parsed(
+                        &client,
+                        vulnerability_report_gvk(),
+                        self::trivy::parse_report,
+                    )
+                    .await,
+                )
+            },
             // The other trivy-operator report kinds (JEF-244), best-effort like the CVE
             // report — empty when their CRDs are absent, so they never fail the join.
             async { anyhow::Ok(list_trivy_findings(&client).await) },
@@ -323,22 +382,48 @@ pub async fn list_trivy_findings(
     Vec<WorkloadFindings>,
     Vec<RbacFindings>,
 ) {
-    let secrets =
-        list_trivy_report(client, "ExposedSecretReport", trivy_secret::parse_report).await;
-    let configs = list_trivy_report(client, "ConfigAuditReport", trivy_config::parse_report).await;
-    let rbac = list_trivy_report(client, "RbacAssessmentReport", trivy_rbac::parse_report).await;
+    let secrets = list_parsed(
+        client,
+        trivy_report_gvk("ExposedSecretReport"),
+        trivy_secret::parse_report,
+    )
+    .await;
+    let configs = list_parsed(
+        client,
+        trivy_report_gvk("ConfigAuditReport"),
+        trivy_config::parse_report,
+    )
+    .await;
+    let rbac = list_parsed(
+        client,
+        trivy_report_gvk("RbacAssessmentReport"),
+        trivy_rbac::parse_report,
+    )
+    .await;
     (secrets, configs, rbac)
 }
 
-/// List an `aquasecurity.github.io/v1alpha1` report kind as `DynamicObject` and parse each
-/// item, dropping the ones that don't parse. Empty (with a debug log) when the CRD is absent
-/// — mirrors [`list_image_vulns`]'s best-effort contract.
-async fn list_trivy_report<T>(
+/// The `aquasecurity.github.io/v1alpha1` GVK for a trivy-operator report `kind`.
+fn trivy_report_gvk(kind: &str) -> GroupVersionKind {
+    GroupVersionKind::gvk("aquasecurity.github.io", "v1alpha1", kind)
+}
+
+/// The GVK for trivy-operator's `VulnerabilityReport` — the source of normalized image
+/// vulnerabilities. The report→graph mapping is unit-tested in [`self::trivy`].
+pub(crate) fn vulnerability_report_gvk() -> GroupVersionKind {
+    trivy_report_gvk("VulnerabilityReport")
+}
+
+/// List a CRD `kind` (named by its full [`GroupVersionKind`]) as `DynamicObject` and parse
+/// each item, dropping the ones that don't parse. Empty (with a debug log) when the CRD is
+/// absent or unreadable — the shared best-effort contract for every CRD list in this module
+/// (trivy-operator reports and the Linkerd policy CRDs). The CRD's API group is the only
+/// thing that varies between callers, so it rides in the GVK rather than as a separate axis.
+pub(crate) async fn list_parsed<T>(
     client: &kube::Client,
-    kind: &str,
+    gvk: GroupVersionKind,
     parse: fn(&DynamicObject) -> Option<T>,
 ) -> Vec<T> {
-    let gvk = GroupVersionKind::gvk("aquasecurity.github.io", "v1alpha1", kind);
     let ar = ApiResource::from_gvk(&gvk);
     match Api::<DynamicObject>::all_with(client.clone(), &ar)
         .list(&ListParams::default())
@@ -346,30 +431,7 @@ async fn list_trivy_report<T>(
     {
         Ok(list) => list.items.iter().filter_map(parse).collect(),
         Err(error) => {
-            tracing::debug!(%error, kind, "no trivy reports (trivy-operator absent?)");
-            Vec::new()
-        }
-    }
-}
-
-/// Best-effort list of normalized image vulnerabilities from trivy-operator's
-/// `VulnerabilityReport` CRDs. Empty if the CRD isn't installed or unreadable. The
-/// report→graph mapping is unit-tested in [`self::trivy`]; this is the
-/// cluster-facing list, shared by the poll observer and the watch assembler.
-pub async fn list_image_vulns(client: &kube::Client) -> Vec<ImageVulnerabilities> {
-    let gvk = GroupVersionKind::gvk("aquasecurity.github.io", "v1alpha1", "VulnerabilityReport");
-    let ar = ApiResource::from_gvk(&gvk);
-    match Api::<DynamicObject>::all_with(client.clone(), &ar)
-        .list(&ListParams::default())
-        .await
-    {
-        Ok(list) => list
-            .items
-            .iter()
-            .filter_map(self::trivy::parse_report)
-            .collect(),
-        Err(error) => {
-            tracing::debug!(%error, "no VulnerabilityReports (trivy-operator absent?)");
+            tracing::debug!(%error, kind = %gvk.kind, "no CRD objects (operator/CRD absent?)");
             Vec::new()
         }
     }
@@ -387,42 +449,24 @@ pub async fn list_linkerd_authz(
     Vec<self::linkerd::LinkerdAuthzPolicy>,
     Vec<self::linkerd::LinkerdMeshTlsAuth>,
 ) {
-    let servers = list_dynamic(client, "v1beta3", "Server", self::linkerd::parse_server).await;
-    let policies = list_dynamic(
+    let linkerd_gvk = |version, kind| GroupVersionKind::gvk("policy.linkerd.io", version, kind);
+    let servers = list_parsed(
         client,
-        "v1alpha1",
-        "AuthorizationPolicy",
+        linkerd_gvk("v1beta3", "Server"),
+        self::linkerd::parse_server,
+    )
+    .await;
+    let policies = list_parsed(
+        client,
+        linkerd_gvk("v1alpha1", "AuthorizationPolicy"),
         self::linkerd::parse_authz_policy,
     )
     .await;
-    let mtls = list_dynamic(
+    let mtls = list_parsed(
         client,
-        "v1alpha1",
-        "MeshTLSAuthentication",
+        linkerd_gvk("v1alpha1", "MeshTLSAuthentication"),
         self::linkerd::parse_mtls_auth,
     )
     .await;
     (servers, policies, mtls)
-}
-
-/// List a `policy.linkerd.io` kind as `DynamicObject` and parse each item, dropping
-/// the ones that don't parse. Empty (with a debug log) when the CRD is absent.
-async fn list_dynamic<T>(
-    client: &kube::Client,
-    version: &str,
-    kind: &str,
-    parse: fn(&DynamicObject) -> Option<T>,
-) -> Vec<T> {
-    let gvk = GroupVersionKind::gvk("policy.linkerd.io", version, kind);
-    let ar = ApiResource::from_gvk(&gvk);
-    match Api::<DynamicObject>::all_with(client.clone(), &ar)
-        .list(&ListParams::default())
-        .await
-    {
-        Ok(list) => list.items.iter().filter_map(parse).collect(),
-        Err(error) => {
-            tracing::debug!(%error, kind, "no Linkerd policy CRDs (linkerd absent?)");
-            Vec::new()
-        }
-    }
 }

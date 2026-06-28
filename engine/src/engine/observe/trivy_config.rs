@@ -14,13 +14,10 @@
 //! the namespace + name a workload node is keyed by ([`WorkloadFindings`]). Best-effort: a
 //! report whose resource can't be identified is skipped rather than guessed.
 
-use std::time::SystemTime;
-
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-use super::{WorkloadFindings, opt_str, report_resource, severity};
-use crate::engine::graph::{Provenance, ScanFinding};
+use super::{WorkloadFindings, report_resource, scan_finding};
 
 /// This adapter's provenance source.
 const SOURCE: &str = "trivy-config-audit";
@@ -33,35 +30,16 @@ pub fn parse_report(object: &DynamicObject) -> Option<WorkloadFindings> {
     let findings = report
         .get("checks")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(check_finding).collect())
+        // A config-audit check is keyed by `checkID`, falls back to `description` for its
+        // title, and carries no `target`. The shared builder drops passing/id-less checks.
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| scan_finding(v, SOURCE, "checkID", "description"))
+                .collect()
+        })
         .unwrap_or_default();
     Some(WorkloadFindings { resource, findings })
-}
-
-/// Map one FAILED `checks[]` entry into a [`ScanFinding`]; a passing or unidentified check is
-/// dropped (returns `None`). `success: true` means the check passed and is not a finding.
-fn check_finding(value: &Value) -> Option<ScanFinding> {
-    // Default-failed: a malformed entry missing `success` is treated as a finding rather than
-    // silently swallowed, but an explicit `success: true` is dropped.
-    if value.get("success").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
-    let id = opt_str(value, "checkID")?;
-    // Prefer the short `title`; fall back to `description`. Both untrusted free-text.
-    let title = opt_str(value, "title").or_else(|| opt_str(value, "description"));
-    Some(ScanFinding {
-        id,
-        severity: severity(
-            value
-                .get("severity")
-                .and_then(Value::as_str)
-                .unwrap_or("LOW"),
-        ),
-        category: opt_str(value, "category"),
-        title,
-        target: None,
-        sources: vec![Provenance::new(SOURCE, SystemTime::now())],
-    })
 }
 
 #[cfg(test)]

@@ -935,12 +935,12 @@ impl Engine {
     }
 }
 
-// The engine's drivers (run_watch/run) and their env-driven builders live in a sibling
+// The engine's driver (`run_watch`) and its env-driven builders live in a sibling
 // module, split out to keep this file under the 1,000-line cap (repo CLAUDE.md). The
-// public surface (`run`, `run_watch`) is re-exported here so external paths
+// public surface (`run_watch`) is re-exported here so external paths
 // (`protector::engine::run_watch`) resolve unchanged.
 mod run_loop;
-pub use run_loop::{run, run_watch};
+pub use run_loop::run_watch;
 
 #[cfg(test)]
 mod tests;
