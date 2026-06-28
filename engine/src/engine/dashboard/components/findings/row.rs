@@ -41,11 +41,10 @@ fn glyphs(g: &GlyphProps) -> Markup {
 
 /// One endpoint's SUMMARY row (JEF-202): the tier cell doubles as the row-expand
 /// `<button aria-expanded aria-controls>`; then entry → reaches, the verdict tag + clause,
-/// the evidence glyphs, the next lever, the pass-age, and the Δ recency cell (JEF-201). The
-/// row class carries `f-calm` for a model-cleared broad entry. `aria-controls` / the detail
-/// id wire the hidden detail row.
+/// the evidence glyphs, the next lever, the pass-age, and the Δ recency cell (JEF-201).
+/// `aria-controls` / the detail id wire the hidden detail row.
 pub fn row(props: &RowProps) -> Markup {
-    let base = if props.calm { "f-row f-calm" } else { "f-row" };
+    let base = "f-row";
     // A context-group row (JEF-202) renders `hidden` and prepends `ctx-row` so the single
     // `ctx-summary` toggle reveals the group; a standalone attention/watch row does neither.
     let row_class = if props.context {

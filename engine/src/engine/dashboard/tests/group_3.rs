@@ -190,7 +190,10 @@ fn what_to_do_escapes_injected_object_names_in_the_card() {
 }
 
 #[test]
-fn safe_broad_row_reads_working_as_intended_and_calm_class() {
+fn safe_broad_row_renders_as_a_plain_safe_row() {
+    // JEF-248: a broad + model-cleared endpoint (e.g. argocd) is NOT singled out. It carries
+    // no "working as intended" label and no special calm row class — it reads like any other
+    // SAFE row, so it can't imply that narrower SAFE endpoints aren't working as intended.
     let entry = "workload/argocd/Pod/argocd-server";
     let fs = broad_findings(
         entry,
@@ -198,24 +201,26 @@ fn safe_broad_row_reads_working_as_intended_and_calm_class() {
     );
     let refs: Vec<&Finding> = fs.iter().collect();
     let html = row_html(entry, &refs);
-    assert!(html.contains("working as intended"), "{html}");
-    assert!(!html.contains("Broadly privileged, working as intended"));
-    assert!(!html.contains("broad-lead muted") && !html.contains("breadth muted"));
-    assert!(html.contains("f-calm"), "calm row class applied");
+    assert!(
+        !html.contains("working as intended"),
+        "label removed: {html}"
+    );
+    assert!(
+        !html.contains("f-calm"),
+        "no special calm row class: {html}"
+    );
     assert!(html.contains("[SAFE]"));
     assert!(!html.contains("breadth is severity"));
-    assert!(!html.contains("severity, not urgency"));
     assert!(!html.contains("not urgency"));
-    // JEF-225 (complaint 2): a "working as intended" row must NOT also carry a remediation
-    // lever — the row pair (summary + expanded detail) shows no durable-fix / revoke advice.
+    // A non-breach row carries no remediation lever (JEF-225): no durable-fix / revoke advice.
     assert!(
         !html.contains("durable fix") && !html.contains("Revoke") && !html.contains("what to do:"),
-        "no remediation lever on a working-as-intended row: {html}"
+        "no remediation lever on a cleared row: {html}"
     );
     let body = card_body(entry, &refs);
     assert!(
         !body.contains("what to do:") && !body.contains("Revoke the `get/secrets`"),
-        "the calm card body shows no remediation: {body}"
+        "the cleared card body shows no remediation: {body}"
     );
     assert!(!html.contains("ADR-") && !html.contains("JEF-"));
 }

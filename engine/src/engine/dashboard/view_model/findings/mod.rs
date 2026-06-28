@@ -618,8 +618,8 @@ pub fn truncate_clause(s: &str) -> String {
 
 /// The terse "next lever" tag for the dense table (JEF-202, JEF-225). Operator-facing advice
 /// is gated on the model's POSTURE, not the mechanical `disposition` (ADR-0016: reachability
-/// is not a breach). For a NON-breach finding (SAFE / awaiting / a "working as intended" broad
-/// row) there is no lever to pull — the cell shows an em-dash, never a remediation verb. Only
+/// is not a breach). For a NON-breach finding (SAFE / awaiting, broad or narrow alike) there is
+/// no lever to pull — the cell shows an em-dash, never a remediation verb. Only
 /// a FLAGGED breach surfaces the next step, in plain words (no raw `no-cut`/`durable-fix PR`/
 /// `forbidden`/`unclassified` token). The full instruction stays in the expanded
 /// [`what_to_do`].
@@ -640,7 +640,7 @@ pub fn next_lever_tag(f: &Finding, posture: Posture) -> &'static str {
 }
 
 /// The "what to do" line for a FLAGGED breach (JEF-161 AC #1, JEF-179, JEF-225). Gated on the
-/// model's POSTURE: a non-breach finding (SAFE / awaiting / "working as intended") gets NO
+/// model's POSTURE: a non-breach finding (SAFE / awaiting) gets NO
 /// remediation — `None`, so the card/row renders no "what to do" block (ADR-0016: a reachable
 /// path the model cleared is not a misconfig to fix). For a breach it is plain-language advice
 /// derived from the finding's mechanical `disposition` + the concrete object/edge on its
