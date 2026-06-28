@@ -12,6 +12,24 @@ use super::{
     Engine, Snapshot, dashboard, journal, model, notify, observe, policy_log, reason, respond,
 };
 
+/// Replay the durable journal's admission lines (JEF-237) back into the shared `/policy` ring
+/// on boot, preserving each row's dedup `count` + last-seen, so the admission log isn't blank
+/// after a restart. Returns how many rows were restored. A disabled/empty journal restores
+/// nothing.
+fn restore_admission_log(
+    journal: &journal::DecisionJournal,
+    policy_log: &policy_log::PolicyDecisionLog,
+) -> usize {
+    let mut restored = 0usize;
+    for entry in journal.replay() {
+        if let journal::Decision::Admission { record } = entry.decision {
+            policy_log.restore(record);
+            restored += 1;
+        }
+    }
+    restored
+}
+
 /// Poll loop: re-list the whole cluster every `interval`, assemble a snapshot, and
 /// process it. The simple fallback for environments where a watch isn't available;
 /// [`run_watch`] is the default. A stable cluster does no useful work here between
@@ -187,6 +205,19 @@ pub async fn run_watch(
     // `PROTECTOR_ENGINE_NOTIFY_URL`, off (zero outbound calls) when unset, redacted by
     // default. Only the watch loop wires it — the timer path (`run`) serves no operator.
     .with_notifier(notify::BreachNotifier::from_env());
+
+    // Repopulate the webhook's admission-decision ring from the durable journal on boot
+    // (JEF-237), so `/policy` isn't blank after a restart — parallel to how the engine's
+    // `replay_journal` restored the model verdicts above. The engine owns a handle to the
+    // same journal file the webhook persists admissions to; we replay its `Admission` lines
+    // (preserving each row's dedup count + last-seen) back into the shared ring.
+    let restored_admissions = restore_admission_log(engine.journal().as_ref(), &policy_log);
+    if restored_admissions > 0 {
+        tracing::info!(
+            restored_admissions,
+            "restored admission decisions onto /policy from the durable journal"
+        );
+    }
 
     // Findings dashboard (read-only): surfaces the proven chains, especially the
     // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis and

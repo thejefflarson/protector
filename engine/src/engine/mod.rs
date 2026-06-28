@@ -391,6 +391,10 @@ impl Engine {
                 // Applies are durable for the audit trail but don't seed a view directly
                 // (the live ledger re-derives the active set from current proof each pass).
                 journal::Decision::Apply { .. } => {}
+                // Admission decisions (JEF-237) restore into the webhook's `/policy` ring, not
+                // the engine's findings/reversions views — `run_watch` does that restore from
+                // the same journal, since it (not the engine) holds the shared decision ring.
+                journal::Decision::Admission { .. } => {}
             }
         }
         if latest_at > std::time::SystemTime::UNIX_EPOCH {
