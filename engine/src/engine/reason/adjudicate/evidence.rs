@@ -66,7 +66,7 @@ pub(crate) fn cve_evidence(v: &Vulnerability) -> String {
 
 /// As [`cve_evidence`], but draws the untrusted free-text title from a shared per-entry
 /// `budget` (JEF-106). The STRUCTURED, low-cardinality fields — id, severity, CVSS score,
-/// reachability, and fix-availability — are ALWAYS rendered (they are bounded by
+/// EPSS probability, reachability, and fix-availability — are ALWAYS rendered (they are bounded by
 /// construction and are the signal the model should weigh first). The free prose (title)
 /// is rendered ONLY while `budget` remains, decrementing it by what it contributes; once
 /// it is exhausted, later CVE lines surface structure only. The title is capped THEN
@@ -108,6 +108,16 @@ fn cve_evidence_budgeted(v: &Vulnerability, budget: &mut usize) -> String {
     if let Some(score) = v.score {
         line.push_str(&format!(" [cvss: {score:.1}]"));
     }
+    // EPSS exploit-prediction probability (JEF-243): the PREDICTIVE exploitation axis — a
+    // `[0, 1]` chance the CVE is exploited in the next 30 days, from the FIRST.org feed.
+    // Like the CVSS score it is a STRUCTURED numeric (never untrusted free-text), charged
+    // to NO budget, and formatted to two decimals (`0.94`) so the same probability always
+    // renders the same token and the verdict fingerprint stays stable across passes. Absent
+    // ⇒ omitted entirely, so an unscored CVE's line is unchanged. This is the slot the
+    // prompt reserved for `epss` (JEF-66); it only renders now that the feed populates it.
+    if let Some(epss) = v.epss {
+        line.push_str(&format!(" [epss: {epss:.2}]"));
+    }
     // Untrusted free prose (trivy's title) — the ONLY untrusted free-text that still
     // reaches the prompt (the NVD advisory feed is retired, JEF-242). Charged to the
     // per-entry budget and capped+sanitized so it stays fenced data, never instructions.
@@ -144,8 +154,9 @@ fn take_from_budget(field: String, budget: &mut usize) -> Option<String> {
 /// (JEF-133), so the model and the operator can never see a different set of facts. Here
 /// the CVEs are rendered into the prompt-string form:
 ///
-/// each line widens the CVE's evidence (JEF-51 + JEF-66 + JEF-242): id, severity, the CVSS
-/// score (when trivy reported it), reachability, and a fix-availability indication so the
+/// each line widens the CVE's evidence (JEF-51 + JEF-66 + JEF-242 + JEF-243): id, severity, the CVSS
+/// score (when trivy reported it), the EPSS exploit-prediction probability (when the FIRST.org
+/// feed scored it), reachability, and a fix-availability indication so the
 /// model can reason about exploitability — "a fix exists but the workload is still on the
 /// vulnerable version" vs "no fix available". The short trivy title (untrusted free-text)
 /// is appended when present; the WHOLE string is fenced+sanitized by `fence_list` at

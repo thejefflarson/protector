@@ -15,7 +15,8 @@ cluster. **Every step toward acting on the cluster is a single, documented value
 
 One thing *is* default-on for egress: the **feed-fetcher sidecar** (`feedSync.enabled:
 true`). It is the single component the chart grants network egress to, and it only
-GETs **public, read-only** CVE/KEV feeds into a shared volume the engine reads — it never
+GETs **public, read-only** exploitation-intel feeds (CISA KEV + FIRST.org EPSS) into a
+shared volume the engine reads — it never
 reads or transmits any cluster data, and the **engine itself stays zero-egress**
 (ADR-0015). For a fully air-gapped / zero-egress install, set `feedSync.enabled=false`
 (see [Air-gapped / zero-egress](#air-gapped--zero-egress)).
@@ -28,8 +29,8 @@ reads or transmits any cluster data, and the **engine itself stays zero-egress**
 | Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token; engine + agent share a chart-provisioned Secret. |
 | Engine              | **shadow** (`engine.enable` empty)     | Detects + proposes; the engine forces dry-run actuation while no class is armed. |
 | Actuator            | `dryrun`                               | Touches nothing even if a class is later armed (a deliberate two-step). |
-| Engine egress       | **none** (zero-egress, ADR-0015)       | The engine makes no breach-notify call, no OTLP export, no live KEV fetch — it only reads mounted feed files; the security graph never leaves the cluster. |
-| Feed-fetcher egress | **on** (`feedSync.enabled: true`)      | The ONE component with egress: a co-located sidecar that GETs public, read-only CVE/KEV feeds into a shared volume the engine reads. It never reads or transmits cluster data. Set `feedSync.enabled=false` for a fully air-gapped install. |
+| Engine egress       | **none** (zero-egress, ADR-0015)       | The engine makes no breach-notify call, no OTLP export, no live feed fetch — it only reads mounted feed files; the security graph never leaves the cluster. |
+| Feed-fetcher egress | **on** (`feedSync.enabled: true`)      | The ONE component with egress: a co-located sidecar that GETs public, read-only exploitation-intel feeds (CISA KEV + FIRST.org EPSS) into a shared volume the engine reads. It never reads or transmits cluster data. Set `feedSync.enabled=false` for a fully air-gapped install. |
 | Model               | **off** (`engine.model.endpoint` empty) | Engine runs the deterministic enumerator only; no model required. |
 | eBPF agent          | **off** (`agent.enabled: false`)       | Needs the agent image + probes load-tested on your kernel.      |
 | RBAC                | read-only                              | No write grants unless `actuationRBAC: true` (armed mode).      |
@@ -146,48 +147,57 @@ leaves the cluster. The adjudicator's veto is load-bearing once a class is armed
 --set engine.model.name="qwen2.5:3b-instruct"
 ```
 
-### KEV feed — feed-fetcher sidecar (on by default)
+### Exploitation-intel feeds (KEV + EPSS) — feed-fetcher sidecar (on by default)
 
-The engine reasons over a CISA KEV catalogue (actively-exploited CVEs). **The engine never
-fetches it over the network** — it only reads it from a file (ADR-0015), so the engine
-stays zero-egress.
+The engine reasons over two exploitation-intel feeds: the CISA KEV catalogue
+(actively-exploited-**now** CVEs) and the FIRST.org EPSS scores (the **predictive** per-CVE
+probability of exploitation in the next 30 days). Together with Trivy's CVSS score (static
+severity) these are the **three exploitation axes** the breach model weighs (ADR-0016).
+**The engine never fetches either over the network** — it only reads them from files
+(ADR-0015), so the engine stays zero-egress.
 
-By default the chart keeps that file fresh for you with a co-located **feed-fetcher
+By default the chart keeps those files fresh for you with a co-located **feed-fetcher
 sidecar** (`feedSync.enabled: true`) on the engine pod: a [native
 sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (an
 `initContainer` with `restartPolicy: Always`) that downloads the **full** public CISA KEV
-feed into a shared `emptyDir`, then re-fetches on `feedSync.interval`. The engine container
-mounts the **same** volume read-only and reads `/var/lib/protector/feeds/kev.json` — wired
-automatically, no further configuration. The engine degrades gracefully if the file is
+feed and the FIRST.org EPSS feed into a shared `emptyDir`, then re-fetches on
+`feedSync.interval`. The engine container mounts the **same** volume read-only and reads
+`/var/lib/protector/feeds/kev.json` and `/var/lib/protector/feeds/epss.csv` — both wired
+automatically, no further configuration. The engine degrades gracefully if either file is
 missing or empty (the first-boot race before the sidecar's first fetch).
 
-**KEV is the only feed.** The NVD advisory feed was retired (JEF-242): it was redundant
-with Trivy's CVE metadata (Trivy already supplies `title`, `severity`, `fixedVersion`, and
-now the CVSS `score` per vulnerability), the only net-new field (`cwe[]`) was one
-trivy-operator omits anyway, and the NVD "recent" feed had a poor hit-rate against the
-old base-image CVEs Trivy actually finds. KEV stays — `exploited_in_wild` is a distinct
-exploitation signal that drives the breach model (ADR-0016).
+**Two feeds, not the retired advisory feed.** The NVD advisory feed was retired (JEF-242):
+it was redundant with Trivy's CVE metadata (Trivy already supplies `title`, `severity`,
+`fixedVersion`, and the CVSS `score` per vulnerability), the only net-new field (`cwe[]`) was
+one trivy-operator omits anyway, and the NVD "recent" feed had a poor hit-rate against the
+old base-image CVEs Trivy actually finds. KEV and EPSS stay — `exploited_in_wild` (KEV) and
+the `epss` probability are the two exploitation signals Trivy does **not** supply, and both
+drive the breach model.
+
+**EPSS is the FIRST.org CSV.** The feed ships gzipped (`epss_scores-current.csv.gz`); the
+sidecar gunzips it in place, and the engine's `EpssStore` parses the `cve,epss,percentile`
+rows (skipping the leading metadata comment and the header). Only the parsed probability is
+retained — no untrusted free-text from the feed reaches the model prompt.
 
 **Why a sidecar, not a ConfigMap?** Raw CISA KEV JSON is ~1.5 MiB — over Kubernetes'
-1 MiB ConfigMap limit (the retired CronJob path had to lossily strip it to CVE IDs). An
-`emptyDir` has no size limit, so the sidecar fetches and the engine reads the data in
-**full**. This supersedes the JEF-228 CronJob and the cancelled JEF-110 engine-fetch (see
-ADR-0015).
+1 MiB ConfigMap limit (the retired CronJob path had to lossily strip it to CVE IDs); the
+EPSS feed is similarly large. An `emptyDir` has no size limit, so the sidecar fetches and
+the engine reads both feeds in **full**. This supersedes the JEF-228 CronJob and the
+cancelled JEF-110 engine-fetch (see ADR-0015).
 
-Override the cadence with `feedSync.interval` (e.g. `12h`), the source with
-`feedSync.kevUrl`, and the curl image with `feedSync.image.*`. KEV needs no transform:
-CISA KEV JSON is what the engine's `KevCatalog` already parses.
+Override the cadence with `feedSync.interval` (e.g. `12h`), the sources with
+`feedSync.kevUrl` / `feedSync.epssUrl`, and the curl image with `feedSync.image.*`.
 
 **Egress boundary.** The sidecar is the **only** component the chart gives network egress
-to, and it is **on by default**. It makes one outbound GET to a **public, read-only** feed
-URL and writes it to the shared volume — it makes **no apiserver call** (no ServiceAccount
+to, and it is **on by default**. It makes outbound GETs to **public, read-only** feed
+URLs and writes them to the shared volume — it makes **no apiserver call** (no ServiceAccount
 grant, no RBAC), never reads cluster state, and never transmits any cluster data outward.
-The **engine stays zero-egress** (ADR-0015): it only reads the resulting file and makes no
-KEV network call of its own. The sidecar runs unprivileged (uid 100 / gid 101,
+The **engine stays zero-egress** (ADR-0015): it only reads the resulting files and makes no
+feed network call of its own. The sidecar runs unprivileged (uid 100 / gid 101,
 `allowPrivilegeEscalation: false`, read-only root filesystem, all capabilities dropped).
 
-**Framing:** *engine zero-egress is preserved; the sidecar egresses to the public KEV feed
-by default — disable it for air-gapped.*
+**Framing:** *engine zero-egress is preserved; the sidecar egresses to the public KEV + EPSS
+feeds by default — disable it for air-gapped.*
 
 #### Air-gapped / zero-egress
 
@@ -199,8 +209,9 @@ To run with **no chart egress at all**, disable the feed-fetcher sidecar:
 
 With `feedSync.enabled=false`, no sidecar, no shared volume, and no feed env are
 templated, and **no component in the chart egresses**. To keep enrichment offline, mount
-your own `kev.json` into the engine container at `/var/lib/protector/feeds` (e.g. via a
-ConfigMap/Secret/PVC you manage) and set `PROTECTOR_KEV_FILE` accordingly.
+your own `kev.json` / `epss.csv` into the engine container at `/var/lib/protector/feeds`
+(e.g. via a ConfigMap/Secret/PVC you manage) and set `PROTECTOR_KEV_FILE` /
+`PROTECTOR_EPSS_FILE` accordingly.
 
 ### Arm the engine (live actuation) — the careful two-step
 
@@ -255,8 +266,9 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `cert.create`                | `true`                               | cert-manager serving cert + caBundle injection.    |
 | `ingestAuth.enabled`         | `true`                               | Bearer-token authn on the :9999 ingest (engine + agent share a Secret). |
 | `ingestAuth.existingSecret`  | `""`                                 | Bring your own Secret (key `token`) for rotation.  |
-| `feedSync.enabled`           | `true`                               | Feed-fetcher sidecar (the one default-on egress); fetches the full CISA KEV into a shared volume the engine reads. Set `false` for air-gapped. |
+| `feedSync.enabled`           | `true`                               | Feed-fetcher sidecar (the one default-on egress); fetches the full CISA KEV + FIRST.org EPSS feeds into a shared volume the engine reads. Set `false` for air-gapped. |
 | `feedSync.kevUrl`            | CISA KEV catalogue JSON              | KEV source (plain JSON, fetched in full). See feeds section. |
+| `feedSync.epssUrl`           | FIRST.org EPSS scores CSV (gzipped)  | EPSS source (gzipped CSV, gunzipped in place). See feeds section. |
 | `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
 | `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy.        |
 | `webhook.enforcedNamespaceSelector` | `{}` (matches nothing)         | Label-select the namespaces that fail closed.      |

@@ -99,6 +99,7 @@ mod tests {
             &ReadinessConfig {
                 model_attached: false,
                 kev_count: 1500,
+                epss_count: 1500,
                 journal_durable: true,
                 armed: false,
             },
@@ -116,6 +117,7 @@ mod tests {
             &ReadinessConfig {
                 model_attached: true,
                 kev_count: 1500,
+                epss_count: 1500,
                 journal_durable: true,
                 armed: false,
             },

@@ -40,6 +40,7 @@ pub async fn run(
     active: EnabledActions,
     scope: ActuationScope,
     kev: observe::exploit_intel::KevCatalog,
+    epss: observe::epss::EpssStore,
 ) {
     let mut engine = Engine::new(
         active.clone(),
@@ -53,6 +54,7 @@ pub async fn run(
         match Snapshot::observe(client.clone()).await {
             Ok(mut snapshot) => {
                 kev.mark_exploited(&mut snapshot.image_vulns);
+                epss.annotate(&mut snapshot.image_vulns);
                 engine.process(&snapshot).await;
             }
             Err(error) => tracing::warn!(%error, "observe failed; retaining previous state"),
@@ -172,6 +174,7 @@ pub async fn run_watch(
     runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
+    epss: observe::epss::EpssStore,
     // The webhook's admission-decision ring (JEF-226), shared so the dashboard's `/policy`
     // view can read the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
@@ -233,6 +236,7 @@ pub async fn run_watch(
         findings.set_readiness_config(dashboard::ReadinessConfig {
             model_attached: model::config().is_some(),
             kev_count: kev.len(),
+            epss_count: epss.len(),
             journal_durable: decisions.is_enabled(),
             armed: !active.is_empty(),
         });
@@ -366,11 +370,12 @@ pub async fn run_watch(
                 .map(|r| (**r).clone())
                 .collect(),
             // Vulnerabilities are listed best-effort on each pass (cheap, only when
-            // something changed), then enriched with KEV exploit intel. Runtime
-            // events are the live, TTL'd Falco signals.
+            // something changed), then enriched with KEV exploit intel and EPSS
+            // exploit-prediction scores. Runtime events are the live, TTL'd Falco signals.
             image_vulns: {
                 let mut v = observe::list_image_vulns(&client).await;
                 kev.mark_exploited(&mut v);
+                epss.annotate(&mut v);
                 v
             },
             image_secrets: image_secrets_now,

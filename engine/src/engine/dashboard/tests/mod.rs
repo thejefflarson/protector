@@ -112,6 +112,7 @@ pub(super) fn ready_all_met() -> Readiness {
         &ReadinessConfig {
             model_attached: true,
             kev_count: 3,
+            epss_count: 3,
             journal_durable: true,
             ..Default::default()
         },
@@ -317,6 +318,7 @@ pub(super) fn full_config() -> ReadinessConfig {
     ReadinessConfig {
         model_attached: true,
         kev_count: 1500,
+        epss_count: 1500,
         journal_durable: true,
         armed: false,
     }

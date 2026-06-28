@@ -169,6 +169,7 @@ pub(crate) fn derive_readiness(
 
     // A file-backed enrichment store is Present iff it loaded >=1 entry, else Absent.
     let kev_state = present_if(config.kev_count > 0);
+    let epss_state = present_if(config.epss_count > 0);
 
     // A behavioral feed is Present iff it delivered >=1 signal this pass, else Absent. (A
     // genuinely quiet cluster reads as Absent for the pass — the panel's "signals last
@@ -195,6 +196,15 @@ pub(crate) fn derive_readiness(
             why: "flags known-exploited CVEs so the model weighs active threats first",
             enable: "PROTECTOR_KEV_FILE",
             detail: coverage_detail(config.kev_count, "known-exploited CVE id"),
+            weakens_decisions: true,
+        },
+        ReadinessRow {
+            id: "epss",
+            label: "EPSS feed",
+            state: epss_state,
+            why: "exploit-prediction scores rank which CVEs are most likely to be hit next",
+            enable: "PROTECTOR_EPSS_FILE",
+            detail: coverage_detail(config.epss_count, "EPSS score"),
             weakens_decisions: true,
         },
         ReadinessRow {
