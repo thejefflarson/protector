@@ -1,0 +1,199 @@
+{{- if .Values.feedSync.enabled }}
+# --- feed-sync (JEF-228) -----------------------------------------------------------
+# Auto-syncs the CISA KEV catalogue + the advisory snapshot into the two ConfigMaps the
+# engine mounts (engine.kev.configMapName / engine.advisory.configMapName), so an
+# operator no longer has to sync them by hand.
+#
+# EGRESS BOUNDARY. This CronJob is the ONLY component the chart gives network egress to.
+# It makes outbound calls to TWO public, READ-ONLY feed URLs (feedSync.kevUrl /
+# feedSync.advisoryUrl) and to the in-cluster apiserver to upsert the ConfigMaps. It
+# never reads cluster state and never transmits any cluster data outward. The engine
+# itself stays ZERO-EGRESS (ADR-0015): it only mounts the resulting snapshot files and
+# makes no advisory/KEV network call of its own. OFF by default (feedSync.enabled=false)
+# — a stock install renders nothing here and keeps today's manual-mount path exactly.
+#
+# LEAST PRIVILEGE. The job runs as its own dedicated ServiceAccount, bound to a Role that
+# grants get/update/patch on ONLY the two named ConfigMaps in the release namespace —
+# no list, no create-of-anything-else, no cluster scope, no secrets. It is deliberately
+# isolated from the engine's ServiceAccount (which has no write grants in shadow).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "protector.feedSyncName" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: feed-sync
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "protector.feedSyncName" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: feed-sync
+rules:
+  # Scoped to EXACTLY the two ConfigMaps the engine mounts, by name. `create` is granted
+  # for the first sync (the ConfigMaps may not exist yet); get/update/patch keep the
+  # `kubectl apply` upsert idempotent thereafter. No list/watch, no other resources, no
+  # cluster scope — the narrowest grant that lets the job own these two objects.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ .Values.feedSync.kevConfigMapName | quote }}
+      - {{ .Values.feedSync.advisoryConfigMapName | quote }}
+    verbs: ["get", "update", "patch"]
+  # `create` cannot be restricted by resourceName (the object has no name to match at
+  # admission time), so it is granted on the configmaps resource for the namespace and
+  # used only for the initial create; every subsequent run takes the get/patch path above.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "protector.feedSyncName" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: feed-sync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "protector.feedSyncName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "protector.feedSyncName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "protector.feedSyncName" . }}
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+    app.kubernetes.io/component: feed-sync
+spec:
+  schedule: {{ .Values.feedSync.schedule | quote }}
+  # Don't pile up runs if a sync is slow or the apiserver is busy; skip the tick instead.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.feedSync.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.feedSync.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.feedSync.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      # A bad feed/URL shouldn't retry forever; let the next scheduled tick try again.
+      backoffLimit: {{ .Values.feedSync.backoffLimit }}
+      # Hard wall on a hung download so a stuck job can't block the next tick.
+      activeDeadlineSeconds: {{ .Values.feedSync.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "protector.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: feed-sync
+          {{- with .Values.feedSync.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          serviceAccountName: {{ include "protector.feedSyncName" . }}
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: feed-sync
+              image: "{{ .Values.feedSync.image.repository }}:{{ .Values.feedSync.image.tag }}"
+              imagePullPolicy: {{ .Values.feedSync.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                  - ALL
+              {{- with .Values.feedSync.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              env:
+                - name: KEV_URL
+                  value: {{ .Values.feedSync.kevUrl | quote }}
+                - name: ADVISORY_URL
+                  value: {{ .Values.feedSync.advisoryUrl | quote }}
+                - name: KEV_CONFIGMAP
+                  value: {{ .Values.feedSync.kevConfigMapName | quote }}
+                - name: ADVISORY_CONFIGMAP
+                  value: {{ .Values.feedSync.advisoryConfigMapName | quote }}
+                - name: KEV_KEY
+                  value: {{ .Values.feedSync.kevKey | quote }}
+                - name: ADVISORY_KEY
+                  value: {{ .Values.feedSync.advisoryKey | quote }}
+                - name: NAMESPACE
+                  value: {{ .Release.Namespace | quote }}
+              command:
+                - /bin/sh
+                - -c
+                # Fetch each public feed to a temp file, then upsert its ConfigMap with a
+                # client-side dry-run render piped into `kubectl apply` (idempotent: create
+                # on first run, patch thereafter). `set -eu` + curl `--fail` mean a feed
+                # outage exits non-zero so the run is marked Failed and retried next tick;
+                # a half-fetched feed never overwrites a good snapshot. Only the two public
+                # feed URLs and the apiserver are contacted — no cluster data leaves.
+                - |
+                  set -eu
+                  work="$(mktemp -d)"
+                  trap 'rm -rf "$work"' EXIT
+
+                  upsert() {
+                    cm="$1"; key="$2"; url="$3"; out="$work/$cm"
+                    echo "feed-sync: fetching $url -> configmap/$cm"
+                    curl --fail --location --silent --show-error \
+                      --retry 3 --retry-delay 5 \
+                      --max-time {{ .Values.feedSync.curlMaxTimeSecs }} \
+                      --output "$out" "$url"
+                    kubectl create configmap "$cm" \
+                      --namespace "$NAMESPACE" \
+                      --from-file="$key=$out" \
+                      --dry-run=client -o yaml \
+                      | kubectl apply --namespace "$NAMESPACE" -f -
+                    echo "feed-sync: applied configmap/$cm"
+                  }
+
+                  upsert "$KEV_CONFIGMAP" "$KEV_KEY" "$KEV_URL"
+                  # Advisory is optional (ADR-0015): only sync it when a source URL is
+                  # configured. Empty = skip, leaving the engine's no-advisory path intact.
+                  if [ -n "$ADVISORY_URL" ]; then
+                    upsert "$ADVISORY_CONFIGMAP" "$ADVISORY_KEY" "$ADVISORY_URL"
+                  else
+                    echo "feed-sync: advisoryUrl empty, skipping advisory snapshot"
+                  fi
+                  echo "feed-sync: done"
+              volumeMounts:
+                # readOnlyRootFilesystem is on, so give mktemp/curl a writable scratch dir.
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.feedSync.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.feedSync.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.feedSync.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

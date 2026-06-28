@@ -44,7 +44,9 @@ jobs:
             --set engine.advisory.configMapName=advisory \
             --set otelEndpoint=http://otel.svc:4318 \
             --set engine.notify.url=https://sink.example/hook \
-            --set registryAuth.dockerconfigSecret=registry
+            --set registryAuth.dockerconfigSecret=registry \
+            --set feedSync.enabled=true \
+            --set feedSync.advisoryUrl=https://feeds.example/advisories.json
       # Security invariants (ingest authn + webhook fail-closed). These assert the
       # rendered manifests carry the protections the security review required, so a
       # regression that quietly drops them fails CI rather than shipping.
@@ -86,4 +88,78 @@ jobs:
           if echo "$render" | grep -q 'protector-ingest-auth'; then
             echo "ingest Secret rendered despite ingestAuth.enabled=false"; exit 1
           fi
+          echo "ok"
+      - name: Assert feed-sync is ON by default and auto-wires the engine
+        run: |
+          # JEF-228 default-on: a stock install must render the feed-sync CronJob + its
+          # dedicated SA/Role/RoleBinding, AND auto-wire the engine to the synced KEV
+          # ConfigMap (kev-snapshot). The engine itself stays zero-egress — it only mounts
+          # the file the job produces.
+          render=$(helm template protector charts/protector --namespace protector)
+          for kind in CronJob ServiceAccount Role RoleBinding; do
+            echo "$render" | grep -q "kind: $kind" \
+              || { echo "feed-sync missing $kind by default"; exit 1; }
+          done
+          echo "$render" | grep -q 'name: protector-feed-sync' \
+            || { echo "feed-sync workload not rendered by default"; exit 1; }
+          # Engine auto-wired: the Deployment mounts the feed-sync's kev-snapshot ConfigMap
+          # and points PROTECTOR_KEV_FILE at it, with NO explicit engine.kev.configMapName.
+          echo "$render" | grep -q 'PROTECTOR_KEV_FILE' \
+            || { echo "engine not auto-wired to KEV by default"; exit 1; }
+          echo "$render" | grep -q 'name: kev-snapshot' \
+            || { echo "engine not mounting the feed-sync kev-snapshot ConfigMap"; exit 1; }
+          # Advisory has no default source, so it must NOT auto-wire by default.
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "advisory auto-wired despite no feedSync.advisoryUrl"; exit 1
+          fi
+          echo "ok"
+      - name: Assert feedSync.enabled=false renders no feed-sync and no auto-wire
+        run: |
+          # Air-gapped path: with feed-sync disabled and no explicit ConfigMap names, the
+          # chart must render NO feed-sync resources and the engine must mount NO KEV /
+          # advisory ConfigMap (the manual path) — nothing in the chart egresses.
+          render=$(helm template protector charts/protector --namespace protector \
+            --set feedSync.enabled=false)
+          if echo "$render" | grep -q 'feed-sync'; then
+            echo "feed-sync rendered despite feedSync.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'PROTECTOR_KEV_FILE'; then
+            echo "engine auto-wired KEV despite feedSync.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "engine auto-wired advisory despite feedSync.enabled=false"; exit 1
+          fi
+          echo "ok"
+      - name: Assert feed-sync renders CronJob + least-privilege RBAC when enabled
+        run: |
+          render=$(helm template protector charts/protector --namespace protector \
+            --set feedSync.enabled=true)
+          # The CronJob and its dedicated SA/Role/RoleBinding must all render.
+          for kind in CronJob ServiceAccount Role RoleBinding; do
+            echo "$render" | grep -q "kind: $kind" \
+              || { echo "feed-sync missing $kind"; exit 1; }
+          done
+          echo "$render" | grep -q 'name: protector-feed-sync' \
+            || { echo "feed-sync workload not named"; exit 1; }
+          # RBAC must be namespaced (Role, not ClusterRole) and scoped to ONLY the two
+          # named ConfigMaps — least privilege.
+          if echo "$render" | awk '/kind: Role/,/kind: RoleBinding/' \
+               | grep -q 'kind: ClusterRole'; then
+            echo "feed-sync RBAC is cluster-scoped"; exit 1
+          fi
+          role=$(echo "$render" | awk '/kind: Role$/,/^---/')
+          echo "$role" | grep -q 'resourceNames' \
+            || { echo "feed-sync Role not restricted by resourceNames"; exit 1; }
+          echo "$role" | grep -q 'kev-snapshot' \
+            || { echo "feed-sync Role missing kev-snapshot"; exit 1; }
+          echo "$role" | grep -q 'advisory-snapshot' \
+            || { echo "feed-sync Role missing advisory-snapshot"; exit 1; }
+          if echo "$role" | grep -qE 'secrets|"delete"|"\*"'; then
+            echo "feed-sync Role over-broad (secrets/delete/wildcard)"; exit 1
+          fi
+          # The job must fetch the KEV feed and apply the ConfigMaps.
+          echo "$render" | grep -q 'kubectl apply' \
+            || { echo "feed-sync does not apply the ConfigMaps"; exit 1; }
+          echo "$render" | grep -q 'known_exploited_vulnerabilities.json' \
+            || { echo "feed-sync does not fetch the KEV feed"; exit 1; }
           echo "ok"
