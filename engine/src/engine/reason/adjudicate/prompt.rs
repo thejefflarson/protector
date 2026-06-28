@@ -13,6 +13,11 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::evidence::entry_evidence;
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
+// JEF-113: exec *classification* (shell / package-manager in container) moved out of the
+// shared `Behavior` wire type into engine policy; the prompt re-applies the notable-exec
+// annotation here so the model still sees "executed /bin/bash (interactive shell in
+// container)" rather than the bare path `Behavior::summary` now returns.
+use crate::engine::observe::exec_class::annotated_summary;
 
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
@@ -54,7 +59,10 @@ pub(super) fn build_judgment_prompt_with(
     // order.)
     let mut cves = cves.to_vec();
 
-    let mut behavior_lines: Vec<String> = behaviors.iter().map(Behavior::summary).collect();
+    // Annotate notable execs (shell / package-manager in container, JEF-55) via engine
+    // policy — `Behavior::summary` returns the bare path after JEF-113, so without this the
+    // prompt would silently lose the "(interactive shell in container)" signal.
+    let mut behavior_lines: Vec<String> = behaviors.iter().map(annotated_summary).collect();
     behavior_lines.sort();
     behavior_lines.dedup();
     // No LINE cap: the model sees every observed behavior and every CVE on the entry. The
