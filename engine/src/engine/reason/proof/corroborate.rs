@@ -62,8 +62,11 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // intrusion regardless of chain. Conservative on purpose: a *bare* ProcessExec
         // (anything else) stays NON-corroborating — legit entrypoints exec constantly
         // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
-        // only. `notable_exec()` is `Some` exactly for shell/pkg-mgr execs.
-        Behavior::ProcessExec { .. } => behavior.notable_exec().is_some(),
+        // only. `notable_exec` is `Some` exactly for shell/pkg-mgr execs (JEF-113: the
+        // classifier is engine policy in `observe::exec_class`, not on the wire type).
+        Behavior::ProcessExec { .. } => {
+            crate::engine::observe::exec_class::notable_exec(behavior).is_some()
+        }
         // PrivilegeChange is NON-corroborating here: model evidence, not a per-objective
         // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
         // Wiring it into a specific attack chain would be a JEF-49-style follow-up.

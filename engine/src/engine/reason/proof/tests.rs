@@ -564,7 +564,9 @@ fn shell_exec_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
         path: "/bin/bash".into(),
     };
-    assert!(shell.is_interactive_shell());
+    assert!(crate::engine::observe::exec_class::is_interactive_shell(
+        &shell
+    ));
     assert!(corroborates(&shell, &CREDENTIAL_ACCESS));
     assert!(corroborates(&shell, &EXFILTRATION));
     assert!(corroborates(&shell, &ESCAPE_TO_HOST));
@@ -578,7 +580,7 @@ fn package_manager_exec_corroborates_any_objective() {
     let pkg = Behavior::ProcessExec {
         path: "/usr/bin/apt".into(),
     };
-    assert!(pkg.is_package_manager());
+    assert!(crate::engine::observe::exec_class::is_package_manager(&pkg));
     assert!(corroborates(&pkg, &CREDENTIAL_ACCESS));
     assert!(corroborates(&pkg, &EXFILTRATION));
     assert!(corroborates(&pkg, &ESCAPE_TO_HOST));
@@ -593,7 +595,7 @@ fn bare_exec_does_not_corroborate() {
     let bare = Behavior::ProcessExec {
         path: "/app/server".into(),
     };
-    assert!(bare.notable_exec().is_none());
+    assert!(crate::engine::observe::exec_class::notable_exec(&bare).is_none());
     assert!(!corroborates(&bare, &CREDENTIAL_ACCESS));
     assert!(!corroborates(&bare, &EXFILTRATION));
     assert!(!corroborates(&bare, &ESCAPE_TO_HOST));
