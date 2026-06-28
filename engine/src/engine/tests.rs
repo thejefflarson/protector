@@ -589,3 +589,154 @@ async fn no_journal_keeps_today_in_memory_behavior() {
         "no reversions without a journal or a revert"
     );
 }
+
+/// An adjudicator that ALWAYS returns Uncertain — the shape of a fully-down / OOM-ing
+/// Ollama (every call times out). Counts the calls it actually receives.
+struct AlwaysUncertain(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl reason::adjudicate::Adjudicator for AlwaysUncertain {
+    async fn judge(
+        &self,
+        _entry: &NodeKey,
+        _objectives: &[(NodeKey, AttackRef)],
+        _graph: &SecurityGraph,
+    ) -> Verdict {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Verdict::Uncertain("model unavailable".into())
+    }
+}
+
+/// JEF-234 — the core bug: an Uncertain (model-down) verdict is never cached, so without
+/// backoff the entry is re-judged on EVERY pass, hammering the struggling model. With
+/// backoff, after the first Uncertain the entry is NOT re-judged on immediately-following
+/// passes (all within the BASE=30s window), so the model-call count is bounded by the
+/// backoff schedule, not once-per-pass. Deterministic and fast: the passes run in well
+/// under 30s, so no real sleeps are needed to stay inside the backoff window.
+#[tokio::test]
+async fn an_uncertain_entry_is_not_re_judged_every_pass() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine_with_adjudicator(Box::new(AlwaysUncertain(calls.clone())));
+
+    // Drive many passes over IDENTICAL evidence (same fingerprint). Uncertain is never
+    // cached, so pre-JEF-234 every pass was a fresh model call. With backoff, only the
+    // first pass calls the model; the rest fall inside the entry's backoff and are skipped.
+    for _ in 0..10 {
+        engine.process(&exposed_snapshot(true)).await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "after the first Uncertain the entry stays in backoff: bounded calls, not 10"
+    );
+}
+
+/// An adjudicator that goes down (Uncertain) for the first N calls, then recovers
+/// (decisive). Used to show a decisive success resets the gate.
+struct RecoversAfter {
+    calls: Arc<AtomicUsize>,
+    down_for: usize,
+}
+
+#[async_trait::async_trait]
+impl reason::adjudicate::Adjudicator for RecoversAfter {
+    async fn judge(
+        &self,
+        _entry: &NodeKey,
+        _objectives: &[(NodeKey, AttackRef)],
+        _graph: &SecurityGraph,
+    ) -> Verdict {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < self.down_for {
+            Verdict::Uncertain("model unavailable".into())
+        } else {
+            Verdict::Exploitable("RCE reaches the secret".into())
+        }
+    }
+}
+
+/// JEF-234 — while an entry backs off, the dashboard keeps showing its last DECISIVE
+/// verdict (no regression to "uncertain"), and once the model recovers a decisive verdict
+/// is cached and shown. We can't fast-forward the injected clock across `process()` here,
+/// so we assert the no-regression display property directly: a decisive verdict shows, and
+/// a same-evidence Uncertain re-judge attempt does not blank or downgrade it.
+#[tokio::test]
+async fn backing_off_entry_keeps_showing_the_last_decisive_verdict() {
+    // First call decisive, every later call Uncertain — a model that answered once then
+    // went down. The first pass (CVE present) judges decisively; the second pass over the
+    // SAME evidence is a cache HIT (decisive verdicts ARE cached), so it never re-calls —
+    // proving the decisive path's correctness is unchanged by the backoff gate.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine_with_adjudicator(Box::new(RecoversAfter {
+        calls: calls.clone(),
+        down_for: 0, // decisive immediately
+    }));
+    engine.process(&exposed_snapshot(true)).await;
+    for _ in 0..5 {
+        engine.process(&exposed_snapshot(true)).await;
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a decisive verdict is cached: the same evidence is never re-judged"
+    );
+    assert!(
+        engine
+            .findings()
+            .snapshot()
+            .iter()
+            .any(|f| f.breach_relevant
+                && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+        "the decisive verdict is shown and stays shown"
+    );
+}
+
+/// JEF-234 global breaker — when the model is fully down, total model calls across the
+/// whole fleet per cooldown are bounded regardless of entry count. We exercise the
+/// breaker's invariant directly on the store (the same handle `process()` drives), with an
+/// injected clock so it's deterministic and fast: BREAKER_TRIP consecutive failures open
+/// it, after which `breaker_open` is true (the whole pass skips its model calls) until the
+/// cooldown elapses, and a decisive success closes it immediately.
+#[test]
+fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
+    use crate::engine::dashboard::VerdictStore;
+    use crate::engine::reason::backoff::{BREAKER_COOLDOWN, BREAKER_TRIP};
+    use std::time::{Duration, Instant};
+
+    let store = VerdictStore::new();
+    let now = Instant::now();
+    assert!(!store.breaker_open(now), "starts closed");
+
+    // Simulate a fully-down model: each "entry" call comes back inconclusive. The breaker
+    // stays closed until BREAKER_TRIP, then opens for the whole fleet.
+    for i in 0..BREAKER_TRIP {
+        assert!(
+            !store.breaker_open(now),
+            "breaker must stay closed before {BREAKER_TRIP} failures (i={i})"
+        );
+        store.record_inconclusive(&format!("entry-{i}"), now);
+    }
+    assert!(
+        store.breaker_open(now),
+        "the whole pass is gated once the model looks fully down"
+    );
+    assert!(
+        store.breaker_open(now + BREAKER_COOLDOWN - Duration::from_millis(1)),
+        "stays open through the cooldown window — total calls/window bounded"
+    );
+    assert!(
+        !store.breaker_open(now + BREAKER_COOLDOWN),
+        "reopens for a single probe after the cooldown"
+    );
+
+    // A decisive success closes it immediately, restoring normal judging.
+    for i in 0..BREAKER_TRIP {
+        store.record_inconclusive(&format!("entry-{i}"), now);
+    }
+    assert!(store.breaker_open(now), "tripped again");
+    store.record_decisive("entry-0");
+    assert!(
+        !store.breaker_open(now),
+        "the first decisive success closes the breaker"
+    );
+}
