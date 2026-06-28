@@ -1,0 +1,148 @@
+{
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2026-11911",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "The Simple File List plugin for WordPress is vulnerable to arbitrary file deletion due to insufficient file path validation in the eeSFL_DeleteFile function in all versions up to, and including, 6.3.7. This makes it possible for unauthenticated attackers to delete arbitrary files on the server, which can easily lead to remote code execution when the right file is deleted (such as wp-config.php). The simplefilelist_edit_job AJAX action is registered via wp_ajax_nopriv_, making it accessible without authentication, and the is_admin() guard that would otherwise restrict access is bypassed because is_admin() always returns true for requests to the admin-ajax.php endpoint."
+          }
+        ],
+        "weaknesses": [
+          {
+            "source": "security@wordfence.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-22"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-functions.php#L1281",
+            "source": "security@wordfence.com"
+          },
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-functions.php#L894",
+            "source": "security@wordfence.com"
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2026-11912",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "The Simple File List plugin for WordPress is vulnerable to arbitrary file modification due to insufficient authorization checks in all versions up to, and including, 6.3.7. This makes it possible for unauthenticated attackers to delete and modify files on the serve. This vulnerability is exploitable even when the administrator has not enabled the AllowFrontManage setting, because the is_admin() check unconditionally short-circuits the guard before that setting is evaluated."
+          }
+        ],
+        "weaknesses": [
+          {
+            "source": "security@wordfence.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-862"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-functions.php#L1265",
+            "source": "security@wordfence.com"
+          },
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-functions.php#L1586",
+            "source": "security@wordfence.com"
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2026-12119",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "The Simple File List plugin for WordPress is vulnerable to unauthorized file operations due to a missing authorization check on the 'frontmanage' shortcode attribute in all versions up to, and including, 6.3.7. This makes it possible for authenticated attackers, with contributor-level access and above, to perform arbitrary file operations including deletion, move, folder creation, and download. An attacker can create a draft post containing the 'eeSFL' shortcode, render it via the post preview endpoint to harvest the nonce needed to authorize the operations, and then submit file operation requests that bypass the intended authorization checks in includes/ee-list-ops-bar-process.php."
+          }
+        ],
+        "weaknesses": [
+          {
+            "source": "security@wordfence.com",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-862"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-front-end.php#L140",
+            "source": "security@wordfence.com"
+          },
+          {
+            "url": "https://plugins.trac.wordpress.org/browser/simple-file-list/tags/6.3.6/includes/ee-list-display.php#L341",
+            "source": "security@wordfence.com"
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2021-44228",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Apache Log4j2 JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints, allowing remote code execution."
+          }
+        ],
+        "weaknesses": [
+          {
+            "source": "x",
+            "type": "Primary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-502"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-917"
+              },
+              {
+                "lang": "en",
+                "value": "NVD-CWE-noinfo"
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://example.com/advisory",
+            "source": "x"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/security.html",
+            "source": "x",
+            "tags": [
+              "Patch",
+              "Vendor Advisory"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

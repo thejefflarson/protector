@@ -399,25 +399,31 @@ agent:
 # mount your own kev.json / advisory.json into the engine at /var/lib/protector/feeds
 # yourself. With the sidecar disabled, no sidecar/volume/feed-env renders.
 #
-# Advisory stays OPTIONAL: kevUrl ships a default public source, but advisoryUrl is empty
-# (no default advisory source), so advisory is only fetched once you set it.
+# BOTH feeds ship a default public source, so KEV exploit intel AND advisory enrichment
+# work out of the box (JEF-238). Clear a URL (or disable feedSync) to drop that feed.
 feedSync:
   enabled: true
-  # The two public, READ-ONLY feed sources. KEV is the canonical CISA catalogue, fetched
-  # in FULL (the emptyDir has no ConfigMap size limit). advisoryUrl defaults to empty (no
-  # advisory enrichment).
+  # The two public, READ-ONLY feed sources. KEV is the canonical CISA catalogue (plain
+  # JSON, fetched in FULL — the emptyDir has no ConfigMap size limit). advisoryUrl defaults
+  # to the public NVD CVE JSON 2.0 "recent" feed.
   #
-  # ADVISORY FORMAT — IMPORTANT. The sidecar fetches advisoryUrl VERBATIM (no transform).
-  # The engine's AdvisoryStore (ADR-0015) parses a specific CVE-keyed shape:
-  #   {"CVE-2021-44228": {"summary": "...", "cwe": ["CWE-502"], "fix_ref": "2.17.0"}, ...}
-  # or {"advisories": [{"id": "CVE-...", "summary": "...", "cwe": [...], "fix_ref": "..."}]}.
-  # Point advisoryUrl at a source ALREADY in that shape (e.g. your operator-curated export).
-  # A public OSV/GHSA bulk feed is NOT in this shape; transforming it would need a JSON
-  # processor the curl-only image lacks, so it is left as a documented follow-up (TODO) —
-  # do not point advisoryUrl at a raw OSV/GHSA dump, the engine would parse it to "no
-  # enrichment". KEV needs no transform: CISA KEV JSON is what KevCatalog already parses.
+  # ADVISORY SOURCE + FORMAT (JEF-238). The advisory default is the NVD CVE JSON 2.0
+  # "recent" feed: a GZIPPED, bounded (~9 MiB uncompressed), frequently-updated feed of the
+  # most recently published/modified CVEs, each carrying a description (-> summary), CWE
+  # weaknesses (-> cwe), and references (-> fix_ref). The sidecar fetches it with plain
+  # curl and gunzips it (busybox gunzip ships in the curl image) — NO jq, NO transform, NO
+  # extra image. It writes the RAW NVD JSON, and the engine's AdvisoryStore (ADR-0015) maps
+  # the NVD shape onto its fields NATIVELY at parse time, under hard length caps (JEF-106).
+  # The engine ALSO still accepts the curated CVE-keyed / {"advisories":[…]} shapes, so an
+  # operator can point advisoryUrl at their own curated export instead (the sidecar always
+  # gunzips the advisory feed, so a curated export must also be gzipped).
+  #
+  # SCOPE / FOLLOW-UP. "recent" covers actively-relevant CVEs (a rolling window), not the
+  # full historical NVD corpus. Broader coverage — also pulling the "modified" feed and/or
+  # a full-year backfill, which would need the sidecar to MERGE multiple NVD files (a jq or
+  # engine-side multi-file read) — is a deliberate follow-up, not this change.
   kevUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-  advisoryUrl: ""
+  advisoryUrl: "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
   # Re-fetch interval (a `sleep` arg: e.g. "12h", "6h", "30m"). KEV/advisory feeds change
   # at most daily; 12h keeps them fresh without spending much egress.
   interval: "12h"

@@ -148,19 +148,19 @@ leaves the cluster. The adjudicator's veto is load-bearing once a class is armed
 
 ### KEV / advisory feeds — feed-fetcher sidecar (on by default)
 
-The engine reasons over a CISA KEV catalogue (actively-exploited CVEs) and an optional
-CVE-keyed advisory snapshot. **The engine never fetches these over the network** — it
-only reads them from a file (ADR-0015), so the engine stays zero-egress.
+The engine reasons over a CISA KEV catalogue (actively-exploited CVEs) and a CVE advisory
+snapshot. **The engine never fetches these over the network** — it only reads them from a
+file (ADR-0015), so the engine stays zero-egress.
 
 By default the chart keeps those files fresh for you with a co-located **feed-fetcher
 sidecar** (`feedSync.enabled: true`) on the engine pod: a [native
 sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (an
 `initContainer` with `restartPolicy: Always`) that downloads the **full** public CISA KEV
-feed (and, if you set an advisory source, an advisory snapshot) into a shared `emptyDir`,
-then re-fetches on `feedSync.interval`. The engine container mounts the **same** volume
-read-only and reads `/var/lib/protector/feeds/kev.json` (and `advisory.json`) — wired
-automatically, no further configuration. The engine degrades gracefully if a file is
-missing or empty (the first-boot race before the sidecar's first fetch).
+feed and the public NVD advisory feed into a shared `emptyDir`, then re-fetches on
+`feedSync.interval`. The engine container mounts the **same** volume read-only and reads
+`/var/lib/protector/feeds/kev.json` and `advisory.json` — wired automatically, no further
+configuration. The engine degrades gracefully if a file is missing or empty (the
+first-boot race before the sidecar's first fetch).
 
 **Why a sidecar, not a ConfigMap?** Raw CISA KEV JSON is ~1.5 MiB — over Kubernetes'
 1 MiB ConfigMap limit (the retired CronJob path had to lossily strip it to CVE IDs), and
@@ -168,30 +168,35 @@ advisory data does not fit at all. An `emptyDir` has no size limit, so the sidec
 and the engine reads the data in **full**. This supersedes the JEF-228 CronJob and the
 cancelled JEF-110 engine-fetch (see ADR-0015).
 
-KEV ships a default public source, so it works out of the box. Advisory has **no** default
-source; opt in by pointing at a curated, CVE-keyed advisory feed **already in the
-`AdvisoryStore` shape** (see the format note below):
+**Both feeds ship a default public source, so KEV *and* advisory enrichment work out of
+the box.** The advisory default is the **NVD CVE JSON 2.0 "recent" feed**. Override the
+cadence with `feedSync.interval` (e.g. `12h`), the sources with `feedSync.kevUrl` /
+`feedSync.advisoryUrl`, and the curl image with `feedSync.image.*`.
 
-```sh
---set feedSync.advisoryUrl="https://your-internal/advisories.json"
-```
+**Advisory source + format (JEF-238).** The advisory default is the public **NVD CVE JSON
+2.0 "recent" feed** — a gzipped, bounded (~9 MiB uncompressed), frequently-updated feed
+where each CVE carries a description, CWE weaknesses, and references. The sidecar fetches
+it with plain `curl` and **gunzips** it (busybox `gunzip` already ships in the curl image)
+— **no `jq`, no transform, no extra container image** — and writes the raw NVD JSON. The
+engine's `AdvisoryStore` maps the NVD shape onto its fields **natively** at parse time
+(description → `summary`, real `CWE-<n>` weaknesses → `cwe`, a `Patch`-tagged-or-first
+reference → `fix_ref`), under the same hard length caps as every other shape (JEF-106).
 
-Tune the cadence with `feedSync.interval` (e.g. `12h`), the sources with `feedSync.kevUrl`
-/ `feedSync.advisoryUrl`, and the curl image with `feedSync.image.*`.
-
-**Advisory format (important).** The sidecar fetches `advisoryUrl` **verbatim — no
-transform**. The engine's `AdvisoryStore` parses a specific CVE-keyed shape:
+The engine **also** still accepts the curated shapes, so you can point `advisoryUrl` at
+your own export instead (the sidecar always gunzips the advisory feed, so a curated export
+must also be gzipped):
 
 ```json
 {"CVE-2021-44228": {"summary": "...", "cwe": ["CWE-502"], "fix_ref": "2.17.0"}}
 ```
 
 (or `{"advisories": [{"id": "CVE-...", "summary": "...", "cwe": [...], "fix_ref": "..."}]}`).
-Point `advisoryUrl` at a source already in that shape. A raw public OSV/GHSA bulk feed is
-**not** in this shape — transforming it would need a JSON processor the curl-only image
-lacks, so an OSV/GHSA→`AdvisoryStore` transform is a documented follow-up (TODO). Don't
-point `advisoryUrl` at a raw OSV/GHSA dump; the engine would parse it to "no enrichment".
-KEV needs no transform.
+
+**Scope / follow-up.** The "recent" feed is a rolling window of actively-relevant CVEs, not
+the full historical NVD corpus. Broader coverage (also pulling the "modified" feed and/or a
+full-year backfill, which would require merging multiple NVD files) is a deliberate
+follow-up, not this change. KEV needs no transform: CISA KEV JSON is what the engine's
+`KevCatalog` already parses.
 
 **Egress boundary.** The sidecar is the **only** component the chart gives network egress
 to, and it is **on by default**. It makes outbound GETs to **public, read-only** feed URLs
@@ -272,7 +277,7 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `ingestAuth.enabled`         | `true`                               | Bearer-token authn on the :9999 ingest (engine + agent share a Secret). |
 | `ingestAuth.existingSecret`  | `""`                                 | Bring your own Secret (key `token`) for rotation.  |
 | `feedSync.enabled`           | `true`                               | Feed-fetcher sidecar (the one default-on egress); fetches the full KEV (+ advisory) into a shared volume the engine reads. Set `false` for air-gapped. |
-| `feedSync.advisoryUrl`       | `""` (KEV only)                      | Set to a CVE-keyed advisory source **already in the `AdvisoryStore` shape** to also fetch advisory (no transform — see feeds section). |
+| `feedSync.advisoryUrl`       | NVD CVE JSON 2.0 *recent* feed       | Advisory source (gzipped). Default-on; the sidecar gunzips it and the engine parses NVD natively (or a curated `AdvisoryStore` shape). Clear to disable advisory. See feeds section. |
 | `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
 | `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy.        |
 | `webhook.enforcedNamespaceSelector` | `{}` (matches nothing)         | Label-select the namespaces that fail closed.      |

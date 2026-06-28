@@ -117,10 +117,11 @@ jobs:
           if echo "$render" | grep -qE 'kev-snapshot|advisory-snapshot'; then
             echo "feed-sync ConfigMaps still rendered (should be an emptyDir now)"; exit 1
           fi
-          # Advisory has no default source, so it must NOT auto-wire by default.
-          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
-            echo "advisory auto-wired despite no feedSync.advisoryUrl"; exit 1
-          fi
+          # Advisory now has a default NVD source (JEF-238), so it auto-wires by default.
+          echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE' \
+            || { echo "advisory not auto-wired despite the default NVD source"; exit 1; }
+          echo "$render" | grep -q 'advisory.json' \
+            || { echo "engine not pointed at the sidecar advisory.json"; exit 1; }
           echo "ok"
       - name: Assert feedSync.enabled=false renders no sidecar and no auto-wire
         run: |
