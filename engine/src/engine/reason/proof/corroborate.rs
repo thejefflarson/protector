@@ -1,0 +1,108 @@
+//! Corroboration (ADR-0014): whether a live runtime signal evidences a proven chain.
+//! Split out of the proof module root purely to keep every file under the 1,000-line
+//! cap (repo CLAUDE.md). These predicates are shadow-gated — they only set
+//! `corroborated`; they never actuate. `corroborates` is the per-objective seam the ADR
+//! is stated in terms of; `corroborated_for` resolves it for an entry's signals.
+
+use petgraph::stable_graph::NodeIndex;
+
+use crate::engine::graph::attack::AttackRef;
+use crate::engine::graph::{Behavior, Node, SecurityGraph};
+
+/// Whether a runtime `behavior` corroborates a chain whose objective has technique
+/// `attack` — the `corroborates(behavior, objective)` relation (ADR-0014). This is the
+/// per-objective seam the ADR's non-shadow design is stated in terms of.
+///
+/// An *alerting* signal corroborates **any** objective: a Falco critical means "an
+/// attack is happening now" regardless of which chain. An interactive-shell or
+/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): it is the
+/// agent-side equivalent of Falco's "terminal shell in container" / "package management
+/// in container" criticals — a hands-on-keyboard / tamper-now signal that, like the alert,
+/// evidences active intrusion irrespective of which chain it lands on. This is the seam
+/// that lets us retire Falco (JEF-56). The agent's own mundane behaviors
+/// (connection / secret-read / library-load) corroborate per objective — each only for
+/// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
+/// "everything corroborates everything" blanket the alert gate intentionally is.
+///
+/// Matching on `attack.tactic` (not the precise technique) is the stable key: the
+/// recognizers tag a Secret-read chain CREDENTIAL_ACCESS (T1552), an internet-egress
+/// chain EXFILTRATION (T1041), and a proven foothold INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING
+/// (T1190).
+///
+/// **Shadow-gated (ADR-0014):** these arms only set `corroborated=true`; they are inert
+/// for *actuation*, which stays gated behind `engine.enable` (empty = shadow). They
+/// remain observe-only until the shadow bake clears and an operator sets `enable` — this
+/// change does NOT touch any default/enable config.
+pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    match behavior {
+        // Unchanged: an alerting signal corroborates any objective.
+        Behavior::Alert { .. } => true,
+        // Actual internet egress corroborates an EXFILTRATION objective (T1041): a
+        // compromised workload shipping data out of the cluster. An in-cluster
+        // connection (`internet: false`) is normal traffic and corroborates nothing.
+        Behavior::NetworkConnection { internet, .. } => {
+            *internet && attack.tactic == Tactic::Exfiltration
+        }
+        // A read of a mounted secret corroborates a CREDENTIAL_ACCESS objective (T1552):
+        // the workload is actually touching the credential the chain reaches.
+        Behavior::SecretRead { .. } => attack.tactic == Tactic::CredentialAccess,
+        // A library load corroborates a FOOTHOLD (Initial Access / Exploit Public-Facing,
+        // T1190): after JEF-75 a LibraryLoaded surviving on a workload is already pruned
+        // to a *vulnerable* library, so its presence is the runtime foothold signal.
+        // (JEF-51 v2: this is also where dynamic CVE reachability promotes a foothold.)
+        Behavior::LibraryLoaded { .. } => attack.tactic == Tactic::InitialAccess,
+        // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
+        // drops it before it becomes graph state.
+        Behavior::FileRead { .. } => false,
+        // A *notable* exec — an interactive shell or package manager in the container
+        // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): it is the
+        // agent-side replacement for Falco's "terminal shell in container" / "package
+        // management in container" criticals, a tamper-now signal that evidences active
+        // intrusion regardless of chain. Conservative on purpose: a *bare* ProcessExec
+        // (anything else) stays NON-corroborating — legit entrypoints exec constantly
+        // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
+        // only. `notable_exec()` is `Some` exactly for shell/pkg-mgr execs.
+        Behavior::ProcessExec { .. } => behavior.notable_exec().is_some(),
+        // PrivilegeChange is NON-corroborating here: model evidence, not a per-objective
+        // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
+        // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
+        Behavior::PrivilegeChange { .. } => false,
+    }
+}
+
+/// Whether `entry` has a live runtime signal that corroborates a chain whose objective
+/// has technique `attack` and whose entry is the proven foothold `foothold` — the
+/// `corroborated-now` predicate. See [`corroborates`]. The signal is read from the entry
+/// workload (where the sensor attributed it), matching the prior entry-scoped semantics.
+///
+/// A behavior corroborates if it evidences **either** the objective's tactic **or** the
+/// foothold's tactic (JEF-77). The objective side is the per-objective seam (a SecretRead
+/// corroborates the CredentialAccess objective, an internet egress the Exfiltration one);
+/// the foothold side closes the gap that left the `LibraryLoaded → InitialAccess` arm
+/// dormant — a vuln-matched library load (already pruned by JEF-75) on an internet-facing
+/// entry evidences the *entry* foothold (T1190), never an objective's `attack`. With no
+/// foothold (`None`) only the objective side applies, so an assume-breach chain is
+/// unaffected. This stays shadow-gated like the rest: it only sets `corroborated`.
+pub(super) fn corroborated_for(
+    runtime: &[crate::engine::graph::RuntimeSignal],
+    attack: &AttackRef,
+    foothold: Option<&AttackRef>,
+) -> bool {
+    runtime.iter().any(|s| {
+        corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
+    })
+}
+
+/// The entry workload's runtime signals (empty for a non-workload node), resolved once
+/// per entry so [`corroborated_for`] doesn't re-look-up the constant entry node on every
+/// objective in the per-objective loop.
+pub(super) fn entry_runtime(
+    graph: &SecurityGraph,
+    entry: NodeIndex,
+) -> &[crate::engine::graph::RuntimeSignal] {
+    match graph.inner().node_weight(entry) {
+        Some(Node::Workload(w)) => &w.runtime,
+        _ => &[],
+    }
+}
