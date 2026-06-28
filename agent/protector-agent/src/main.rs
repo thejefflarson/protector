@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("PROTECTOR_AGENT_ENDPOINT")
         .unwrap_or_else(|_| "http://protector.protector.svc.cluster.local:9999".to_string());
     tracing::info!(%endpoint, "protector-agent starting");
-    let reporter = Reporter::new(&endpoint)?;
+    let mut reporter = Reporter::new(&endpoint)?;
 
     let (tx, mut rx) = mpsc::channel::<RuntimeObservation>(4096);
 
@@ -70,8 +70,15 @@ async fn main() -> anyhow::Result<()> {
                 _ = tick.tick() => {
                     reported_since_tick += reporter.send(&batch).await;
                     batch.clear();
+                    // JEF-240: surface cumulative delivered/rejected alongside the
+                    // interval count so a wedged ingest (token skew → every batch 401'd)
+                    // is visible here, not just in a per-batch WARN. A rising `rejected`
+                    // against a flat `delivered` is the agent dropping 100% of signal.
+                    let (delivered_total, rejected_total) = reporter.counters();
                     tracing::info!(
                         reported = reported_since_tick,
+                        delivered_total,
+                        rejected_total,
                         "behavioral observations reported (last {}s)",
                         FLUSH_INTERVAL.as_secs(),
                     );
