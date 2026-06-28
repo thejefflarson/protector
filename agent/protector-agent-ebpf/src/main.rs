@@ -21,7 +21,9 @@ mod vmlinux;
 
 use aya_ebpf::{
     helpers::bpf_ktime_get_ns,
-    helpers::gen::{bpf_d_path, bpf_probe_read_kernel, bpf_probe_read_kernel_str},
+    helpers::gen::{
+        bpf_d_path, bpf_get_current_cgroup_id, bpf_probe_read_kernel, bpf_probe_read_kernel_str,
+    },
     macros::{fentry, kprobe, map},
     maps::{LruHashMap, PerCpuArray, RingBuf},
     programs::{FEntryContext, ProbeContext},
@@ -31,9 +33,9 @@ use aya_ebpf::{
 // dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
 // tests share one definition and can't drift.
 use protector_agent_common::{
-    ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, DEDUP_MAP_CAP, DEDUP_WINDOW_NS,
-    KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
-    should_coalesce,
+    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, DEDUP_MAP_CAP,
+    DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE,
+    PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -55,6 +57,26 @@ static DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 fn record_drop() {
     if let Some(slot) = DROPS.get_ptr_mut(0) {
         unsafe { *slot += 1 };
+    }
+}
+
+/// Build the [`EventHeader`] common to every emitted event: the kind plus the current
+/// task's pid and cgroup id, both captured AT EVENT TIME (JEF-158). The cgroup id comes
+/// from the stable `bpf_get_current_cgroup_id()` helper (the cgroup v2 directory inode),
+/// recorded while the process is still live so userspace can attribute it to a pod even
+/// after the (often short-lived) process has exited — the exited-process race the
+/// post-hoc `/proc/<pid>/cgroup` read can't win. Both calls are stable helpers usable in
+/// kprobe and fentry programs alike. Verifier-safe: two helper calls, no loops, no reads.
+fn make_header(kind: u32) -> EventHeader {
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    // SAFETY: `bpf_get_current_cgroup_id` is a stable helper with no arguments and no
+    // pointer use; it returns 0 if the current task has no cgroup v2 id (handled in
+    // userspace by falling back to the `/proc` read).
+    let cgroup_id = unsafe { bpf_get_current_cgroup_id() };
+    EventHeader {
+        kind,
+        pid,
+        cgroup_id,
     }
 }
 
@@ -172,10 +194,7 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
     }
     if let Some(mut slot) = EVENTS.reserve::<ConnEvent>(0) {
         slot.write(ConnEvent {
-            header: EventHeader {
-                kind: KIND_CONNECT,
-                pid,
-            },
+            header: make_header(KIND_CONNECT),
             daddr,
             dport,
         });
@@ -281,13 +300,9 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
     if !(new_uid == 0 && old_uid != 0) {
         return Ok(());
     }
-    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     if let Some(mut slot) = EVENTS.reserve::<PrivEvent>(0) {
         slot.write(PrivEvent {
-            header: EventHeader {
-                kind: KIND_PRIV_CHANGE,
-                pid,
-            },
+            header: make_header(KIND_PRIV_CHANGE),
             old_uid,
             new_uid,
         });
@@ -326,12 +341,8 @@ fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
 /// directly with `bpf_probe_read_kernel_str`. NOT `bpf_d_path`: `security_bprm_check`
 /// isn't on the kernel's d_path allowlist, so the verifier would reject it (JEF-68).
 fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
-    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let mut ev = FileEvent {
-        header: EventHeader {
-            kind: KIND_EXEC,
-            pid,
-        },
+        header: make_header(KIND_EXEC),
         len: 0,
         path: [0u8; PATH_CAP],
     };
@@ -371,9 +382,8 @@ fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
 /// secret-read (file_open) probe — it needs the full path so the engine can match it to a
 /// Secret mount. (Library-load uses [`emit_lib_name`]: bpf_d_path is disallowed in its hook.)
 fn emit_file_path(file: *const vmlinux::file, kind: u32) {
-    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let mut ev = FileEvent {
-        header: EventHeader { kind, pid },
+        header: make_header(kind),
         len: 0,
         path: [0u8; PATH_CAP],
     };
@@ -408,12 +418,8 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
 /// needs the basename to name the library, which is the leaf dentry's `d_name`, so read it
 /// directly with bpf_probe_read_kernel(_str) — allowed in any program type.
 fn emit_lib_name(file: *const vmlinux::file) {
-    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let mut ev = FileEvent {
-        header: EventHeader {
-            kind: KIND_LIBRARY_LOAD,
-            pid,
-        },
+        header: make_header(KIND_LIBRARY_LOAD),
         len: 0,
         path: [0u8; PATH_CAP],
     };
