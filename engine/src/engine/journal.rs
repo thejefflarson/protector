@@ -107,6 +107,17 @@ pub enum Decision {
         /// Why it was lifted (health divergence, posture cleared, …).
         reason: String,
     },
+    /// One admission decision the webhook resolved (JEF-237): the deduped per-workload
+    /// signature/mesh allow/audit/deny record the `/policy` view shows. Persisted so the
+    /// admission log survives a restart and repopulates on boot (parallel to how
+    /// [`Breach`](Decision::Breach) repopulates `/findings`), rather than going blank.
+    /// Carries the full [`PolicyDecisionRecord`] (with its dedup `count` + last-seen), so
+    /// the replay restores the row verbatim.
+    Admission {
+        /// The deduped admission-decision record (subject / image / signature / mesh /
+        /// decision / reason / count / last-seen). Low-cardinality, no secret values.
+        record: crate::engine::policy_log::PolicyDecisionRecord,
+    },
 }
 
 /// One journal line: a [`Decision`] stamped with when it was recorded. The timestamp is
@@ -544,6 +555,46 @@ mod tests {
             .is_backed(),
             "a behavioral signal backs the decision"
         );
+    }
+
+    #[test]
+    fn admission_decisions_round_trip_across_a_reopen() {
+        // JEF-237 persistence: an admission record written before a "restart" replays after
+        // it, with its dedup count + last-seen intact, so `/policy` repopulates on boot.
+        use crate::engine::policy_log::PolicyDecisionRecord;
+        let path = temp_path("admission");
+        {
+            let journal = DecisionJournal::open(&path);
+            let mut record = PolicyDecisionRecord::now(
+                "admission",
+                "allow",
+                "Pod/web",
+                "ghcr.io/org/app:1",
+                "signed",
+                "meshed",
+                "default",
+                "",
+            );
+            record.count = 4;
+            record.at_ms = 42;
+            journal.record(Decision::Admission { record });
+        }
+        let reopened = DecisionJournal::open(&path);
+        let entries = reopened.replay();
+        assert_eq!(entries.len(), 1);
+        match &entries[0].decision {
+            Decision::Admission { record } => {
+                assert_eq!(record.subject, "Pod/web");
+                assert_eq!(record.image, "ghcr.io/org/app:1");
+                assert_eq!(record.signature, "signed");
+                assert_eq!(record.mesh, "meshed");
+                assert_eq!(record.decision, "allow");
+                assert_eq!(record.count, 4, "the dedup count survives the reopen");
+                assert_eq!(record.at_ms, 42, "the last-seen survives the reopen");
+            }
+            other => panic!("expected an Admission, got {other:?}"),
+        }
+        cleanup(&path);
     }
 
     #[test]

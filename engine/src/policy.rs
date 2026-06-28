@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
 
+use crate::engine::journal::{Decision as JournalDecision, DecisionJournal};
 use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use crate::metrics::Metrics;
 
@@ -141,16 +142,41 @@ pub trait Policy: Send + Sync {
 /// Evaluation is fail-closed per policy: the first applicable policy that denies
 /// short-circuits and the request is rejected. A request is allowed only when
 /// every applicable policy allows (or merely audits) it. The engine owns the
-/// recording of violations — both `Deny` and `Audit` outcomes are logged with
-/// request context and metered — so policies just decide; they don't log.
+/// recording of decisions — both violations (`Deny`/`Audit`, logged + metered) and
+/// clean admits (`Allow`) — so policies just decide; they don't log.
 pub struct Engine {
     policies: Vec<Box<dyn Policy>>,
     metrics: Arc<Metrics>,
-    /// The bounded admission-decision ring (JEF-226): the per-event log the `/policy`
-    /// dashboard view reads. Optional so the webhook can run without a dashboard (and so
-    /// the engine's existing tests construct without one). When present, every recorded
-    /// audit/deny is mirrored here alongside the metric + log.
+    /// The bounded, deduped admission-decision ring (JEF-226/237): the per-workload log the
+    /// `/policy` dashboard view reads. Optional so the webhook can run without a dashboard
+    /// (and so the engine's existing tests construct without one). When present, EVERY
+    /// resolved admission — clean admit, audit, or deny — is mirrored here (JEF-237 records
+    /// the good pods too, not only violations).
     decisions: Option<Arc<PolicyDecisionLog>>,
+    /// The durable decision journal (JEF-141/237). Optional. When present, each resolved
+    /// admission is also persisted so the `/policy` log survives a restart and repopulates
+    /// on boot. Disabled (a no-op) when no writable volume is configured.
+    journal: Option<Arc<DecisionJournal>>,
+}
+
+/// The holistic, engine-derived view of one request's resolved admission — the per-workload
+/// row JEF-237 records (one row per request, deduped, not one per policy). The signature/mesh
+/// statuses are COARSE and derived from each policy's outcome: the engine stays policy-agnostic
+/// (it never re-implements gating/mesh logic), so `signed` means "passed the signature gate"
+/// (covers verified AND out-of-gate-scope) and `meshed` means "passed the mesh gate" (covers
+/// meshed AND out-of-mesh-scope). A would-deny/deny from a policy flips its status to the
+/// flagged form (`unsigned` / `unmeshed`).
+struct AdmissionSummary {
+    /// `allow` (clean admit), `audit` (would-deny, allowed), or `deny` (rejected) — the
+    /// strongest outcome across the request's applicable policies.
+    decision: &'static str,
+    /// The first deny/audit reason (the actionable prose), empty for a clean admit.
+    reason: String,
+    /// Coarse signature status (`signed` / `unsigned`), empty if the signature policy
+    /// didn't run for this request.
+    signature: String,
+    /// Coarse mesh status (`meshed` / `unmeshed`), empty if the mesh policy didn't run.
+    mesh: String,
 }
 
 impl Engine {
@@ -159,45 +185,76 @@ impl Engine {
             policies,
             metrics,
             decisions: None,
+            journal: None,
         }
     }
 
-    /// Attach the admission-decision ring (JEF-226) so resolved audit/deny outcomes are
-    /// recorded for the `/policy` view in addition to the metric + log. Builder-style so
-    /// `new` stays the minimal constructor the existing tests use.
+    /// Attach the admission-decision ring (JEF-226/237) so EVERY resolved decision — clean
+    /// admit, audit, or deny — is recorded for the `/policy` view in addition to the metric +
+    /// log. Builder-style so `new` stays the minimal constructor the existing tests use.
     pub fn with_decision_log(mut self, decisions: Arc<PolicyDecisionLog>) -> Self {
         self.decisions = Some(decisions);
         self
     }
 
-    /// Run every applicable policy in order. Records every violation (deny or
-    /// audit) with request context, returns `Deny` on the first hard denial,
-    /// else `Allow`. Audit findings never deny — they're the discovery signal.
+    /// Attach the durable decision journal (JEF-237) so resolved admissions persist across a
+    /// restart. Builder-style; a disabled journal is a safe no-op (in-memory only).
+    pub fn with_journal(mut self, journal: Arc<DecisionJournal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Run every applicable policy in order. Meters + logs every violation (deny or audit),
+    /// returns `Deny` on the first hard denial else `Allow`, and records the resolved
+    /// admission — clean admit included — into the `/policy` ring + journal. Audit findings
+    /// never deny (the discovery signal); a deny short-circuits the API verdict.
     pub async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
+        let mut summary = AdmissionSummary {
+            decision: "allow",
+            reason: String::new(),
+            signature: String::new(),
+            mesh: String::new(),
+        };
         for policy in &self.policies {
             if !policy.applies(req) {
                 continue;
             }
-            match policy.evaluate(req).await {
+            let outcome = policy.evaluate(req).await;
+            let word = match &outcome {
+                Decision::Allow => "allow",
+                Decision::Audit { .. } => "audit",
+                Decision::Deny { .. } => "deny",
+            };
+            summary.note_policy(policy.name(), word);
+            match outcome {
                 Decision::Allow => {}
                 Decision::Audit { reason } => {
-                    self.record(policy.name(), "audit", req, &reason);
+                    self.meter_and_log(policy.name(), "audit", req, &reason);
+                    if summary.decision == "allow" {
+                        summary.decision = "audit";
+                        summary.reason = reason;
+                    }
                 }
                 Decision::Deny { reason } => {
-                    self.record(policy.name(), "deny", req, &reason);
-                    // Prefix with the policy name so the API caller can see which
-                    // rule rejected the request.
+                    self.meter_and_log(policy.name(), "deny", req, &reason);
+                    summary.decision = "deny";
+                    summary.reason = reason.clone();
+                    // The FIRST deny is the API verdict (fail-closed short-circuit); later
+                    // policies don't run. Prefix with the policy name so the API caller can
+                    // see which rule rejected the request.
+                    self.record_admission(req, &summary);
                     return Decision::deny(format!("[{}] {reason}", policy.name()));
                 }
             }
         }
+        self.record_admission(req, &summary);
         Decision::Allow
     }
 
     /// Log (with request context) and meter a policy violation. The structured
     /// fields — policy, namespace, name, kind — are what a discovery query keys
     /// on to find workloads that should be meshed or images that should be signed.
-    fn record(
+    fn meter_and_log(
         &self,
         policy: &'static str,
         decision: &'static str,
@@ -215,19 +272,85 @@ impl Engine {
             audit = decision == "audit",
             "{reason}"
         );
-        // Mirror the resolved decision into the bounded ring the `/policy` view reads
-        // (JEF-226). Low-cardinality, no secret values: the subject is the workload
-        // `kind/name`; any image ref(s) live in the (already operator-facing) reason.
+    }
+
+    /// Mirror the request's resolved admission into the bounded, deduped ring the `/policy`
+    /// view reads (JEF-237) AND the durable journal (so it survives a restart). One row per
+    /// request — clean admits included — deduped by `(subject, image, decision)` so a
+    /// Deployment's replicas or a CronJob's runs coalesce into a single counted row.
+    /// Low-cardinality, no secret values.
+    fn record_admission(&self, req: &AdmissionRequest<DynamicObject>, summary: &AdmissionSummary) {
+        // No ring AND no journal ⇒ nothing to do (skip the image extraction work).
+        if self.decisions.is_none() && self.journal.is_none() {
+            return;
+        }
+        let namespace = req.namespace.as_deref().unwrap_or_default();
+        let record = PolicyDecisionRecord::now(
+            "admission",
+            summary.decision,
+            format!("{}/{}", req.kind.kind, req.name),
+            request_image(req),
+            summary.signature.clone(),
+            summary.mesh.clone(),
+            namespace,
+            summary.reason.clone(),
+        );
         if let Some(decisions) = &self.decisions {
-            decisions.record(PolicyDecisionRecord::now(
-                policy,
-                decision,
-                format!("{}/{}", req.kind.kind, req.name),
-                namespace,
-                reason,
-            ));
+            decisions.record(record.clone());
+        }
+        if let Some(journal) = &self.journal {
+            journal.record(JournalDecision::Admission { record });
         }
     }
+}
+
+impl AdmissionSummary {
+    /// Fold one policy's coarse outcome into the per-request signature/mesh status. The engine
+    /// stays policy-agnostic: it keys on the stable policy NAME and never re-derives gating or
+    /// mesh logic. `allow` from a gate ⇒ it passed (`signed` / `meshed`); `audit`/`deny` ⇒ the
+    /// flagged form (`unsigned` / `unmeshed`).
+    fn note_policy(&mut self, policy: &str, word: &str) {
+        let passed = word == "allow";
+        match policy {
+            "image-signature" => {
+                self.signature = if passed { "signed" } else { "unsigned" }.to_string();
+            }
+            "mesh-injection" => {
+                self.mesh = if passed { "meshed" } else { "unmeshed" }.to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A single representative image ref for the request's `(subject, image, decision)` dedup key
+/// (JEF-237). For a Pod it's the FIRST workload container image (init/ephemeral and the
+/// injected `linkerd-proxy` sidecar are skipped, so a meshed and an unmeshed copy of the same
+/// app dedup together). Empty for a non-Pod or an object with no container image — the row
+/// then dedups on `(subject, decision)` alone. Low-cardinality and operator-facing; UNTRUSTED
+/// (auto-escaped at render).
+fn request_image(req: &AdmissionRequest<DynamicObject>) -> String {
+    let Some(obj) = req.object.as_ref() else {
+        return String::new();
+    };
+    let containers = obj.data["spec"]
+        .get("containers")
+        .and_then(|v| v.as_array());
+    let Some(containers) = containers else {
+        return String::new();
+    };
+    for c in containers {
+        let name = c.get("name").and_then(|v| v.as_str());
+        // Skip Linkerd's injected sidecar so the same app image keys identically whether or
+        // not it ended up meshed.
+        if name == Some("linkerd-proxy") {
+            continue;
+        }
+        if let Some(image) = c.get("image").and_then(|v| v.as_str()) {
+            return image.to_string();
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]
@@ -333,11 +456,38 @@ mod tests {
         ));
     }
 
+    /// A Pod CREATE carrying a single container image, so the recorded admission row has a
+    /// non-empty `image` (the dedup key component) and `request_image` has something to find.
+    fn pod_request_with_image(image: &str) -> AdmissionRequest<DynamicObject> {
+        let review: kube::core::admission::AdmissionReview<DynamicObject> =
+            serde_json::from_value(json!({
+                "apiVersion": "admission.k8s.io/v1",
+                "kind": "AdmissionReview",
+                "request": {
+                    "uid": "test-uid",
+                    "kind": {"group": "", "version": "v1", "kind": "Pod"},
+                    "resource": {"group": "", "version": "v1", "resource": "pods"},
+                    "name": "demo",
+                    "namespace": "default",
+                    "operation": "CREATE",
+                    "userInfo": {},
+                    "object": {
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": {"name": "demo"},
+                        "spec": {"containers": [{"name": "app", "image": image}]}
+                    }
+                }
+            }))
+            .expect("valid AdmissionReview fixture");
+        review.try_into().expect("review carries a request")
+    }
+
     #[tokio::test]
-    async fn records_each_resolved_decision_into_the_ring() {
-        // JEF-226: a resolved audit/deny is mirrored into the bounded ring with the right
-        // policy / decision / subject / namespace / reason. The pod fixture is Pod "demo"
-        // in "default".
+    async fn records_one_holistic_admission_row_with_signature_and_mesh_status() {
+        // JEF-237: a single per-request admission row carries the COARSE signature + mesh
+        // status derived from each gate's outcome, the resolved decision word, the subject,
+        // image, namespace, and the actionable reason — not one row per policy.
         let log = Arc::new(PolicyDecisionLog::new());
         let engine = Engine::new(
             vec![
@@ -349,39 +499,101 @@ mod tests {
                 Box::new(Fixed {
                     name: "mesh-injection",
                     applies: true,
-                    decision: Decision::deny("not enrolled in the mesh"),
+                    decision: Decision::Allow,
                 }),
             ],
             Arc::new(Metrics::new()),
         )
         .with_decision_log(log.clone());
 
-        let _ = engine.evaluate(&pod_request()).await;
+        let _ = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
 
         let snap = log.snapshot();
-        // Newest-first: the mesh deny short-circuited evaluation after the signature audit,
-        // so both were recorded, deny last (hence first in the snapshot).
-        assert_eq!(snap.len(), 2, "both resolved decisions recorded");
-        assert_eq!(snap[0].policy, "mesh-injection");
-        assert_eq!(snap[0].decision, "deny");
-        assert_eq!(snap[0].subject, "Pod/demo");
-        assert_eq!(snap[0].namespace, "default");
-        assert_eq!(snap[0].reason, "not enrolled in the mesh");
-
-        assert_eq!(snap[1].policy, "image-signature");
-        assert_eq!(snap[1].decision, "audit");
-        assert_eq!(snap[1].subject, "Pod/demo");
-        assert_eq!(snap[1].namespace, "default");
+        assert_eq!(snap.len(), 1, "one holistic row per request");
+        let r = &snap[0];
+        assert_eq!(r.policy, "admission");
         assert_eq!(
-            snap[1].reason,
+            r.decision, "audit",
+            "audit is the resolved (non-deny) outcome"
+        );
+        assert_eq!(r.subject, "Pod/demo");
+        assert_eq!(r.image, "ghcr.io/org/app:1");
+        assert_eq!(r.signature, "unsigned", "the signature gate audited");
+        assert_eq!(r.mesh, "meshed", "the mesh gate passed");
+        assert_eq!(r.namespace, "default");
+        assert_eq!(
+            r.reason,
             "unsigned or untrusted image(s): ghcr.io/org/app:1"
         );
     }
 
     #[tokio::test]
-    async fn allow_decisions_are_not_recorded() {
-        // An all-allow evaluation leaves the ring empty — the log is the would-deny /
-        // deny discovery signal, complementing (not duplicating) the allow path.
+    async fn records_clean_admit_as_an_allow_row() {
+        // JEF-237's headline: a good pod (signed + meshed) is RECORDED as a green admit row,
+        // not dropped — so a healthy cluster's /policy view isn't blank.
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![
+                Box::new(Fixed {
+                    name: "image-signature",
+                    applies: true,
+                    decision: Decision::Allow,
+                }),
+                Box::new(Fixed {
+                    name: "mesh-injection",
+                    applies: true,
+                    decision: Decision::Allow,
+                }),
+            ],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+
+        let _ = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
+
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), 1, "the clean admit is recorded");
+        let r = &snap[0];
+        assert_eq!(r.decision, "allow");
+        assert_eq!(r.signature, "signed");
+        assert_eq!(r.mesh, "meshed");
+        assert!(r.reason.is_empty(), "a clean admit carries no reason");
+    }
+
+    #[tokio::test]
+    async fn deny_short_circuits_but_the_admission_row_is_still_recorded() {
+        // A hard deny is the API verdict AND is captured as a deny row (with the gate's status
+        // up to the short-circuit point).
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![Box::new(Fixed {
+                name: "image-signature",
+                applies: true,
+                decision: Decision::deny("unsigned"),
+            })],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+
+        let verdict = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
+        assert!(matches!(verdict, Decision::Deny { .. }));
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].decision, "deny");
+        assert_eq!(snap[0].signature, "unsigned");
+        assert_eq!(snap[0].reason, "unsigned");
+    }
+
+    #[tokio::test]
+    async fn replica_churn_dedups_into_one_counted_admission_row() {
+        // A Deployment's replicas (same subject + image + outcome) must coalesce into ONE
+        // counted row, not flood the ring — the bounding JEF-237 requires.
         let log = Arc::new(PolicyDecisionLog::new());
         let engine = Engine::new(
             vec![Box::new(Fixed {
@@ -392,8 +604,56 @@ mod tests {
             Arc::new(Metrics::new()),
         )
         .with_decision_log(log.clone());
-        let _ = engine.evaluate(&pod_request()).await;
-        assert!(log.snapshot().is_empty(), "allow is not recorded");
+        for _ in 0..25 {
+            let _ = engine
+                .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+                .await;
+        }
+        let snap = log.snapshot();
+        assert_eq!(snap.len(), 1, "replica churn folds into one row");
+        assert_eq!(snap[0].count, 25, "the dedup count totals the replicas");
+    }
+
+    #[tokio::test]
+    async fn resolved_admission_is_persisted_to_the_journal() {
+        // JEF-237 persistence: with a journal attached, the resolved admission is written as a
+        // durable Admission line so /policy survives a restart.
+        use crate::engine::journal::{Decision as JournalDecision, DecisionJournal};
+        let path = std::env::temp_dir().join(format!(
+            "protector-policy-journal-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let journal = Arc::new(DecisionJournal::open(&path));
+        let engine = Engine::new(
+            vec![Box::new(Fixed {
+                name: "image-signature",
+                applies: true,
+                decision: Decision::Allow,
+            })],
+            Arc::new(Metrics::new()),
+        )
+        .with_journal(journal.clone());
+
+        let _ = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
+
+        let entries = journal.replay();
+        let admissions: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match &e.decision {
+                JournalDecision::Admission { record } => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admissions.len(), 1, "the admission was persisted");
+        assert_eq!(admissions[0].decision, "allow");
+        assert_eq!(admissions[0].image, "ghcr.io/org/app:1");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

@@ -140,20 +140,30 @@ async fn judgements_json_view(State(journal): State<Arc<JudgementLog>>) -> Json<
     Json(journal.snapshot())
 }
 
-/// The `/policy` HTML view (JEF-226): the webhook's recent admission decisions — signature
-/// / mesh / enforce-authz audit vs deny — one row per resolved decision. The machine-readable
-/// form is `/policy.json`. Read-only; complements the aggregate `/metrics` counter.
-async fn policy_html_view(State(log): State<Arc<PolicyDecisionLog>>) -> Html<String> {
-    Html(components::policy(&policy_props(&log.snapshot())).into_string())
+/// The `/policy` route state (JEF-226/237): the shared admission-decision ring plus the
+/// process boot time, so the activity line's honest-empty state can say "no decisions since
+/// <boot>" rather than "just now".
+#[derive(Clone)]
+struct PolicyState {
+    log: Arc<PolicyDecisionLog>,
+    boot: SystemTime,
 }
 
-/// The `/policy.json` view (JEF-226): the recent admission decisions as machine-readable
-/// JSON (policy / decision / subject / namespace / reason / timestamp per record), so the
-/// per-event decision log can be scraped/asserted, not only eyeballed.
-async fn policy_json_view(
-    State(log): State<Arc<PolicyDecisionLog>>,
-) -> Json<Vec<PolicyDecisionRecord>> {
-    Json(log.snapshot())
+/// The `/policy` HTML view (JEF-226/237): the webhook's recent admission decisions — clean
+/// admits (signed + meshed) AND audited/denied — one deduped row per workload + image +
+/// outcome, with the admit/audit/deny activity line. The machine-readable form is
+/// `/policy.json`. Read-only; complements the aggregate `/metrics` counter.
+async fn policy_html_view(State(state): State<PolicyState>) -> Html<String> {
+    let props = policy_props(&state.log.snapshot(), state.log.tallies(), state.boot);
+    Html(components::policy(&props).into_string())
+}
+
+/// The `/policy.json` view (JEF-226/237): the recent admission decisions as machine-readable
+/// JSON (policy / decision / subject / image / signature / mesh / namespace / reason / count /
+/// timestamp per record), so the per-event decision log can be scraped/asserted, not only
+/// eyeballed.
+async fn policy_json_view(State(state): State<PolicyState>) -> Json<Vec<PolicyDecisionRecord>> {
+    Json(state.log.snapshot())
 }
 
 /// Replay the durable decision journal and aggregate the would-have-acted report over
@@ -287,13 +297,16 @@ pub async fn serve_dashboard(
                 .route("/reversions", get(reversions_view))
                 .with_state(reversions),
         )
-        // JEF-226: the webhook's admission-decision log (HTML + JSON). New routes; no
-        // existing route changes. Its own state handle (the shared decision ring).
+        // JEF-226/237: the webhook's admission-decision log (HTML + JSON). The shared decision
+        // ring plus the boot time (for the honest-empty "no decisions since <boot>" line).
         .merge(
             Router::new()
                 .route("/policy", get(policy_html_view))
                 .route("/policy.json", get(policy_json_view))
-                .with_state(admission),
+                .with_state(PolicyState {
+                    log: admission,
+                    boot: SystemTime::now(),
+                }),
         )
         .merge(
             Router::new()

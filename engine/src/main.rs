@@ -189,15 +189,23 @@ async fn main() -> Result<()> {
     // server's /metrics scrape endpoint.
     let metrics = Arc::new(Metrics::new());
 
-    // The bounded admission-decision ring (JEF-226): the webhook engine writes each
-    // resolved audit/deny here; the (separately-spawned) dashboard reads it for `/policy`.
-    // Both run in this one process, so the two halves are the same `Arc`. In-memory only.
+    // The bounded, deduped admission-decision ring (JEF-226/237): the webhook engine writes
+    // each resolved decision — clean admit, audit, or deny — here; the (separately-spawned)
+    // dashboard reads it for `/policy`. Both run in this one process, so the two halves are
+    // the same `Arc`. On boot the mitigation engine repopulates it from the durable journal.
     let policy_log = Arc::new(PolicyDecisionLog::new());
+
+    // The durable decision journal (JEF-141/237): the webhook engine persists each resolved
+    // admission so `/policy` survives a restart. Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH`
+    // ⇒ disabled (in-memory only, no crash). The mitigation engine opens its own handle to the
+    // same path; both append-only writers share the file safely.
+    let webhook_journal = Arc::new(protector::engine::journal::DecisionJournal::from_env());
 
     // The policy set is fixed at startup and shared (read-only) across requests.
     let engine = Arc::new(
         Engine::new(vec![Box::new(signature), Box::new(mesh)], metrics.clone())
-            .with_decision_log(policy_log.clone()),
+            .with_decision_log(policy_log.clone())
+            .with_journal(webhook_journal.clone()),
     );
 
     // The mitigation engine is the product: it runs by default, out-of-band, with
