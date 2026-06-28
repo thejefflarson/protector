@@ -157,21 +157,33 @@ registryAuth:
 # --- webhook wiring ---
 webhook:
   # Fail-safe for the AUDIT webhook (the broad one, below): a webhook outage must never
-  # block API writes in namespaces that have NOT opted into enforcement. Keep this
-  # Ignore — audit is observe-only, so failing it open loses a little observability, not
-  # safety. The separate ENFORCING webhook fails CLOSED (see enforcedNamespaceSelector).
+  # block API writes. Keep this Ignore — audit is observe-only, so failing it open loses
+  # a little observability, not safety. This is also what makes AUDIT-EVERYWHERE safe (see
+  # excludeNamespaces): because the audit webhook is fail-open AND audit never denies, it
+  # can never block Pod CREATE anywhere — including kube-system or protector's own
+  # namespace during bootstrap — even if the engine is down. The separate ENFORCING
+  # webhook fails CLOSED (see enforcedNamespaceSelector).
   failurePolicy: Ignore
   # Keep the apiserver from stalling pod creation on a slow verify.
   timeoutSeconds: 5
-  # Namespaces never gated — control plane + infra, and protector's own ns, so a bug
-  # here can't deadlock the cluster or protector itself. cert-manager is exempt because
-  # the chart depends on it (see `cert` below); drop it if you supply your own certs.
-  exemptNamespaces:
-  - kube-system
-  - kube-public
-  - kube-node-lease
-  - cert-manager
-  - protector
+  # AUDIT-EVERYWHERE BY DEFAULT. EMPTY ([]) means the audit webhook intercepts Pod CREATE
+  # in EVERY namespace — including the control plane (kube-system / kube-public /
+  # kube-node-lease), cert-manager, mesh/CD infra (linkerd / argocd), and protector's OWN
+  # namespace. There is no default exclusion list anymore: audit observes the whole
+  # cluster out of the box.
+  #
+  # WHY THIS IS SAFE (availability rationale): the audit webhook is fail-open
+  # (failurePolicy: Ignore, above) and audit NEVER denies — it only logs + meters. So even
+  # in kube-system, and even while the engine is restarting or unreachable, the apiserver
+  # admits the Pod regardless. The webhook cannot deadlock the cluster or protector itself.
+  # (Enforcement is a SEPARATE, opt-in, fail-closed webhook scoped by label — see
+  # enforcedNamespaceSelector. Auditing a namespace does NOT enforce it.)
+  #
+  # OPT-OUT: list namespace names here to keep BOTH webhooks OFF them, e.g.:
+  #   webhook.excludeNamespaces:
+  #   - kube-system
+  #   - cert-manager
+  excludeNamespaces: []
   # --- fail-closed enforcement (security fix) ---
   # A SECOND webhook, scoped to namespaces that have opted into signature/mesh
   # ENFORCEMENT, fails CLOSED: if protector is down or a Pod spec is oversized, Pod
