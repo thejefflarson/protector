@@ -75,13 +75,20 @@ impl AdvisoryStore {
         self.by_cve.is_empty()
     }
 
-    /// Parse the snapshot. Accepts either shape (mirroring `KevCatalog::parse`'s
+    /// Parse the snapshot. Accepts three shapes (mirroring `KevCatalog::parse`'s
     /// tolerance):
     ///
     /// - an object keyed by CVE id:
     ///   `{"CVE-2021-44228": {"summary": "...", "cwe": ["CWE-502"], "fix_ref": "2.17.0"}}`
     /// - an array of entries each carrying their own id:
     ///   `{"advisories": [{"id": "CVE-...", "summary": "...", "cwe": [...], "fix_ref": "..."}]}`
+    /// - the **public NVD CVE JSON 2.0** feed shape verbatim (JEF-238):
+    ///   `{"vulnerabilities": [{"cve": {"id": "CVE-...", "descriptions": [...],
+    ///   "weaknesses": [...], "references": [...]}}]}`. This lets the feed-fetcher sidecar
+    ///   stay a plain `curl` (no `jq`, no extra image): it just fetches+gunzips NVD's
+    ///   `recent`/`modified` feeds and the engine maps them onto [`Advisory`] here, under
+    ///   the SAME parse-time caps as the curated shapes — no new dependency, the untrusted
+    ///   third-party text never escapes the engine's bounded parser (JEF-106 / ADR-0015).
     ///
     /// Each entry's fields are structurally extracted and length-capped (JEF-106): the
     /// summary is truncated to [`SUMMARY_CAP`] chars, CWE ids are sorted/deduped/capped to
@@ -92,6 +99,21 @@ impl AdvisoryStore {
         };
         let mut by_cve = HashMap::new();
         match root {
+            // NVD CVE JSON 2.0 feed shape: `{"vulnerabilities": [{"cve": {...}}]}`. Each
+            // wrapper carries one `cve` object naming its own id; we reshape it (NVD's
+            // verbose schema → the three capped fields) without a sidecar transform.
+            Value::Object(ref obj) if obj.contains_key("vulnerabilities") => {
+                if let Some(Value::Array(entries)) = obj.get("vulnerabilities") {
+                    for entry in entries {
+                        if let Some(cve) = entry.get("cve")
+                            && let Some(id) = cve.get("id").and_then(Value::as_str)
+                            && let Some(advisory) = Self::extract_nvd(cve)
+                        {
+                            by_cve.insert(id.to_string(), advisory);
+                        }
+                    }
+                }
+            }
             // Array shape: each entry names its own CVE id.
             Value::Object(ref obj) if obj.contains_key("advisories") => {
                 if let Some(Value::Array(entries)) = obj.get("advisories") {
@@ -163,6 +185,75 @@ impl AdvisoryStore {
             cwe,
             fix_ref,
         })
+    }
+
+    /// Reshape ONE NVD CVE JSON 2.0 `cve` object into the curated `{summary, cwe, fix_ref}`
+    /// shape, then delegate to [`Self::extract`] so the parse-time caps (JEF-106) are
+    /// applied in exactly ONE place. The NVD field mapping (JEF-238):
+    ///
+    /// - `summary`  ← the first English (`lang == "en"`) `descriptions[].value`.
+    /// - `cwe`      ← every English `weaknesses[].description[].value` that is a real
+    ///   `CWE-<n>` id (NVD also emits placeholders like `NVD-CWE-noinfo` / `NVD-CWE-Other`,
+    ///   which carry no class and are dropped here).
+    /// - `fix_ref`  ← a reference url, preferring one tagged `"Patch"`, else the first url.
+    ///
+    /// Returns `None` (entry dropped) when none of the three fields is usable — same
+    /// contract as [`Self::extract`].
+    fn extract_nvd(cve: &Value) -> Option<Advisory> {
+        // First English description → summary.
+        let summary = cve
+            .get("descriptions")
+            .and_then(Value::as_array)
+            .and_then(|ds| {
+                ds.iter()
+                    .find(|d| d.get("lang").and_then(Value::as_str) == Some("en"))
+                    .and_then(|d| d.get("value").and_then(Value::as_str))
+            })
+            .unwrap_or_default();
+
+        // English weakness values that are genuine CWE ids (skip NVD's no-info placeholders).
+        let cwe: Vec<Value> = cve
+            .get("weaknesses")
+            .and_then(Value::as_array)
+            .map(|ws| {
+                ws.iter()
+                    .filter_map(|w| w.get("description").and_then(Value::as_array))
+                    .flatten()
+                    .filter(|d| d.get("lang").and_then(Value::as_str) == Some("en"))
+                    .filter_map(|d| d.get("value").and_then(Value::as_str))
+                    .filter(|v| v.starts_with("CWE-"))
+                    .map(|v| Value::String(v.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // A reference url: prefer one tagged "Patch", else the first listed.
+        let refs = cve.get("references").and_then(Value::as_array);
+        let fix_ref = refs.and_then(|rs| {
+            let patch = rs
+                .iter()
+                .find(|r| {
+                    r.get("tags")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ts| ts.iter().any(|t| t.as_str() == Some("Patch")))
+                })
+                .and_then(|r| r.get("url").and_then(Value::as_str));
+            patch
+                .or_else(|| {
+                    rs.first()
+                        .and_then(|r| r.get("url").and_then(Value::as_str))
+                })
+                .map(str::to_string)
+        });
+
+        // Hand the normalized entry to the shared extractor so the caps apply once.
+        let mut normalized = serde_json::Map::new();
+        normalized.insert("summary".into(), Value::String(summary.to_string()));
+        normalized.insert("cwe".into(), Value::Array(cwe));
+        if let Some(fix_ref) = fix_ref {
+            normalized.insert("fix_ref".into(), Value::String(fix_ref));
+        }
+        Self::extract(&Value::Object(normalized))
     }
 
     /// Load the snapshot from a file. Returns an empty store (with a logged warning) if
@@ -248,6 +339,58 @@ mod tests {
         let store = AdvisoryStore::parse(array);
         assert_eq!(store.len(), 1);
         assert_eq!(store.get("CVE-2021-44228").unwrap().summary, "Log4Shell");
+    }
+
+    #[test]
+    fn parses_nvd_cve_json_2_0_shape() {
+        // JEF-238: the engine maps the raw NVD CVE JSON 2.0 feed (what the curl+gunzip
+        // sidecar drops in, no transform) onto Advisory — first English description ->
+        // summary, real CWE ids -> cwe (NVD-CWE-* placeholders dropped), a Patch-tagged
+        // reference preferred for fix_ref.
+        let nvd = r#"{"vulnerabilities":[
+            {"cve":{
+                "id":"CVE-2021-44228",
+                "descriptions":[
+                    {"lang":"es","value":"ignored non-english"},
+                    {"lang":"en","value":"Log4Shell JNDI RCE"}
+                ],
+                "weaknesses":[{"description":[
+                    {"lang":"en","value":"CWE-502"},
+                    {"lang":"en","value":"NVD-CWE-noinfo"},
+                    {"lang":"en","value":"CWE-917"}
+                ]}],
+                "references":[
+                    {"url":"https://example.com/first"},
+                    {"url":"https://logging.apache.org/security.html","tags":["Patch"]}
+                ]
+            }}
+        ]}"#;
+        let store = AdvisoryStore::parse(nvd);
+        assert_eq!(store.len(), 1);
+        let a = store.get("CVE-2021-44228").unwrap();
+        assert_eq!(a.summary, "Log4Shell JNDI RCE");
+        // Real CWE ids survive (sorted/deduped); the NVD placeholder is dropped.
+        assert_eq!(a.cwe, vec!["CWE-502", "CWE-917"]);
+        // The Patch-tagged reference wins over the first-listed one.
+        assert_eq!(
+            a.fix_ref.as_deref(),
+            Some("https://logging.apache.org/security.html")
+        );
+    }
+
+    #[test]
+    fn nvd_entry_falls_back_to_first_reference_when_no_patch_tag() {
+        // No Patch tag → fix_ref is the first reference url.
+        let nvd = r#"{"vulnerabilities":[{"cve":{
+            "id":"CVE-2026-0001",
+            "descriptions":[{"lang":"en","value":"desc"}],
+            "references":[{"url":"https://example.com/a"},{"url":"https://example.com/b"}]
+        }}]}"#;
+        let store = AdvisoryStore::parse(nvd);
+        assert_eq!(
+            store.get("CVE-2026-0001").unwrap().fix_ref.as_deref(),
+            Some("https://example.com/a")
+        );
     }
 
     #[test]

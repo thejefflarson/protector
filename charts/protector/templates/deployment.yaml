@@ -104,12 +104,18 @@ spec:
             # Fetch each feed to a TEMP file, then atomically move it into place only on a
             # clean download — `set -eu` + curl `--fail` mean a feed outage leaves the
             # PREVIOUS good file untouched (never a half/empty overwrite) and the loop just
-            # retries next tick. KEV is fetched in FULL (no ConfigMap size limit). Advisory
-            # is fetched verbatim ONLY when ADVISORY_URL is set; the operator must point it
-            # at a source already in the AdvisoryStore CVE-keyed shape (no transform here —
-            # see values.yaml / ADR-0015; an OSV/GHSA->AdvisoryStore transform is a TODO).
+            # retries next tick.
+            #
+            # KEV is plain JSON, fetched in FULL (no ConfigMap size limit). ADVISORY is the
+            # public NVD CVE JSON 2.0 "recent" feed (JEF-238): a GZIPPED file, so we fetch it
+            # to a .gz temp and `gunzip` it into place. NO `jq` / NO transform / NO extra
+            # image — the busybox `gunzip` already in curlimages/curl is the only tool added,
+            # and the ENGINE maps NVD's schema onto its Advisory fields natively in
+            # AdvisoryStore::parse (under its parse-time length caps). The engine never
+            # fetches anything itself (zero egress, ADR-0015); it only reads these files.
             - |
               set -eu
+              # Plain (uncompressed) feed → atomic move on a clean download.
               fetch() {
                 name="$1"; url="$2"; dest="$FEEDS_DIR/$name"; tmp="$dest.tmp"
                 echo "feed-fetcher: fetching $url -> $dest"
@@ -124,10 +130,28 @@ spec:
                   echo "feed-fetcher: WARN fetch failed for $url; keeping previous $dest" >&2
                 fi
               }
+              # Gzipped feed (NVD): fetch the .gz, gunzip to the dest temp, then atomic move.
+              # gunzip failure (a truncated/corrupt download) keeps the previous good file.
+              fetch_gz() {
+                name="$1"; url="$2"; dest="$FEEDS_DIR/$name"
+                gz="$dest.gz.tmp"; tmp="$dest.tmp"
+                echo "feed-fetcher: fetching (gz) $url -> $dest"
+                if curl --fail --location --silent --show-error \
+                     --retry 3 --retry-delay 5 \
+                     --max-time "$CURL_MAX_TIME" \
+                     --output "$gz" "$url" && gunzip -c "$gz" > "$tmp"; then
+                  mv -f "$tmp" "$dest"
+                  rm -f "$gz"
+                  echo "feed-fetcher: updated $dest"
+                else
+                  rm -f "$gz" "$tmp"
+                  echo "feed-fetcher: WARN fetch/gunzip failed for $url; keeping previous $dest" >&2
+                fi
+              }
               while :; do
                 fetch kev.json "$KEV_URL"
                 if [ -n "$ADVISORY_URL" ]; then
-                  fetch advisory.json "$ADVISORY_URL"
+                  fetch_gz advisory.json "$ADVISORY_URL"
                 else
                   echo "feed-fetcher: advisoryUrl empty, skipping advisory fetch"
                 fi
@@ -267,10 +291,14 @@ spec:
             - name: PROTECTOR_KEV_FILE
               value: {{ printf "%s/kev.json" $feedsDir | quote }}
             {{- if .Values.feedSync.advisoryUrl }}
-            # Advisory snapshot (ADR-0015): the sidecar fetches advisoryUrl verbatim into
-            # the shared emptyDir. Only set when an advisory source is configured, so with
-            # no source the prompt stays byte-identical to the no-snapshot path. The source
-            # MUST already be in the AdvisoryStore CVE-keyed shape (see values.yaml).
+            # Advisory snapshot (ADR-0015): the sidecar fetches advisoryUrl (the NVD CVE
+            # JSON 2.0 "recent" feed by default — JEF-238), gunzips it, and writes the RAW
+            # NVD JSON here. AdvisoryStore::parse maps the NVD shape onto its fields natively
+            # (no sidecar transform). DEFAULT-ON: advisoryUrl ships a public source, so this
+            # renders out of the box; clear advisoryUrl (or disable feedSync) to drop it, and
+            # the prompt stays byte-identical to the no-snapshot path. The engine never
+            # fetches it (zero egress) — it only reads this file, degrading to "no advisory
+            # enrichment" if missing/empty (the first-boot race before the first fetch).
             - name: PROTECTOR_ADVISORY_FILE
               value: {{ printf "%s/advisory.json" $feedsDir | quote }}
             {{- end }}
