@@ -385,6 +385,9 @@ pub struct ReadinessConfig {
     /// How many KEV CVE ids loaded from the mounted catalogue. `0` ⇒ the store is absent
     /// or empty, so no known-exploited enrichment reaches the model.
     pub kev_count: usize,
+    /// How many EPSS scores loaded from the mounted FIRST.org feed (JEF-243). `0` ⇒ the
+    /// store is absent or empty, so no exploit-prediction enrichment reaches the model.
+    pub epss_count: usize,
     /// The decision journal is durable (a writable `PROTECTOR_ENGINE_JOURNAL_PATH` volume
     /// is mounted). `false` ⇒ in-memory only: verdicts and the would-have-acted report
     /// don't survive a restart.

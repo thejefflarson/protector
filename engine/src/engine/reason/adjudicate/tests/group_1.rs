@@ -122,6 +122,37 @@ fn cvss_score_surfaces_as_structured_token() {
     assert!(prompt.contains("[cvss: 9.8]"));
 }
 
+/// JEF-243: the EPSS exploit-prediction probability surfaces as a STRUCTURED `[epss: X.XX]`
+/// token on the CVE line — the predictive exploitation axis the prompt reserved for `epss`
+/// (JEF-66), now that the FIRST.org feed populates it. Like the CVSS token it is a numeric
+/// (never untrusted free-text), formatted to two decimals for determinism, and rides into
+/// the fenced prompt unchanged.
+#[test]
+fn epss_score_surfaces_as_structured_token() {
+    let mut v = critical_cve("CVE-2021-44228");
+    v.epss = Some(0.94334);
+    let line = cve_evidence(&v);
+    assert!(line.contains("[epss: 0.94]"), "epss surfaced: {line}");
+
+    let (g, e) = graph_with_vuln(v);
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    assert!(prompt.contains("<<<CVE-2021-44228"), "CVE line is fenced");
+    assert!(
+        prompt.contains("[epss: 0.94]"),
+        "epss in fenced prompt: {prompt}"
+    );
+}
+
+/// JEF-243: an unscored CVE (no EPSS in the feed) omits the token entirely, so its line is
+/// byte-identical to the pre-EPSS baseline — the feed only ever adds a token, never reshapes
+/// the line.
+#[test]
+fn absent_epss_omits_the_token() {
+    let bare = critical_cve("CVE-2021-44228");
+    assert!(bare.epss.is_none());
+    assert!(!cve_evidence(&bare).contains("epss"));
+}
+
 /// JEF-66/JEF-242: trivy's `title` is the only untrusted free-text that still reaches the
 /// prompt. A title laden with fence/prompt-injection characters cannot close the fence or
 /// inject structure — `fence_list` sanitizes the joined CVE list, so the dangerous chars
