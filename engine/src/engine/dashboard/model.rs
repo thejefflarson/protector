@@ -89,14 +89,19 @@ pub struct PathStep {
 
 /// A single CVE on the entry's image, the dashboard-/JSON-facing projection of a
 /// [`graph::Vulnerability`] (JEF-133). The same fields `cve_evidence` surfaces to the
-/// model: id, severity, reachability, fix availability, and CWE/advisory when the
-/// mounted snapshot enriched it. ADR-0016: this is a SEVERITY/reachability input — "how
-/// bad IF exploited" — never on its own the breach call.
+/// model: id, severity, the CVSS score when trivy reported it (JEF-242), reachability,
+/// fix availability, and the trivy title. ADR-0016: this is a SEVERITY/reachability input
+/// — "how bad IF exploited" — never on its own the breach call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CveEvidence {
     pub id: String,
     /// `low` / `medium` / `high` / `critical` (from [`graph::Severity::label`]).
     pub severity: String,
+    /// The CVSS base score trivy reported (JEF-242), if any, formatted to one decimal
+    /// (`"9.8"`) — the same static-severity signal the model is shown. `None` when the
+    /// scanner omits it. Stored pre-formatted (a `String`, not an `f64`) so the dashboard
+    /// props can keep `Eq` and the operator reads the exact token the prompt rendered.
+    pub score: Option<String>,
     /// Whether the CVE is listed in a known-exploited catalogue (CISA KEV) — the
     /// stronger-than-severity exploitation signal.
     pub kev: bool,
@@ -108,8 +113,6 @@ pub struct CveEvidence {
     /// The advisory title (trivy's `title`), if reported. Untrusted free-text — HTML-
     /// escaped at render time like every other model-adjacent string.
     pub title: Option<String>,
-    /// CWE id(s) from a mounted advisory snapshot (ADR-0015), if matched. Empty otherwise.
-    pub cwe: Vec<String>,
 }
 
 impl CveEvidence {
@@ -125,15 +128,13 @@ impl CveEvidence {
         CveEvidence {
             id: v.id.clone(),
             severity: v.severity.label().to_string(),
+            // Format to one decimal so the dashboard shows the SAME `cvss` token the prompt
+            // renders (JEF-242) and the projection stays `Eq`.
+            score: v.score.map(|s| format!("{s:.1}")),
             kev: v.exploited_in_wild,
             reachability: v.reachability.label().to_string(),
             fix,
             title: v.title.clone(),
-            cwe: v
-                .advisory
-                .as_ref()
-                .map(|a| a.cwe.clone())
-                .unwrap_or_default(),
         }
     }
 }
@@ -381,12 +382,9 @@ pub struct ReadinessConfig {
     /// exploitability calls are made — every breach-relevant chain falls through to the
     /// deterministic skeptic default, the single most load-bearing coverage gap (ADR-0016).
     pub model_attached: bool,
-    /// How many KEV/advisory CVE ids loaded from the mounted catalogue. `0` ⇒ the store is
-    /// absent or empty, so no known-exploited enrichment reaches the model.
+    /// How many KEV CVE ids loaded from the mounted catalogue. `0` ⇒ the store is absent
+    /// or empty, so no known-exploited enrichment reaches the model.
     pub kev_count: usize,
-    /// How many advisory records loaded from the mounted snapshot. `0` ⇒ no CVE summary /
-    /// fix-version enrichment is available.
-    pub advisory_count: usize,
     /// The decision journal is durable (a writable `PROTECTOR_ENGINE_JOURNAL_PATH` volume
     /// is mounted). `false` ⇒ in-memory only: verdicts and the would-have-acted report
     /// don't survive a restart.

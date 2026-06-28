@@ -27,8 +27,8 @@ jobs:
       - name: Helm lint
         run: helm lint charts/protector
       # Render with the safe defaults AND with every opt-in armed, so a template that
-      # only breaks under an opt-in (model, agent, advisory, notify, live actuator) is
-      # caught here. Both must produce valid manifests.
+      # only breaks under an opt-in (model, agent, notify, live actuator) is caught here.
+      # Both must produce valid manifests.
       - name: Helm template (safe defaults)
         run: helm template protector charts/protector --namespace protector
       - name: Helm template (all opt-ins armed)
@@ -43,8 +43,7 @@ jobs:
             --set otelEndpoint=http://otel.svc:4318 \
             --set engine.notify.url=https://sink.example/hook \
             --set registryAuth.dockerconfigSecret=registry \
-            --set feedSync.enabled=true \
-            --set feedSync.advisoryUrl=https://feeds.example/advisories.json
+            --set feedSync.enabled=true
       # Security invariants (ingest authn + webhook fail-closed). These assert the
       # rendered manifests carry the protections the security review required, so a
       # regression that quietly drops them fails CI rather than shipping.
@@ -117,11 +116,14 @@ jobs:
           if echo "$render" | grep -qE 'kev-snapshot|advisory-snapshot'; then
             echo "feed-sync ConfigMaps still rendered (should be an emptyDir now)"; exit 1
           fi
-          # Advisory now has a default NVD source (JEF-238), so it auto-wires by default.
-          echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE' \
-            || { echo "advisory not auto-wired despite the default NVD source"; exit 1; }
-          echo "$render" | grep -q 'advisory.json' \
-            || { echo "engine not pointed at the sidecar advisory.json"; exit 1; }
+          # The NVD advisory feed was retired (JEF-242): KEV is the ONLY feed now, so no
+          # advisory env and no advisory.json must render anywhere.
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "advisory env rendered despite the advisory feed being retired (JEF-242)"; exit 1
+          fi
+          if echo "$render" | grep -q 'advisory.json'; then
+            echo "advisory.json path rendered despite the advisory feed being retired (JEF-242)"; exit 1
+          fi
           echo "ok"
       - name: Assert feedSync.enabled=false renders no sidecar and no auto-wire
         run: |
@@ -147,8 +149,7 @@ jobs:
           # dropped) and — unlike the retired CronJob — make NO apiserver call: no dedicated
           # ServiceAccount, no Role/RoleBinding for it, no kubectl. It fetches the FULL public
           # KEV feed (the emptyDir has no ConfigMap size limit).
-          render=$(helm template protector charts/protector --namespace protector \
-            --set feedSync.advisoryUrl=https://feeds.example/advisories.json)
+          render=$(helm template protector charts/protector --namespace protector)
           sc=$(echo "$render" | awk '/name: feed-fetcher/,/volumeMounts:/')
           echo "$sc" | grep -q 'runAsNonRoot: true' \
             || { echo "feed-fetcher not runAsNonRoot"; exit 1; }
@@ -166,9 +167,10 @@ jobs:
           if echo "$render" | grep -qE 'kubectl (apply|create|get|patch)'; then
             echo "feed-fetcher invokes kubectl (should make no apiserver call)"; exit 1
           fi
-          # It must fetch the KEV feed (and, with a source set, the advisory feed).
+          # It must fetch the KEV feed (the only feed — the advisory feed was retired, JEF-242).
           echo "$render" | grep -q 'known_exploited_vulnerabilities.json' \
             || { echo "feed-fetcher does not fetch the KEV feed"; exit 1; }
-          echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE' \
-            || { echo "advisory not auto-wired when advisoryUrl is set"; exit 1; }
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "advisory env rendered despite the advisory feed being retired (JEF-242)"; exit 1
+          fi
           echo "ok"

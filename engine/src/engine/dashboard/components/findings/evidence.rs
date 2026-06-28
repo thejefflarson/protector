@@ -8,18 +8,18 @@ use crate::engine::dashboard::view_model::findings::{
 };
 use maud::{Markup, html};
 
-/// One CVE list item: id, a severity chip, KEV/reachability/fix, and CWE/title when present.
-/// All free-text (title, cwe) rides an auto-escaping maud brace — it is untrusted
-/// third-party data. The severity uses the card's chip idiom (`chip {tone}`), distinct from
-/// the shared `chips::severity_badge` (`badge {tone}`), kept for byte-stability.
+/// One CVE list item: id, a severity chip, the CVSS score (JEF-242), KEV/reachability/fix,
+/// and the title when present. All free-text (title) rides an auto-escaping maud brace — it
+/// is untrusted third-party data. The severity uses the card's chip idiom (`chip {tone}`),
+/// distinct from the shared `chips::severity_badge` (`badge {tone}`), kept for byte-stability.
 fn cve_li(c: &CveRow) -> Markup {
     html! {
         li {
             code { (c.id) } " "
             span class=(format!("chip {}", c.severity_tone)) { (c.severity) }
+            @if let Some(s) = &c.score { " " span class="muted" { "CVSS " (s) } }
             @if c.kev { " " span class="kev" title="CISA Known-Exploited" { "KEV" } }
             " " span class="muted" { "reachability: " (c.reachability) " · " (c.fix) }
-            @if !c.cwe.is_empty() { " " span class="muted" { "[" (c.cwe.join(", ")) "]" } }
             @if let Some(t) = &c.title { @if !t.is_empty() { " — " (t) } }
         }
     }
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::engine::dashboard::model::{CveEvidence, EntryEvidence};
     use crate::engine::dashboard::view_model::findings::{cve_block_props, runtime_block_props};
-    use crate::engine::graph::{Advisory, Behavior, Reachability, Severity, Vulnerability};
+    use crate::engine::graph::{Behavior, Reachability, Severity, Vulnerability};
 
     fn cve(id: &str, severity: Severity, kev: bool) -> CveEvidence {
         CveEvidence::from_vuln(&Vulnerability {
@@ -208,7 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn cve_block_renders_cwe_and_advisory_title() {
+    fn cve_block_renders_cvss_score_and_title() {
+        // JEF-242: the CVSS score trivy reports surfaces alongside the title and fix; the
+        // retired advisory CWE block is gone. Score formats to one decimal.
         let mut v = Vulnerability {
             id: "CVE-2021-44228".into(),
             severity: Severity::Critical,
@@ -217,18 +219,14 @@ mod tests {
             ..Default::default()
         };
         v.title = Some("Log4Shell remote code execution".into());
-        v.advisory = Some(Advisory {
-            summary: "deserialization".into(),
-            cwe: vec!["CWE-502".into()],
-            fix_ref: None,
-        });
+        v.score = Some(10.0);
         v.fixed_version = Some("2.17.0".into());
         v.installed_version = Some("2.14.0".into());
         let html = block(&EntryEvidence {
             cves: vec![CveEvidence::from_vuln(&v)],
             runtime: vec![],
         });
-        assert!(html.contains("CWE-502"), "cwe surfaced: {html}");
+        assert!(html.contains("CVSS 10.0"), "cvss score surfaced: {html}");
         assert!(html.contains("Log4Shell"), "title surfaced: {html}");
         assert!(
             html.contains("fix available: 2.14.0 to 2.17.0"),

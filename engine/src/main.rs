@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use protector::engine::observe::advisory::AdvisoryStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::policy_log::PolicyDecisionLog;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
@@ -257,14 +256,6 @@ async fn main() -> Result<()> {
             Ok(path) => KevCatalog::from_file(&path),
             Err(_) => KevCatalog::empty(),
         };
-        // Advisory snapshot (a mounted CVE-keyed file an operator syncs from a public
-        // advisory feed) for the Advisory enrichment — CWE class, fix-availability, and a
-        // short summary the model reasons over (JEF-103/ADR-0015). Mounted-snapshot-only,
-        // zero egress; unset = no advisory enrichment (byte-identical to today).
-        let advisory = match env::var("PROTECTOR_ADVISORY_FILE") {
-            Ok(path) => AdvisoryStore::from_file(&path),
-            Err(_) => AdvisoryStore::empty(),
-        };
         // The dashboard (spawned inside run_watch) reads the webhook's admission-decision
         // ring for `/policy` (JEF-226) — the same `Arc` the webhook engine writes to.
         let dashboard_policy_log = policy_log.clone();
@@ -279,7 +270,6 @@ async fn main() -> Result<()> {
                         falco_addr,
                         dashboard_addr,
                         kev,
-                        advisory,
                         dashboard_policy_log,
                     )
                     .await

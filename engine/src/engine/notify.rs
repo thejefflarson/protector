@@ -18,8 +18,8 @@
 //!   topology, secret names, the peer-by-peer reachability graph, or the CVE inventory.
 //!   Richer detail (the per-objective ATT&CK list) is gated behind an explicit opt-in
 //!   (`PROTECTOR_ENGINE_NOTIFY_VERBOSE`) and still excludes secrets/peers/CVEs.
-//! - **Verdict prose is sanitized before egress.** The verdict text can carry
-//!   advisory-derived third-party text (ADR-0015); it is run through
+//! - **Verdict prose is sanitized before egress.** The verdict text can carry untrusted
+//!   third-party text (trivy's CVE title, JEF-66); it is run through
 //!   [`super::reason::adjudicate::sanitize`] before it leaves the cluster.
 //! - **Deduped on the decision identity** (the journal's, JEF-141): the caller fires
 //!   this only when it appends a *new* breach line, so one decision is one notification.
@@ -102,7 +102,8 @@ pub struct BreachNotice<'a> {
 /// per-objective ATT&CK list (still no secrets/peers/CVEs); the default is the summary.
 ///
 /// The verdict text is sanitized ([`sanitize`]) before it lands in the payload, so
-/// advisory-derived third-party prose (ADR-0015) can't smuggle structure into the sink.
+/// untrusted third-party prose (trivy's CVE title, JEF-66) can't smuggle structure into the
+/// sink.
 pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
     // Distinct ATT&CK references reached — the "outcome", as low-cardinality IDs. A
     // BTreeSet dedups and orders them deterministically (stable payloads = stable tests).
@@ -124,8 +125,8 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
         })
         .collect();
 
-    // The verdict text can carry advisory-derived third-party prose (ADR-0015) — sanitize
-    // it before egress so it's inert data in the operator's sink. `sanitize` strips
+    // The verdict text can carry untrusted third-party prose (trivy's CVE title, JEF-66) —
+    // sanitize it before egress so it's inert data in the operator's sink. `sanitize` strips
     // STRUCTURE (fences/braces) but not SEMANTICS: the model can echo a secret/peer name
     // or a CVE id it was shown into its free-text reason, which would then egress around
     // the ADR-0018 redaction. So also scrub those names/tokens out (Fix 6).
@@ -569,7 +570,8 @@ mod tests {
     }
 
     /// The verdict prose is sanitized before egress: fence/structure characters that
-    /// advisory-derived text (ADR-0015) might carry are stripped from the payload.
+    /// untrusted third-party text (trivy's CVE title, JEF-66) might carry are stripped from
+    /// the payload.
     #[test]
     fn verdict_text_is_sanitized_before_egress() {
         let verdict = Verdict::Exploitable("see <<<inject>>> `code`\nrun".into());

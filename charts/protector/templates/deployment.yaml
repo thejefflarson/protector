@@ -1,13 +1,14 @@
 {{- /*
 Feed-fetcher sidecar wiring (JEF-238). When feedSync is ON (the default), a native
-sidecar (an initContainer with restartPolicy: Always) fetches the FULL public KEV (and,
-if configured, advisory) feeds into a shared emptyDir, and the engine reads those files
-from the SAME volume — no ConfigMap, no CronJob (those hit the 1 MiB ConfigMap limit;
-raw CISA KEV is ~1.5 MiB and advisory data does not fit at all). The emptyDir has no
-size limit, so KEV is fetched in FULL. The engine itself stays zero-egress (ADR-0015):
-only the sidecar egresses, to public read-only feeds. With feedSync OFF, no sidecar and
-no shared volume render, and the feed env is dropped — the air-gapped / manual-mount
-path (mount your own files at the same paths if you want enrichment offline).
+sidecar (an initContainer with restartPolicy: Always) fetches the FULL public CISA KEV
+catalogue into a shared emptyDir, and the engine reads that file from the SAME volume —
+no ConfigMap, no CronJob (those hit the 1 MiB ConfigMap limit; raw CISA KEV is ~1.5 MiB).
+The emptyDir has no size limit, so KEV is fetched in FULL. The engine itself stays
+zero-egress (ADR-0015): only the sidecar egresses, to one public read-only feed. With
+feedSync OFF, no sidecar and no shared volume render, and the feed env is dropped — the
+air-gapped / manual-mount path (mount your own kev.json at the same path if you want
+enrichment offline). KEV is the ONLY feed: the NVD advisory feed was retired (JEF-242,
+redundant with Trivy's CVE metadata).
 */}}
 {{- $feeds := and .Values.engine.enabled .Values.feedSync.enabled }}
 {{- $feedsDir := include "protector.feedsDir" . }}
@@ -57,8 +58,8 @@ spec:
       # the engine reads them, and (b) is auto-restarted for the pod's lifetime if it exits.
       #
       # EGRESS BOUNDARY. This is the ONLY container the chart gives network egress to. It
-      # GETs TWO public, READ-ONLY feed URLs (feedSync.kevUrl / feedSync.advisoryUrl) and
-      # writes them to the shared `feeds` emptyDir. It makes NO apiserver call (unlike the
+      # GETs ONE public, READ-ONLY feed URL (feedSync.kevUrl) and writes it to the shared
+      # `feeds` emptyDir. It makes NO apiserver call (unlike the
       # retired JEF-228 CronJob — no RBAC, no ServiceAccount grant) and never reads or
       # transmits any cluster data. The engine stays ZERO-EGRESS (ADR-0015): it only reads
       # the resulting files. A curl-only image is used because bitnami/kubectl was pulled
@@ -90,8 +91,6 @@ spec:
           env:
             - name: KEV_URL
               value: {{ .Values.feedSync.kevUrl | quote }}
-            - name: ADVISORY_URL
-              value: {{ .Values.feedSync.advisoryUrl | quote }}
             - name: FEEDS_DIR
               value: {{ $feedsDir | quote }}
             - name: INTERVAL
@@ -101,18 +100,15 @@ spec:
           command:
             - /bin/sh
             - -c
-            # Fetch each feed to a TEMP file, then atomically move it into place only on a
+            # Fetch the KEV feed to a TEMP file, then atomically move it into place only on a
             # clean download — `set -eu` + curl `--fail` mean a feed outage leaves the
             # PREVIOUS good file untouched (never a half/empty overwrite) and the loop just
             # retries next tick.
             #
-            # KEV is plain JSON, fetched in FULL (no ConfigMap size limit). ADVISORY is the
-            # public NVD CVE JSON 2.0 "recent" feed (JEF-238): a GZIPPED file, so we fetch it
-            # to a .gz temp and `gunzip` it into place. NO `jq` / NO transform / NO extra
-            # image — the busybox `gunzip` already in curlimages/curl is the only tool added,
-            # and the ENGINE maps NVD's schema onto its Advisory fields natively in
-            # AdvisoryStore::parse (under its parse-time length caps). The engine never
-            # fetches anything itself (zero egress, ADR-0015); it only reads these files.
+            # KEV is plain JSON, fetched in FULL (no ConfigMap size limit). It is the ONLY
+            # feed: the NVD advisory feed was retired (JEF-242, redundant with Trivy's CVE
+            # metadata). NO `jq` / NO transform / NO extra image. The engine never fetches
+            # anything itself (zero egress, ADR-0015); it only reads this file.
             - |
               set -eu
               # Plain (uncompressed) feed → atomic move on a clean download.
@@ -130,31 +126,8 @@ spec:
                   echo "feed-fetcher: WARN fetch failed for $url; keeping previous $dest" >&2
                 fi
               }
-              # Gzipped feed (NVD): fetch the .gz, gunzip to the dest temp, then atomic move.
-              # gunzip failure (a truncated/corrupt download) keeps the previous good file.
-              fetch_gz() {
-                name="$1"; url="$2"; dest="$FEEDS_DIR/$name"
-                gz="$dest.gz.tmp"; tmp="$dest.tmp"
-                echo "feed-fetcher: fetching (gz) $url -> $dest"
-                if curl --fail --location --silent --show-error \
-                     --retry 3 --retry-delay 5 \
-                     --max-time "$CURL_MAX_TIME" \
-                     --output "$gz" "$url" && gunzip -c "$gz" > "$tmp"; then
-                  mv -f "$tmp" "$dest"
-                  rm -f "$gz"
-                  echo "feed-fetcher: updated $dest"
-                else
-                  rm -f "$gz" "$tmp"
-                  echo "feed-fetcher: WARN fetch/gunzip failed for $url; keeping previous $dest" >&2
-                fi
-              }
               while :; do
                 fetch kev.json "$KEV_URL"
-                if [ -n "$ADVISORY_URL" ]; then
-                  fetch_gz advisory.json "$ADVISORY_URL"
-                else
-                  echo "feed-fetcher: advisoryUrl empty, skipping advisory fetch"
-                fi
                 echo "feed-fetcher: sleeping $INTERVAL"
                 sleep "$INTERVAL"
               done
@@ -290,18 +263,6 @@ spec:
             # if it is missing/empty (the first-boot race before the sidecar's first fetch).
             - name: PROTECTOR_KEV_FILE
               value: {{ printf "%s/kev.json" $feedsDir | quote }}
-            {{- if .Values.feedSync.advisoryUrl }}
-            # Advisory snapshot (ADR-0015): the sidecar fetches advisoryUrl (the NVD CVE
-            # JSON 2.0 "recent" feed by default — JEF-238), gunzips it, and writes the RAW
-            # NVD JSON here. AdvisoryStore::parse maps the NVD shape onto its fields natively
-            # (no sidecar transform). DEFAULT-ON: advisoryUrl ships a public source, so this
-            # renders out of the box; clear advisoryUrl (or disable feedSync) to drop it, and
-            # the prompt stays byte-identical to the no-snapshot path. The engine never
-            # fetches it (zero egress) — it only reads this file, degrading to "no advisory
-            # enrichment" if missing/empty (the first-boot race before the first fetch).
-            - name: PROTECTOR_ADVISORY_FILE
-              value: {{ printf "%s/advisory.json" $feedsDir | quote }}
-            {{- end }}
             {{- end }}
             {{- with .Values.engine.model.endpoint }}
             # Local-first model (OpenAI-compatible). Unset = deterministic enumerator only.
@@ -348,7 +309,7 @@ spec:
             {{- end }}
             {{- if $feeds }}
             # The shared feeds emptyDir the sidecar writes (JEF-238), mounted READ-ONLY in
-            # the engine — the engine only reads kev.json / advisory.json, never writes.
+            # the engine — the engine only reads kev.json, never writes.
             - name: feeds
               mountPath: {{ $feedsDir | quote }}
               readOnly: true
@@ -381,8 +342,8 @@ spec:
         {{- if $feeds }}
         # Shared scratch volume between the feed-fetcher sidecar (writer) and the engine
         # (reader) — JEF-238. emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA KEV
-        # JSON (~1.5 MiB) and advisory data fit. Lives for the pod's lifetime; the sidecar
-        # re-fetches on its interval and on restart.
+        # JSON (~1.5 MiB) fits. Lives for the pod's lifetime; the sidecar re-fetches on its
+        # interval and on restart.
         - name: feeds
           emptyDir: {}
         {{- end }}

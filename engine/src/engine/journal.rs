@@ -10,8 +10,8 @@
 //! tail so `/findings`, `/judgements`, and the reversions view populate immediately —
 //! before a fresh model pass lands.
 //!
-//! Shape and posture mirror ADR-0015's mounted-snapshot ports (`advisory.rs`,
-//! `exploit_intel.rs`): the path is a `PROTECTOR_ENGINE_*` env var pointing at an
+//! Shape and posture mirror the mounted-snapshot port (`exploit_intel.rs`, the KEV
+//! catalogue): the path is a `PROTECTOR_ENGINE_*` env var pointing at an
 //! operator-provided PVC or hostPath, and an **absent or unwritable** volume degrades
 //! to today's in-memory-only behaviour — it NEVER crashes. Stays in-cluster: this writes
 //! to a local mount, no new outbound path.
@@ -52,8 +52,8 @@ const MAX_BYTES: u64 = 1024 * 1024;
 /// a gap (see [`Decision::Breach::coverage`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrichmentCoverage {
-    /// The CVE ids in the entry's actual evidence that went into the prompt (the matched
-    /// advisory backing). Empty ⇒ no CVE reached the model for this entry.
+    /// The CVE ids in the entry's actual evidence that went into the prompt (the CVE
+    /// backing). Empty ⇒ no CVE reached the model for this entry.
     #[serde(default)]
     pub cves: Vec<String>,
     /// Whether any behavioral signal (runtime telemetry, ADR-0014) was present on the

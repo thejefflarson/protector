@@ -7,7 +7,7 @@ use crate::engine::dashboard::view_model::readiness_data::*;
 use crate::engine::dashboard::view_model::report_data::*;
 use crate::engine::dashboard::{DASHBOARD_CSS, DASHBOARD_JS, default_window_report};
 use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
-use crate::engine::graph::{Advisory, NodeKey, Reachability, Severity, Vulnerability};
+use crate::engine::graph::{NodeKey, Reachability, Severity, Vulnerability};
 use crate::engine::journal::{DecisionJournal, EnrichmentCoverage};
 use crate::engine::reason::proof::Link;
 use std::collections::{BTreeMap, BTreeSet};
@@ -438,7 +438,6 @@ fn readiness_reports_each_input_from_live_state() {
     assert!(rrow(&r, "model").detail.contains("last call ok"));
     assert_eq!(rrow(&r, "kev").state, InputState::Present);
     assert!(rrow(&r, "kev").detail.contains("1500"));
-    assert_eq!(rrow(&r, "advisory").state, InputState::Present);
     assert_eq!(rrow(&r, "falco").state, InputState::Present);
     assert!(rrow(&r, "falco").detail.contains("3 signals last pass"));
     assert_eq!(rrow(&r, "ebpf-agent").state, InputState::Present);
@@ -465,7 +464,7 @@ fn absent_enrichment_inputs_are_marked_and_flagged_as_weakening() {
         &BakeStats::default(),
         Some(SystemTime::now()),
     );
-    for id in ["kev", "advisory", "falco", "ebpf-agent"] {
+    for id in ["kev", "falco", "ebpf-agent"] {
         assert_eq!(rrow(&r, id).state, InputState::Absent, "{id} absent");
         assert!(rrow(&r, id).weakens_decisions, "{id} weakens decisions");
     }
@@ -560,10 +559,7 @@ fn first_run_checklist_replaces_the_empty_body_when_inputs_unmet() {
         html.contains("PROTECTOR_ENGINE_MODEL"),
         "model enable linked"
     );
-    assert!(
-        html.contains("PROTECTOR_ADVISORY_FILE"),
-        "advisory enable linked"
-    );
+    assert!(html.contains("PROTECTOR_KEV_FILE"), "kev enable linked");
     // It frames itself as a guided start, never a bare/error-looking page.
     assert!(html.contains("guided start, not a blank page"));
 }
@@ -630,7 +626,6 @@ fn readiness_json_shape_matches_the_panel_data() {
     let r = derive_readiness(
         &ReadinessConfig {
             model_attached: true,
-            advisory_count: 7,
             ..ReadinessConfig::default()
         },
         ModelHealth::Ok,
@@ -674,7 +669,6 @@ fn findings_round_trips_the_readiness_config_and_model_health() {
     findings.set_readiness_config(ReadinessConfig {
         model_attached: true,
         kev_count: 10,
-        advisory_count: 5,
         journal_durable: true,
         armed: true,
     });

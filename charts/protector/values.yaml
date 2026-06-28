@@ -12,11 +12,11 @@
 #
 # EGRESS POSTURE — read this. The ENGINE itself stays ZERO-EGRESS (ADR-0015): the
 # security graph and evidence never leave the cluster, and it makes no breach-notify
-# call, no OTLP export, and no live advisory/KEV fetch (it only reads mounted files).
+# call, no OTLP export, and no live KEV fetch (it only reads mounted files).
 # As of JEF-238 the chart ships ONE component with network egress, ON BY DEFAULT: the
 # feed-fetcher SIDECAR on the engine pod (feedSync.enabled: true). It is the SOLE
-# component the chart grants egress to. It makes outbound GETs to PUBLIC, READ-ONLY
-# CVE/KEV feeds and writes the result into a shared emptyDir the engine reads. It NEVER
+# component the chart grants egress to. It makes an outbound GET to the PUBLIC, READ-ONLY
+# CISA KEV feed and writes the result into a shared emptyDir the engine reads. It NEVER
 # reads cluster state and NEVER transmits any cluster data outward — only the plain feed
 # downloads leave. (This supersedes the JEF-228 feed-sync CronJob: raw CISA KEV is
 # ~1.5 MiB, over the 1 MiB ConfigMap limit; an emptyDir holds the FULL data.)
@@ -25,8 +25,8 @@
 #   * SIDECAR EGRESSES by default    feedSync.enabled: true   (public read-only feeds only)
 #
 # FULLY AIR-GAPPED / ZERO-EGRESS posture: set feedSync.enabled=false (no sidecar, nothing
-# egresses) and, to keep enrichment offline, mount your own kev.json / advisory.json into
-# the engine at /var/lib/protector/feeds.
+# egresses) and, to keep enrichment offline, mount your own kev.json into the engine at
+# /var/lib/protector/feeds.
 #
 # See the chart README for the exact opt-in/opt-out for each.
 
@@ -288,15 +288,15 @@ engine:
   falco:
     enabled: true
     port: 9999
-  # CISA KEV catalogue (actively-exploited CVEs) and advisory snapshot (ADR-0015) feed the
-  # engine's exploit intel + model reasoning. The engine NEVER fetches these over the
-  # network (zero egress) — it only READS files from a shared emptyDir. By default the
-  # feed-fetcher SIDECAR (feedSync below, ON by default) fetches them in FULL into that
-  # volume and the engine auto-reads them at /var/lib/protector/feeds/{kev,advisory}.json
-  # (PROTECTOR_KEV_FILE / PROTECTOR_ADVISORY_FILE, set automatically). No further config.
+  # CISA KEV catalogue (actively-exploited CVEs) feeds the engine's exploit intel + model
+  # reasoning (ADR-0015). The engine NEVER fetches it over the network (zero egress) — it
+  # only READS a file from a shared emptyDir. By default the feed-fetcher SIDECAR (feedSync
+  # below, ON by default) fetches it in FULL into that volume and the engine auto-reads it
+  # at /var/lib/protector/feeds/kev.json (PROTECTOR_KEV_FILE, set automatically). No further
+  # config. (The NVD advisory feed was retired in JEF-242 — redundant with Trivy.)
   #
   # AIR-GAPPED: set feedSync.enabled=false (no sidecar, no egress) and, to keep enrichment
-  # offline, mount your own kev.json / advisory.json into the engine at that same path.
+  # offline, mount your own kev.json into the engine at that same path.
   # Local-first model for the adjudicator/hypothesis proposer (OpenAI-compatible chat
   # endpoint). OPTIONAL and OFF by default — the engine runs the deterministic enumerator
   # only with no model. Point at an IN-CLUSTER model so the graph never leaves the cluster
@@ -376,56 +376,39 @@ agent:
 # --- feed-fetcher sidecar (JEF-238) ---
 # ON BY DEFAULT (feedSync.enabled: true). A co-located feed-fetcher SIDECAR (a native
 # sidecar = an initContainer with restartPolicy: Always) on the engine pod fetches the
-# FULL public CISA KEV catalogue (and, if you set advisoryUrl, an advisory snapshot) into
-# a shared emptyDir the engine reads — so KEV exploit intel is fresh out of the box with
-# no operator syncing it by hand and no further configuration.
+# FULL public CISA KEV catalogue into a shared emptyDir the engine reads — so KEV exploit
+# intel is fresh out of the box with no operator syncing it by hand and no further config.
+#
+# KEV is the ONLY feed. The NVD advisory feed was retired (JEF-242): it was redundant with
+# Trivy's CVE metadata (title ~ summary, fixedVersion ~ fix_ref) and had a poor hit-rate
+# against the base-image CVEs Trivy finds. KEV stays — `exploited_in_wild` is a distinct
+# exploitation signal that drives the breach model (ADR-0016).
 #
 # WHY A SIDECAR, NOT A CONFIGMAP (supersedes JEF-228). Raw CISA KEV JSON is ~1.5 MiB,
-# over the 1 MiB ConfigMap limit (the CronJob path had to lossily strip it to CVE-IDs);
-# advisory data does not fit at all. An emptyDir has NO size limit, so the sidecar fetches
-# the data in FULL and the engine reads the complete files.
+# over the 1 MiB ConfigMap limit (the CronJob path had to lossily strip it to CVE-IDs). An
+# emptyDir has NO size limit, so the sidecar fetches it in FULL and the engine reads the
+# complete file.
 #
 # EGRESS POSTURE — READ THIS. The sidecar is the ONE container the chart gives network
-# egress to, and it is ON by default. It GETs PUBLIC, READ-ONLY feed URLs (kevUrl /
-# advisoryUrl) and writes them to the shared emptyDir. Unlike the retired CronJob it makes
-# NO apiserver call (no ServiceAccount grant, no RBAC). It NEVER reads cluster state and
-# NEVER transmits any cluster data outward — the only bytes that leave are the plain GETs
-# for the public feeds. The ENGINE itself stays ZERO-EGRESS (ADR-0015): it only reads the
-# resulting files and makes no advisory/KEV network call of its own.
+# egress to, and it is ON by default. It GETs ONE PUBLIC, READ-ONLY feed URL (kevUrl) and
+# writes it to the shared emptyDir. Unlike the retired CronJob it makes NO apiserver call
+# (no ServiceAccount grant, no RBAC). It NEVER reads cluster state and NEVER transmits any
+# cluster data outward — the only bytes that leave are the plain GET for the public KEV
+# feed. The ENGINE itself stays ZERO-EGRESS (ADR-0015): it only reads the resulting file
+# and makes no KEV network call of its own.
 #
-# TRADEOFF / FRAMING: engine zero-egress is preserved; the sidecar egresses to public
-# feeds by default. TO RESTORE A FULLY AIR-GAPPED / ZERO-EGRESS POSTURE, set
+# TRADEOFF / FRAMING: engine zero-egress is preserved; the sidecar egresses to the public
+# KEV feed by default. TO RESTORE A FULLY AIR-GAPPED / ZERO-EGRESS POSTURE, set
 # feedSync.enabled=false (then NOTHING in the chart egresses); to keep enrichment offline,
-# mount your own kev.json / advisory.json into the engine at /var/lib/protector/feeds
-# yourself. With the sidecar disabled, no sidecar/volume/feed-env renders.
-#
-# BOTH feeds ship a default public source, so KEV exploit intel AND advisory enrichment
-# work out of the box (JEF-238). Clear a URL (or disable feedSync) to drop that feed.
+# mount your own kev.json into the engine at /var/lib/protector/feeds yourself. With the
+# sidecar disabled, no sidecar/volume/feed-env renders.
 feedSync:
   enabled: true
-  # The two public, READ-ONLY feed sources. KEV is the canonical CISA catalogue (plain
-  # JSON, fetched in FULL — the emptyDir has no ConfigMap size limit). advisoryUrl defaults
-  # to the public NVD CVE JSON 2.0 "recent" feed.
-  #
-  # ADVISORY SOURCE + FORMAT (JEF-238). The advisory default is the NVD CVE JSON 2.0
-  # "recent" feed: a GZIPPED, bounded (~9 MiB uncompressed), frequently-updated feed of the
-  # most recently published/modified CVEs, each carrying a description (-> summary), CWE
-  # weaknesses (-> cwe), and references (-> fix_ref). The sidecar fetches it with plain
-  # curl and gunzips it (busybox gunzip ships in the curl image) — NO jq, NO transform, NO
-  # extra image. It writes the RAW NVD JSON, and the engine's AdvisoryStore (ADR-0015) maps
-  # the NVD shape onto its fields NATIVELY at parse time, under hard length caps (JEF-106).
-  # The engine ALSO still accepts the curated CVE-keyed / {"advisories":[…]} shapes, so an
-  # operator can point advisoryUrl at their own curated export instead (the sidecar always
-  # gunzips the advisory feed, so a curated export must also be gzipped).
-  #
-  # SCOPE / FOLLOW-UP. "recent" covers actively-relevant CVEs (a rolling window), not the
-  # full historical NVD corpus. Broader coverage — also pulling the "modified" feed and/or
-  # a full-year backfill, which would need the sidecar to MERGE multiple NVD files (a jq or
-  # engine-side multi-file read) — is a deliberate follow-up, not this change.
+  # The one public, READ-ONLY feed source: the canonical CISA KEV catalogue (plain JSON,
+  # fetched in FULL — the emptyDir has no ConfigMap size limit).
   kevUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-  advisoryUrl: "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
-  # Re-fetch interval (a `sleep` arg: e.g. "12h", "6h", "30m"). KEV/advisory feeds change
-  # at most daily; 12h keeps them fresh without spending much egress.
+  # Re-fetch interval (a `sleep` arg: e.g. "12h", "6h", "30m"). The KEV feed changes at
+  # most daily; 12h keeps it fresh without spending much egress.
   interval: "12h"
   # The fetcher image. A CURL-ONLY image (no apiserver client needed anymore — and
   # bitnami/kubectl was pulled from Docker Hub, cluster fork). Pinned by tag. The image's
@@ -436,7 +419,7 @@ feedSync:
     pullPolicy: IfNotPresent
   # Per-feed download wall (s) for curl --max-time, bounding a slow/hung feed host.
   curlMaxTimeSecs: 120
-  # Tiny: a curl loop writing two files. Override for very large advisory snapshots.
+  # Tiny: a curl loop writing one file.
   resources:
     requests:
       cpu: 10m

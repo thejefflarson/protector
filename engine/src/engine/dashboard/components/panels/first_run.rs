@@ -81,10 +81,7 @@ mod tests {
             panel.contains("PROTECTOR_ENGINE_MODEL"),
             "model enable linked"
         );
-        assert!(
-            panel.contains("PROTECTOR_ADVISORY_FILE"),
-            "advisory enable linked"
-        );
+        assert!(panel.contains("PROTECTOR_KEV_FILE"), "kev enable linked");
         // The "to do" line carries the non-breaking space as the `&nbsp;` entity via
         // `chips::nbsp()` — byte-identical to the pre-maud legacy output (ADR-0019 allowance #3).
         assert!(panel.contains("to&nbsp;do"), "non-breaking 'to do' label");
@@ -100,7 +97,6 @@ mod tests {
             &ReadinessConfig {
                 model_attached: true,
                 kev_count: 3,
-                advisory_count: 3,
                 journal_durable: true,
                 armed: false,
             },

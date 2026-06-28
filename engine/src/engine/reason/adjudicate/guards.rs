@@ -114,9 +114,8 @@ pub(crate) fn guard_fabricated_cve(
 /// model call per endpoint is dear on a Pi). Behavior contributes only its COARSE
 /// fingerprint keys, so mundane per-peer connection churn doesn't bust the cache.
 ///
-/// Advisory enrichment (JEF-103) rides in through each `cve_evidence` line, which carries
-/// only the STABLE advisory fields — CWE id(s), fix reference, and the capped summary, no
-/// timestamps. So when a freshly-synced advisory snapshot enriches a CVE the fingerprint
+/// The CVSS score (JEF-242) rides in through each `cve_evidence` line as a STABLE numeric
+/// field (no timestamps). So when trivy newly reports a score for a CVE the fingerprint
 /// changes ONCE (the entry is re-judged with the new evidence) and is then stable across
 /// passes — it does not thrash the cache per pass (the JEF-63 budget).
 pub(crate) fn entry_fingerprint(
