@@ -23,17 +23,17 @@
 //! deterministic enumerator.
 
 use super::proof::{self, ProvenChain};
-use crate::engine::graph::attack::Tactic;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 
-/// Which model tier produced or should adjudicate a hypothesis.
+/// Which model tier produced or should adjudicate a hypothesis. Only `Local` is wired
+/// today — the cheap, private, in-cluster model (a small Ollama). The tier is kept as a
+/// named type (carried on [`Hypothesis`] and [`ModelHypothesizer`]) so a future
+/// higher-consequence tier can be added without reshaping the propose path; a `Frontier`
+/// variant existed but was removed as dead code (no frontier model is wired).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     /// Cheap, private, in-cluster (e.g. a small Ollama model). The default.
     Local,
-    /// A stronger model, used only for high-consequence adjudication, redacted and
-    /// human-in-the-loop.
-    Frontier,
 }
 
 /// A *candidate* attack chain — proposed, not proven. Its links are claims the
@@ -207,30 +207,12 @@ pub fn confirm_all(graph: &SecurityGraph, hypotheses: &[Hypothesis]) -> Vec<Prov
         .collect()
 }
 
-/// The tier that should adjudicate a *confirmed* chain. Escalate to the frontier
-/// only on consequence: a proven foothold into a Privilege-Escalation or Impact
-/// objective. Everything else stays local — the gate already settled whether it's
-/// real.
-pub fn escalation_tier(chain: &ProvenChain) -> Tier {
-    let high_stakes = chain.foothold.is_some()
-        && matches!(
-            chain.attack.tactic,
-            Tactic::PrivilegeEscalation | Tactic::Impact
-        );
-    if high_stakes {
-        Tier::Frontier
-    } else {
-        Tier::Local
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::graph::attack::{CREDENTIAL_ACCESS, ESCAPE_TO_HOST};
+    use crate::engine::graph::attack::CREDENTIAL_ACCESS;
     use crate::engine::observe::Snapshot;
     use crate::engine::observe::adapter::{build_graph, default_adapters};
-    use crate::engine::reason::proof::{Link, ProvenChain};
     use serde_json::json;
 
     fn lateral_graph() -> crate::engine::graph::SecurityGraph {
@@ -297,48 +279,6 @@ mod tests {
         assert_eq!(confirmed.len(), 1, "only the graph-backed chain survives");
         assert_eq!(confirmed[0].objective.0, "secret/app/db-creds");
         assert_eq!(confirmed[0].attack, CREDENTIAL_ACCESS);
-    }
-
-    #[test]
-    fn escalation_is_by_stakes() {
-        let base = |foothold, attack| ProvenChain {
-            entry: key("workload/app/Pod/x"),
-            objective: key("host/node-1"),
-            attack,
-            foothold,
-            corroborated: false,
-            adjudicated: true,
-            promoted: false,
-            exposed_entry: foothold.is_some(),
-            verdict: None,
-            links: vec![Link {
-                from: key("workload/app/Pod/x"),
-                to: key("host/node-1"),
-                relation: "escapes-to/privileged".into(),
-                technique: Some(ESCAPE_TO_HOST),
-                from_labels: Default::default(),
-                to_labels: Default::default(),
-            }],
-            single_edge_cuts: vec![],
-        };
-        // Proven foothold into a privilege-escalation objective ⇒ frontier.
-        assert_eq!(
-            escalation_tier(&base(
-                Some(crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING),
-                ESCAPE_TO_HOST
-            )),
-            Tier::Frontier
-        );
-        // No foothold ⇒ stays local even for the same objective.
-        assert_eq!(escalation_tier(&base(None, ESCAPE_TO_HOST)), Tier::Local);
-        // Foothold but a low-consequence (credential-access) objective ⇒ local.
-        assert_eq!(
-            escalation_tier(&base(
-                Some(crate::engine::graph::attack::EXPLOIT_PUBLIC_FACING),
-                CREDENTIAL_ACCESS
-            )),
-            Tier::Local
-        );
     }
 
     #[test]

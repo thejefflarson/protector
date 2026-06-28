@@ -12,13 +12,10 @@
 //! field of trivy's report (trivy redacts before emitting the CR) and is never parsed,
 //! stored, or rendered here. The unit tests assert no plaintext secret reaches the output.
 
-use std::time::SystemTime;
-
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-use super::{ImageScanFindings, opt_str, severity};
-use crate::engine::graph::{Provenance, ScanFinding};
+use super::{ImageScanFindings, scan_finding};
 
 /// This adapter's provenance source — distinguishes an exposed-secret finding from the CVE
 /// findings the `trivy` adapter asserts on the same Image (corroboration, ADR-0003).
@@ -33,38 +30,24 @@ pub fn parse_report(object: &DynamicObject) -> Option<ImageScanFindings> {
 
 fn from_report(report: &Value) -> Option<ImageScanFindings> {
     let image = super::image_ref(report)?;
+    // One `secrets[]` entry → one [`ScanFinding`], via the shared builder, keyed by `ruleID`
+    // (vs the checks' `checkID`) and falling back to trivy's already-**redacted** `match` for
+    // the title (vs the checks' `description`). REDACTION GUARANTEE: the builder reads ONLY
+    // the structured coordinates (`ruleID`, `severity`, `category`, `target`, `title`/`match`)
+    // — the raw secret value is never a field it touches, so it can't surface (the module note
+    // + the `never_surfaces_the_raw_secret_value` test). An exposed-secret entry has no
+    // `success` field, so the builder's passing-check gate is a no-op here.
     let findings = report
         .get("secrets")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(secret_finding).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| scan_finding(v, SOURCE, "ruleID", "match"))
+                .collect()
+        })
         .unwrap_or_default();
     Some(ImageScanFindings { image, findings })
-}
-
-/// Map one `secrets[]` entry into a [`ScanFinding`]. Reads ONLY the redacted, structured
-/// coordinates — `ruleID`, `severity`, `category`, `target` (path), and trivy's already-
-/// redacted `match`. The raw secret value is not a field of this entry; nothing here can
-/// surface it. An entry without a `ruleID` is skipped (malformed ⇒ dropped, never panics).
-fn secret_finding(value: &Value) -> Option<ScanFinding> {
-    let id = opt_str(value, "ruleID")?;
-    // trivy's `match` is the redacted line where the secret was found (the value itself is
-    // replaced with `*****` before trivy ever emits it). It is UNTRUSTED scanner free-text,
-    // surfaced as the finding's title and fenced/escaped downstream like a CVE title. We
-    // prefer the human `title` when present and fall back to the redacted `match`.
-    let title = opt_str(value, "title").or_else(|| opt_str(value, "match"));
-    Some(ScanFinding {
-        id,
-        severity: severity(
-            value
-                .get("severity")
-                .and_then(Value::as_str)
-                .unwrap_or("LOW"),
-        ),
-        category: opt_str(value, "category"),
-        title,
-        target: opt_str(value, "target"),
-        sources: vec![Provenance::new(SOURCE, SystemTime::now())],
-    })
 }
 
 #[cfg(test)]

@@ -20,14 +20,7 @@ impl Adapter for VulnerabilityAdapter {
             // Canonicalize the finding's ref to match the Image node the workload
             // adapter keyed (a short pod ref vs a scanner's fully-qualified one) —
             // without this the CVE silently fails to attach (security fix [15]).
-            let key = Node::Image(Image {
-                digest: canonical_image(&finding.image),
-                reference: None,
-                trust: Trust::Unknown,
-                vulnerabilities: vec![],
-                exposed_secrets: vec![],
-            })
-            .key();
+            let key = NodeKey::image(&canonical_image(&finding.image));
             graph.update_node(&key, |node| {
                 if let Node::Image(img) = node {
                     img.vulnerabilities = finding.vulnerabilities.clone();
@@ -664,14 +657,7 @@ mod tests {
             ..Default::default()
         };
         let graph = super::super::build_graph(&snap, &super::super::default_adapters());
-        let img_key = Node::Image(Image {
-            digest: canonical_image("web:1"),
-            reference: None,
-            trust: Trust::Unknown,
-            vulnerabilities: vec![],
-            exposed_secrets: vec![],
-        })
-        .key();
+        let img_key = NodeKey::image(&canonical_image("web:1"));
         let idx = graph.index_of(&img_key).expect("image node exists");
         match graph.node(idx) {
             Some(Node::Image(img)) => img.vulnerabilities[0].reachability,
@@ -871,14 +857,7 @@ mod tests {
             ..Default::default()
         };
         let graph = super::super::build_graph(&snap, &super::super::default_adapters());
-        let img_key = Node::Image(Image {
-            digest: canonical_image("web:1"),
-            reference: None,
-            trust: Trust::Unknown,
-            vulnerabilities: vec![],
-            exposed_secrets: vec![],
-        })
-        .key();
+        let img_key = NodeKey::image(&canonical_image("web:1"));
         let idx = graph.index_of(&img_key).expect("image node exists");
         let Some(Node::Image(img)) = graph.node(idx) else {
             panic!("expected image node");

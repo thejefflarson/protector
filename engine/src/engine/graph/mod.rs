@@ -70,7 +70,7 @@ impl Node {
             Node::Identity(i) => format!("identity/{}/{}", i.namespace, i.name),
             Node::Secret(s) => format!("secret/{}/{}", s.namespace, s.name),
             Node::Endpoint(e) => format!("endpoint/{}", e.address),
-            Node::Image(im) => format!("image/{}", im.digest),
+            Node::Image(im) => NodeKey::image(&im.digest).0,
             Node::Host(h) => format!("host/{}", h.name),
             Node::Capability(c) => {
                 format!("capability/{}/{}/{}", c.scope.label(), c.verb, c.resource)
@@ -112,6 +112,15 @@ impl NodeKey {
     /// construct. Must match [`Node::key`]'s `Workload` arm.
     pub fn workload(namespace: &str, kind: &str, name: &str) -> NodeKey {
         NodeKey(format!("workload/{namespace}/{kind}/{name}"))
+    }
+
+    /// The key for an Image node, by its content `digest`, without building the full
+    /// struct — so the vulnerability/exposed-secret enrichment adapters can address
+    /// the Image node they want to annotate (after [`canonical_image`]-ing a finding's
+    /// reference) instead of constructing a throwaway [`Node::Image`] just for its key.
+    /// Must match [`Node::key`]'s `Image` arm.
+    pub fn image(digest: &str) -> NodeKey {
+        NodeKey(format!("image/{digest}"))
     }
 
     /// The leading path segment that names the node's kind — the discriminant every
@@ -878,6 +887,36 @@ mod tests {
         });
         // Identity (digest) drives the key; facts (trust, vulns) do not.
         assert_eq!(clean.key(), scanned.key());
+    }
+
+    #[test]
+    fn node_key_constructors_match_node_key() {
+        // The struct-free constructors the enrichment adapters use must produce exactly the
+        // key `Node::key` derives from a full node — otherwise a finding silently fails to
+        // attach (the security-fix [15] / JEF-244 attach bugs). Guards both arms that route
+        // through a constructor.
+        let image = Node::Image(Image {
+            digest: "sha256:abc".into(),
+            reference: Some("ghcr.io/x:1".into()),
+            trust: Trust::Untrusted,
+            vulnerabilities: vec![],
+            exposed_secrets: vec![],
+        });
+        assert_eq!(NodeKey::image("sha256:abc"), image.key());
+
+        let workload = Node::Workload(Workload {
+            namespace: "app".into(),
+            name: "web".into(),
+            kind: "Pod".into(),
+            labels: BTreeMap::new(),
+            meshed: false,
+            exposure: Exposure::Internal,
+            runtime: vec![],
+            persistent: false,
+            misconfigs: vec![],
+            rbac_findings: vec![],
+        });
+        assert_eq!(NodeKey::workload("app", "Pod", "web"), workload.key());
     }
 
     #[test]

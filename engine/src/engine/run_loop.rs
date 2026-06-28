@@ -1,11 +1,8 @@
-//! The engine's drivers: the event-driven observer ([`run_watch`], the default) and
-//! the poll-loop fallback ([`run`]), plus the small builders that wire the actuator,
-//! hypothesis source, and adjudicator from the environment. Split out of the engine
-//! module root (`mod.rs`) purely to keep every file under the 1,000-line cap (repo
-//! CLAUDE.md); the orchestration core ([`Engine::process`]) stays there. Both drivers
-//! call the same `process`, so the analysis is identical — only the trigger differs.
-
-use std::time::Duration;
+//! The engine's driver: the event-driven observer ([`run_watch`]), plus the small
+//! builders that wire the actuator, hypothesis source, and adjudicator from the
+//! environment. Split out of the engine module root (`mod.rs`) purely to keep every file
+//! under the 1,000-line cap (repo CLAUDE.md); the orchestration core
+//! ([`Engine::process`]) stays there.
 
 use super::respond::actuator::{ActuationScope, Actuator, DryRunActuator, EnabledActions};
 use super::{
@@ -28,39 +25,6 @@ fn restore_admission_log(
         }
     }
     restored
-}
-
-/// Poll loop: re-list the whole cluster every `interval`, assemble a snapshot, and
-/// process it. The simple fallback for environments where a watch isn't available;
-/// [`run_watch`] is the default. A stable cluster does no useful work here between
-/// changes — it just re-lists — which is exactly why the watch path is preferred.
-pub async fn run(
-    client: kube::Client,
-    interval: Duration,
-    active: EnabledActions,
-    scope: ActuationScope,
-    kev: observe::exploit_intel::KevCatalog,
-    epss: observe::epss::EpssStore,
-) {
-    let mut engine = Engine::new(
-        active.clone(),
-        scope,
-        build_actuator(&active, &client),
-        build_hypothesizer(),
-        // The timer path serves no dashboard, so there is nowhere to read a journal.
-        build_adjudicator(None),
-    );
-    loop {
-        match Snapshot::observe(client.clone()).await {
-            Ok(mut snapshot) => {
-                kev.mark_exploited(&mut snapshot.image_vulns);
-                epss.annotate(&mut snapshot.image_vulns);
-                engine.process(&snapshot).await;
-            }
-            Err(error) => tracing::warn!(%error, "observe failed; retaining previous state"),
-        }
-        tokio::time::sleep(interval).await;
-    }
 }
 
 /// Choose the actuator. Dry-run when nothing is enabled (the engine can never touch
@@ -99,14 +63,6 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
     }
 }
 
-/// The model endpoint + name, read once from `PROTECTOR_ENGINE_MODEL` /
-/// `PROTECTOR_ENGINE_MODEL_NAME`. `None` when no endpoint is set (deterministic-only
-/// — null hypothesizer and adjudicator). Shared by both model-backed builders so the
-/// endpoint and the default model name have a single source of truth.
-fn model_config() -> Option<(String, String)> {
-    model::config()
-}
-
 /// Choose the hypothesis source: a model-backed one when a model is configured AND
 /// `PROTECTOR_ENGINE_HYPOTHESIS=model` opts it in, else the null source. Local-first:
 /// point it at an in-cluster model so the graph never leaves.
@@ -119,7 +75,7 @@ fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
     // `PROTECTOR_ENGINE_HYPOTHESIS=model` only where the model is fast enough; the
     // model's real job is adjudication (ADR-0013), wired separately below.
     let opt_in = std::env::var("PROTECTOR_ENGINE_HYPOTHESIS").as_deref() == Ok("model");
-    match model_config() {
+    match model::config() {
         Some((endpoint, model)) if opt_in => {
             tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
             Box::new(reason::hypothesis::ModelHypothesizer::new(
@@ -137,15 +93,13 @@ fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
 /// governs). The model judges exploitability bidirectionally — vetoing a live chain
 /// the deterministic bar would act on, or promoting an exposed one it wouldn't.
 fn build_adjudicator(
-    journal: Option<std::sync::Arc<dashboard::JudgementLog>>,
+    journal: std::sync::Arc<dashboard::JudgementLog>,
 ) -> Box<dyn reason::adjudicate::Adjudicator> {
-    match model_config() {
+    match model::config() {
         Some((endpoint, model)) => {
             tracing::info!(%model, "adjudicator: model-backed (judges exploitability — promote/veto)");
-            let mut adjudicator = reason::adjudicate::ModelAdjudicator::new(endpoint, model);
-            if let Some(journal) = journal {
-                adjudicator = adjudicator.with_journal(journal);
-            }
+            let adjudicator =
+                reason::adjudicate::ModelAdjudicator::new(endpoint, model).with_journal(journal);
             Box::new(adjudicator)
         }
         None => Box::new(reason::adjudicate::NullAdjudicator),
@@ -159,9 +113,8 @@ fn build_adjudicator(
 /// also means it catches **ephemeral** workloads (e.g. short-lived CI runners) a
 /// poll between ticks would miss entirely.
 ///
-/// The graph-building, proof, and response logic is identical to [`run`]; only the
-/// trigger differs (event stream vs. timer). This path is exercised against a real
-/// cluster, not unit tests — the analysis it drives is what the tests cover.
+/// This path is exercised against a real cluster, not unit tests — the analysis it
+/// drives is what the tests cover.
 // This is the engine's top-level entrypoint: each argument is an independent wired-in
 // capability (client, arm-state, scope, the optional feed/dashboard addrs, the intel
 // snapshots, the admission-decision ring). Bundling them into a config struct belongs to
@@ -198,12 +151,12 @@ pub async fn run_watch(
         scope,
         build_actuator(&active, &client),
         build_hypothesizer(),
-        build_adjudicator(Some(journal.clone())),
+        build_adjudicator(journal.clone()),
     )
     .with_journal(journal::DecisionJournal::from_env())
     // The one sanctioned outbound path (JEF-144, ADR-0018): operator-configured via
     // `PROTECTOR_ENGINE_NOTIFY_URL`, off (zero outbound calls) when unset, redacted by
-    // default. Only the watch loop wires it — the timer path (`run`) serves no operator.
+    // default.
     .with_notifier(notify::BreachNotifier::from_env());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
@@ -373,7 +326,12 @@ pub async fn run_watch(
             // something changed), then enriched with KEV exploit intel and EPSS
             // exploit-prediction scores. Runtime events are the live, TTL'd Falco signals.
             image_vulns: {
-                let mut v = observe::list_image_vulns(&client).await;
+                let mut v = observe::list_parsed(
+                    &client,
+                    observe::vulnerability_report_gvk(),
+                    observe::trivy::parse_report,
+                )
+                .await;
                 kev.mark_exploited(&mut v);
                 epss.annotate(&mut v);
                 v

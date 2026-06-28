@@ -14,13 +14,10 @@
 //! skipped — it has no single workload to attach to, and double-counting cluster RBAC is
 //! exactly what JEF-79 already owns).
 
-use std::time::SystemTime;
-
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-use super::{RbacFindings, opt_str, report_resource, severity};
-use crate::engine::graph::{Provenance, ScanFinding};
+use super::{RbacFindings, report_resource, scan_finding};
 
 /// This adapter's provenance source.
 const SOURCE: &str = "trivy-rbac";
@@ -34,34 +31,18 @@ pub fn parse_report(object: &DynamicObject) -> Option<RbacFindings> {
     let findings = report
         .get("checks")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(check_finding).collect())
+        // Identical check shape to the config-audit report (`checkID` / `description`), but an
+        // RBAC check names the assessed role in `target`. The shared builder reads `target`.
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| scan_finding(v, SOURCE, "checkID", "description"))
+                .collect()
+        })
         .unwrap_or_default();
     Some(RbacFindings {
         namespace: resource.namespace,
         findings,
-    })
-}
-
-/// Map one FAILED `checks[]` entry into a [`ScanFinding`]. Identical check shape to the
-/// config-audit report; a passing or id-less check is dropped.
-fn check_finding(value: &Value) -> Option<ScanFinding> {
-    if value.get("success").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
-    let id = opt_str(value, "checkID")?;
-    let title = opt_str(value, "title").or_else(|| opt_str(value, "description"));
-    Some(ScanFinding {
-        id,
-        severity: severity(
-            value
-                .get("severity")
-                .and_then(Value::as_str)
-                .unwrap_or("LOW"),
-        ),
-        category: opt_str(value, "category"),
-        title,
-        target: opt_str(value, "target"),
-        sources: vec![Provenance::new(SOURCE, SystemTime::now())],
     })
 }
 

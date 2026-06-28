@@ -21,14 +21,7 @@ impl Adapter for ExposedSecretAdapter {
 
     fn contribute(&self, snapshot: &Snapshot, graph: &mut SecurityGraph) {
         for finding in &snapshot.image_secrets {
-            let key = Node::Image(Image {
-                digest: canonical_image(&finding.image),
-                reference: None,
-                trust: Trust::Unknown,
-                vulnerabilities: vec![],
-                exposed_secrets: vec![],
-            })
-            .key();
+            let key = NodeKey::image(&canonical_image(&finding.image));
             graph.update_node(&key, |node| {
                 if let Node::Image(img) = node {
                     img.exposed_secrets = finding.findings.clone();
