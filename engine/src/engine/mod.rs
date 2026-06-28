@@ -93,6 +93,11 @@ struct EngineMetrics {
     /// Per-pass adjudications served from the verdict cache (cache hit). Cumulative
     /// counter, the companion to [`Self::judged`].
     cached: opentelemetry::metrics::Counter<u64>,
+    /// Per-pass cache MISSES the engine declined to send to the model because the entry
+    /// (or the whole fleet, via the global breaker) was in inconclusive-adjudication
+    /// backoff (JEF-234). A cumulative counter: a sustained nonzero rate means the model is
+    /// degraded and the engine is correctly NOT hammering it (the bounding is working).
+    skipped: opentelemetry::metrics::Counter<u64>,
     /// Adjudicator model-call latency in milliseconds (histogram), recorded around each
     /// fresh `judge` call so the slow CPU model's tail is visible.
     model_latency_ms: opentelemetry::metrics::Histogram<f64>,
@@ -167,6 +172,12 @@ impl EngineMetrics {
             cached: m
                 .u64_counter("protector.engine.cached")
                 .with_description("Adjudications served from the verdict cache (cache hit).")
+                .build(),
+            skipped: m
+                .u64_counter("protector.engine.skipped")
+                .with_description(
+                    "Adjudications skipped (inconclusive-adjudication backoff / breaker open).",
+                )
                 .build(),
             model_latency_ms: m
                 .f64_histogram("protector.engine.model_latency_ms")
@@ -567,6 +578,17 @@ impl Engine {
         // cached verdict. A persistently high `judged` means the verdict-cache fingerprint
         // is churning (re-judging unchanged entries) — the thing to watch for model load.
         let (mut judged, mut cached) = (0u64, 0u64);
+        // JEF-234: cache misses that we DECLINE to send to the model this pass because the
+        // entry (or the whole fleet, via the global breaker) is in inconclusive-adjudication
+        // backoff. A degraded Ollama was previously re-judged for every failed entry every
+        // pass — a feedback loop that hammered the struggling model. `skipped` makes the
+        // bounding visible: a sustained nonzero rate means the model is down and we are
+        // correctly NOT hammering it.
+        let mut skipped = 0u64;
+        // One `now` for the whole pass so every backoff/breaker decision in this loop shares
+        // a single clock read — the timing seam the JEF-234 tests drive deterministically
+        // (the store methods all take `now`, never reach for `Instant::now()` themselves).
+        let pass_now = std::time::Instant::now();
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
             // The (objective, technique) set this entry reaches — what the model judges.
@@ -582,6 +604,24 @@ impl Engine {
                 Some(v) => {
                     cached += 1;
                     v
+                }
+                // JEF-234: the GLOBAL breaker is open — the model looks fully down, so skip
+                // EVERY entry's model call this pass (a fully-down Ollama is then probed at
+                // most ~once per cooldown, regardless of entry count). Synthesize an
+                // Uncertain so the display logic below carries forward the prior decisive
+                // verdict and model-health stays Timeout, exactly as a real timeout would.
+                None if self.verdicts.breaker_open(pass_now) => {
+                    skipped += 1;
+                    reason::adjudicate::Verdict::Uncertain(
+                        "model unavailable (breaker open)".into(),
+                    )
+                }
+                // JEF-234: THIS entry is in exponential backoff after a recent inconclusive
+                // verdict — don't re-judge it until its backoff elapses. Same carry-forward
+                // Uncertain, no model call, no `judged` increment.
+                None if self.verdicts.entry_backing_off(entry_key, pass_now) => {
+                    skipped += 1;
+                    reason::adjudicate::Verdict::Uncertain("model unavailable (backing off)".into())
                 }
                 None => {
                     judged += 1;
@@ -601,12 +641,21 @@ impl Engine {
                     let result = match &v {
                         reason::adjudicate::Verdict::Uncertain(why) => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), %why, "adjudication inconclusive (will retry)");
+                            // JEF-234: arm this entry's exponential backoff and advance the
+                            // global breaker's failure run, so the next pass does NOT re-judge
+                            // it immediately. Still not cached (Uncertain is never decisive) —
+                            // the backoff is the new gate.
+                            self.verdicts.record_inconclusive(entry_key, pass_now);
                             "unavailable"
                         }
                         decisive => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), verdict = ?decisive, "adjudicated entry");
                             self.verdicts
                                 .cache_decisive(entry_key, fingerprint, v.clone());
+                            // JEF-234: a decisive answer means the model is alive — clear this
+                            // entry's backoff and close the global breaker so judging resumes
+                            // normally for the whole fleet.
+                            self.verdicts.record_decisive(entry_key);
                             "ok"
                         }
                     };
@@ -717,6 +766,9 @@ impl Engine {
         if cached > 0 {
             self.metrics.cached.add(cached, &[]);
         }
+        if skipped > 0 {
+            self.metrics.skipped.add(skipped, &[]);
+        }
         // Mirror the shadow would-have-acted report headline (JEF-143) to OTLP, like the
         // bake counts: the gates-exiting-shadow figures (JEF-50) over the default window,
         // read back from the durable journal we just appended this pass's breach decision
@@ -739,6 +791,7 @@ impl Engine {
                 entries = by_entry.len(),
                 judged,
                 cached,
+                skipped,
                 "adjudication pass (model calls = judged)"
             );
         }

@@ -11,12 +11,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 
 use crate::engine::graph::{Behavior, SecurityGraph, Vulnerability};
 use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
 use crate::engine::reason::proof::ProvenChain;
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
@@ -408,6 +409,12 @@ pub struct VerdictEntry {
     /// (formerly `journaled_verdicts`), so a steady-state cluster writes/notifies once
     /// per change, not per pass.
     pub journaled: Option<String>,
+    /// Exponential-backoff state for INCONCLUSIVE adjudication (JEF-234). An `Uncertain`
+    /// verdict (a model timeout / Ollama-down / OOM) is never cached, so without this gate
+    /// the entry is re-judged every pass and hammers a struggling model. Each `Uncertain`
+    /// grows the retry delay; a decisive verdict resets it. The verdict cache above still
+    /// serves decisive verdicts — this only gates the re-judge of failed ones.
+    pub backoff: EntryBackoff,
 }
 
 impl VerdictEntry {
@@ -433,6 +440,23 @@ impl VerdictEntry {
 #[derive(Default)]
 pub struct VerdictStore {
     entries: Mutex<BTreeMap<String, VerdictEntry>>,
+    /// The GLOBAL inconclusive-adjudication circuit-breaker (JEF-234): when the model
+    /// looks fully down (a run of consecutive `Uncertain` calls across all entries), the
+    /// whole judging pass skips its model calls for a cooldown, so a fully-down Ollama's
+    /// total calls-per-window is bounded regardless of entry count. A decisive success
+    /// closes it. Separate lock from `entries` — it is touched once per call, not per entry.
+    breaker: Mutex<CircuitBreaker>,
+}
+
+/// A stable per-entry seed for the backoff jitter (JEF-234), derived from the entry key
+/// so two entries that fail on the same pass spread their retries apart rather than
+/// thundering back together. A plain `DefaultHasher` of the key — deterministic per key,
+/// no external dependency.
+fn jitter_seed(entry: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    entry.hash(&mut h);
+    h.finish()
 }
 
 impl VerdictStore {
@@ -480,6 +504,54 @@ impl VerdictStore {
     /// Cache a fresh DECISIVE verdict + its fingerprint for the re-judge gate.
     pub fn cache_decisive(&self, entry: &str, fingerprint: String, verdict: Verdict) {
         self.update(entry, |e| e.cached = Some((fingerprint, verdict)));
+    }
+
+    /// JEF-234 — whether the judging loop should SKIP the model call for `entry` this pass
+    /// because it is in inconclusive-adjudication backoff at `now`. On a cache MISS the loop
+    /// checks this BEFORE calling `judge()`: if backing off it keeps the prior display
+    /// verdict and does not touch the (struggling) model. `now` is injected for testability.
+    pub fn entry_backing_off(&self, entry: &str, now: Instant) -> bool {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .is_some_and(|e| e.backoff.is_backing_off(now))
+    }
+
+    /// JEF-234 — record an INCONCLUSIVE (`Uncertain`) adjudication for `entry` at `now`:
+    /// grow the entry's exponential backoff AND advance the global breaker's failure run.
+    /// The jitter seed is derived from the entry key so distinct entries de-sync their
+    /// retries. Does NOT cache the verdict (Uncertain is never decisive) — the backoff is
+    /// the gate.
+    pub fn record_inconclusive(&self, entry: &str, now: Instant) {
+        let seed = jitter_seed(entry);
+        self.update(entry, |e| e.backoff.record_failure(now, seed));
+        self.breaker
+            .lock()
+            .expect("verdict store breaker mutex poisoned")
+            .record_failure(now);
+    }
+
+    /// JEF-234 — record a DECISIVE adjudication for `entry`: clear the entry's backoff and
+    /// close the global breaker (the model answered). Pairs with [`cache_decisive`], which
+    /// the loop still calls to cache the verdict itself.
+    ///
+    /// [`cache_decisive`]: Self::cache_decisive
+    pub fn record_decisive(&self, entry: &str) {
+        self.update(entry, |e| e.backoff.record_success());
+        self.breaker
+            .lock()
+            .expect("verdict store breaker mutex poisoned")
+            .record_success();
+    }
+
+    /// JEF-234 — whether the GLOBAL breaker is open at `now`: the whole judging pass should
+    /// skip its model calls (the model looks fully down). `now` is injected for testability.
+    pub fn breaker_open(&self, now: Instant) -> bool {
+        self.breaker
+            .lock()
+            .expect("verdict store breaker mutex poisoned")
+            .is_open(now)
     }
 
     /// The entry's current typed DISPLAY verdict (the carry-forward + Uncertain-fallback
