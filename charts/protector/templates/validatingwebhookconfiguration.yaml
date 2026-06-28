@@ -4,9 +4,14 @@
 #
 # TWO webhooks, by design (security fix — webhook fail-closed):
 #
-#   * pods.protector.dev — the AUDIT webhook. Broad (every non-exempt, non-enforced
-#     namespace) and FAIL-OPEN (failurePolicy Ignore): a protector outage must never
-#     block Pod creation where enforcement was never opted into. Observe-only.
+#   * pods.protector.dev — the AUDIT webhook. Intercepts EVERY namespace by default
+#     (including kube-system / cert-manager / argocd / linkerd / protector itself) and
+#     FAIL-OPEN (failurePolicy Ignore): a protector outage must never block Pod creation,
+#     and audit never denies, so widening interception cluster-wide is safe. Observe-only.
+#     It excludes only (a) namespaces an operator explicitly opts out via
+#     webhook.excludeNamespaces (EMPTY by default — nothing excluded) and (b) the enforced
+#     namespaces, which the fail-closed webhook below covers instead, so they aren't
+#     double-validated and a protector outage doesn't silently fail those open.
 #
 #   * pods-enforce.protector.dev — the ENFORCING webhook. Scoped to enforced namespaces
 #     via a label selector and FAIL-CLOSED (failurePolicy Fail): if protector is down or
@@ -16,8 +21,12 @@
 #     scoped to a sentinel label no namespace carries, so it matches nothing and can
 #     never block until a namespace is opted in.
 #
-# Both exclude the control plane + protector's own namespace, so a bug here can't
-# deadlock the cluster or protector itself.
+# SELF-DEADLOCK: the audit webhook now intercepts protector's OWN namespace, but it is
+# fail-open (Ignore) AND audit can never deny, so it cannot block protector's own pod
+# CREATE during bootstrap — if the webhook endpoint isn't up yet the apiserver simply
+# admits the pod. The enforcing webhook never covers protector's namespace by default
+# (it matches nothing until an operator labels a namespace in), so it can't deadlock the
+# engine either. To audit-exempt a namespace anyway, add it to webhook.excludeNamespaces.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -36,16 +45,21 @@ webhooks:
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     matchPolicy: Equivalent
     timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    {{- $enforcedLabels := dict }}
+    {{- with .Values.webhook.enforcedNamespaceSelector }}{{ $enforcedLabels = .matchLabels | default dict }}{{- end }}
+    {{- if or .Values.webhook.excludeNamespaces $enforcedLabels }}
     namespaceSelector:
       matchExpressions:
+        {{- if .Values.webhook.excludeNamespaces }}
+        # Operator opt-out: keep the audit webhook OFF these namespaces.
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values:
-            {{- range .Values.webhook.exemptNamespaces }}
+            {{- range .Values.webhook.excludeNamespaces }}
             - {{ . }}
             {{- end }}
-        {{- with .Values.webhook.enforcedNamespaceSelector }}
-        {{- range $key, $value := .matchLabels }}
+        {{- end }}
+        {{- range $key, $value := $enforcedLabels }}
         # Enforced namespaces are validated by the fail-closed webhook below instead, so
         # exclude them here — otherwise the fail-open audit webhook would also cover them
         # and a protector outage would silently fail those open.
@@ -53,7 +67,12 @@ webhooks:
           operator: NotIn
           values: [{{ $value | quote }}]
         {{- end }}
-        {{- end }}
+    {{- else }}
+    # AUDIT-EVERYWHERE: excludeNamespaces and enforcedNamespaceSelector both empty, so the
+    # selector is empty ({}) and the fail-open audit webhook fires on Pod CREATE in EVERY
+    # namespace (incl. kube-system / cert-manager / argocd / linkerd / protector itself).
+    namespaceSelector: {}
+    {{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
@@ -75,12 +94,15 @@ webhooks:
     timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
     namespaceSelector:
       matchExpressions:
+        {{- if .Values.webhook.excludeNamespaces }}
+        # Operator opt-out also keeps the fail-closed webhook off these namespaces.
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values:
-            {{- range .Values.webhook.exemptNamespaces }}
+            {{- range .Values.webhook.excludeNamespaces }}
             - {{ . }}
             {{- end }}
+        {{- end }}
         {{- with .Values.webhook.enforcedNamespaceSelector }}
         {{- range $key, $value := .matchLabels }}
         - key: {{ $key }}

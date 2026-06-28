@@ -23,7 +23,8 @@ a fully air-gapped / zero-egress install, set `feedSync.enabled=false` and mount
 | Property            | Default                                | Why                                                              |
 | ------------------- | -------------------------------------- | --------------------------------------------------------------- |
 | Webhook gating      | **audit-only** (`enforceNamespaces` empty) | Logs unsigned/unmeshed pods, never blocks them.             |
-| Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes; the fail-closed enforcing webhook matches no namespace until you label one in. |
+| Webhook scope       | **audit every namespace** (`webhook.excludeNamespaces: []`) | The fail-open audit webhook observes Pod creates cluster-wide, including kube-system / cert-manager / linkerd / argocd / protector. List names in `excludeNamespaces` to opt some out. |
+| Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes (so auditing every namespace is safe even for kube-system); the fail-closed enforcing webhook matches no namespace until you label one in. |
 | Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token; engine + agent share a chart-provisioned Secret. |
 | Engine              | **shadow** (`engine.enable` empty)     | Detects + proposes; the engine forces dry-run actuation while no class is armed. |
 | Actuator            | `dryrun`                               | Touches nothing even if a class is later armed (a deliberate two-step). |
