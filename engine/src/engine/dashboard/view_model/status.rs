@@ -1,221 +1,261 @@
-//! The status / nav view-model (ADR-0019, the DATA layer): pure functions that map the
-//! engine's per-pass snapshot (the resolved [`Finding`]s, arm-state, last-pass time, and
-//! whether the model is judging) into the plain `Props` the `components::banner` /
-//! `components::nav` renderers consume. No maud here, and no presentation markup — only
-//! the glanceable cluster verdict and the data the components turn into HTML.
+//! The one-line STATUS props (JEF-255) — the dashboard's headline answer:
+//! `● N BREACH · M endpoints · K awaiting · model live (pass <age>) · coverage X%`.
+//!
+//! The line is GREEN only when it is honestly all-clear AND covered: no breach, the model is
+//! live, and every decision input is met. A model that is down must NOT read calm — that is
+//! the honest blind state (exposed paths are unjudged, not cleared; ADR-0016). Pure data; the
+//! `components::status_line` renderer turns this into the chip + counts.
 
-use crate::engine::dashboard::model::Finding;
-use crate::engine::dashboard::view_model::findings::flagged;
-use std::collections::BTreeSet;
 use std::time::SystemTime;
 
-/// The glanceable cluster verdict (JEF-159): the one-word answer the status banner leads
-/// with. A pure presentation classification over the snapshot — never a decision gate
-/// (ADR-0016), never a model call.
+use crate::engine::dashboard::model::{Finding, relative_time};
+use crate::engine::dashboard::view_model::posture::Posture;
+use crate::engine::dashboard::view_model::readiness_data::Readiness;
+
+/// The overall tone of the status line — drives the lead dot's color and the screen-reader
+/// summary. Meaning is always also carried in the counts text, never the dot alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClusterStatus {
-    /// `last_pass` is `None` — no pass has completed, so there are no verdicts yet. We
-    /// show progress, NOT a blank and NOT a false "OK": a warming cluster is unknown, not
-    /// clear.
-    WarmingUp,
-    /// ≥1 breach-relevant finding the model affirmed exploitable now, AND a cut is in
-    /// force for it (armed + an auto-eligible remediation, which renders as "applied").
-    /// The breach is real but contained — red border on a calm fill, distinct from a
-    /// live, un-cut breach.
-    Isolated,
-    /// ≥1 breach-relevant finding the model affirmed exploitable now, with no cut in
-    /// force. The one red state: a live breach the operator must look at.
-    BreachLive,
-    /// Exposed breach-relevant endpoints exist and the model is NOT answering (no model
-    /// configured, or its last call timed out / hasn't landed this run — JEF-174). Nothing
-    /// is flagged, but that is the deterministic skeptic default, NOT a model clearance: the
-    /// single most load-bearing input is absent (ADR-0016). Non-green (amber) — these paths
-    /// are unjudged, not confirmed safe. Ranked worse than `Watching` (a real clearance).
-    Unjudged,
-    /// Exposed breach-relevant endpoints exist, the model IS answering, and it cleared them
-    /// all (none exploitable). Calm green — actively watched, a live verdict, nothing live.
-    Watching,
-    /// No breach-relevant exposure at all. Calm green — nothing reaches an objective.
-    Quiet,
+pub enum StatusTone {
+    /// One or more entries are a confirmed breach — loud.
+    Breach,
+    /// No breach, but the engine is BLIND: the model is down, or coverage is incomplete, so
+    /// a calm reading would be dishonest (exposed paths are unjudged).
+    Blind,
+    /// Honestly all-clear AND covered: no breach, model live, every input met.
+    Clear,
 }
 
-impl ClusterStatus {
-    /// The one word the banner leads with — the glanceable answer.
-    pub fn word(self) -> &'static str {
+impl StatusTone {
+    /// The CSS tone class for the lead dot / line (`s-breach` / `s-blind` / `s-clear`).
+    pub fn css(self) -> &'static str {
         match self {
-            ClusterStatus::WarmingUp => "Warming up",
-            ClusterStatus::Isolated => "Isolated",
-            ClusterStatus::BreachLive => "Breach — live",
-            ClusterStatus::Unjudged => "Unjudged",
-            ClusterStatus::Watching => "Watching",
-            ClusterStatus::Quiet => "Quiet",
-        }
-    }
-
-    /// A leading glyph so the state is legible without color (accessibility): the meaning
-    /// is carried by word + glyph, color only reinforces it.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ClusterStatus::WarmingUp => "◌",
-            ClusterStatus::Isolated => "▣",
-            ClusterStatus::BreachLive => "▲",
-            ClusterStatus::Unjudged => "◍",
-            ClusterStatus::Watching => "●",
-            ClusterStatus::Quiet => "●",
-        }
-    }
-
-    /// The CSS class for the banner's tone — maps to the tokens in `web/dist/dashboard.css`.
-    /// `ok` is the new calm/green token (the first "healthy" color); `breach` is the
-    /// reserved red; `isolated` is red-border-on-calm; `warming` is muted; `unjudged` is the
-    /// amber/degraded token (JEF-174) — explicitly NOT green, because nothing was cleared.
-    pub fn tone(self) -> &'static str {
-        match self {
-            ClusterStatus::WarmingUp => "warming",
-            ClusterStatus::Isolated => "isolated",
-            ClusterStatus::BreachLive => "breach",
-            ClusterStatus::Unjudged => "unjudged",
-            ClusterStatus::Watching | ClusterStatus::Quiet => "ok",
+            StatusTone::Breach => "s-breach",
+            StatusTone::Blind => "s-blind",
+            StatusTone::Clear => "s-clear",
         }
     }
 }
 
-/// The glanceable cluster status (JEF-159) — a PURE function over the snapshot the
-/// dashboard already has: the resolved findings, whether the engine is armed, and the
-/// last-pass time. No model call. The verdict is read from each finding's RESOLVED
-/// verdict (JEF-157: the snapshot resolves it from the unified per-entry store), and a
-/// finding counts as a live breach exactly when [`flagged`] is true for it.
-///
-/// `model_judging` (JEF-174) is whether the model is actually answering right now. It gates
-/// the ONE clearance claim: exposed-but-unflagged paths are `Watching` (a real, green "the
-/// model cleared them") only while the model is live; otherwise they are
-/// [`Unjudged`](ClusterStatus::Unjudged) — non-green, because "nothing flagged" is the
-/// deterministic skeptic default, not a verdict (ADR-0016). It never relaxes a breach
-/// state, only withholds a clearance.
-pub fn cluster_status(
+/// The shaped status-line data the renderer consumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusProps {
+    pub tone: StatusTone,
+    /// Confirmed-breach endpoints right now.
+    pub breach: usize,
+    /// Exposed endpoints with a possible attack path (the table's total rows).
+    pub endpoints: usize,
+    /// Exposed endpoints with no verdict yet (the model hasn't reached them).
+    pub awaiting: usize,
+    /// The model-health clause (`model live`, `model down — not judging`, `no model — not
+    /// judging`). Honest about the blind state.
+    pub model_clause: String,
+    /// The last-pass age (`pass 12s ago`, `waiting for first pass`).
+    pub pass_age: String,
+    /// Coverage as a whole percent (met decision inputs / total inputs).
+    pub coverage_pct: u8,
+}
+
+/// Build the status-line props from this pass's findings + live readiness (JEF-255). Posture
+/// is derived from each entry's TYPED verdict (the SSOT) — never re-parsed prose.
+pub fn status_props(
     findings: &[Finding],
-    armed: bool,
     last_pass: Option<SystemTime>,
-    model_judging: bool,
-) -> ClusterStatus {
-    // No pass yet ⇒ no verdicts ⇒ never claim OK (warming, not blank, not clear).
-    if last_pass.is_none() {
-        return ClusterStatus::WarmingUp;
+    readiness: &Readiness,
+) -> StatusProps {
+    // Count per unique exposed entry, not per chain: an entry is the unit. An entry is a
+    // breach if ANY of its chains is a breach; awaiting if it has no verdict at all.
+    let mut entries: std::collections::BTreeMap<&str, Posture> = std::collections::BTreeMap::new();
+    for f in findings.iter().filter(|f| f.breach_relevant) {
+        let p = Posture::of_verdict(f.verdict.as_ref());
+        let slot = entries.entry(f.entry.as_str()).or_insert(Posture::Awaiting);
+        // Escalate the entry's posture toward Breach: Breach > Safe > Awaiting.
+        *slot = max_posture(*slot, p);
     }
+    let endpoints = entries.len();
+    let breach = entries.values().filter(|p| p.is_breach()).count();
+    let awaiting = entries
+        .values()
+        .filter(|p| **p == Posture::Awaiting)
+        .count();
 
-    let breach = findings.iter().filter(|f| f.breach_relevant);
-    let mut exposed = 0usize;
-    let mut live_breach = false;
-    let mut cut_applied = false;
-    for f in breach {
-        exposed += 1;
-        if flagged(f.verdict.as_deref()) {
-            live_breach = true;
-            // A cut is in force for a flagged breach only when the engine is armed AND the
-            // chain is auto-eligible (it would render "applied", not "would apply").
-            if armed && f.disposition == crate::engine::dashboard::model::AUTO_ELIGIBLE {
-                cut_applied = true;
-            }
+    let coverage_pct = coverage_pct(readiness);
+    let tone = if breach > 0 {
+        StatusTone::Breach
+    } else if !readiness.model_judging || coverage_pct < 100 {
+        // No breach, but blind: the model isn't judging, or an input is missing. Honest — a
+        // green/clear reading here would imply "cleared" when paths are merely unjudged.
+        StatusTone::Blind
+    } else {
+        StatusTone::Clear
+    };
+
+    StatusProps {
+        tone,
+        breach,
+        endpoints,
+        awaiting,
+        model_clause: model_clause(readiness),
+        pass_age: relative_time(last_pass),
+        coverage_pct,
+    }
+}
+
+/// The honest model-health clause. "down → not judging" / "no model → not judging" must read
+/// as a gap, never calm (ADR-0016).
+fn model_clause(readiness: &Readiness) -> String {
+    if readiness.model_judging {
+        "model live".to_string()
+    } else if readiness.model_attached() {
+        "model down — not judging".to_string()
+    } else {
+        "no model — not judging".to_string()
+    }
+}
+
+/// Coverage as a whole percent: met decision inputs over total inputs. Arm-state is posture,
+/// not an input gap, so it neither counts as met nor as a denominator.
+fn coverage_pct(readiness: &Readiness) -> u8 {
+    let total = readiness
+        .inputs
+        .iter()
+        .filter(|r| r.id != "arm-state")
+        .count();
+    if total == 0 {
+        return 0;
+    }
+    let met = total - readiness.unmet_count();
+    ((met * 100) / total) as u8
+}
+
+/// The higher (louder) of two postures: Breach > Safe > Awaiting.
+fn max_posture(a: Posture, b: Posture) -> Posture {
+    fn rank(p: Posture) -> u8 {
+        match p {
+            Posture::Awaiting => 0,
+            Posture::Safe => 1,
+            Posture::Breach => 2,
+        }
+    }
+    if rank(b) > rank(a) { b } else { a }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::dashboard::model::{BakeStats, EntryEvidence, ReadinessConfig};
+    use crate::engine::dashboard::view_model::readiness_data::derive_readiness;
+    use crate::engine::reason::adjudicate::Verdict;
+
+    fn entry_finding(entry: &str, verdict: Option<Verdict>) -> Finding {
+        Finding {
+            entry: entry.into(),
+            objective: "secret/app/s".into(),
+            foothold: true,
+            corroborated: false,
+            disposition: "no-cut".into(),
+            cut: None,
+            breach_relevant: true,
+            verdict,
+            path: vec![],
+            evidence: EntryEvidence::default(),
+            recency: None,
         }
     }
 
-    match (live_breach, cut_applied, exposed) {
-        (true, true, _) => ClusterStatus::Isolated,
-        (true, false, _) => ClusterStatus::BreachLive,
-        // No exposure at all ⇒ nothing for the model to clear, so model health is moot:
-        // `Quiet` makes no clearance claim ("no exposure reaches an objective") regardless.
-        (false, _, 0) => ClusterStatus::Quiet,
-        // Exposure exists and nothing is flagged: `Watching` (a green "the model cleared
-        // them") is honest ONLY while the model is live. Otherwise the all-clear is just the
-        // skeptic default with no model behind it ⇒ `Unjudged`, non-green (JEF-174).
-        (false, _, _) if model_judging => ClusterStatus::Watching,
-        (false, _, _) => ClusterStatus::Unjudged,
+    fn covered_judging() -> Readiness {
+        let mut bake = BakeStats::default();
+        bake.signals_by_variant.insert("alert".into(), 1);
+        bake.signals_by_variant.insert("connection".into(), 1);
+        derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                kev_count: 1,
+                epss_count: 1,
+                journal_durable: true,
+                armed: false,
+            },
+            crate::engine::dashboard::model::ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+        )
     }
-}
 
-/// The plain-data props for the status banner (ADR-0019 view-model). Carries the computed
-/// [`ClusterStatus`], the path counts the detail line states, the freshness phrase, and the
-/// arm-state — no markup, no engine domain type. The `components::banner` renderer turns
-/// this into HTML.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BannerProps {
-    /// The glanceable verdict — drives the word, glyph, and tone class.
-    pub status: ClusterStatus,
-    /// Distinct exposed (breach-relevant) endpoints — the count `Watching`/`Unjudged` state.
-    pub exposed: usize,
-    /// Distinct flagged (model-exploitable) endpoints — the count the breach states name.
-    pub flagged: usize,
-    /// The "last scan …" freshness phrase (already humanized).
-    pub freshness: String,
-    /// Whether the engine is armed (acting) vs shadow (proposing only) — the subtitle half.
-    pub armed: bool,
-}
-
-/// Build the banner props from the per-pass snapshot — the pure mapping from engine state
-/// to the data the banner component renders. Mirrors the old `status_banner` inputs.
-pub fn banner_props(
-    findings: &[Finding],
-    armed: bool,
-    last_pass: Option<SystemTime>,
-    freshness: &str,
-    model_judging: bool,
-) -> BannerProps {
-    let status = cluster_status(findings, armed, last_pass, model_judging);
-    let exposed = findings
-        .iter()
-        .filter(|f| f.breach_relevant)
-        .map(|f| f.entry.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let flagged = findings
-        .iter()
-        .filter(|f| f.breach_relevant && flagged(f.verdict.as_deref()))
-        .map(|f| f.entry.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    BannerProps {
-        status,
-        exposed,
-        flagged,
-        freshness: freshness.to_string(),
-        armed,
+    #[test]
+    fn breach_entry_makes_the_line_loud() {
+        let fs = vec![entry_finding(
+            "web",
+            Some(Verdict::Exploitable("CVE-x".into())),
+        )];
+        let p = status_props(&fs, Some(SystemTime::now()), &covered_judging());
+        assert_eq!(p.tone, StatusTone::Breach);
+        assert_eq!(p.breach, 1);
+        assert_eq!(p.endpoints, 1);
+        assert_eq!(p.awaiting, 0);
     }
-}
 
-/// One nav item: the link target, its label, and whether it is the current page.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavItem {
-    pub href: &'static str,
-    pub label: &'static str,
-    pub current: bool,
-}
+    #[test]
+    fn all_clear_and_covered_reads_green() {
+        let fs = vec![entry_finding(
+            "web",
+            Some(Verdict::Refuted("internal".into())),
+        )];
+        let p = status_props(&fs, Some(SystemTime::now()), &covered_judging());
+        assert_eq!(p.tone, StatusTone::Clear);
+        assert_eq!(p.breach, 0);
+        assert_eq!(p.coverage_pct, 100);
+        assert_eq!(p.model_clause, "model live");
+    }
 
-/// The plain-data props for the persistent nav (ADR-0019 view-model): the ordered items
-/// with the current page marked. No markup; `components::nav` renders it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavProps {
-    pub items: Vec<NavItem>,
-}
+    #[test]
+    fn model_down_is_blind_not_calm() {
+        // Model attached but last call timed out → not judging → blind, even with no breach.
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                kev_count: 1,
+                epss_count: 1,
+                journal_durable: true,
+                armed: false,
+            },
+            crate::engine::dashboard::model::ModelHealth::Timeout,
+            &{
+                let mut b = BakeStats::default();
+                b.signals_by_variant.insert("alert".into(), 1);
+                b.signals_by_variant.insert("connection".into(), 1);
+                b
+            },
+            Some(SystemTime::now()),
+        );
+        let fs = vec![entry_finding("web", None)];
+        let p = status_props(&fs, Some(SystemTime::now()), &r);
+        assert_eq!(p.tone, StatusTone::Blind);
+        assert_eq!(p.model_clause, "model down — not judging");
+        assert_eq!(p.awaiting, 1);
+    }
 
-/// Build the nav props for the page at `current`. Answer-first (JEF-175):
-/// dashboard · why · shadow log · admission. `/readiness`, `/bake`, and `/reversions` are
-/// de-listed from the nav (their routes stay reachable elsewhere). `admission` is the
-/// webhook's per-event policy-decision log (JEF-226).
-pub fn nav_props(current: &str) -> NavProps {
-    const LINKS: [(&str, &str); 4] = [
-        ("/", "dashboard"),
-        ("/judgements", "why"),
-        ("/report", "shadow log"),
-        ("/policy", "admission"),
-    ];
-    NavProps {
-        items: LINKS
-            .iter()
-            .map(|(href, label)| NavItem {
-                href,
-                label,
-                current: *href == current,
-            })
-            .collect(),
+    #[test]
+    fn missing_input_is_blind_even_with_model_live() {
+        // Model live but no KEV loaded → coverage < 100 → blind.
+        let r = derive_readiness(
+            &ReadinessConfig {
+                model_attached: true,
+                kev_count: 0,
+                epss_count: 1,
+                journal_durable: true,
+                armed: false,
+            },
+            crate::engine::dashboard::model::ModelHealth::Ok,
+            &{
+                let mut b = BakeStats::default();
+                b.signals_by_variant.insert("alert".into(), 1);
+                b.signals_by_variant.insert("connection".into(), 1);
+                b
+            },
+            Some(SystemTime::now()),
+        );
+        let fs: Vec<Finding> = vec![];
+        let p = status_props(&fs, Some(SystemTime::now()), &r);
+        assert_eq!(p.tone, StatusTone::Blind);
+        assert!(p.coverage_pct < 100);
     }
 }

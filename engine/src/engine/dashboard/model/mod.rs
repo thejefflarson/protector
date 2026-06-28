@@ -2,7 +2,7 @@
 //! dashboard reads — the [`Finding`] row and its evidence, the per-entry [`VerdictStore`],
 //! the [`Findings`] / [`JudgementLog`] / [`ReversionLog`] handles, the [`BakeStats`] /
 //! [`ModelHealth`] / [`ReadinessConfig`] coverage shapes, and the small data helpers
-//! ([`classify`], [`killchain`], [`relative_time`]).
+//! ([`classify`], [`relative_time`]).
 //!
 //! This is data, not markup: it holds NO rendering. The presentation reads it through the
 //! `view_model` (which shapes it into `Props`) and the `components` (which render those
@@ -28,44 +28,43 @@ use crate::engine::reason::proof::ProvenChain;
 mod evidence;
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 
-/// One row: a proven chain, its ATT&CK label and evidence, and what the engine
-/// does with it.
-#[derive(Debug, Clone, Serialize)]
+/// One ENTRY-rooted proven attack path, its evidence, and the model's typed verdict — the
+/// unit the v2 dashboard renders (JEF-255). The dashboard answers "is anything compromised
+/// right now, and if not am I covered or blind?"; the answer's unit is an exposed entry with
+/// a model-decided posture, so this carries the proven facts (topology, cut), the model's
+/// inputs (evidence), and its TYPED [`Verdict`] — the single source of truth for posture, so
+/// no verdict prose is ever re-parsed in the view (the JEF-255 typed-verdict SSOT).
+///
+/// Several v1 ATT&CK-matrix / JSON-only fields (`tactic`, `tactic_name`, `technique`,
+/// `technique_name`, `adjudicated`, `promoted`, `killchain`) were dropped in the v2 rewrite:
+/// the attack-vectors matrix and the `/findings` JSON route they fed are gone, so they were
+/// dead serialize-only weight.
+#[derive(Debug, Clone)]
 pub struct Finding {
     pub entry: String,
     pub objective: String,
-    pub tactic: String,
-    /// The ATT&CK tactic name (e.g. "Credential Access") — for the attack-vector summary.
-    pub tactic_name: String,
-    pub technique: String,
-    /// The ATT&CK technique name (e.g. "Unsecured Credentials").
-    pub technique_name: String,
+    /// Whether the entry is an internet-facing FRONT DOOR — drives the hop-list's
+    /// "(internet-reachable)" lead and the breach-relevance discriminator.
     pub foothold: bool,
+    /// A live runtime signal backed this chain up (ADR-0009) — the corroboration glyph.
     pub corroborated: bool,
-    pub adjudicated: bool,
-    /// The model promoted this chain to auto-eligible (ADR-0011), as opposed to live
-    /// runtime corroboration.
-    pub promoted: bool,
     /// The chain's **mechanical** disposition — what its minimal cut can do
     /// (auto-eligible / latent foothold / structural / durable-fix PR / forbidden /
-    /// no-cut), independent of the model's exploitability call. This is metadata for
-    /// the JSON view and drives only the dashboard's remediation-vs-attack-path
-    /// routing; the human-facing "is this exploitable" judgement is [`verdict`], the
-    /// model's own words (the LLM is the judge — ADR-0013).
+    /// no-cut), independent of the model's exploitability call. The human-facing "is this
+    /// exploitable" judgement is [`verdict`](Self::verdict), the model's own typed call
+    /// (the LLM is the judge — ADR-0013).
     pub disposition: String,
-    /// The single-edge cut that severs it, if one exists.
+    /// The single-edge cut that severs it, if one exists — the cut point the hop-list marks.
     pub cut: Option<String>,
     /// Whether the entry is internet-facing — the discriminator between a real breach
     /// path and an assume-breach access path. Only breach-relevant chains are shown;
     /// see [`ProvenChain::is_breach_relevant`].
     pub breach_relevant: bool,
-    /// The ATT&CK kill chain this path realizes, in plain terms — the Initial Access
-    /// foothold (if any) through the objective's technique.
-    pub killchain: String,
-    /// The model's adjudication, if it judged this chain — both positive ("exploitable
-    /// — …") and negative ("not exploitable — …") calls, with the model's reasoning.
-    /// `None` if no model was consulted.
-    pub verdict: Option<String>,
+    /// The model's TYPED adjudication, if it judged this entry (JEF-255) — the single source
+    /// of truth for posture and the verbatim "why". `None` if no model was consulted. Resolved
+    /// from the shared [`VerdictStore`] at [`Findings::snapshot`] time, so the dashboard never
+    /// re-parses verdict prose to decide posture.
+    pub verdict: Option<Verdict>,
     /// The proven attack path, hop by hop (entry → … → objective).
     pub path: Vec<PathStep>,
     /// The evidence the adjudicator weighed for this path's entry (JEF-133) — the CVEs
@@ -79,15 +78,14 @@ pub struct Finding {
     /// pass (NEW / escalated / de-escalated / unchanged-age / restored). Resolved from the
     /// shared verdict store at [`Findings::snapshot`] time, like [`verdict`](Self::verdict),
     /// so the Δ tracks the stored first-seen / posture history rather than the render clock.
-    /// `None` on a row published before any recency update (the published rows carry no
-    /// recency of their own). Pure presentation metadata: gates nothing (ADR-0016).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `None` on a row published before any recency update. Pure presentation metadata
+    /// (ADR-0016).
     pub recency: Option<RecencyInfo>,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
 /// (so the renderer can derive both a short label and the node kind/shape).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct PathStep {
     pub from: String,
     pub relation: String,
@@ -97,8 +95,8 @@ pub struct PathStep {
 impl Finding {
     /// Build a finding from a proven chain and the graph it was proven over. The graph is
     /// needed for the per-entry evidence blocks (JEF-133): the chain alone carries the
-    /// topology and verdict, but the CVEs and runtime signals live on the entry's graph
-    /// node — the same place the adjudicator reads them.
+    /// topology, but the CVEs and runtime signals live on the entry's graph node — the same
+    /// place the adjudicator reads them.
     pub fn from_chain(chain: &ProvenChain, graph: &SecurityGraph) -> Self {
         let action = chain
             .single_edge_cuts
@@ -108,26 +106,18 @@ impl Finding {
             evidence: EntryEvidence::for_entry(graph, &chain.entry),
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
-            tactic: chain.attack.tactic.id().to_string(),
-            tactic_name: chain.attack.tactic.name().to_string(),
-            technique: chain.attack.technique_id.to_string(),
-            technique_name: chain.attack.technique.to_string(),
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
-            adjudicated: chain.adjudicated,
-            promoted: chain.promoted,
             disposition: classify(chain, action),
             cut: chain
                 .single_edge_cuts
                 .first()
                 .map(crate::engine::respond::cut_signature),
             breach_relevant: chain.is_breach_relevant(),
-            killchain: killchain(chain),
-            // The verdict is NOT stamped per-chain any more (JEF-157): it is the
-            // model's per-ENTRY call, held in the shared verdict store and resolved by
-            // [`Findings::snapshot`] at read time. `chain.verdict` is carried along only
-            // as a fallback for the timer path (no dashboard) / direct callers.
-            verdict: chain.verdict.clone(),
+            // The verdict is the model's per-ENTRY call (JEF-157), held in the shared verdict
+            // store and resolved by [`Findings::snapshot`] at read time. The published row
+            // carries none of its own.
+            verdict: None,
             path: chain
                 .links
                 .iter()
@@ -137,24 +127,8 @@ impl Finding {
                     to: l.to.0.clone(),
                 })
                 .collect(),
-            // Resolved per-entry from the verdict store at `Findings::snapshot` time
-            // (JEF-201), like `verdict`; the published row carries none of its own.
             recency: None,
         }
-    }
-}
-
-/// The attack steps in plain terms: the front-door foothold (T1190), when the entry is
-/// an exploitable front door, through the target's own technique. Plain-language leading,
-/// MITRE code in parentheses — this is the JSON-facing text form; the card renders the
-/// same steps with the code tucked into an `<abbr>` tooltip (the maud
-/// `view_model::findings` killchain props).
-pub(crate) fn killchain(chain: &ProvenChain) -> String {
-    let goal = format!("{} ({})", chain.attack.technique, chain.attack.technique_id);
-    if chain.foothold.is_some() {
-        format!("break in through an internet-facing service (T1190) → {goal}")
-    } else {
-        goal
     }
 }
 
@@ -625,9 +599,6 @@ pub struct Findings {
     /// from this at [`snapshot`](Self::snapshot) time, so `/findings` reflects a verdict
     /// the instant the engine writes it — never only at end-of-pass.
     verdicts: Arc<VerdictStore>,
-    /// Whether any action class is armed (`engine.enable` non-empty). Drives the
-    /// remediations section title: "Active" when armed, "Proposed" in shadow.
-    armed: std::sync::atomic::AtomicBool,
     /// The most recent behavioral-bake snapshot (JEF-48), replaced each pass alongside
     /// the findings rows.
     bake: Mutex<BakeStats>,
@@ -648,16 +619,6 @@ pub struct Findings {
 impl Findings {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Record whether an action class is armed (set once from `EnabledActions`).
-    pub fn set_armed(&self, armed: bool) {
-        self.armed
-            .store(armed, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn is_armed(&self) -> bool {
-        self.armed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The single per-entry verdict store (JEF-157), shared with the engine. The engine
@@ -695,7 +656,9 @@ impl Findings {
             // their (absent) verdict. Resolving here means publishing the rows once is
             // enough — the verdict tracks the store, not the last `replace`.
             if f.breach_relevant {
-                f.verdict = self.verdicts.display_summary(&f.entry);
+                // The TYPED verdict (JEF-255) is the single source of truth for posture — the
+                // view derives posture from it once, never re-parsing the summary prose.
+                f.verdict = self.verdicts.display_verdict(&f.entry);
                 // The Δ / recency facts track the same per-entry store (JEF-201): the glyph is
                 // the one computed at pass time, only the age is freshened at `now`.
                 f.recency = self.verdicts.recency_for(&f.entry, now);

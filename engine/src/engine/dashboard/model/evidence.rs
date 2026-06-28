@@ -27,6 +27,10 @@ pub struct CveEvidence {
     /// Whether the CVE is listed in a known-exploited catalogue (CISA KEV) — the
     /// stronger-than-severity exploitation signal.
     pub kev: bool,
+    /// The EPSS exploit-prediction probability (JEF-243) as a percent string (`"90%"`) — the
+    /// same exploit-likelihood signal the model is shown. `None` when the FIRST.org feed has
+    /// no score for this id. Pre-formatted (a `String`) so the projection keeps `Eq`.
+    pub epss: Option<String>,
     /// `unknown` / `loaded-at-runtime` / `not-observed` (from [`graph::Reachability`]).
     pub reachability: String,
     /// A human fix-availability phrase: `no fix available`, `fix available: <ver>`, or
@@ -54,6 +58,8 @@ impl CveEvidence {
             // renders (JEF-242) and the projection stays `Eq`.
             score: v.score.map(|s| format!("{s:.1}")),
             kev: v.exploited_in_wild,
+            // EPSS is a probability in [0,1]; render as a whole percent (the prompt's form).
+            epss: v.epss.map(|p| format!("{:.0}%", p * 100.0)),
             reachability: v.reachability.label().to_string(),
             fix,
             title: v.title.clone(),

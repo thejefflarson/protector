@@ -12,35 +12,35 @@
 
 use serde::Serialize;
 
+use crate::engine::reason::adjudicate::Verdict;
+
 /// The model's POSTURE for an entry as the recency tracker stores it (JEF-201) — the
 /// data-layer twin of the view's `Posture`, kept here so the engine can diff this pass's
 /// posture against the previous one WITHOUT pulling the presentation layer into the engine
-/// (the view's `Posture` lives in `view_model::findings`, which the components own). Derived
-/// from a display verdict summary by [`StoredPosture::of_summary`].
+/// (the view's `Posture` lives in `view_model::posture`, which the components own). Derived
+/// from the TYPED [`Verdict`] by [`StoredPosture::of_verdict`] (JEF-255) — the single source
+/// of truth, so the recency diff and the rendered posture chip can never disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoredPosture {
-    /// The model affirmed a real breach (its summary begins with "exploitable").
+    /// The model affirmed a real breach (a `Confirmed` / `Exploitable` verdict).
     Breach,
-    /// The model judged this NOT a breach (a "not exploitable — …" call).
+    /// The model judged this NOT a breach (a `Refuted` / `Uncertain` call).
     Safe,
     /// No verdict has been displayed for this entry yet (the model hasn't reached it).
     Awaiting,
 }
 
 impl StoredPosture {
-    /// The posture a display-verdict summary string carries — the same "exploitable …" test
-    /// the view's `Posture::of` uses, applied to the engine's display summary so the recency
-    /// diff and the rendered posture chip can never disagree. `None` ⇒ `Awaiting`.
-    pub fn of_summary(summary: Option<&str>) -> Self {
-        match summary {
+    /// The posture a TYPED verdict carries (JEF-255) — `Confirmed`/`Exploitable`
+    /// ([`Verdict::is_confirmed`]) is a BREACH, any decisive negative (`Refuted`/`Uncertain`)
+    /// is `Safe`, and `None` (no verdict yet) is `Awaiting`. This is the one place posture is
+    /// derived; the view's `Posture::of_verdict` mirrors it from the same typed input, so the
+    /// recency diff and the rendered chip can never drift. (v1 string-matched the "exploitable"
+    /// prefix here and in the view 4×, and missed `Confirmed`; JEF-255 fixes that.)
+    pub fn of_verdict(verdict: Option<&Verdict>) -> Self {
+        match verdict {
             None => StoredPosture::Awaiting,
-            Some(s)
-                if s.trim_start()
-                    .to_ascii_lowercase()
-                    .starts_with("exploitable") =>
-            {
-                StoredPosture::Breach
-            }
+            Some(v) if v.is_confirmed() => StoredPosture::Breach,
             Some(_) => StoredPosture::Safe,
         }
     }
@@ -150,18 +150,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn posture_of_summary_matches_exploitable_prefix() {
-        assert_eq!(StoredPosture::of_summary(None), StoredPosture::Awaiting);
+    fn posture_of_verdict_keys_on_is_confirmed() {
+        assert_eq!(StoredPosture::of_verdict(None), StoredPosture::Awaiting);
         assert_eq!(
-            StoredPosture::of_summary(Some("exploitable — CVE-2021-44228")),
+            StoredPosture::of_verdict(Some(&Verdict::Exploitable("CVE-2021-44228".into()))),
+            StoredPosture::Breach
+        );
+        // A `Confirmed` verdict is ALSO a breach — v1's string-match missed it (JEF-255).
+        assert_eq!(
+            StoredPosture::of_verdict(Some(&Verdict::Confirmed)),
             StoredPosture::Breach
         );
         assert_eq!(
-            StoredPosture::of_summary(Some("  Exploitable now")),
-            StoredPosture::Breach
+            StoredPosture::of_verdict(Some(&Verdict::Refuted("internal only".into()))),
+            StoredPosture::Safe
         );
         assert_eq!(
-            StoredPosture::of_summary(Some("not exploitable — internal only")),
+            StoredPosture::of_verdict(Some(&Verdict::Uncertain("model timed out".into()))),
             StoredPosture::Safe
         );
     }

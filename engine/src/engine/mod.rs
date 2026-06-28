@@ -285,7 +285,9 @@ impl Engine {
             tracing::warn!("engine: action classes enabled — auto-application is on for them");
         }
         let findings = std::sync::Arc::new(dashboard::Findings::new());
-        findings.set_armed(!active.is_empty());
+        // The arm state reaches the dashboard via `ReadinessConfig.armed` (set in run_loop),
+        // which the v2 internals coverage row renders; the redundant `Findings` arm atomic was
+        // dropped in the JEF-255 rewrite.
         // The verdict store (JEF-157) is OWNED by the findings handle and SHARED with the
         // engine: both write/read the same `Arc`, so a verdict the judging loop writes is
         // visible on `/findings` immediately.
@@ -711,7 +713,7 @@ impl Engine {
             // presentation metadata — it gates nothing (ADR-0016: recency is a view).
             self.verdicts.record_recency(
                 entry_key,
-                dashboard::StoredPosture::of_summary(Some(&display.summary())),
+                dashboard::StoredPosture::of_verdict(Some(&display)),
                 pass_now,
             );
             // Append the breach decision to the durable journal (JEF-141) — but only a

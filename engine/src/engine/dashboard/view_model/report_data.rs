@@ -1,61 +1,26 @@
 //! The report DATA layer (ADR-0019): the would-have-acted [`Report`] aggregation and its
-//! shapes ([`WouldActEntry`] / [`LeftAloneEntry`]), the [`ReportQuery`] window parsing, and
-//! the [`aggregate_report`] fold over the journal's breach decisions.
+//! shapes ([`WouldActEntry`] / [`LeftAloneEntry`]) and the [`aggregate_report`] fold over the
+//! journal's breach decisions.
 //!
-//! This is data, not markup — it holds NO rendering. `/report.json` serializes [`Report`]
-//! directly, and `view_model::report` shapes the same aggregation into the `Props` the
-//! `components::report` renderer consumes.
+//! This is data, not markup — it holds NO rendering. The v1 `/report` HTML/JSON tab was dropped
+//! in the JEF-255 rewrite; this aggregation stays SOLELY to back the engine's per-pass OTLP
+//! would-have-acted mirror ([`super::super::default_window_report`]), over the default window.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::engine::journal::{Decision, EnrichmentCoverage, JournalEntry};
 
-/// Default rolling window for `/report`, in hours (7 days). The journal's own
-/// rotation bounds how far back history actually reaches; this is the default the
-/// view aggregates over when `?hours=`/`?days=` isn't supplied. Configurable per
-/// request, never narrower than the journal — a window wider than the on-disk
-/// history simply yields everything that survived rotation.
+/// Default rolling window for the OTLP would-have-acted mirror, in hours (7 days). The
+/// journal's own rotation bounds how far back history actually reaches.
 pub(crate) const DEFAULT_WINDOW_HOURS: u64 = 24 * 7;
 
-/// A would-be cut lifted within this long is **short-lived** — the likely-false-
-/// positive signature (a transient breach condition that cleared in minutes, e.g. a
-/// scanner blip or a pod that restarted clean). A sustained would-act (at or above
-/// this) is the one worth a real cut. The ticket frames "lifted within minutes" as
-/// the FP tell; five minutes is the conservative default, configurable via
-/// `?short_lived_secs=`.
+/// A would-be cut lifted within this long is **short-lived** — the likely-false-positive
+/// signature (a transient breach condition that cleared in minutes). A sustained would-act (at
+/// or above this) is the one worth a real cut. Five minutes is the conservative default.
 pub(crate) const DEFAULT_SHORT_LIVED_SECS: u64 = 5 * 60;
-
-/// Query parameters for `/report` (and `/report.json`): the rolling window and the
-/// short-lived threshold, all optional with sane defaults. `days` is sugar for
-/// `hours`; if both are given, `hours` wins (the finer unit).
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ReportQuery {
-    /// Window length in hours. Defaults to [`DEFAULT_WINDOW_HOURS`].
-    pub hours: Option<u64>,
-    /// Window length in days (sugar for `hours`). Ignored when `hours` is set.
-    pub days: Option<u64>,
-    /// Short-lived threshold in seconds. Defaults to [`DEFAULT_SHORT_LIVED_SECS`].
-    pub short_lived_secs: Option<u64>,
-}
-
-impl ReportQuery {
-    /// The resolved window length, falling back through `hours` → `days` → default.
-    pub(crate) fn window(&self) -> Duration {
-        let hours = self
-            .hours
-            .or(self.days.map(|d| d.saturating_mul(24)))
-            .unwrap_or(DEFAULT_WINDOW_HOURS);
-        Duration::from_secs(hours.saturating_mul(3600))
-    }
-
-    /// The resolved short-lived threshold.
-    pub(crate) fn short_lived(&self) -> Duration {
-        Duration::from_secs(self.short_lived_secs.unwrap_or(DEFAULT_SHORT_LIVED_SECS))
-    }
-}
 
 /// One workload the engine WOULD have isolated in the window: the entry, how often
 /// the breach condition held, the projected would-be cut lifetime, and the FP-vs-real
@@ -322,34 +287,7 @@ pub(crate) fn aggregate_report(
     }
 }
 
-/// Render a `Duration`-in-seconds as a compact human span ("4m", "2h", "3d") for the
-/// would-be cut lifetime column. Sub-minute spans read as seconds (the short-lived
-/// tell).
-pub(crate) fn human_span(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86_400)
-    }
-}
-
-// The `/report` and `/judgements` HTML renders moved to the maud `components::report` /
-// `components::judgements` layer, fed by the `view_model::report` / `view_model::judgements`
-// data layer (JEF-207). The aggregation ([`aggregate_report`], [`Report`], [`human_span`])
-// and the [`Judgement`] / [`Posture`] shapes stay here — the data layer the JSON contracts
-// and the view-model both read.
-
-// ===========================================================================
-// The readiness / coverage panel (JEF-160)
-// ===========================================================================
-//
-// When the model, KEV file, Falco feed, eBPF agent, or journal volume is
-// unconfigured or down, protector degrades SILENTLY — a cluster with no model renders the
-// same "quiet" empty page as a genuinely clean one (ADR-0016: enrichment coverage is
-// load-bearing). This panel lists each enrichment/decision input and its LIVE state, so
-// the operator can tell "all clear" from "blind", and a new operator gets a guided start.
-// Read-only, zero-egress: presence/health only — no secret names, no graph data, no values.
+// The would-have-acted aggregation ([`aggregate_report`], [`Report`] + its count methods)
+// stays here as the data the engine's per-pass OTLP mirror reads
+// ([`super::super::default_window_report`]); the v1 `/report` HTML/JSON tab and its renderer
+// were dropped in the JEF-255 rewrite.
