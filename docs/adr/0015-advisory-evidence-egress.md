@@ -59,13 +59,26 @@ Advisory text reaches the model as **structured, length-capped, fenced data**:
 - **Structured fields lead.** CWE id(s) and a fix reference — low-cardinality tokens
   that convey "what class of bug" and "is there a fix" without free prose — are the
   preferred signal.
-- **The free-text summary is hard-capped twice.** Once at parse time (the store caps
-  the stored string and bounds the CWE count, so an oversized snapshot entry can never
-  enter the system) and again at the prompt boundary (an independent cap in
-  `cve_evidence`), so the budget holds regardless of how the advisory arrived.
-- **Everything is fenced + sanitized.** The whole CVE evidence list flows through
-  `fence`/`sanitize` before the prompt, stripping fence-closing / structure characters
-  — so a malicious summary is inert data, never instructions or a fence break.
+- **Every free-text field is hard-capped twice.** Once at parse time (the store caps
+  the stored summary, the `fix_ref`, each CWE string, and the CWE count, so an oversized
+  snapshot entry can never enter the system) and again at the prompt boundary (independent
+  per-field caps in `cve_evidence` for the title, summary, and `fix_ref`), so the bound
+  holds regardless of how the advisory arrived — including a future live-OSV lane (JEF-110)
+  that would bypass the parse-time cap.
+- **A per-entry AGGREGATE budget bounds the whole prompt.** Per-field caps bound any one
+  field, but a CVE-heavy image (hundreds of CVEs, each at its per-field cap) could still
+  aggregate an unbounded prompt. So an entry has a fixed total free-text budget
+  (`ENTRY_FREETEXT_BUDGET`, applied in `entry_evidence` over the CVEs in sorted-id order):
+  early CVE lines keep their free prose; once the budget is spent, later lines fall back
+  to the **structured fields only** (id / severity / reachability / fix-availability / CWE
+  / fix-ref). The model never loses a CVE — only its unbounded prose. The budget spends
+  deterministically (sorted order, all-or-nothing per field), so the same evidence always
+  renders the same prompt and the verdict fingerprint stays stable across passes (§5).
+- **Cap THEN sanitize THEN fence, in that order, per field.** Each untrusted field is
+  length-capped first and `sanitize`d second (so whatever survives the cap is still
+  stripped of fence-closing / structure chars), then the whole CVE list is fenced +
+  sanitized again at prompt-build. A capped value therefore cannot reconstruct a `<<<` /
+  `>>>` delimiter — a malicious summary is inert data, never instructions or a fence break.
 
 ### 5. Only stable fields enter the verdict fingerprint
 

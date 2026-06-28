@@ -57,10 +57,11 @@ pub(super) fn build_judgment_prompt_with(
     let mut behavior_lines: Vec<String> = behaviors.iter().map(Behavior::summary).collect();
     behavior_lines.sort();
     behavior_lines.dedup();
-    // No caps: the model sees every observed behavior and every CVE on the entry. The
-    // untrusted third-party text in these is still fenced + sanitized (the real injection
-    // defense, JEF-106); the prior 25-line cap only bounded size, at the cost of hiding
-    // evidence from the judge.
+    // No LINE cap: the model sees every observed behavior and every CVE on the entry. The
+    // untrusted third-party text WITHIN each line is fenced + sanitized AND hard length-capped
+    // — both per-field and against a per-entry aggregate budget (JEF-106, in `entry_evidence`)
+    // — so the prompt is bounded without hiding a whole CVE from the judge. The `cves` passed
+    // in are the already-budgeted lines; sort+dedup is just for stable ordering.
     cves.sort();
     cves.dedup();
 

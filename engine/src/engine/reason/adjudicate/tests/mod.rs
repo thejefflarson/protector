@@ -20,6 +20,7 @@ use std::time::SystemTime;
 
 mod group_1;
 mod group_2;
+mod group_3;
 
 /// The (objective, technique) list for a chain — the shape `judge` now takes.
 pub(super) fn objectives_of(chain: &ProvenChain) -> Vec<(NodeKey, AttackRef)> {
@@ -30,6 +31,13 @@ pub(super) fn objectives_of(chain: &ProvenChain) -> Vec<(NodeKey, AttackRef)> {
 /// `vuln` — the smallest graph that drives `entry_evidence`/`build_judgment_prompt`.
 /// Returns the graph and the entry key.
 pub(super) fn graph_with_vuln(vuln: Vulnerability) -> (SecurityGraph, NodeKey) {
+    graph_with_vulns(vec![vuln])
+}
+
+/// As [`graph_with_vuln`], but the entry's image carries the whole `vulns` list — used to
+/// drive the per-entry aggregate free-text budget (JEF-106), where MANY CVEs together must
+/// stay bounded even when each per-field cap holds.
+pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, NodeKey) {
     let mut g = SecurityGraph::new();
     let wl = Node::Workload(Workload {
         namespace: "app".into(),
@@ -47,7 +55,7 @@ pub(super) fn graph_with_vuln(vuln: Vulnerability) -> (SecurityGraph, NodeKey) {
         digest: "sha256:abc".into(),
         reference: Some("web:1".into()),
         trust: Trust::Unknown,
-        vulnerabilities: vec![vuln],
+        vulnerabilities: vulns,
     }));
     g.add_edge(
         e,
