@@ -9,8 +9,8 @@
 use super::*;
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Advisory, Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation,
-    SecurityGraph, Severity, Trust, Vulnerability, Workload,
+    Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
+    Severity, Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};

@@ -262,17 +262,18 @@ pub struct RailProps {
 }
 
 /// One CVE row's plain data for the evidence block (JEF-133): the id, its severity (+ tone),
-/// KEV flag, reachability, fix phrasing, CWE list, and title. All free-text is rendered
-/// through auto-escaping maud braces in the component (it is untrusted third-party data).
+/// the CVSS score (JEF-242), KEV flag, reachability, fix phrasing, and title. All free-text
+/// is rendered through auto-escaping maud braces in the component (untrusted third-party
+/// data).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CveRow {
     pub id: String,
     pub severity: String,
     pub severity_tone: &'static str,
+    pub score: Option<String>,
     pub kev: bool,
     pub reachability: String,
     pub fix: String,
-    pub cwe: Vec<String>,
     pub title: Option<String>,
 }
 
@@ -282,10 +283,10 @@ impl CveRow {
             id: c.id.clone(),
             severity: c.severity.clone(),
             severity_tone: severity_tone(&c.severity),
+            score: c.score.clone(),
             kev: c.kev,
             reachability: c.reachability.clone(),
             fix: c.fix.clone(),
-            cwe: c.cwe.clone(),
             title: c.title.clone(),
         }
     }

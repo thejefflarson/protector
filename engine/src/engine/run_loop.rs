@@ -40,7 +40,6 @@ pub async fn run(
     active: EnabledActions,
     scope: ActuationScope,
     kev: observe::exploit_intel::KevCatalog,
-    advisory: observe::advisory::AdvisoryStore,
 ) {
     let mut engine = Engine::new(
         active.clone(),
@@ -54,7 +53,6 @@ pub async fn run(
         match Snapshot::observe(client.clone()).await {
             Ok(mut snapshot) => {
                 kev.mark_exploited(&mut snapshot.image_vulns);
-                advisory.apply(&mut snapshot.image_vulns);
                 engine.process(&snapshot).await;
             }
             Err(error) => tracing::warn!(%error, "observe failed; retaining previous state"),
@@ -174,7 +172,6 @@ pub async fn run_watch(
     runtime_addr: Option<std::net::SocketAddr>,
     dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
-    advisory: observe::advisory::AdvisoryStore,
     // The webhook's admission-decision ring (JEF-226), shared so the dashboard's `/policy`
     // view can read the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
@@ -236,7 +233,6 @@ pub async fn run_watch(
         findings.set_readiness_config(dashboard::ReadinessConfig {
             model_attached: model::config().is_some(),
             kev_count: kev.len(),
-            advisory_count: advisory.len(),
             journal_durable: decisions.is_enabled(),
             armed: !active.is_empty(),
         });
@@ -371,7 +367,6 @@ pub async fn run_watch(
             image_vulns: {
                 let mut v = observe::list_image_vulns(&client).await;
                 kev.mark_exploited(&mut v);
-                advisory.apply(&mut v);
                 v
             },
             runtime_events: runtime_events.current(),

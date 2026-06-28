@@ -80,8 +80,8 @@ pub struct WouldActEntry {
     /// when sustained. An open episode is never short-lived (it's still standing).
     pub short_lived: bool,
     /// At least one would-act episode fired during an enrichment-coverage gap — the
-    /// model affirmed exploitability WITHOUT a CVE backing it (no advisory enrichment
-    /// matched). These are the would-acts to scrutinize first.
+    /// model affirmed exploitability WITHOUT a CVE backing it. These are the would-acts
+    /// to scrutinize first.
     pub coverage_gap: bool,
     /// The model's verdict for the most recent would-act episode (its own words) — the
     /// human-readable "why it would have cut".
@@ -347,7 +347,7 @@ pub(crate) fn human_span(secs: u64) -> String {
 // The readiness / coverage panel (JEF-160)
 // ===========================================================================
 //
-// When the model, KEV/advisory file, Falco feed, eBPF agent, or journal volume is
+// When the model, KEV file, Falco feed, eBPF agent, or journal volume is
 // unconfigured or down, protector degrades SILENTLY — a cluster with no model renders the
 // same "quiet" empty page as a genuinely clean one (ADR-0016: enrichment coverage is
 // load-bearing). This panel lists each enrichment/decision input and its LIVE state, so

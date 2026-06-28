@@ -25,7 +25,7 @@ use crate::engine::dashboard::view_model::report_data::{
 };
 use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Advisory, Behavior, NodeKey, Reachability, SecurityGraph, Severity, Vulnerability,
+    Behavior, NodeKey, Reachability, SecurityGraph, Severity, Vulnerability,
 };
 use crate::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage, JournalEntry};
 use crate::engine::reason::proof::{Link, ProvenChain};
@@ -112,7 +112,6 @@ pub(super) fn ready_all_met() -> Readiness {
         &ReadinessConfig {
             model_attached: true,
             kev_count: 3,
-            advisory_count: 3,
             journal_durable: true,
             ..Default::default()
         },
@@ -318,7 +317,6 @@ pub(super) fn full_config() -> ReadinessConfig {
     ReadinessConfig {
         model_attached: true,
         kev_count: 1500,
-        advisory_count: 800,
         journal_durable: true,
         armed: false,
     }

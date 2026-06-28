@@ -323,31 +323,11 @@ pub struct Vulnerability {
     /// The advisory's primary reference URL (trivy's `primaryLink`), if reported. Also
     /// untrusted third-party text — fenced before it reaches the prompt (JEF-66).
     pub primary_link: Option<String>,
-    /// Enrichment from a mounted advisory snapshot (Advisory port, JEF-103/ADR-0015):
-    /// structurally-extracted CWE id(s), fix reference, and a short summary an operator
-    /// synced from a public advisory feed. `None` until the Advisory port applies a
-    /// matching snapshot entry; absent/malformed snapshot ⇒ stays `None` (empty-on-missing).
-    /// The text fields are UNTRUSTED third-party data — fenced/sanitized and hard
-    /// length-capped before they reach the promote-capable model (JEF-106).
-    pub advisory: Option<Advisory>,
-}
-
-/// Structurally-extracted advisory enrichment for a [`Vulnerability`], sourced from a
-/// mounted CVE-keyed snapshot (ADR-0015: mounted-snapshot-only, zero egress). Only the
-/// stable, low-cardinality fields the model can reason over — no timestamps, no fix
-/// diffs (out of scope for the local model; ADR-0015). The text fields are untrusted
-/// third-party data: the prompt layer fences/sanitizes them and hard-caps the summary
-/// (JEF-106) before they reach the promote-capable model.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Advisory {
-    /// A short human summary of the advisory. Untrusted free-text — length-capped and
-    /// fenced before the prompt.
-    pub summary: String,
-    /// CWE identifier(s) (e.g. `CWE-502`) — structured, low-cardinality, the preferred
-    /// injection-safe signal (JEF-106): "what class of bug" without free prose.
-    pub cwe: Vec<String>,
-    /// A fix reference (a fixing version or advisory URL), if the snapshot carries one.
-    pub fix_ref: Option<String>,
+    /// The CVSS base score (`0.0`–`10.0`) trivy-operator emits per vulnerability, if
+    /// reported (JEF-242). A STRUCTURED, low-cardinality severity signal — a numeric
+    /// field, never untrusted free-text — surfaced to the model as static-severity
+    /// evidence alongside the categorical `severity`. `None` when the scanner omits it.
+    pub score: Option<f64>,
 }
 
 /// Whether a vulnerability's code is reachable (JEF-51). v1 populates only the

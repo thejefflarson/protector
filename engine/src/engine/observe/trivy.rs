@@ -91,12 +91,14 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
                         // before they reach the model prompt, never trusted here.
                         title: opt_str(v, "title"),
                         primary_link: opt_str(v, "primaryLink"),
+                        // CVSS base score (JEF-242): trivy-operator emits a `score` float
+                        // per vulnerability when it has one. A STRUCTURED numeric severity
+                        // signal (not free-text) — absent ⇒ None. We lean on Trivy for CVE
+                        // metadata now that the NVD advisory feed is retired.
+                        score: v.get("score").and_then(Value::as_f64),
                         // Reachability is correlated later (ReachabilityAdapter); the
                         // scanner alone never asserts it.
                         reachability: Reachability::Unknown,
-                        // Advisory enrichment is applied later from the mounted snapshot
-                        // (Advisory port, JEF-103); the scanner does not carry it.
-                        advisory: None,
                     })
                 })
                 .collect()
@@ -124,7 +126,8 @@ mod tests {
                     "resource": "log4j-core",
                     "installedVersion": "2.14.0", "fixedVersion": "2.17.0",
                     "title": "Remote code execution via JNDI lookup",
-                    "primaryLink": "https://nvd.nist.gov/vuln/detail/CVE-2026-1"
+                    "primaryLink": "https://nvd.nist.gov/vuln/detail/CVE-2026-1",
+                    "score": 9.8
                 },
                 {"vulnerabilityID": "CVE-2026-2", "severity": "LOW",
                  "resource": "zlib", "installedVersion": "1.2.11", "fixedVersion": "",
@@ -163,6 +166,12 @@ mod tests {
         // primaryLink is None — both stay off the prompt rather than emitting blanks.
         assert_eq!(parsed.vulnerabilities[1].title, None);
         assert_eq!(parsed.vulnerabilities[1].primary_link, None);
+        // CVSS score (JEF-242): the float trivy emits parses; absent ⇒ None.
+        assert_eq!(v0.score, Some(9.8));
+        assert_eq!(
+            parsed.vulnerabilities[1].score, None,
+            "a vulnerability with no `score` field collapses to None"
+        );
     }
 
     #[test]

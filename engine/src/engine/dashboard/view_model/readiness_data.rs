@@ -57,8 +57,8 @@ impl InputState {
 /// JSON-serializable so `/readiness` returns exactly the panel's data.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadinessRow {
-    /// A stable, machine-readable id for the input (`model` / `kev` / `advisory` /
-    /// `falco` / `ebpf-agent` / `journal` / `arm-state`).
+    /// A stable, machine-readable id for the input (`model` / `kev` / `falco` /
+    /// `ebpf-agent` / `journal` / `arm-state`).
     pub id: &'static str,
     /// The human label shown in the panel.
     pub label: &'static str,
@@ -169,7 +169,6 @@ pub(crate) fn derive_readiness(
 
     // A file-backed enrichment store is Present iff it loaded >=1 entry, else Absent.
     let kev_state = present_if(config.kev_count > 0);
-    let advisory_state = present_if(config.advisory_count > 0);
 
     // A behavioral feed is Present iff it delivered >=1 signal this pass, else Absent. (A
     // genuinely quiet cluster reads as Absent for the pass — the panel's "signals last
@@ -196,15 +195,6 @@ pub(crate) fn derive_readiness(
             why: "flags known-exploited CVEs so the model weighs active threats first",
             enable: "PROTECTOR_KEV_FILE",
             detail: coverage_detail(config.kev_count, "known-exploited CVE id"),
-            weakens_decisions: true,
-        },
-        ReadinessRow {
-            id: "advisory",
-            label: "Advisory store",
-            state: advisory_state,
-            why: "adds CVE summaries + fix versions — the evidence the model judges with",
-            enable: "PROTECTOR_ADVISORY_FILE",
-            detail: coverage_detail(config.advisory_count, "advisory record"),
             weakens_decisions: true,
         },
         ReadinessRow {

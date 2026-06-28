@@ -1,8 +1,8 @@
 # 0015. Advisory evidence is mounted-snapshot-only (zero egress); injection-safe by construction
 
-- Status: Accepted
-- Date: 2026-06-22
-- Relates to: [0013](0013-proof-winnows-model-decides.md) (the model is promote-capable, so its inputs are a security boundary), [0014](0014-behavioral-telemetry-ebpf.md) (same "in-cluster, no egress of cluster data" posture)
+- Status: Superseded in part by the JEF-242 amendment below — the advisory feed is RETIRED; only the KEV feed remains. The zero-egress + injection-safety rules this ADR established still govern every mounted feed (KEV today).
+- Date: 2026-06-22 (amended 2026-06-28: advisory feed retired, JEF-242)
+- Relates to: [0013](0013-proof-winnows-model-decides.md) (the model is promote-capable, so its inputs are a security boundary), [0014](0014-behavioral-telemetry-ebpf.md) (same "in-cluster, no egress of cluster data" posture), [0016](0016-severity-vs-urgency.md) (KEV's `exploited_in_wild` is a distinct exploitation signal kept by this amendment)
 
 ## Context
 
@@ -126,6 +126,48 @@ bulk feed is a documented follow-up, not part of this lane today.
 sidecar entirely (nothing in the chart egresses); an operator can still mount their own
 snapshot files into the engine for fully-offline enrichment — the §1 mounted-snapshot
 posture, verbatim.
+
+## Amendment (JEF-242): the advisory feed is RETIRED — the engine leans on Trivy for CVE metadata
+
+The advisory enrichment lane this ADR established is **removed**. The engine no longer
+consumes any advisory feed: `AdvisoryStore`, the `Advisory` type, the `Vulnerability.advisory`
+field, the `PROTECTOR_ADVISORY_FILE` wiring, the advisory branches in the prompt evidence
+(`cve_evidence`), and the chart's `feedSync.advisoryUrl` + the sidecar's advisory fetch all
+go away. **The only feed egress is now the CISA KEV catalogue.**
+
+**Why it was added then retired (kept honest).** The advisory lane was built (JEF-52/JEF-103,
+this ADR) to give the model a CWE class, a fix reference, and a short summary so it could
+reason "a fix exists but the workload is still on the vulnerable version". In practice that
+evidence proved **redundant with Trivy** (the Vulnerability port, ADR-0003), which already
+supplies `id`, `severity`, `title`, `primaryLink`, and `fixedVersion` per finding — the
+advisory `summary` ≈ Trivy's `title`, the advisory `fix_ref` ≈ Trivy's `fixedVersion`. The
+only net-new advisory field was `cwe[]`, which trivy-operator omits anyway, so it was empty
+in practice. The default NVD "recent" feed (~8.5 MiB) also had a poor hit-rate against the
+old base-image CVEs Trivy actually finds. The cost (a second feed, a gzipped 8.5 MiB
+download every cycle, the whole JEF-106 injection surface of untrusted advisory free-text)
+no longer bought anything Trivy didn't already give.
+
+**What replaces it.** Trivy's per-vulnerability CVSS **`score`** (a float, e.g. `9.8`; often
+absent) is now parsed and surfaced to the model as a structured `[cvss: X.X]` token — a
+numeric, low-cardinality static-severity signal, charged to no free-text budget, never
+untrusted prose. The model keeps the severity/fix-availability evidence it always had from
+Trivy; it loses only the redundant advisory adjunct.
+
+**KEV is untouched.** `exploited_in_wild` (the CISA KEV "is this being sprayed right now?"
+signal, `exploit_intel.rs`) is a **distinct** exploitation signal that drives the breach
+model (ADR-0016) — it is NOT advisory enrichment and is explicitly kept. The KEV mounted-feed
+lane, its zero-egress posture, and its feed-fetcher sidecar are exactly as this ADR and the
+JEF-238 amendment describe them.
+
+**What still holds from this ADR.** Every rule above about *mounted feeds* — zero engine
+egress (the engine only READS files; only the co-located, no-cluster-access sidecar
+egresses, and only to public read-only feeds), the empty-on-missing degrade, the fingerprint
+discipline (only stable fields ride the verdict cache; the CVSS `score` is one such stable
+field) — governs the KEV feed unchanged. The injection-safety machinery is now smaller
+because the only untrusted free-text reaching the promote-capable model is Trivy's `title`,
+which is still capped → sanitized → fenced and charged to the per-entry aggregate budget
+(JEF-106). The advisory-only caps (`summary`/`fix_ref`/CWE) are removed with the field they
+guarded; the caps that also guard `title` stay.
 
 ## Consequences
 
