@@ -570,8 +570,9 @@ fn detail_props_collapse_fanout_by_tier_and_set_broad_calm() {
     let refs: Vec<&Finding> = fs.iter().collect();
     let (detail, meta) = detail_props(entry, &refs);
     assert_eq!(meta.objectives, 25);
-    assert!(meta.calm, "broad + safe ⇒ calm");
-    assert_eq!(detail.broad_lead, BroadLead::Calm);
+    // JEF-248: broad + safe is no longer a special "calm" case — it renders no lead and reads
+    // as a plain SAFE row.
+    assert_eq!(detail.broad_lead, BroadLead::None);
     assert!(detail.graph.broad);
     // 25 terminal objectives share one (from, relation, kind) group ⇒ one aggregate edge.
     assert_eq!(
@@ -581,7 +582,7 @@ fn detail_props_collapse_fanout_by_tier_and_set_broad_calm() {
     );
     assert_eq!(detail.graph.fanouts[0].count, 25);
 
-    // Awaiting + broad ⇒ the honest note, not calm.
+    // Awaiting + broad ⇒ the honest note.
     let awaiting: Vec<Finding> = (0..25)
         .map(|n| {
             finding(
@@ -594,8 +595,7 @@ fn detail_props_collapse_fanout_by_tier_and_set_broad_calm() {
         })
         .collect();
     let arefs: Vec<&Finding> = awaiting.iter().collect();
-    let (adet, ameta) = detail_props(entry, &arefs);
-    assert!(!ameta.calm);
+    let (adet, _ameta) = detail_props(entry, &arefs);
     assert_eq!(adet.broad_lead, BroadLead::AwaitingNote);
 }
 

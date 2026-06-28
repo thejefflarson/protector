@@ -31,9 +31,9 @@ pub fn verdict_line(posture: Posture, verdict: Option<&str>) -> Markup {
     }
 }
 
-/// The broad-reach lead (ADR-0016, the argocd case). The verbose reassurance prose is GONE
-/// (JEF-200): a Safe + broad entry is the calm case (no lead, the row carries it); an
-/// Awaiting + broad entry keeps a one-line honest note that the model hasn't finished.
+/// The broad-reach lead (ADR-0016, the argocd case). A Safe + broad entry renders no lead — it
+/// reads as a plain SAFE row like any other (JEF-200/JEF-248); only an Awaiting + broad entry
+/// keeps a one-line honest note that the model hasn't finished.
 fn broad_lead(lead: BroadLead) -> Markup {
     html! {
         @if let BroadLead::AwaitingNote = lead {

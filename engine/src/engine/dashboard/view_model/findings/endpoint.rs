@@ -52,15 +52,14 @@ pub struct GraphProps {
     pub fanouts: Vec<FanoutGroup>,
 }
 
-/// What the disposition-derived broad-reach lead reads, and whether the row is the calm
-/// "working as intended" case.
+/// What the disposition-derived broad-reach lead reads. A broad + Safe endpoint renders no
+/// lead — it reads as a plain SAFE row like any other (JEF-248); only broad + Awaiting keeps an
+/// honest note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadLead {
-    /// Not a broad endpoint (or broad + breach) — no lead, not calm.
+    /// No lead — a non-broad endpoint, or a broad one that's a breach or model-cleared (Safe).
     None,
-    /// Broad + Safe — the calm "working as intended" row, no verbose lead.
-    Calm,
-    /// Broad + Awaiting — the honest one-line "model hasn't finished" note, not calm.
+    /// Broad + Awaiting — the honest one-line "model hasn't finished" note.
     AwaitingNote,
 }
 
@@ -88,8 +87,6 @@ pub struct DetailProps {
 pub struct RowMeta {
     pub posture: Posture,
     pub objectives: usize,
-    /// Whether the model cleared a broad entry → the calm "working as intended" row.
-    pub calm: bool,
 }
 
 /// The summary-row cell data for one endpoint (JEF-202): the tier chip, the entry → reaches
@@ -113,7 +110,6 @@ pub struct RowProps {
     /// the Δ survives the `/fragment` poll (the glyph was computed at pass time) and a
     /// journal-restore (a restored endpoint reads `·`, never NEW).
     pub recency: RecencyCell,
-    pub calm: bool,
     /// Whether this summary row belongs to the collapsed Context group (JEF-202): the page
     /// composition sets it for context-tier endpoints so the row renders `hidden` behind the
     /// single `ctx-summary` toggle. Default `false` (a standalone attention/watch row).
@@ -195,17 +191,15 @@ pub fn detail_props(entry: &str, fs: &[&Finding]) -> (DetailProps, RowMeta) {
     let evidence = evidence_props(entry_evidence);
 
     let broad = is_broad(objectives);
-    let (broad_lead, calm) = if broad && posture == Posture::Safe {
-        (BroadLead::Calm, true)
-    } else if broad && posture == Posture::Awaiting {
-        (BroadLead::AwaitingNote, false)
+    let broad_lead = if broad && posture == Posture::Awaiting {
+        BroadLead::AwaitingNote
     } else {
-        (BroadLead::None, false)
+        BroadLead::None
     };
 
     // JEF-225: advice is gated on the model's POSTURE, never the mechanical disposition. A
-    // non-breach finding (SAFE / awaiting / "working as intended") yields `None` ⇒ no "what to
-    // do" block on the card; only a flagged breach surfaces the plain-language step.
+    // non-breach finding (SAFE / awaiting) yields `None` ⇒ no "what to do" block on the card;
+    // only a flagged breach surfaces the plain-language step.
     let todo = fs.first().and_then(|f| what_to_do(f, posture));
 
     let aria = path_aria_label(entry, fs);
@@ -250,7 +244,6 @@ pub fn detail_props(entry: &str, fs: &[&Finding]) -> (DetailProps, RowMeta) {
         RowMeta {
             posture,
             objectives,
-            calm,
         },
     )
 }
@@ -285,14 +278,9 @@ pub fn endpoint_props(
     let corroborated = fs.iter().any(|f| f.corroborated);
     let glyphs = glyph_props(ev, corroborated, awaiting);
 
-    // JEF-225: the "working as intended" broad-Safe row keeps that calm cell (it is NOT a
-    // remediation verb); every other row's lever is posture-gated — a non-breach row shows the
+    // JEF-225: the lever is posture-gated — a non-breach row (SAFE / awaiting) shows the
     // em-dash, only a flagged breach shows the actual next lever.
-    let lever = if meta.calm {
-        "working as intended"
-    } else {
-        fs.first().map_or("—", |f| next_lever_tag(f, meta.posture))
-    };
+    let lever = fs.first().map_or("—", |f| next_lever_tag(f, meta.posture));
 
     let row = RowProps {
         tier,
@@ -310,7 +298,6 @@ pub fn endpoint_props(
         // glyph/aria/tone cell. Resolved per-entry at `Findings::snapshot` time onto each
         // finding, so it tracks the store, not the render clock.
         recency: recency_cell(endpoint_recency(fs).as_ref()),
-        calm: meta.calm,
         // Set by the page composition for context-tier endpoints (JEF-202); a row built here
         // is a standalone attention/watch row until the page groups it.
         context: false,
