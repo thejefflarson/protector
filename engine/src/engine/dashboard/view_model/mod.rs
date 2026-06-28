@@ -11,6 +11,7 @@ pub mod attack_vectors;
 pub mod bake;
 pub mod findings;
 pub mod judgements;
+pub mod policy;
 pub mod readiness;
 pub mod readiness_data;
 pub mod report;
@@ -21,6 +22,7 @@ pub mod status;
 pub use attack_vectors::{AttackVectorRow, AttackVectorsProps, attack_vectors_props};
 pub use bake::{BakeProps, BakeVariantRow, bake_props};
 pub use judgements::{JudgementCardProps, JudgementLead, JudgementsProps, judgements_props};
+pub use policy::{PolicyDecisionRow, PolicyProps, policy_props};
 pub use readiness::{
     FirstRunItemProps, FirstRunProps, ReadinessProps, ReadinessRowProps, first_run_props,
     readiness_props,

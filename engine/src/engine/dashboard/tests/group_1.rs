@@ -207,11 +207,12 @@ fn render_html_includes_the_banner_and_nav_without_a_meta_refresh() {
         html.contains("role=\"status\""),
         "banner is a status region"
     );
-    // Trimmed nav (JEF-175): only dashboard · why · shadow log, with aria-current on
-    // the dashboard. `/readiness`, `/bake`, and `/reversions` are de-listed from nav.
+    // Trimmed nav (JEF-175): dashboard · why · shadow log · admission (JEF-226), with
+    // aria-current on the dashboard. `/readiness`, `/bake`, and `/reversions` are de-listed.
     assert!(html.contains("<a href=\"/\" aria-current=\"page\">dashboard</a>"));
     assert!(html.contains("<a href=\"/judgements\">why</a>"));
     assert!(html.contains("<a href=\"/report\">shadow log</a>"));
+    assert!(html.contains("<a href=\"/policy\">admission</a>"));
     let nav_at = html.find("class=\"nav\"").expect("nav present");
     let nav_end = html[nav_at..].find("</nav>").expect("nav closes") + nav_at;
     let nav = &html[nav_at..nav_end];
@@ -221,7 +222,7 @@ fn render_html_includes_the_banner_and_nav_without_a_meta_refresh() {
     );
     assert!(!nav.contains("href=\"/readiness\""), "readiness de-listed");
     assert!(!nav.contains("href=\"/bake\""), "bake de-listed");
-    assert_eq!(nav.matches("<a ").count(), 3, "exactly three nav items");
+    assert_eq!(nav.matches("<a ").count(), 4, "exactly four nav items");
     // JEF-180 AC #2: the 30s full-page meta-refresh is GONE — no http-equiv refresh
     // of any kind. A timer must never reload the whole document (resetting scroll,
     // focus, and every <details>).

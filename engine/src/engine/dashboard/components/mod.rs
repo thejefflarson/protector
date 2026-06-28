@@ -15,9 +15,11 @@ pub mod graph;
 pub mod judgements;
 pub mod nav;
 pub mod panels;
+pub mod policy;
 pub mod report;
 
 pub use banner::banner;
 pub use judgements::judgements;
 pub use nav::nav;
+pub use policy::policy;
 pub use report::report;

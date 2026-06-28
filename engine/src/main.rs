@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use protector::engine::observe::advisory::AdvisoryStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
+use protector::engine::policy_log::PolicyDecisionLog;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
@@ -188,11 +189,16 @@ async fn main() -> Result<()> {
     // server's /metrics scrape endpoint.
     let metrics = Arc::new(Metrics::new());
 
+    // The bounded admission-decision ring (JEF-226): the webhook engine writes each
+    // resolved audit/deny here; the (separately-spawned) dashboard reads it for `/policy`.
+    // Both run in this one process, so the two halves are the same `Arc`. In-memory only.
+    let policy_log = Arc::new(PolicyDecisionLog::new());
+
     // The policy set is fixed at startup and shared (read-only) across requests.
-    let engine = Arc::new(Engine::new(
-        vec![Box::new(signature), Box::new(mesh)],
-        metrics.clone(),
-    ));
+    let engine = Arc::new(
+        Engine::new(vec![Box::new(signature), Box::new(mesh)], metrics.clone())
+            .with_decision_log(policy_log.clone()),
+    );
 
     // The mitigation engine is the product: it runs by default, out-of-band, with
     // its *own* kube client (the webhook keeps its zero-cluster-access property).
@@ -251,6 +257,9 @@ async fn main() -> Result<()> {
             Ok(path) => AdvisoryStore::from_file(&path),
             Err(_) => AdvisoryStore::empty(),
         };
+        // The dashboard (spawned inside run_watch) reads the webhook's admission-decision
+        // ring for `/policy` (JEF-226) — the same `Arc` the webhook engine writes to.
+        let dashboard_policy_log = policy_log.clone();
         match kube::Client::try_default().await {
             Ok(client) => {
                 tracing::info!("starting mitigation engine (event-driven observer)");
@@ -263,6 +272,7 @@ async fn main() -> Result<()> {
                         dashboard_addr,
                         kev,
                         advisory,
+                        dashboard_policy_log,
                     )
                     .await
                     {

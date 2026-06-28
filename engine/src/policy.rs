@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
 
+use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use crate::metrics::Metrics;
 
 /// Outcome of evaluating a single policy against one admission request.
@@ -145,11 +146,28 @@ pub trait Policy: Send + Sync {
 pub struct Engine {
     policies: Vec<Box<dyn Policy>>,
     metrics: Arc<Metrics>,
+    /// The bounded admission-decision ring (JEF-226): the per-event log the `/policy`
+    /// dashboard view reads. Optional so the webhook can run without a dashboard (and so
+    /// the engine's existing tests construct without one). When present, every recorded
+    /// audit/deny is mirrored here alongside the metric + log.
+    decisions: Option<Arc<PolicyDecisionLog>>,
 }
 
 impl Engine {
     pub fn new(policies: Vec<Box<dyn Policy>>, metrics: Arc<Metrics>) -> Self {
-        Self { policies, metrics }
+        Self {
+            policies,
+            metrics,
+            decisions: None,
+        }
+    }
+
+    /// Attach the admission-decision ring (JEF-226) so resolved audit/deny outcomes are
+    /// recorded for the `/policy` view in addition to the metric + log. Builder-style so
+    /// `new` stays the minimal constructor the existing tests use.
+    pub fn with_decision_log(mut self, decisions: Arc<PolicyDecisionLog>) -> Self {
+        self.decisions = Some(decisions);
+        self
     }
 
     /// Run every applicable policy in order. Records every violation (deny or
@@ -187,15 +205,28 @@ impl Engine {
         reason: &str,
     ) {
         self.metrics.record_violation(policy, decision);
+        let namespace = req.namespace.as_deref().unwrap_or_default();
         tracing::warn!(
             policy,
             decision,
-            namespace = req.namespace.as_deref().unwrap_or_default(),
+            namespace,
             name = %req.name,
             kind = %req.kind.kind,
             audit = decision == "audit",
             "{reason}"
         );
+        // Mirror the resolved decision into the bounded ring the `/policy` view reads
+        // (JEF-226). Low-cardinality, no secret values: the subject is the workload
+        // `kind/name`; any image ref(s) live in the (already operator-facing) reason.
+        if let Some(decisions) = &self.decisions {
+            decisions.record(PolicyDecisionRecord::now(
+                policy,
+                decision,
+                format!("{}/{}", req.kind.kind, req.name),
+                namespace,
+                reason,
+            ));
+        }
     }
 }
 
@@ -300,6 +331,69 @@ mod tests {
             engine.evaluate(&pod_request()).await,
             Decision::Allow
         ));
+    }
+
+    #[tokio::test]
+    async fn records_each_resolved_decision_into_the_ring() {
+        // JEF-226: a resolved audit/deny is mirrored into the bounded ring with the right
+        // policy / decision / subject / namespace / reason. The pod fixture is Pod "demo"
+        // in "default".
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![
+                Box::new(Fixed {
+                    name: "image-signature",
+                    applies: true,
+                    decision: Decision::audit("unsigned or untrusted image(s): ghcr.io/org/app:1"),
+                }),
+                Box::new(Fixed {
+                    name: "mesh-injection",
+                    applies: true,
+                    decision: Decision::deny("not enrolled in the mesh"),
+                }),
+            ],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+
+        let _ = engine.evaluate(&pod_request()).await;
+
+        let snap = log.snapshot();
+        // Newest-first: the mesh deny short-circuited evaluation after the signature audit,
+        // so both were recorded, deny last (hence first in the snapshot).
+        assert_eq!(snap.len(), 2, "both resolved decisions recorded");
+        assert_eq!(snap[0].policy, "mesh-injection");
+        assert_eq!(snap[0].decision, "deny");
+        assert_eq!(snap[0].subject, "Pod/demo");
+        assert_eq!(snap[0].namespace, "default");
+        assert_eq!(snap[0].reason, "not enrolled in the mesh");
+
+        assert_eq!(snap[1].policy, "image-signature");
+        assert_eq!(snap[1].decision, "audit");
+        assert_eq!(snap[1].subject, "Pod/demo");
+        assert_eq!(snap[1].namespace, "default");
+        assert_eq!(
+            snap[1].reason,
+            "unsigned or untrusted image(s): ghcr.io/org/app:1"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_decisions_are_not_recorded() {
+        // An all-allow evaluation leaves the ring empty — the log is the would-deny /
+        // deny discovery signal, complementing (not duplicating) the allow path.
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![Box::new(Fixed {
+                name: "image-signature",
+                applies: true,
+                decision: Decision::Allow,
+            })],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+        let _ = engine.evaluate(&pod_request()).await;
+        assert!(log.snapshot().is_empty(), "allow is not recorded");
     }
 
     #[tokio::test]
