@@ -186,6 +186,13 @@ table.findings td.c-verdict{max-width:30rem}
 .lever{font-family:var(--font-mono);font-size:.74rem;color:var(--color-link);white-space:nowrap}
 tr.f-calm .lever{color:var(--color-safe-text)}
 table.findings td.c-age{color:var(--c-grey-2);white-space:nowrap}
+table.findings td.c-delta{white-space:nowrap;text-align:center}
+.rc{font-family:var(--font-mono);font-size:var(--fs-xs);font-weight:700}
+.rc.rc-new{color:var(--color-breach-text);background:var(--color-breach-tint);border:var(--border-1) solid var(--color-breach);border-radius:var(--radius-chip);padding:0 .25rem}
+.rc.rc-up{color:var(--color-breach)}
+.rc.rc-down{color:var(--color-safe-text)}
+.rc.rc-steady{color:var(--c-grey-2);font-weight:400}
+p.recency-tally{margin:.1rem 0 .4rem;font-size:var(--fs-md);color:var(--c-ink-2)}
 table.policy{border-collapse:collapse;width:100%;font-size:var(--fs-md);margin:.2rem 0 .6rem}
 table.policy th{text-align:left;font-weight:600;color:var(--c-ink-3);border-bottom:var(--border-1) solid var(--c-grey-line);padding:.3rem .5rem;white-space:nowrap}
 table.policy td{padding:.3rem .5rem;border-bottom:var(--border-1) solid var(--c-grey-hair);vertical-align:top}

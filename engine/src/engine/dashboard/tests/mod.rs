@@ -35,6 +35,7 @@ mod group_2;
 mod group_3;
 mod group_4;
 mod guards;
+mod recency;
 
 /// A default readiness snapshot for the render tests that don't exercise the panel
 /// itself — every input absent, post-warmup. The readiness-specific behavior is
@@ -79,6 +80,7 @@ pub(super) fn breach_finding(entry: &str) -> Finding {
         verdict: None,
         path: Vec::new(),
         evidence: EntryEvidence::default(),
+        recency: None,
     }
 }
 
@@ -198,6 +200,7 @@ pub(super) fn finding(
         // Most render tests don't exercise the evidence blocks; the dedicated
         // JEF-133 tests below build findings with populated evidence.
         evidence: EntryEvidence::default(),
+        recency: None,
     }
 }
 

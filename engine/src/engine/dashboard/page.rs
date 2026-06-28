@@ -21,7 +21,8 @@ use crate::engine::dashboard::model::{
     AUTO_ELIGIBLE, BakeStats, Finding, ReversionRecord, relative_time,
 };
 use crate::engine::dashboard::view_model::findings::{
-    Tier, endpoint_attention_rank, endpoint_props, remediation_props, tier_of_priority,
+    RecencyTally, Tier, endpoint_attention_rank, endpoint_props, recency_tally, remediation_props,
+    tier_of_priority,
 };
 use crate::engine::dashboard::view_model::readiness_data::Readiness;
 use crate::engine::dashboard::view_model::{
@@ -135,6 +136,11 @@ fn findings_region(
             .then_with(|| a.0.cmp(b.0)) // then entry key, for a stable total order
     });
 
+    // The findings-region recency tally for the latest pass (JEF-201): how many endpoints are
+    // NEW and how many newly FLAGGED (escalated). Counted per endpoint over the same per-entry
+    // groups the region renders, from each endpoint's stored Δ — pure presentation (ADR-0016).
+    let recency = recency_tally(ranked.iter().map(|(_, fs)| fs.as_slice()));
+
     // Partition the ranked endpoints into the answer-first split, as dense table ROWS
     // (JEF-202): "Needs attention" is the Flagged tier (the model judged a real breach);
     // "Watching" holds the Watch tier directly plus the Context tier collapsed behind a
@@ -192,6 +198,9 @@ fn findings_region(
             " with possible attack paths · last pass " b { (freshness) }
             " " (chips::sep()) " " a href="/findings" { "json" }
         }
+        // The recency tally for the latest pass (JEF-201): "N new · M newly flagged since last
+        // pass". Omitted when nothing changed (a hollow "0 new" reads worse than silence).
+        (recency_tally_line(recency))
         // The dense findings region (JEF-202) — the primary view, leading below the banner.
         // Answer-first: a "Needs attention — N flagged" table (OMITTED entirely when nothing
         // is flagged) then a "Watching — N exposed, not flagged" table. Counts live in the
@@ -252,6 +261,26 @@ fn markup_join(rows: &[Markup]) -> Markup {
 /// Pluralize a count: the empty suffix for one, `s` otherwise.
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// The findings-region recency tally line (JEF-201): "N new · M newly flagged since last
+/// pass". Rendered only when something changed this pass; an all-quiet pass renders nothing
+/// (a "0 new · 0 newly flagged" line reads as noise). Counts only — pure presentation.
+fn recency_tally_line(tally: RecencyTally) -> Markup {
+    html! {
+        @if !tally.is_empty() {
+            p class="recency-tally" {
+                @if tally.new > 0 {
+                    b { (tally.new) } " new"
+                }
+                @if tally.new > 0 && tally.newly_flagged > 0 { " · " }
+                @if tally.newly_flagged > 0 {
+                    b { (tally.newly_flagged) } " newly flagged"
+                }
+                " since last pass"
+            }
+        }
+    }
 }
 
 /// Render the dashboard: the live region (banner + findings, [`live_region`]) plus the

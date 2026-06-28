@@ -78,6 +78,7 @@ fn restored_verdict_shows_until_a_live_verdict_supersedes_it() {
     store.seed_restored(
         "workload/app/Pod/web",
         "exploitable — from before restart".into(),
+        std::time::Instant::now(),
     );
     assert_eq!(
         store.display_summary("workload/app/Pod/web").as_deref(),

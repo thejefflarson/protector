@@ -46,6 +46,7 @@ fn finding(
             },
         ],
         evidence: EntryEvidence::default(),
+        recency: None,
     }
 }
 
