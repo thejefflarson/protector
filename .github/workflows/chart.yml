@@ -89,13 +89,45 @@ jobs:
             echo "ingest Secret rendered despite ingestAuth.enabled=false"; exit 1
           fi
           echo "ok"
-      - name: Assert feed-sync is OFF by default (zero egress)
+      - name: Assert feed-sync is ON by default and auto-wires the engine
         run: |
-          # Default install: the feed-sync CronJob + its SA/Role/RoleBinding must NOT
-          # render, so a stock chart grants no egress and no namespaced write.
+          # JEF-228 default-on: a stock install must render the feed-sync CronJob + its
+          # dedicated SA/Role/RoleBinding, AND auto-wire the engine to the synced KEV
+          # ConfigMap (kev-snapshot). The engine itself stays zero-egress — it only mounts
+          # the file the job produces.
           render=$(helm template protector charts/protector --namespace protector)
+          for kind in CronJob ServiceAccount Role RoleBinding; do
+            echo "$render" | grep -q "kind: $kind" \
+              || { echo "feed-sync missing $kind by default"; exit 1; }
+          done
+          echo "$render" | grep -q 'name: protector-feed-sync' \
+            || { echo "feed-sync workload not rendered by default"; exit 1; }
+          # Engine auto-wired: the Deployment mounts the feed-sync's kev-snapshot ConfigMap
+          # and points PROTECTOR_KEV_FILE at it, with NO explicit engine.kev.configMapName.
+          echo "$render" | grep -q 'PROTECTOR_KEV_FILE' \
+            || { echo "engine not auto-wired to KEV by default"; exit 1; }
+          echo "$render" | grep -q 'name: kev-snapshot' \
+            || { echo "engine not mounting the feed-sync kev-snapshot ConfigMap"; exit 1; }
+          # Advisory has no default source, so it must NOT auto-wire by default.
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "advisory auto-wired despite no feedSync.advisoryUrl"; exit 1
+          fi
+          echo "ok"
+      - name: Assert feedSync.enabled=false renders no feed-sync and no auto-wire
+        run: |
+          # Air-gapped path: with feed-sync disabled and no explicit ConfigMap names, the
+          # chart must render NO feed-sync resources and the engine must mount NO KEV /
+          # advisory ConfigMap (the manual path) — nothing in the chart egresses.
+          render=$(helm template protector charts/protector --namespace protector \
+            --set feedSync.enabled=false)
           if echo "$render" | grep -q 'feed-sync'; then
-            echo "feed-sync rendered despite feedSync.enabled=false (default)"; exit 1
+            echo "feed-sync rendered despite feedSync.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'PROTECTOR_KEV_FILE'; then
+            echo "engine auto-wired KEV despite feedSync.enabled=false"; exit 1
+          fi
+          if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
+            echo "engine auto-wired advisory despite feedSync.enabled=false"; exit 1
           fi
           echo "ok"
       - name: Assert feed-sync renders CronJob + least-privilege RBAC when enabled

@@ -1,17 +1,32 @@
 # Default values for protector.
 #
 # SAFE BY DEFAULT. Out of the box this chart installs protector in its most
-# conservative posture, and every step toward acting on the cluster is a single,
+# conservative posture, and every step toward ACTING ON the cluster is a single,
 # documented value change — never default-on:
 #
 #   * Webhook AUDIT-ONLY        signature.enforceNamespaces / mesh.enforceNamespaces empty
 #   * Engine SHADOW             engine.enable empty            (propose-only, touches nothing)
 #   * Actuator DRY-RUN          engine.actuator: dryrun        (no cluster writes even if armed)
-#   * ZERO EGRESS               no notify URL, no OTLP, no live advisory fetch
 #   * MODEL OPTIONAL            engine.model.endpoint empty    (deterministic enumerator only)
 #   * AGENT OFF                 agent.enabled: false           (no eBPF DaemonSet)
 #
-# See the chart README for the exact opt-in for each.
+# EGRESS POSTURE — read this. The ENGINE itself stays ZERO-EGRESS (ADR-0015): the
+# security graph and evidence never leave the cluster, and it makes no breach-notify
+# call, no OTLP export, and no live advisory/KEV fetch (it only mounts snapshot files).
+# As of JEF-228 the chart DOES ship ONE component with network egress, ON BY DEFAULT:
+# the feed-sync CronJob (feedSync.enabled: true). It is the SOLE component the chart
+# grants egress to. It makes outbound GETs to PUBLIC, READ-ONLY CVE/KEV feeds and writes
+# the result into in-cluster ConfigMaps the engine mounts. It NEVER reads cluster state
+# and NEVER transmits any cluster data outward — only the plain feed downloads leave.
+#
+#   * ENGINE ZERO-EGRESS preserved   engine never calls out (snapshots are mounted)
+#   * FEED-SYNC EGRESSES by default  feedSync.enabled: true   (public read-only feeds only)
+#
+# FULLY AIR-GAPPED / ZERO-EGRESS posture: set feedSync.enabled=false and mount the KEV /
+# advisory snapshots yourself (engine.kev.configMapName / engine.advisory.configMapName).
+# Then NOTHING in the chart egresses.
+#
+# See the chart README for the exact opt-in/opt-out for each.
 
 replicaCount: 1
 
@@ -260,15 +275,24 @@ engine:
     enabled: true
     port: 9999
   # CISA KEV catalogue (actively-exploited CVEs) for exploit intel. OPTIONAL —
-  # without it, footholds still fire on critical-severity CVEs. Point at an
-  # operator-synced ConfigMap (zero egress — same posture as the advisory snapshot).
+  # without it, footholds still fire on critical-severity CVEs. The engine never fetches
+  # KEV itself (zero egress); it mounts a synced ConfigMap.
+  # AUTO-WIRED BY DEFAULT: leave configMapName empty and, because feed-sync is ON by
+  # default, the engine auto-mounts the feed-sync's ConfigMap (feedSync.kevConfigMapName,
+  # default "kev-snapshot"). Set an explicit name to override the auto-wire and point at
+  # your own operator-synced ConfigMap. With feedSync.enabled=false AND this empty, no KEV
+  # is mounted (the manual/air-gapped path) — set configMapName to mount one by hand.
   kev:
     configMapName: ""
     key: known_exploited_vulnerabilities.json
-  # Advisory snapshot (ADR-0015): a CVE-keyed file the operator syncs out of band so the
-  # model reasons over CWE class + fix-availability + a capped summary. MOUNTED-SNAPSHOT
-  # ONLY — the engine never fetches advisories over the network (zero egress). OPTIONAL;
-  # empty = no advisory enrichment.
+  # Advisory snapshot (ADR-0015): a CVE-keyed file synced out of band so the model reasons
+  # over CWE class + fix-availability + a capped summary. MOUNTED-SNAPSHOT ONLY — the
+  # engine never fetches advisories over the network (zero egress). OPTIONAL.
+  # AUTO-WIRED only when feed-sync is on AND a source is configured: leave configMapName
+  # empty and set feedSync.advisoryUrl, and the engine auto-mounts the feed-sync's
+  # ConfigMap (feedSync.advisoryConfigMapName, default "advisory-snapshot"). Advisory has
+  # NO default source, so without an explicit configMapName and without feedSync.advisoryUrl
+  # there is no advisory enrichment. Set an explicit name to override the auto-wire.
   advisory:
     configMapName: ""
     key: advisories.json
@@ -349,29 +373,32 @@ agent:
   - operator: Exists
 
 # --- feed-sync (JEF-228) ---
-# OPTIONAL, OFF BY DEFAULT. A dedicated CronJob that auto-syncs the CISA KEV catalogue
-# and the advisory snapshot into the two ConfigMaps the engine mounts (kevConfigMapName /
-# advisoryConfigMapName), so an operator no longer syncs them by hand. When disabled
-# (the default) NOTHING here is templated and the chart behaves exactly as the manual-
-# mount path does today — you sync the ConfigMaps yourself and point
-# engine.kev.configMapName / engine.advisory.configMapName at them.
+# ON BY DEFAULT (feedSync.enabled: true). A dedicated CronJob that auto-syncs the CISA KEV
+# catalogue (and, if you configure advisoryUrl, an advisory snapshot) into the ConfigMaps
+# the engine mounts, so KEV exploit intel is fresh out of the box without an operator
+# syncing it by hand. The engine is AUTO-WIRED to these ConfigMaps when you leave
+# engine.kev.configMapName / engine.advisory.configMapName empty (see those keys above).
 #
-# EGRESS POSTURE (read this before enabling). This CronJob is the ONLY component the
-# chart gives network egress to. It makes outbound calls to TWO public, READ-ONLY feed
-# URLs (kevUrl / advisoryUrl) and to the in-cluster apiserver to upsert the ConfigMaps.
-# It NEVER reads cluster state and NEVER transmits any cluster data outward — the only
-# bytes that leave are the plain GET requests for the public feeds. The ENGINE itself
-# stays ZERO-EGRESS (ADR-0015): it only mounts the resulting snapshot files and makes no
-# advisory/KEV network call of its own. The job runs as its own dedicated ServiceAccount
-# whose Role grants get/update/patch (and the first-run create) on ONLY the two named
-# ConfigMaps in this namespace — least privilege, isolated from the engine's SA.
+# EGRESS POSTURE — READ THIS. This CronJob is the ONE component the chart gives network
+# egress to, and it is ON by default. It makes outbound GETs to PUBLIC, READ-ONLY feed
+# URLs (kevUrl / advisoryUrl) and writes to the in-cluster apiserver to upsert the
+# ConfigMaps. It NEVER reads cluster state and NEVER transmits any cluster data outward —
+# the only bytes that leave are the plain GET requests for the public feeds. The ENGINE
+# itself stays ZERO-EGRESS (ADR-0015): it only mounts the resulting snapshot files and
+# makes no advisory/KEV network call of its own. The job runs as its own dedicated
+# ServiceAccount whose Role grants get/update/patch (and the first-run create) on ONLY the
+# two named ConfigMaps in this namespace — least privilege, isolated from the engine's SA.
 #
-# TO ENABLE: set feedSync.enabled=true, then point the engine at the synced ConfigMaps:
-#   engine.kev.configMapName=kev-snapshot
-#   engine.advisory.configMapName=advisory-snapshot
-# (the ConfigMap names must match feedSync.kevConfigMapName / advisoryConfigMapName).
+# TRADEOFF / FRAMING: engine zero-egress is preserved; feed-sync egresses to public feeds
+# by default. TO RESTORE A FULLY AIR-GAPPED / ZERO-EGRESS POSTURE, set feedSync.enabled=false
+# (then NOTHING in the chart egresses) and mount the KEV / advisory snapshots yourself via
+# engine.kev.configMapName / engine.advisory.configMapName. With feed-sync disabled, nothing
+# here is templated and the chart behaves exactly as the manual-mount path.
+#
+# Advisory stays OPTIONAL: kevUrl ships a default public source, but advisoryUrl is empty
+# (no default advisory source), so advisory is only synced/auto-wired once you set it.
 feedSync:
-  enabled: false
+  enabled: true
   # Standard cron schedule. Default: once a day at 03:00. KEV/advisory feeds change at
   # most daily; a tighter cadence buys little and spends egress + apiserver writes.
   schedule: "0 3 * * *"

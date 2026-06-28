@@ -1,3 +1,13 @@
+{{- /*
+Effective KEV / advisory ConfigMap names the engine mounts. These resolve the auto-wire
+fallback (JEF-228): an explicit engine.kev/advisory.configMapName always wins; otherwise,
+when feed-sync is ON (the default), the engine auto-mounts the ConfigMaps the job upserts
+— KEV whenever feed-sync is enabled, advisory only when feedSync.advisoryUrl is also set
+(advisory has no default source). Empty = no mount (the disabled/manual/air-gapped path).
+The engine still makes no outbound KEV/advisory call of its own — it only mounts files.
+*/}}
+{{- $kevConfigMapName := include "protector.kevConfigMapName" . }}
+{{- $advisoryConfigMapName := include "protector.advisoryConfigMapName" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -153,15 +163,19 @@ spec:
             - name: PROTECTOR_FALCO_ADDR
               value: "0.0.0.0:{{ .Values.engine.falco.port }}"
             {{- end }}
-            {{- with .Values.engine.kev.configMapName }}
+            {{- if $kevConfigMapName }}
+            # Effective KEV ConfigMap (explicit name, or auto-wired to the feed-sync's
+            # kev-snapshot when feed-sync is on — see protector.kevConfigMapName).
             - name: PROTECTOR_KEV_FILE
-              value: /etc/protector/kev/{{ $.Values.engine.kev.key }}
+              value: /etc/protector/kev/{{ .Values.engine.kev.key }}
             {{- end }}
-            {{- with .Values.engine.advisory.configMapName }}
+            {{- if $advisoryConfigMapName }}
             # Advisory snapshot (ADR-0015): mounted CVE-keyed file, zero egress. Unset =
             # no advisory enrichment (prompt byte-identical to the no-snapshot path).
+            # Effective name: explicit, or auto-wired to the feed-sync's advisory-snapshot
+            # when feed-sync is on AND feedSync.advisoryUrl is set.
             - name: PROTECTOR_ADVISORY_FILE
-              value: /etc/protector/advisory/{{ $.Values.engine.advisory.key }}
+              value: /etc/protector/advisory/{{ .Values.engine.advisory.key }}
             {{- end }}
             {{- with .Values.engine.model.endpoint }}
             # Local-first model (OpenAI-compatible). Unset = deterministic enumerator only.
@@ -206,12 +220,12 @@ spec:
             - name: journal
               mountPath: {{ dir .Values.engine.journal.path | quote }}
             {{- end }}
-            {{- if and .Values.engine.enabled .Values.engine.kev.configMapName }}
+            {{- if and .Values.engine.enabled $kevConfigMapName }}
             - name: kev
               mountPath: /etc/protector/kev
               readOnly: true
             {{- end }}
-            {{- if and .Values.engine.enabled .Values.engine.advisory.configMapName }}
+            {{- if and .Values.engine.enabled $advisoryConfigMapName }}
             - name: advisory
               mountPath: /etc/protector/advisory
               readOnly: true
@@ -241,15 +255,15 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "protector.fullname" . }}-journal
         {{- end }}
-        {{- if and .Values.engine.enabled .Values.engine.kev.configMapName }}
+        {{- if and .Values.engine.enabled $kevConfigMapName }}
         - name: kev
           configMap:
-            name: {{ .Values.engine.kev.configMapName }}
+            name: {{ $kevConfigMapName }}
         {{- end }}
-        {{- if and .Values.engine.enabled .Values.engine.advisory.configMapName }}
+        {{- if and .Values.engine.enabled $advisoryConfigMapName }}
         - name: advisory
           configMap:
-            name: {{ .Values.engine.advisory.configMapName }}
+            name: {{ $advisoryConfigMapName }}
         {{- end }}
         {{- if .Values.registryAuth.dockerconfigSecret }}
         # A pull secret's dockerconfigjson, surfaced as config.json so the cosign
