@@ -10,9 +10,9 @@ use super::super::evidence::{
     ADVISORY_FIX_REF_CAP, ADVISORY_SUMMARY_CAP, ENTRY_FREETEXT_BUDGET, cve_evidence,
 };
 use super::super::*;
-use super::{critical_cve, graph_with_vuln, graph_with_vulns};
+use super::{critical_cve, graph_with_behaviors, graph_with_vuln, graph_with_vulns};
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{Advisory, NodeKey, Severity, Vulnerability};
+use crate::engine::graph::{Advisory, Behavior, NodeKey, Severity, Vulnerability};
 
 /// The content inside the CVE list's `<<< >>>` fence in an assembled prompt — what the
 /// model reads as data. Panics if the fence is missing (which is itself the failure we
@@ -218,5 +218,45 @@ fn structured_fields_are_sanitized_tokens_independent_of_prose() {
     assert!(
         line.contains("[fix: 2.0.0"),
         "fix-ref token present: {line}"
+    );
+}
+
+/// JEF-113 (behavior-preservation across the refactor + integration): the exec classifiers
+/// moved out of the `Behavior` wire type, so `Behavior::summary` now returns the bare path.
+/// The adjudication prompt must re-apply the engine's notable-exec annotation
+/// (`exec_class::annotated_summary`) so the model still sees "(interactive shell in
+/// container)" / "(package manager in container)" — losing it would silently weaken the
+/// judge's runtime evidence. This is the one-line `prompt.rs` swap the JEF-113/JEF-106
+/// integration required; guard it.
+#[test]
+fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
+    let (g, e) = graph_with_behaviors(vec![
+        Behavior::ProcessExec {
+            path: "/bin/bash".into(),
+        },
+        Behavior::ProcessExec {
+            path: "/usr/bin/apt".into(),
+        },
+        Behavior::ProcessExec {
+            path: "/app/server".into(),
+        },
+    ]);
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    assert!(
+        prompt.contains("executed /bin/bash (interactive shell in container)"),
+        "prompt lost the interactive-shell annotation:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("executed /usr/bin/apt (package manager in container)"),
+        "prompt lost the package-manager annotation:\n{prompt}"
+    );
+    // A bare exec stays an unannotated path (no spurious classification).
+    assert!(
+        prompt.contains("executed /app/server"),
+        "prompt dropped the bare exec line:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("executed /app/server ("),
+        "bare exec was wrongly annotated:\n{prompt}"
     );
 }

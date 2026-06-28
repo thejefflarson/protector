@@ -8,6 +8,7 @@
 
 pub mod adapter;
 pub mod advisory;
+pub mod exec_class;
 pub mod exploit_intel;
 pub mod health;
 pub mod ingest_guard;

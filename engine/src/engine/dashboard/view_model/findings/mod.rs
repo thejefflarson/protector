@@ -356,11 +356,15 @@ pub struct RuntimeBlockProps {
 /// Shape the runtime-alert block from the entry evidence (JEF-133). Corroborating alerts
 /// first, then the agent behaviors as context.
 pub fn runtime_block_props(ev: &EntryEvidence) -> RuntimeBlockProps {
+    // `annotated_summary` applies the engine's notable-exec classification (shell / package
+    // manager in container — JEF-55) on top of the bare wire summary, since the classifier
+    // moved out of the shared `Behavior` type into engine policy (JEF-113).
+    use crate::engine::observe::exec_class::annotated_summary;
     RuntimeBlockProps {
-        corroborating: ev.corroborating().map(|b| b.summary()).collect(),
+        corroborating: ev.corroborating().map(annotated_summary).collect(),
         context: ev
             .context_behaviors()
-            .map(|b| (b.variant_label().to_string(), b.summary()))
+            .map(|b| (b.variant_label().to_string(), annotated_summary(b)))
             .collect(),
     }
 }

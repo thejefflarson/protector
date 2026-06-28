@@ -9,8 +9,8 @@
 use super::*;
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Advisory, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
-    Severity, Trust, Vulnerability, Workload,
+    Advisory, Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation,
+    SecurityGraph, Severity, Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -66,6 +66,35 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
             grade: Grade::Proof,
         },
     );
+    (g, entry_key)
+}
+
+/// A minimal internet-facing workload carrying the given runtime `behaviors` (no CVEs) —
+/// drives the behavior side of `entry_evidence`/`build_judgment_prompt`. Used to verify the
+/// prompt re-applies the engine's notable-exec annotation (JEF-113) now that
+/// `Behavior::summary` returns the bare path.
+pub(super) fn graph_with_behaviors(behaviors: Vec<Behavior>) -> (SecurityGraph, NodeKey) {
+    use crate::engine::graph::RuntimeSignal;
+    let runtime = behaviors
+        .into_iter()
+        .map(|behavior| RuntimeSignal {
+            behavior,
+            provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+        })
+        .collect();
+    let mut g = SecurityGraph::new();
+    let wl = Node::Workload(Workload {
+        namespace: "app".into(),
+        name: "web".into(),
+        kind: "Pod".into(),
+        labels: Default::default(),
+        meshed: false,
+        exposure: Exposure::Internet,
+        runtime,
+        persistent: false,
+    });
+    let entry_key = wl.key();
+    g.upsert_node(wl);
     (g, entry_key)
 }
 
