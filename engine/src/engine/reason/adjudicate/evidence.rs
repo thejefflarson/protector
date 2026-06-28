@@ -6,7 +6,7 @@
 //! single source of truth shared with the dashboard), then rendered here.
 
 use super::guards::sanitize;
-use crate::engine::graph::{Behavior, NodeKey, SecurityGraph, Vulnerability};
+use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. The
 /// `entry_fingerprint` discipline means the (capped) string is what the cache keys
@@ -174,6 +174,54 @@ pub(crate) fn entry_evidence(
         .map(|v| cve_evidence_budgeted(v, &mut budget))
         .collect();
     (cves, behaviors)
+}
+
+/// Render one non-CVE scanner finding (JEF-244 — exposed secret / misconfig / RBAC) into a
+/// prompt line: the structured, low-cardinality fields lead (id + severity), then the short
+/// untrusted title, capped+sanitized exactly as a CVE title is. Charged to the same shared
+/// per-entry free-text budget so a finding-heavy entry can't bloat the prompt. The whole list
+/// is fenced by `fence_list` at prompt-build time, so the title is data, never instructions.
+fn finding_evidence_budgeted(f: &ScanFinding, budget: &mut usize) -> String {
+    let mut line = format!("{} [severity: {}]", sanitize(&f.id), f.severity.label());
+    if let Some(title) = f.title.as_deref() {
+        let title = cap_untrusted(title, TITLE_CAP);
+        if let Some(title) = take_from_budget(title, budget) {
+            line.push_str(" — ");
+            line.push_str(&title);
+        }
+    }
+    line
+}
+
+/// The non-CVE scanner findings behind an entry (JEF-244), rendered into prompt lines and
+/// drawn from the SAME [`SecurityGraph::entry_findings`] the dashboard reads. Returns
+/// `(exposed_secrets, static_posture)`: exposed secrets are kept separate because they ARE
+/// exploitation evidence (a usable credential baked into the image), while the config-audit
+/// and RBAC-assessment findings are folded together as STATIC POSTURE / severity context — on
+/// the same calibrated footing the prompt gives reachability breadth, never a breach driver on
+/// their own. Each list is sorted (stable prompt + fingerprint) and shares the per-entry
+/// free-text budget with the CVE lines.
+pub(crate) fn entry_findings(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+) -> (Vec<String>, Vec<String>) {
+    let (mut secrets, mut misconfigs, mut rbac) = graph.entry_findings(entry_key);
+    secrets.sort_by(|a, b| a.id.cmp(&b.id));
+    misconfigs.sort_by(|a, b| a.id.cmp(&b.id));
+    rbac.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    let secret_lines = secrets
+        .iter()
+        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .collect();
+    // Misconfig + RBAC share one "static posture" list: same role in the prompt (severity
+    // context), so the model sees one fenced block rather than two it might over-weight.
+    let posture_lines = misconfigs
+        .iter()
+        .chain(rbac.iter())
+        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .collect();
+    (secret_lines, posture_lines)
 }
 
 /// The set of CVE ids in an entry's actual evidence — the ground truth the model's

@@ -196,6 +196,21 @@ pub struct Workload {
     /// signal that it is a **data store** (database, cache, object store), i.e. an
     /// information repository an attacker reaching it could mine (ATT&CK T1213).
     pub persistent: bool,
+    /// FAILED configuration-audit checks from trivy-operator's `ConfigAuditReport`
+    /// (JEF-244) — misconfiguration evidence (a hostPath mount, a missing securityContext,
+    /// …) for this workload. STRUCTURAL severity/context for the model, NOT exploitation
+    /// evidence; surfaced as static-posture findings the same way CVE severity is. Each
+    /// finding's free-text is UNTRUSTED third-party scanner output, fenced/capped before it
+    /// reaches the prompt or escaped before the dashboard. Empty when trivy-operator's
+    /// config-audit reports are absent.
+    pub misconfigs: Vec<ScanFinding>,
+    /// FAILED role / cluster-role checks from trivy-operator's `RbacAssessmentReport`
+    /// (JEF-244) — structural RBAC-exposure evidence (a role granting `*` verbs, secret
+    /// access, …) attached to the workloads in the report's namespace. INFORMS the model's
+    /// authorization reasoning (JEF-79 already reasons about RBAC-authorized breadth); it
+    /// does not re-implement or double-count that logic. Untrusted scanner free-text, fenced
+    /// like the others. Empty when the reports are absent.
+    pub rbac_findings: Vec<ScanFinding>,
 }
 
 /// An identity (ServiceAccount / RBAC subject) a workload acts as.
@@ -231,6 +246,15 @@ pub struct Image {
     pub trust: Trust,
     /// Vulnerabilities present in this image (Vulnerability ∧ ExploitIntel ports).
     pub vulnerabilities: Vec<Vulnerability>,
+    /// Exposed secrets baked into this image, from trivy-operator's `ExposedSecretReport`
+    /// (JEF-244) — a credential committed into the image layers (an AWS key, a private key,
+    /// a token). EXPLOITATION-grade exposure: a usable secret sitting in the image is a real
+    /// breach primitive, not mere posture. The finding carries only the rule id, category,
+    /// severity, target path, and trivy's **redacted** match — the raw secret value is NEVER
+    /// parsed, stored, or rendered (the redaction guarantee, enforced in the adapter + tests).
+    /// Lives on the Image (not the Workload) so it is shared by every workload running the
+    /// same digest, exactly like [`Vulnerability`]. Empty when the reports are absent.
+    pub exposed_secrets: Vec<ScanFinding>,
 }
 
 /// A cluster node / host.
@@ -357,6 +381,38 @@ impl Reachability {
             Reachability::NotObserved => "not-observed",
         }
     }
+}
+
+/// A non-CVE scanner finding from one of trivy-operator's other report kinds (JEF-244):
+/// an exposed secret ([`Image::exposed_secrets`]), a failed config-audit check
+/// ([`Workload::misconfigs`]), or a failed RBAC-assessment check
+/// ([`Workload::rbac_findings`]). One small shared shape rather than three parallel
+/// structs — the fields are the same STRUCTURED, low-cardinality coordinates trivy emits
+/// for each: a stable rule/check id, a severity band, a category, and a short title.
+///
+/// `title` (and any path baked into it) is UNTRUSTED third-party scanner text — it is
+/// fenced/capped before the prompt and HTML-escaped before the dashboard, exactly as the
+/// CVE `title` is. For an exposed secret the title carries trivy's already-**redacted**
+/// match only; the raw secret value never enters this type (the redaction guarantee).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanFinding {
+    /// The scanner's stable identifier for the rule/check — trivy's `ruleID` (exposed
+    /// secret) or `checkID` (config-audit / RBAC), e.g. `aws-access-key-id`, `KSV017`. A
+    /// low-cardinality token, surfaced verbatim like a CVE id.
+    pub id: String,
+    pub severity: Severity,
+    /// The scanner's category for the finding (`AWS`, `Kubernetes Security Check`, …) —
+    /// short, low-cardinality classification; absent ⇒ `None`.
+    pub category: Option<String>,
+    /// A short human title/description trivy reports for the finding. UNTRUSTED free-text:
+    /// fenced+capped before the model prompt, HTML-escaped before the dashboard.
+    pub title: Option<String>,
+    /// What the finding is about: the file path (exposed secret), or the audited
+    /// resource/object. Untrusted — sanitized alongside `title`. Absent ⇒ `None`.
+    pub target: Option<String>,
+    /// Which adapter asserted this finding (e.g. `trivy-exposed-secret`,
+    /// `trivy-config-audit`, `trivy-rbac`), for provenance/corroboration.
+    pub sources: Vec<Provenance>,
 }
 
 /// Severity band of a vulnerability.
@@ -691,6 +747,40 @@ impl SecurityGraph {
         }
         (cves, behaviors)
     }
+
+    /// The non-CVE scanner findings behind an `entry` node (JEF-244): the exposed secrets
+    /// baked into its image(s), and the failed config-audit / RBAC-assessment checks on the
+    /// workload itself. Companion to [`entry_evidence`](Self::entry_evidence) — kept separate
+    /// so the established CVE/runtime evidence tuple (and its many callers) is untouched while
+    /// the new trivy report kinds get one shared SOURCE OF TRUTH for the prompt and the
+    /// dashboard, so the model and the operator can never see a different set.
+    ///
+    /// Returns `(exposed_secrets, misconfigs, rbac_findings)`; all empty for an unknown key
+    /// or a non-workload node. Exposed secrets are followed across the entry's `RunsImage`
+    /// edges (they live on the Image, shared by every workload on that digest); the two
+    /// config findings live directly on the Workload.
+    pub fn entry_findings(
+        &self,
+        entry_key: &NodeKey,
+    ) -> (Vec<ScanFinding>, Vec<ScanFinding>, Vec<ScanFinding>) {
+        let empty = (Vec::new(), Vec::new(), Vec::new());
+        let Some(entry) = self.index_of(entry_key) else {
+            return empty;
+        };
+        let (misconfigs, rbac_findings) = match self.graph.node_weight(entry) {
+            Some(Node::Workload(w)) => (w.misconfigs.clone(), w.rbac_findings.clone()),
+            _ => return empty,
+        };
+        let mut exposed_secrets = Vec::new();
+        for edge in self.graph.edges(entry) {
+            if matches!(edge.weight().relation, Relation::RunsImage)
+                && let Some(Node::Image(image)) = self.graph.node_weight(edge.target())
+            {
+                exposed_secrets.extend(image.exposed_secrets.iter().cloned());
+            }
+        }
+        (exposed_secrets, misconfigs, rbac_findings)
+    }
 }
 
 #[cfg(test)]
@@ -770,6 +860,7 @@ mod tests {
             reference: Some("ghcr.io/x:1".into()),
             trust: Trust::Unknown,
             vulnerabilities: vec![],
+            exposed_secrets: vec![],
         });
         let scanned = Node::Image(Image {
             digest: "sha256:abc".into(),
@@ -783,6 +874,7 @@ mod tests {
                 sources: vec![prov("trivy"), prov("grype")],
                 ..Default::default()
             }],
+            exposed_secrets: vec![],
         });
         // Identity (digest) drives the key; facts (trust, vulns) do not.
         assert_eq!(clean.key(), scanned.key());
@@ -796,6 +888,7 @@ mod tests {
             reference: None,
             trust: Trust::Unknown,
             vulnerabilities: vec![],
+            exposed_secrets: vec![],
         }));
         let wl = g.upsert_node(Node::Workload(Workload {
             namespace: "app".into(),
@@ -806,6 +899,8 @@ mod tests {
             exposure: Exposure::Internet,
             runtime: vec![],
             persistent: false,
+            misconfigs: vec![],
+            rbac_findings: vec![],
         }));
         g.add_edge(wl, img, proof_edge(Relation::RunsImage, "kube"));
         assert_eq!(g.node_count(), 2);
@@ -824,6 +919,7 @@ mod tests {
                 sources: vec![prov("trivy")],
                 ..Default::default()
             }],
+            exposed_secrets: vec![],
         }));
         assert_eq!(img2, img, "upsert keeps the same index");
         assert_eq!(g.node_count(), 2, "no duplicate node");

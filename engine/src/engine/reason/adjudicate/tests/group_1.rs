@@ -52,6 +52,8 @@ fn entry_coverage_reflects_the_model_evidence() {
         exposure: Exposure::Internet,
         runtime: Vec::new(),
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     });
     let bare_key = bare.key();
     g.upsert_node(bare);
@@ -81,6 +83,8 @@ fn entry_coverage_reflects_the_model_evidence() {
             provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
         }],
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     });
     let key = wl.key();
     g.upsert_node(wl);
@@ -555,6 +559,7 @@ fn fingerprint_changes_with_cve_reachability() {
             reference: None,
             trust: crate::engine::graph::Trust::Unknown,
             vulnerabilities: vec![],
+            exposed_secrets: vec![],
         })
         .key();
         let mut graph = graph;

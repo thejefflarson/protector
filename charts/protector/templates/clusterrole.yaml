@@ -24,10 +24,17 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
     verbs: ["get", "list", "watch"]
-  # trivy-operator vulnerability reports. Harmless if the CRD is absent — the engine
-  # degrades to no vuln data.
+  # trivy-operator reports — the in-cluster, zero-egress scanner signal (ADR-0003).
+  # Read-only; all harmless if the CRDs are absent — the engine degrades to no data for
+  # whichever report kind is missing. vulnerabilityreports is the CVE source (JEF-242);
+  # exposedsecretreports / configauditreports / rbacassessmentreports are the
+  # breach/exposure/misconfiguration signals (JEF-244).
   - apiGroups: ["aquasecurity.github.io"]
-    resources: ["vulnerabilityreports"]
+    resources:
+      - "vulnerabilityreports"
+      - "exposedsecretreports"
+      - "configauditreports"
+      - "rbacassessmentreports"
     verbs: ["get", "list", "watch"]
   # Linkerd authorization policy (a mesh-native reachability source). Read-only;
   # harmless if the CRDs are absent (the engine degrades to NetworkPolicy-only

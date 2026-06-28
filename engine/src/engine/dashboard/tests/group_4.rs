@@ -155,6 +155,7 @@ fn finding_carries_evidence_in_json_for_programmatic_use() {
         runtime: vec![Behavior::Alert {
             rule: "shell".into(),
         }],
+        ..Default::default()
     };
     let v = serde_json::to_value(&f).unwrap();
     assert_eq!(v["evidence"]["cves"][0]["id"], "CVE-2021-44228");
@@ -180,6 +181,7 @@ fn endpoint_card_renders_both_evidence_blocks() {
         runtime: vec![Behavior::Alert {
             rule: "Terminal shell in container".into(),
         }],
+        ..Default::default()
     };
     let refs = vec![&f];
     let html = card_body("workload/app/Pod/web", &refs);
@@ -236,6 +238,8 @@ fn from_chain_pulls_entry_evidence_filtered_to_kev_or_critical() {
             provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
         }],
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     });
     let entry_key = wl.key();
     let e = g.upsert_node(wl);
@@ -248,6 +252,7 @@ fn from_chain_pulls_entry_evidence_filtered_to_kev_or_critical() {
             vuln("CVE-2021-0002", Severity::High, true),
             vuln("CVE-2021-0003", Severity::Medium, false),
         ],
+        exposed_secrets: vec![],
     }));
     g.add_edge(
         e,

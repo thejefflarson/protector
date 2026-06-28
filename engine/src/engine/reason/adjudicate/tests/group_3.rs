@@ -73,6 +73,86 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
     assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
 }
 
+/// JEF-244 — the other trivy report kinds reach the prompt: an exposed secret is framed as
+/// EXPLOITATION evidence (its own section + breach-definition bullet), while a misconfig is
+/// framed as STATIC POSTURE / severity context (never a breach on its own). Both untrusted
+/// titles are fenced and the secret value never appears.
+#[test]
+fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
+    use crate::engine::graph::Exposure;
+    use crate::engine::graph::{
+        Edge, Grade, Image, Node, Provenance, Relation, ScanFinding, SecurityGraph, Trust, Workload,
+    };
+    use std::time::SystemTime;
+
+    let mut g = SecurityGraph::new();
+    let wl = Node::Workload(Workload {
+        namespace: "app".into(),
+        name: "web".into(),
+        kind: "Pod".into(),
+        labels: Default::default(),
+        meshed: false,
+        exposure: Exposure::Internet,
+        runtime: vec![],
+        persistent: false,
+        misconfigs: vec![ScanFinding {
+            id: "KSV017".into(),
+            severity: Severity::High,
+            category: Some("Kubernetes Security Check".into()),
+            title: Some("Privileged container".into()),
+            target: None,
+            sources: vec![Provenance::new(
+                "trivy-config-audit",
+                SystemTime::UNIX_EPOCH,
+            )],
+        }],
+        rbac_findings: vec![],
+    });
+    let entry = wl.key();
+    let e = g.upsert_node(wl);
+    let img = g.upsert_node(Node::Image(Image {
+        digest: "sha256:abc".into(),
+        reference: Some("web:1".into()),
+        trust: Trust::Unknown,
+        vulnerabilities: vec![],
+        exposed_secrets: vec![ScanFinding {
+            id: "aws-access-key-id".into(),
+            severity: Severity::Critical,
+            category: Some("AWS".into()),
+            title: Some("AWS_ACCESS_KEY_ID=*****".into()),
+            target: Some("/app/.env".into()),
+            sources: vec![Provenance::new(
+                "trivy-exposed-secret",
+                SystemTime::UNIX_EPOCH,
+            )],
+        }],
+    }));
+    g.add_edge(
+        e,
+        img,
+        Edge {
+            relation: Relation::RunsImage,
+            provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+            grade: Grade::Proof,
+        },
+    );
+
+    let prompt = build_judgment_prompt(&entry, &[], &g);
+    // The exposed secret reaches its own fenced section as exploitation evidence.
+    assert!(prompt.contains("Exposed secrets baked into this image"));
+    assert!(
+        prompt.contains("aws-access-key-id"),
+        "secret rule id surfaced"
+    );
+    // The misconfig reaches the static-posture section, framed as context not breach.
+    assert!(prompt.contains("Static posture findings"));
+    assert!(prompt.contains("KSV017"), "misconfig check id surfaced");
+    // The breach definition now lists exposed secrets as exploitation evidence.
+    assert!(prompt.contains("EXPOSED SECRET"));
+    // The fence is balanced (every new section is fenced like the others).
+    assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
+}
+
 /// JEF-106 — the title cap holds at the PROMPT boundary (defense in depth): an oversized
 /// title is truncated well under the 10k input, never raw.
 #[test]

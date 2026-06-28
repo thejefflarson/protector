@@ -139,11 +139,25 @@ pub(crate) fn entry_fingerprint(
         .collect();
     objs.sort_unstable();
     objs.dedup();
+    // The other trivy report kinds (JEF-244): a newly-baked exposed secret, a new misconfig,
+    // or a new RBAC finding changes the model's call, so it must re-judge the entry. We key
+    // on the STABLE finding ids only (low-cardinality, no untrusted free-text), so the
+    // fingerprint changes ONCE when a finding appears and is then stable across passes.
+    let (secrets, misconfigs, rbac) = graph.entry_findings(entry);
+    let mut findings: Vec<String> = secrets
+        .iter()
+        .map(|f| format!("sec:{}", f.id))
+        .chain(misconfigs.iter().map(|f| format!("cfg:{}", f.id)))
+        .chain(rbac.iter().map(|f| format!("rbac:{}", f.id)))
+        .collect();
+    findings.sort();
+    findings.dedup();
     format!(
-        "cves={}|rt={}|objs={}",
+        "cves={}|rt={}|objs={}|findings={}",
         cves.join(","),
         runtime.join(","),
-        objs.join(",")
+        objs.join(","),
+        findings.join(",")
     )
 }
 

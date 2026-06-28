@@ -163,6 +163,8 @@ mod tests {
             exposure: Exposure::Internal,
             runtime: vec![],
             persistent,
+            misconfigs: vec![],
+            rbac_findings: vec![],
         })
     }
 

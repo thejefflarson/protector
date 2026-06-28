@@ -16,10 +16,17 @@ use std::time::{Instant, SystemTime};
 use serde::Serialize;
 
 use crate::engine::dashboard::recency::{Delta, RecencyInfo, StoredPosture};
-use crate::engine::graph::{Behavior, SecurityGraph, Vulnerability};
+use crate::engine::graph::SecurityGraph;
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
 use crate::engine::reason::proof::ProvenChain;
+
+/// The per-entry evidence projections (JEF-133 + JEF-244): the CVE and scanner-finding
+/// view shapes and the [`EntryEvidence`] aggregate. Split into a submodule to keep this
+/// file under the 1,000-line cap (CLAUDE.md); re-exported so callers keep using
+/// `dashboard::model::{CveEvidence, EntryEvidence, FindingEvidence}`.
+mod evidence;
+pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 
 /// One row: a proven chain, its ATT&CK label and evidence, and what the engine
 /// does with it.
@@ -85,102 +92,6 @@ pub struct PathStep {
     pub from: String,
     pub relation: String,
     pub to: String,
-}
-
-/// A single CVE on the entry's image, the dashboard-/JSON-facing projection of a
-/// [`graph::Vulnerability`] (JEF-133). The same fields `cve_evidence` surfaces to the
-/// model: id, severity, the CVSS score when trivy reported it (JEF-242), reachability,
-/// fix availability, and the trivy title. ADR-0016: this is a SEVERITY/reachability input
-/// — "how bad IF exploited" — never on its own the breach call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CveEvidence {
-    pub id: String,
-    /// `low` / `medium` / `high` / `critical` (from [`graph::Severity::label`]).
-    pub severity: String,
-    /// The CVSS base score trivy reported (JEF-242), if any, formatted to one decimal
-    /// (`"9.8"`) — the same static-severity signal the model is shown. `None` when the
-    /// scanner omits it. Stored pre-formatted (a `String`, not an `f64`) so the dashboard
-    /// props can keep `Eq` and the operator reads the exact token the prompt rendered.
-    pub score: Option<String>,
-    /// Whether the CVE is listed in a known-exploited catalogue (CISA KEV) — the
-    /// stronger-than-severity exploitation signal.
-    pub kev: bool,
-    /// `unknown` / `loaded-at-runtime` / `not-observed` (from [`graph::Reachability`]).
-    pub reachability: String,
-    /// A human fix-availability phrase: `no fix available`, `fix available: <ver>`, or
-    /// `fix available: <installed> to <fixed>` — the same shape the prompt uses.
-    pub fix: String,
-    /// The advisory title (trivy's `title`), if reported. Untrusted free-text — HTML-
-    /// escaped at render time like every other model-adjacent string.
-    pub title: Option<String>,
-}
-
-impl CveEvidence {
-    /// Project a graph [`Vulnerability`] into the view shape. Keeps the fix-availability
-    /// phrasing identical to the adjudicator's `cve_evidence` so the operator reads the
-    /// same fact the model did.
-    pub(crate) fn from_vuln(v: &Vulnerability) -> Self {
-        let fix = match (v.fixed_version.as_deref(), v.installed_version.as_deref()) {
-            (Some(fixed), Some(installed)) => format!("fix available: {installed} to {fixed}"),
-            (Some(fixed), None) => format!("fix available: {fixed}"),
-            (None, _) => "no fix available".to_string(),
-        };
-        CveEvidence {
-            id: v.id.clone(),
-            severity: v.severity.label().to_string(),
-            // Format to one decimal so the dashboard shows the SAME `cvss` token the prompt
-            // renders (JEF-242) and the projection stays `Eq`.
-            score: v.score.map(|s| format!("{s:.1}")),
-            kev: v.exploited_in_wild,
-            reachability: v.reachability.label().to_string(),
-            fix,
-            title: v.title.clone(),
-        }
-    }
-}
-
-/// The two evidence blocks ADR-0016 keeps distinct, attached to a finding's entry
-/// (JEF-133):
-///
-/// - `cves` — the entry image's foothold-relevant CVEs (KEV or critical), the
-///   SEVERITY/reachability input.
-/// - `runtime` — the runtime [`Behavior`]s observed on the entry, the LIVE-corroboration
-///   signal. The subset that actually *corroborates* (Falco-style `Alert`s) is what flips
-///   `corroborated`; non-corroborating agent behaviors (exec/connect/secret-read/library-
-///   load/privilege-change) ride along as context, exactly as the model sees them.
-///
-/// Both empty is the honest "no evidence" state (render shows "none" / "unknown", never
-/// an implied-absent blank — JEF-161 coverage-gap idiom).
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct EntryEvidence {
-    pub cves: Vec<CveEvidence>,
-    pub runtime: Vec<Behavior>,
-}
-
-impl EntryEvidence {
-    /// Pull the entry's evidence from the graph — the SAME selection the adjudicator
-    /// reads ([`SecurityGraph::entry_evidence`]: KEV-or-critical CVEs + the entry's
-    /// runtime behaviors), projected into the view shape.
-    pub(crate) fn for_entry(graph: &SecurityGraph, entry: &crate::engine::graph::NodeKey) -> Self {
-        let (vulns, runtime) = graph.entry_evidence(entry);
-        EntryEvidence {
-            cves: vulns.iter().map(CveEvidence::from_vuln).collect(),
-            runtime,
-        }
-    }
-
-    /// The runtime behaviors that actually corroborate the chain (Falco-style alerts) —
-    /// what flips `ProvenChain::corroborated` (ADR-0009). Separated from context behaviors
-    /// in the live-corroboration block.
-    pub(crate) fn corroborating(&self) -> impl Iterator<Item = &Behavior> {
-        self.runtime.iter().filter(|b| b.is_alert())
-    }
-
-    /// The non-corroborating agent behaviors — context for the chain, not a corroboration
-    /// (exec/connect/secret-read/library-load/privilege-change). Shown for context.
-    pub(crate) fn context_behaviors(&self) -> impl Iterator<Item = &Behavior> {
-        self.runtime.iter().filter(|b| !b.is_alert())
-    }
 }
 
 impl Finding {

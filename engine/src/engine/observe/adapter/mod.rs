@@ -41,6 +41,7 @@ mod egress;
 mod enrich;
 mod escape;
 mod exposure;
+mod findings;
 mod linkerd;
 mod network;
 mod rbac;
@@ -51,6 +52,7 @@ pub use self::egress::EgressAdapter;
 pub use self::enrich::{CveReachabilityAdapter, RuntimeAdapter, VulnerabilityAdapter};
 pub use self::escape::HostEscapeAdapter;
 pub use self::exposure::ExposureAdapter;
+pub use self::findings::{ConfigAuditAdapter, ExposedSecretAdapter, RbacAssessmentAdapter};
 pub use self::linkerd::LinkerdReachabilityAdapter;
 pub use self::network::ReachabilityAdapter;
 pub use self::rbac::PrivilegeAdapter;
@@ -117,6 +119,8 @@ pub(super) fn workload_node(namespace: &str, name: &str) -> Node {
         exposure: Exposure::Internal,
         runtime: vec![],
         persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
     })
 }
 
@@ -170,6 +174,12 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         // adapters already created.
         Box::new(ExposureAdapter),
         Box::new(VulnerabilityAdapter),
+        // The other trivy-operator report kinds (JEF-244): exposed secrets onto Images,
+        // config-audit + RBAC-assessment findings onto Workloads. Enrich existing nodes,
+        // so they run after the structural adapters alongside the vulnerability adapter.
+        Box::new(ExposedSecretAdapter),
+        Box::new(ConfigAuditAdapter),
+        Box::new(RbacAssessmentAdapter),
         Box::new(RuntimeAdapter),
         // CVE↔runtime-load correlation (JEF-51): reads the CVEs the VulnerabilityAdapter
         // put on Images and the loads the RuntimeAdapter put on Workloads, so it runs
