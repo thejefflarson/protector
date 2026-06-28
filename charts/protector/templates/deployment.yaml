@@ -1,13 +1,16 @@
 {{- /*
-Effective KEV / advisory ConfigMap names the engine mounts. These resolve the auto-wire
-fallback (JEF-228): an explicit engine.kev/advisory.configMapName always wins; otherwise,
-when feed-sync is ON (the default), the engine auto-mounts the ConfigMaps the job upserts
-— KEV whenever feed-sync is enabled, advisory only when feedSync.advisoryUrl is also set
-(advisory has no default source). Empty = no mount (the disabled/manual/air-gapped path).
-The engine still makes no outbound KEV/advisory call of its own — it only mounts files.
+Feed-fetcher sidecar wiring (JEF-238). When feedSync is ON (the default), a native
+sidecar (an initContainer with restartPolicy: Always) fetches the FULL public KEV (and,
+if configured, advisory) feeds into a shared emptyDir, and the engine reads those files
+from the SAME volume — no ConfigMap, no CronJob (those hit the 1 MiB ConfigMap limit;
+raw CISA KEV is ~1.5 MiB and advisory data does not fit at all). The emptyDir has no
+size limit, so KEV is fetched in FULL. The engine itself stays zero-egress (ADR-0015):
+only the sidecar egresses, to public read-only feeds. With feedSync OFF, no sidecar and
+no shared volume render, and the feed env is dropped — the air-gapped / manual-mount
+path (mount your own files at the same paths if you want enrichment offline).
 */}}
-{{- $kevConfigMapName := include "protector.kevConfigMapName" . }}
-{{- $advisoryConfigMapName := include "protector.advisoryConfigMapName" . }}
+{{- $feeds := and .Values.engine.enabled .Values.feedSync.enabled }}
+{{- $feedsDir := include "protector.feedsDir" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,6 +48,98 @@ spec:
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $feeds }}
+      # --- feed-fetcher sidecar (JEF-238) -------------------------------------------------
+      # A NATIVE SIDECAR: an initContainer with restartPolicy: Always (k8s 1.29+ / the
+      # cluster's k3s 1.36). Because it is a native sidecar it (a) starts and is given a
+      # head start BEFORE the engine container, so the feed files usually exist by the time
+      # the engine reads them, and (b) is auto-restarted for the pod's lifetime if it exits.
+      #
+      # EGRESS BOUNDARY. This is the ONLY container the chart gives network egress to. It
+      # GETs TWO public, READ-ONLY feed URLs (feedSync.kevUrl / feedSync.advisoryUrl) and
+      # writes them to the shared `feeds` emptyDir. It makes NO apiserver call (unlike the
+      # retired JEF-228 CronJob — no RBAC, no ServiceAccount grant) and never reads or
+      # transmits any cluster data. The engine stays ZERO-EGRESS (ADR-0015): it only reads
+      # the resulting files. A curl-only image is used because bitnami/kubectl was pulled
+      # from Docker Hub (cluster fork) and no apiserver client is needed here anymore.
+      initContainers:
+        - name: feed-fetcher
+          image: "{{ .Values.feedSync.image.repository }}:{{ .Values.feedSync.image.tag }}"
+          imagePullPolicy: {{ .Values.feedSync.image.pullPolicy }}
+          # Native sidecar: keep it running and restart it alongside the engine.
+          restartPolicy: Always
+          securityContext:
+            # cluster fix #166: the curl image's unprivileged user is uid 100 / gid 101.
+            runAsUser: 100
+            runAsGroup: 101
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            # Writes go only to the shared `feeds` volume and /tmp (both emptyDir), so the
+            # root filesystem can stay read-only.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          {{- with .Values.feedSync.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: KEV_URL
+              value: {{ .Values.feedSync.kevUrl | quote }}
+            - name: ADVISORY_URL
+              value: {{ .Values.feedSync.advisoryUrl | quote }}
+            - name: FEEDS_DIR
+              value: {{ $feedsDir | quote }}
+            - name: INTERVAL
+              value: {{ .Values.feedSync.interval | quote }}
+            - name: CURL_MAX_TIME
+              value: {{ .Values.feedSync.curlMaxTimeSecs | quote }}
+          command:
+            - /bin/sh
+            - -c
+            # Fetch each feed to a TEMP file, then atomically move it into place only on a
+            # clean download — `set -eu` + curl `--fail` mean a feed outage leaves the
+            # PREVIOUS good file untouched (never a half/empty overwrite) and the loop just
+            # retries next tick. KEV is fetched in FULL (no ConfigMap size limit). Advisory
+            # is fetched verbatim ONLY when ADVISORY_URL is set; the operator must point it
+            # at a source already in the AdvisoryStore CVE-keyed shape (no transform here —
+            # see values.yaml / ADR-0015; an OSV/GHSA->AdvisoryStore transform is a TODO).
+            - |
+              set -eu
+              fetch() {
+                name="$1"; url="$2"; dest="$FEEDS_DIR/$name"; tmp="$dest.tmp"
+                echo "feed-fetcher: fetching $url -> $dest"
+                if curl --fail --location --silent --show-error \
+                     --retry 3 --retry-delay 5 \
+                     --max-time "$CURL_MAX_TIME" \
+                     --output "$tmp" "$url"; then
+                  mv -f "$tmp" "$dest"
+                  echo "feed-fetcher: updated $dest"
+                else
+                  rm -f "$tmp"
+                  echo "feed-fetcher: WARN fetch failed for $url; keeping previous $dest" >&2
+                fi
+              }
+              while :; do
+                fetch kev.json "$KEV_URL"
+                if [ -n "$ADVISORY_URL" ]; then
+                  fetch advisory.json "$ADVISORY_URL"
+                else
+                  echo "feed-fetcher: advisoryUrl empty, skipping advisory fetch"
+                fi
+                echo "feed-fetcher: sleeping $INTERVAL"
+                sleep "$INTERVAL"
+              done
+          volumeMounts:
+            - name: feeds
+              mountPath: {{ $feedsDir | quote }}
+            # readOnlyRootFilesystem is on, so give curl a writable scratch dir.
+            - name: tmp
+              mountPath: /tmp
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -163,19 +258,22 @@ spec:
             - name: PROTECTOR_FALCO_ADDR
               value: "0.0.0.0:{{ .Values.engine.falco.port }}"
             {{- end }}
-            {{- if $kevConfigMapName }}
-            # Effective KEV ConfigMap (explicit name, or auto-wired to the feed-sync's
-            # kev-snapshot when feed-sync is on — see protector.kevConfigMapName).
+            {{- if $feeds }}
+            # KEV catalogue file the feed-fetcher sidecar writes into the shared emptyDir
+            # (JEF-238). FULL CISA KEV JSON — KevCatalog parses the canonical
+            # {"vulnerabilities":[…]} shape. The engine never fetches KEV itself (zero
+            # egress); it only reads this file, and degrades to "nothing known-exploited"
+            # if it is missing/empty (the first-boot race before the sidecar's first fetch).
             - name: PROTECTOR_KEV_FILE
-              value: /etc/protector/kev/{{ .Values.engine.kev.key }}
-            {{- end }}
-            {{- if $advisoryConfigMapName }}
-            # Advisory snapshot (ADR-0015): mounted CVE-keyed file, zero egress. Unset =
-            # no advisory enrichment (prompt byte-identical to the no-snapshot path).
-            # Effective name: explicit, or auto-wired to the feed-sync's advisory-snapshot
-            # when feed-sync is on AND feedSync.advisoryUrl is set.
+              value: {{ printf "%s/kev.json" $feedsDir | quote }}
+            {{- if .Values.feedSync.advisoryUrl }}
+            # Advisory snapshot (ADR-0015): the sidecar fetches advisoryUrl verbatim into
+            # the shared emptyDir. Only set when an advisory source is configured, so with
+            # no source the prompt stays byte-identical to the no-snapshot path. The source
+            # MUST already be in the AdvisoryStore CVE-keyed shape (see values.yaml).
             - name: PROTECTOR_ADVISORY_FILE
-              value: /etc/protector/advisory/{{ .Values.engine.advisory.key }}
+              value: {{ printf "%s/advisory.json" $feedsDir | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.engine.model.endpoint }}
             # Local-first model (OpenAI-compatible). Unset = deterministic enumerator only.
@@ -220,14 +318,11 @@ spec:
             - name: journal
               mountPath: {{ dir .Values.engine.journal.path | quote }}
             {{- end }}
-            {{- if and .Values.engine.enabled $kevConfigMapName }}
-            - name: kev
-              mountPath: /etc/protector/kev
-              readOnly: true
-            {{- end }}
-            {{- if and .Values.engine.enabled $advisoryConfigMapName }}
-            - name: advisory
-              mountPath: /etc/protector/advisory
+            {{- if $feeds }}
+            # The shared feeds emptyDir the sidecar writes (JEF-238), mounted READ-ONLY in
+            # the engine — the engine only reads kev.json / advisory.json, never writes.
+            - name: feeds
+              mountPath: {{ $feedsDir | quote }}
               readOnly: true
             {{- end }}
             {{- if .Values.registryAuth.dockerconfigSecret }}
@@ -255,15 +350,13 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "protector.fullname" . }}-journal
         {{- end }}
-        {{- if and .Values.engine.enabled $kevConfigMapName }}
-        - name: kev
-          configMap:
-            name: {{ $kevConfigMapName }}
-        {{- end }}
-        {{- if and .Values.engine.enabled $advisoryConfigMapName }}
-        - name: advisory
-          configMap:
-            name: {{ $advisoryConfigMapName }}
+        {{- if $feeds }}
+        # Shared scratch volume between the feed-fetcher sidecar (writer) and the engine
+        # (reader) — JEF-238. emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA KEV
+        # JSON (~1.5 MiB) and advisory data fit. Lives for the pod's lifetime; the sidecar
+        # re-fetches on its interval and on restart.
+        - name: feeds
+          emptyDir: {}
         {{- end }}
         {{- if .Values.registryAuth.dockerconfigSecret }}
         # A pull secret's dockerconfigjson, surfaced as config.json so the cosign
