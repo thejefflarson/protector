@@ -6,9 +6,36 @@
 //! This is glue — the one network call the model layers make. The prompt-building
 //! and reply-parsing that wrap it are pure and tested in their own modules.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
+
+/// Process-wide single-flight gate for the model endpoint: at most ONE Ollama request
+/// is in flight at any instant. The judging path serializes its calls within a pass, but
+/// the background keep-warm task ([`spawn_keep_warm`]) pings on its own timer and could
+/// otherwise overlap a `propose`/`judge` request. On the single-CPU, OOM-prone Ollama
+/// node that homelab deployments run, two concurrent requests add contention and risk an
+/// out-of-memory unload. A 1-permit semaphore makes "one request at a time" structural
+/// rather than incidental — every path that POSTs the model endpoint ([`chat`] and
+/// [`keep_warm`]) acquires the permit first and holds it for the whole request.
+///
+/// Each call is still bounded by the reqwest timeout (see [`client`]), so a hung request
+/// releases the permit when it times out — the gate cannot deadlock.
+static MODEL_GATE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));
+
+/// Acquire the single-flight permit, blocking until the in-flight request (if any)
+/// finishes. The returned guard releases the permit on drop — on BOTH success and
+/// error/timeout — so callers just hold it for the duration of their request and let it
+/// drop at function return. The semaphore is never closed, so `acquire` cannot fail;
+/// `expect` documents that invariant rather than papering over a real error.
+async fn acquire_gate() -> tokio::sync::SemaphorePermit<'static> {
+    MODEL_GATE
+        .acquire()
+        .await
+        .expect("the model single-flight semaphore is never closed")
+}
 
 /// Total request timeout in seconds, from `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS`
 /// (default 30). A small local model on CPU-only hardware (a Pi cluster) can take far
@@ -110,6 +137,11 @@ pub async fn chat(
     model: &str,
     prompt: &str,
 ) -> Option<String> {
+    // Single-flight: hold the process-wide permit for the whole request so no other
+    // model call (judge/propose/keep-warm) overlaps it. The guard releases on drop at
+    // function return — on the `?` early-exits, the timeout error, and the happy path
+    // alike — so a hung-then-timed-out request never strands the permit.
+    let _permit = acquire_gate().await;
     let body = json!({
         "model": model,
         "temperature": 0,
@@ -307,6 +339,11 @@ fn parse_keepwarm_interval(raw: Option<&str>) -> Option<Duration> {
 /// model is warm), `false` on any transport/status error — callers treat this as
 /// best-effort and never block on it. Does NOT touch verdicts or actuation.
 pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) -> bool {
+    // keep-warm builds its own (one-token, `keep_alive`) request rather than routing
+    // through `chat`, so it must take the single-flight permit itself — otherwise the
+    // background ping could overlap a judging/propose request on the single-CPU node.
+    // The guard releases on drop at function return (success or transport error).
+    let _permit = acquire_gate().await;
     let body = json!({
         "model": model,
         "temperature": 0,
@@ -570,6 +607,86 @@ mod tests {
             "an over-cap response must be rejected as None, not buffered/parsed"
         );
         let _ = server.await;
+    }
+
+    /// JEF-236: the process-wide single-flight gate must keep at most ONE model request
+    /// in flight at a time across all callers (judge/propose/keep-warm all go through the
+    /// gate). A localhost server records the number of CONCURRENTLY-open requests and the
+    /// max it ever observes; each request lingers briefly (released by a shared `Notify`
+    /// only once all clients have connected the gate would have to permit) so overlap is
+    /// observable if the gate were absent. We fire 5 `chat` calls with a `JoinSet` and
+    /// assert the server never saw more than one request open at once.
+    #[tokio::test]
+    async fn chat_calls_are_serialized_to_one_in_flight() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const CALLS: usize = 5;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let srv_in_flight = in_flight.clone();
+        let srv_max = max_in_flight.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..CALLS {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let in_flight = srv_in_flight.clone();
+                let max = srv_max.clone();
+                tokio::spawn(async move {
+                    // Drain the request enough to respond; we don't need to parse it.
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    // Record the concurrency this request observed. If the gate works,
+                    // `now` is always 1; without it, overlapping requests push it higher.
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max.fetch_max(now, Ordering::SeqCst);
+                    // Linger so a second request — were the gate absent — would overlap
+                    // this one and be seen by the counter above.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    let payload = json!({
+                        "choices": [{ "message": { "content": "ok" } }]
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..CALLS {
+            let endpoint = endpoint.clone();
+            set.spawn(async move {
+                let client = timeout_only_client(5).unwrap();
+                chat(&client, &endpoint, "m", "p").await
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            assert_eq!(
+                res.unwrap().as_deref(),
+                Some("ok"),
+                "every gated chat call must still complete normally"
+            );
+        }
+        server.await.unwrap();
+
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "the single-flight gate must keep at most one model request in flight at once"
+        );
     }
 
     /// Fix 5: in-cluster endpoints pass the zero-egress check; an external one fails closed
