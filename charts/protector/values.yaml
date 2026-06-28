@@ -12,19 +12,21 @@
 #
 # EGRESS POSTURE — read this. The ENGINE itself stays ZERO-EGRESS (ADR-0015): the
 # security graph and evidence never leave the cluster, and it makes no breach-notify
-# call, no OTLP export, and no live advisory/KEV fetch (it only mounts snapshot files).
-# As of JEF-228 the chart DOES ship ONE component with network egress, ON BY DEFAULT:
-# the feed-sync CronJob (feedSync.enabled: true). It is the SOLE component the chart
-# grants egress to. It makes outbound GETs to PUBLIC, READ-ONLY CVE/KEV feeds and writes
-# the result into in-cluster ConfigMaps the engine mounts. It NEVER reads cluster state
-# and NEVER transmits any cluster data outward — only the plain feed downloads leave.
+# call, no OTLP export, and no live advisory/KEV fetch (it only reads mounted files).
+# As of JEF-238 the chart ships ONE component with network egress, ON BY DEFAULT: the
+# feed-fetcher SIDECAR on the engine pod (feedSync.enabled: true). It is the SOLE
+# component the chart grants egress to. It makes outbound GETs to PUBLIC, READ-ONLY
+# CVE/KEV feeds and writes the result into a shared emptyDir the engine reads. It NEVER
+# reads cluster state and NEVER transmits any cluster data outward — only the plain feed
+# downloads leave. (This supersedes the JEF-228 feed-sync CronJob: raw CISA KEV is
+# ~1.5 MiB, over the 1 MiB ConfigMap limit; an emptyDir holds the FULL data.)
 #
-#   * ENGINE ZERO-EGRESS preserved   engine never calls out (snapshots are mounted)
-#   * FEED-SYNC EGRESSES by default  feedSync.enabled: true   (public read-only feeds only)
+#   * ENGINE ZERO-EGRESS preserved   engine never calls out (feeds are read from a volume)
+#   * SIDECAR EGRESSES by default    feedSync.enabled: true   (public read-only feeds only)
 #
-# FULLY AIR-GAPPED / ZERO-EGRESS posture: set feedSync.enabled=false and mount the KEV /
-# advisory snapshots yourself (engine.kev.configMapName / engine.advisory.configMapName).
-# Then NOTHING in the chart egresses.
+# FULLY AIR-GAPPED / ZERO-EGRESS posture: set feedSync.enabled=false (no sidecar, nothing
+# egresses) and, to keep enrichment offline, mount your own kev.json / advisory.json into
+# the engine at /var/lib/protector/feeds.
 #
 # See the chart README for the exact opt-in/opt-out for each.
 
@@ -286,28 +288,15 @@ engine:
   falco:
     enabled: true
     port: 9999
-  # CISA KEV catalogue (actively-exploited CVEs) for exploit intel. OPTIONAL —
-  # without it, footholds still fire on critical-severity CVEs. The engine never fetches
-  # KEV itself (zero egress); it mounts a synced ConfigMap.
-  # AUTO-WIRED BY DEFAULT: leave configMapName empty and, because feed-sync is ON by
-  # default, the engine auto-mounts the feed-sync's ConfigMap (feedSync.kevConfigMapName,
-  # default "kev-snapshot"). Set an explicit name to override the auto-wire and point at
-  # your own operator-synced ConfigMap. With feedSync.enabled=false AND this empty, no KEV
-  # is mounted (the manual/air-gapped path) — set configMapName to mount one by hand.
-  kev:
-    configMapName: ""
-    key: known_exploited_vulnerabilities.json
-  # Advisory snapshot (ADR-0015): a CVE-keyed file synced out of band so the model reasons
-  # over CWE class + fix-availability + a capped summary. MOUNTED-SNAPSHOT ONLY — the
-  # engine never fetches advisories over the network (zero egress). OPTIONAL.
-  # AUTO-WIRED only when feed-sync is on AND a source is configured: leave configMapName
-  # empty and set feedSync.advisoryUrl, and the engine auto-mounts the feed-sync's
-  # ConfigMap (feedSync.advisoryConfigMapName, default "advisory-snapshot"). Advisory has
-  # NO default source, so without an explicit configMapName and without feedSync.advisoryUrl
-  # there is no advisory enrichment. Set an explicit name to override the auto-wire.
-  advisory:
-    configMapName: ""
-    key: advisories.json
+  # CISA KEV catalogue (actively-exploited CVEs) and advisory snapshot (ADR-0015) feed the
+  # engine's exploit intel + model reasoning. The engine NEVER fetches these over the
+  # network (zero egress) — it only READS files from a shared emptyDir. By default the
+  # feed-fetcher SIDECAR (feedSync below, ON by default) fetches them in FULL into that
+  # volume and the engine auto-reads them at /var/lib/protector/feeds/{kev,advisory}.json
+  # (PROTECTOR_KEV_FILE / PROTECTOR_ADVISORY_FILE, set automatically). No further config.
+  #
+  # AIR-GAPPED: set feedSync.enabled=false (no sidecar, no egress) and, to keep enrichment
+  # offline, mount your own kev.json / advisory.json into the engine at that same path.
   # Local-first model for the adjudicator/hypothesis proposer (OpenAI-compatible chat
   # endpoint). OPTIONAL and OFF by default — the engine runs the deterministic enumerator
   # only with no model. Point at an IN-CLUSTER model so the graph never leaves the cluster
@@ -384,65 +373,64 @@ agent:
   tolerations:
   - operator: Exists
 
-# --- feed-sync (JEF-228) ---
-# ON BY DEFAULT (feedSync.enabled: true). A dedicated CronJob that auto-syncs the CISA KEV
-# catalogue (and, if you configure advisoryUrl, an advisory snapshot) into the ConfigMaps
-# the engine mounts, so KEV exploit intel is fresh out of the box without an operator
-# syncing it by hand. The engine is AUTO-WIRED to these ConfigMaps when you leave
-# engine.kev.configMapName / engine.advisory.configMapName empty (see those keys above).
+# --- feed-fetcher sidecar (JEF-238) ---
+# ON BY DEFAULT (feedSync.enabled: true). A co-located feed-fetcher SIDECAR (a native
+# sidecar = an initContainer with restartPolicy: Always) on the engine pod fetches the
+# FULL public CISA KEV catalogue (and, if you set advisoryUrl, an advisory snapshot) into
+# a shared emptyDir the engine reads — so KEV exploit intel is fresh out of the box with
+# no operator syncing it by hand and no further configuration.
 #
-# EGRESS POSTURE — READ THIS. This CronJob is the ONE component the chart gives network
-# egress to, and it is ON by default. It makes outbound GETs to PUBLIC, READ-ONLY feed
-# URLs (kevUrl / advisoryUrl) and writes to the in-cluster apiserver to upsert the
-# ConfigMaps. It NEVER reads cluster state and NEVER transmits any cluster data outward —
-# the only bytes that leave are the plain GET requests for the public feeds. The ENGINE
-# itself stays ZERO-EGRESS (ADR-0015): it only mounts the resulting snapshot files and
-# makes no advisory/KEV network call of its own. The job runs as its own dedicated
-# ServiceAccount whose Role grants get/update/patch (and the first-run create) on ONLY the
-# two named ConfigMaps in this namespace — least privilege, isolated from the engine's SA.
+# WHY A SIDECAR, NOT A CONFIGMAP (supersedes JEF-228). Raw CISA KEV JSON is ~1.5 MiB,
+# over the 1 MiB ConfigMap limit (the CronJob path had to lossily strip it to CVE-IDs);
+# advisory data does not fit at all. An emptyDir has NO size limit, so the sidecar fetches
+# the data in FULL and the engine reads the complete files.
 #
-# TRADEOFF / FRAMING: engine zero-egress is preserved; feed-sync egresses to public feeds
-# by default. TO RESTORE A FULLY AIR-GAPPED / ZERO-EGRESS POSTURE, set feedSync.enabled=false
-# (then NOTHING in the chart egresses) and mount the KEV / advisory snapshots yourself via
-# engine.kev.configMapName / engine.advisory.configMapName. With feed-sync disabled, nothing
-# here is templated and the chart behaves exactly as the manual-mount path.
+# EGRESS POSTURE — READ THIS. The sidecar is the ONE container the chart gives network
+# egress to, and it is ON by default. It GETs PUBLIC, READ-ONLY feed URLs (kevUrl /
+# advisoryUrl) and writes them to the shared emptyDir. Unlike the retired CronJob it makes
+# NO apiserver call (no ServiceAccount grant, no RBAC). It NEVER reads cluster state and
+# NEVER transmits any cluster data outward — the only bytes that leave are the plain GETs
+# for the public feeds. The ENGINE itself stays ZERO-EGRESS (ADR-0015): it only reads the
+# resulting files and makes no advisory/KEV network call of its own.
+#
+# TRADEOFF / FRAMING: engine zero-egress is preserved; the sidecar egresses to public
+# feeds by default. TO RESTORE A FULLY AIR-GAPPED / ZERO-EGRESS POSTURE, set
+# feedSync.enabled=false (then NOTHING in the chart egresses); to keep enrichment offline,
+# mount your own kev.json / advisory.json into the engine at /var/lib/protector/feeds
+# yourself. With the sidecar disabled, no sidecar/volume/feed-env renders.
 #
 # Advisory stays OPTIONAL: kevUrl ships a default public source, but advisoryUrl is empty
-# (no default advisory source), so advisory is only synced/auto-wired once you set it.
+# (no default advisory source), so advisory is only fetched once you set it.
 feedSync:
   enabled: true
-  # Standard cron schedule. Default: once a day at 03:00. KEV/advisory feeds change at
-  # most daily; a tighter cadence buys little and spends egress + apiserver writes.
-  schedule: "0 3 * * *"
-  # The two public, READ-ONLY feed sources fetched on each run. KEV is the canonical
-  # CISA catalogue; advisory defaults to empty (no advisory enrichment) — set it to YOUR
-  # operator-curated, CVE-keyed advisory snapshot URL to opt into ADR-0015 enrichment.
+  # The two public, READ-ONLY feed sources. KEV is the canonical CISA catalogue, fetched
+  # in FULL (the emptyDir has no ConfigMap size limit). advisoryUrl defaults to empty (no
+  # advisory enrichment).
+  #
+  # ADVISORY FORMAT — IMPORTANT. The sidecar fetches advisoryUrl VERBATIM (no transform).
+  # The engine's AdvisoryStore (ADR-0015) parses a specific CVE-keyed shape:
+  #   {"CVE-2021-44228": {"summary": "...", "cwe": ["CWE-502"], "fix_ref": "2.17.0"}, ...}
+  # or {"advisories": [{"id": "CVE-...", "summary": "...", "cwe": [...], "fix_ref": "..."}]}.
+  # Point advisoryUrl at a source ALREADY in that shape (e.g. your operator-curated export).
+  # A public OSV/GHSA bulk feed is NOT in this shape; transforming it would need a JSON
+  # processor the curl-only image lacks, so it is left as a documented follow-up (TODO) —
+  # do not point advisoryUrl at a raw OSV/GHSA dump, the engine would parse it to "no
+  # enrichment". KEV needs no transform: CISA KEV JSON is what KevCatalog already parses.
   kevUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
   advisoryUrl: ""
-  # Names of the ConfigMaps the job upserts; point engine.kev.configMapName /
-  # engine.advisory.configMapName at these same names to mount them into the engine.
-  kevConfigMapName: kev-snapshot
-  advisoryConfigMapName: advisory-snapshot
-  # Keys within each ConfigMap (must match engine.kev.key / engine.advisory.key so the
-  # engine's PROTECTOR_KEV_FILE / PROTECTOR_ADVISORY_FILE paths resolve).
-  kevKey: known_exploited_vulnerabilities.json
-  advisoryKey: advisories.json
-  # The sync image. Needs BOTH curl and kubectl. Defaults to the official bitnami/kubectl
-  # image (curl included), pinned by tag. First-party/official only — no marketplace dep.
+  # Re-fetch interval (a `sleep` arg: e.g. "12h", "6h", "30m"). KEV/advisory feeds change
+  # at most daily; 12h keeps them fresh without spending much egress.
+  interval: "12h"
+  # The fetcher image. A CURL-ONLY image (no apiserver client needed anymore — and
+  # bitnami/kubectl was pulled from Docker Hub, cluster fork). Pinned by tag. The image's
+  # unprivileged user is uid 100 / gid 101 (set in the sidecar securityContext).
   image:
-    repository: docker.io/bitnami/kubectl
-    tag: "1.31"
+    repository: curlimages/curl
+    tag: "8.11.1"
     pullPolicy: IfNotPresent
   # Per-feed download wall (s) for curl --max-time, bounding a slow/hung feed host.
   curlMaxTimeSecs: 120
-  # Job lifecycle knobs. Forbid-overlap is set in the template; these tune history +
-  # retry/deadline so a stuck or failing run can't pile up or block the next tick.
-  backoffLimit: 2
-  activeDeadlineSeconds: 600
-  startingDeadlineSeconds: 300
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  # Tiny: a curl + two small kubectl applies. Override for very large advisory snapshots.
+  # Tiny: a curl loop writing two files. Override for very large advisory snapshots.
   resources:
     requests:
       cpu: 10m
@@ -450,7 +438,3 @@ feedSync:
     limits:
       cpu: 100m
       memory: 128Mi
-  podAnnotations: {}
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}

@@ -66,46 +66,15 @@ app.kubernetes.io/part-of: {{ include "protector.name" . }}
 {{- end }}
 
 {{/*
-Name of the feed-sync workload (CronJob + its dedicated ServiceAccount / Role /
-RoleBinding). The feed-sync job is the ONLY component with network egress (JEF-228):
-it fetches the public KEV + advisory feeds and upserts the two ConfigMaps the engine
-mounts. Its RBAC is scoped to get/update/patch on exactly those two named ConfigMaps —
-least privilege — and it never reads or transmits any cluster data outward. The engine
-stays zero-egress (ADR-0015): it only mounts the resulting snapshots.
+Mount path of the shared emptyDir the feed-fetcher sidecar writes and the engine reads
+(JEF-238). The native-sidecar initContainer fetches the FULL public feeds into files on
+a shared emptyDir under this dir; the engine container mounts the SAME emptyDir
+read-only and points PROTECTOR_KEV_FILE / PROTECTOR_ADVISORY_FILE at the files. The
+engine itself stays zero-egress (ADR-0015): only the co-located sidecar egresses, and
+only to public, read-only feeds — it never reads or transmits any cluster data.
 */}}
-{{- define "protector.feedSyncName" -}}
-{{- printf "%s-feed-sync" (include "protector.fullname" .) }}
-{{- end }}
-
-{{/*
-Effective KEV ConfigMap the engine mounts. An explicit engine.kev.configMapName always
-wins (the manual-mount path is untouched). Otherwise, when feed-sync is ON (default),
-auto-wire the engine to the ConfigMap the job upserts (feedSync.kevConfigMapName) so a
-stock install actually feeds the engine. Empty (no auto-wire) only when feed-sync is OFF
-and no explicit name is given — the air-gapped/manual path. KEV always has a default
-source (feedSync.kevUrl), so it auto-wires whenever feed-sync is enabled.
-*/}}
-{{- define "protector.kevConfigMapName" -}}
-{{- if .Values.engine.kev.configMapName -}}
-{{- .Values.engine.kev.configMapName -}}
-{{- else if .Values.feedSync.enabled -}}
-{{- .Values.feedSync.kevConfigMapName -}}
-{{- end -}}
-{{- end }}
-
-{{/*
-Effective advisory ConfigMap the engine mounts. As with KEV, an explicit
-engine.advisory.configMapName always wins. Advisory has NO default source, so it only
-auto-wires when feed-sync is ON *and* an advisory source URL is configured
-(feedSync.advisoryUrl non-empty) — matching the job, which only upserts the advisory
-ConfigMap when advisoryUrl is set. Empty otherwise (no advisory enrichment).
-*/}}
-{{- define "protector.advisoryConfigMapName" -}}
-{{- if .Values.engine.advisory.configMapName -}}
-{{- .Values.engine.advisory.configMapName -}}
-{{- else if and .Values.feedSync.enabled .Values.feedSync.advisoryUrl -}}
-{{- .Values.feedSync.advisoryConfigMapName -}}
-{{- end -}}
+{{- define "protector.feedsDir" -}}
+{{- "/var/lib/protector/feeds" -}}
 {{- end }}
 
 {{/* Name of the cert-manager serving Certificate (and its Secret). */}}

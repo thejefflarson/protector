@@ -89,6 +89,44 @@ reference — and **no timestamps**. So a freshly-synced snapshot busts the cach
 **once** (the entry is re-judged with the new evidence) and is then stable across
 passes; it does not thrash per pass.
 
+## Amendment (JEF-238): a co-located feed-fetcher sidecar is the approved live-enrichment mechanism
+
+The core rule above is unchanged: **the engine (and the security graph) make no outbound
+advisory/KEV call and never transmit cluster data — they only READ mounted files.** What
+this amendment settles is *how those files get refreshed* without an operator syncing them
+by hand, and it does so without weakening the engine's zero-egress posture.
+
+**The mechanism.** A **feed-fetcher sidecar** — a native sidecar (an `initContainer` with
+`restartPolicy: Always`) co-located on the engine pod — fetches the public feeds into a
+shared `emptyDir` the engine reads. This is **on by default** (`feedSync.enabled: true`).
+It is sanctioned as the single approved live-enrichment lane:
+
+- **Inbound-only public-feed egress.** The sidecar makes outbound GETs to **public,
+  read-only** feed URLs (CISA KEV; an operator-supplied advisory source) and writes the
+  results to the shared volume. It makes **no apiserver call** and has **no RBAC** — it
+  cannot read or transmit any cluster state. The only bytes that leave are the plain feed
+  GETs, keyed on nothing cluster-specific (the full CISA KEV catalogue is the same request
+  for every cluster — it does **not** leak the cluster's own CVE profile, unlike a
+  per-CVE live lookup, which is exactly why §2's per-CVE OSV fetch was rejected).
+- **Engine + graph remain zero-egress.** The engine still only reads files; the §1 rule
+  and the injection-safety guarantees (§4/§5) are untouched, because the file shape the
+  engine parses is identical to the mounted-snapshot shape this ADR already governs.
+- **Full data, no ConfigMap limit.** An `emptyDir` has no size cap, so the **full** CISA
+  KEV JSON (~1.5 MiB) and advisory data are fetched and read in full.
+
+**Supersedes.** This replaces the **JEF-228** feed-sync CronJob+ConfigMap path: raw CISA
+KEV (~1.5 MiB) exceeds Kubernetes' 1 MiB ConfigMap limit (forcing a lossy CVE-IDs-only
+extraction) and advisory data does not fit at all. It also definitively closes the
+cancelled **JEF-110** engine-fetch option (§2): the engine never fetches; only the
+co-located, no-cluster-access sidecar does. The advisory file the sidecar fetches must
+already be in the `AdvisoryStore` CVE-keyed shape (§4) — a transform from a raw OSV/GHSA
+bulk feed is a documented follow-up, not part of this lane today.
+
+**Air-gapped escape hatch preserved.** Setting `feedSync.enabled=false` removes the
+sidecar entirely (nothing in the chart egresses); an operator can still mount their own
+snapshot files into the engine for fully-offline enrichment — the §1 mounted-snapshot
+posture, verbatim.
+
 ## Consequences
 
 Easier / better:

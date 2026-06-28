@@ -13,12 +13,12 @@ Out of the box the chart is in its most conservative posture for **acting on** t
 cluster. **Every step toward acting on the cluster is a single, documented value change
 — nothing that writes to or blocks your workloads is default-on.**
 
-One thing *is* default-on for egress: the **feed-sync** CronJob (`feedSync.enabled:
+One thing *is* default-on for egress: the **feed-fetcher sidecar** (`feedSync.enabled:
 true`). It is the single component the chart grants network egress to, and it only
-GETs **public, read-only** CVE/KEV feeds into in-cluster ConfigMaps — it never reads or
-transmits any cluster data, and the **engine itself stays zero-egress** (ADR-0015). For
-a fully air-gapped / zero-egress install, set `feedSync.enabled=false` and mount the KEV
-/ advisory snapshots yourself (see [Air-gapped / zero-egress](#air-gapped--zero-egress)).
+GETs **public, read-only** CVE/KEV feeds into a shared volume the engine reads — it never
+reads or transmits any cluster data, and the **engine itself stays zero-egress**
+(ADR-0015). For a fully air-gapped / zero-egress install, set `feedSync.enabled=false`
+(see [Air-gapped / zero-egress](#air-gapped--zero-egress)).
 
 | Property            | Default                                | Why                                                              |
 | ------------------- | -------------------------------------- | --------------------------------------------------------------- |
@@ -28,8 +28,8 @@ a fully air-gapped / zero-egress install, set `feedSync.enabled=false` and mount
 | Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token; engine + agent share a chart-provisioned Secret. |
 | Engine              | **shadow** (`engine.enable` empty)     | Detects + proposes; the engine forces dry-run actuation while no class is armed. |
 | Actuator            | `dryrun`                               | Touches nothing even if a class is later armed (a deliberate two-step). |
-| Engine egress       | **none** (zero-egress, ADR-0015)       | The engine makes no breach-notify call, no OTLP export, no live advisory/KEV fetch — it only mounts snapshot files; the security graph never leaves the cluster. |
-| Feed-sync egress    | **on** (`feedSync.enabled: true`)      | The ONE component with egress: a CronJob that GETs public, read-only CVE/KEV feeds into in-cluster ConfigMaps. It never reads or transmits cluster data. Set `feedSync.enabled=false` for a fully air-gapped install. |
+| Engine egress       | **none** (zero-egress, ADR-0015)       | The engine makes no breach-notify call, no OTLP export, no live advisory/KEV fetch — it only reads mounted feed files; the security graph never leaves the cluster. |
+| Feed-fetcher egress | **on** (`feedSync.enabled: true`)      | The ONE component with egress: a co-located sidecar that GETs public, read-only CVE/KEV feeds into a shared volume the engine reads. It never reads or transmits cluster data. Set `feedSync.enabled=false` for a fully air-gapped install. |
 | Model               | **off** (`engine.model.endpoint` empty) | Engine runs the deterministic enumerator only; no model required. |
 | eBPF agent          | **off** (`agent.enabled: false`)       | Needs the agent image + probes load-tested on your kernel.      |
 | RBAC                | read-only                              | No write grants unless `actuationRBAC: true` (armed mode).      |
@@ -73,7 +73,7 @@ kubectl -n protector port-forward svc/protector-dashboard 8080:8080
 ## Opt-ins (each is one value change)
 
 Nothing below that **acts on or blocks** your workloads is enabled by default (the one
-default-on item is the read-only **feed-sync** egress, covered below). Arm in this order
+default-on item is the read-only **feed-fetcher** egress, covered below). Arm in this order
 and review the decision journal / audit log at each step.
 
 ### Enforce image signatures in a namespace
@@ -146,65 +146,77 @@ leaves the cluster. The adjudicator's veto is load-bearing once a class is armed
 --set engine.model.name="qwen2.5:3b-instruct"
 ```
 
-### KEV / advisory snapshots — feed-sync (on by default)
+### KEV / advisory feeds — feed-fetcher sidecar (on by default)
 
 The engine reasons over a CISA KEV catalogue (actively-exploited CVEs) and an optional
 CVE-keyed advisory snapshot. **The engine never fetches these over the network** — it
-only mounts them from ConfigMaps (ADR-0015), so the engine stays zero-egress.
+only reads them from a file (ADR-0015), so the engine stays zero-egress.
 
-By default the chart keeps those ConfigMaps fresh for you with the **feed-sync** CronJob
-(`feedSync.enabled: true`): a dedicated job that downloads the public CISA KEV feed (and,
-if you set an advisory source, an advisory snapshot) on a schedule and upserts the
-`kev-snapshot` / `advisory-snapshot` ConfigMaps. **The engine is auto-wired to these
-ConfigMaps** when you leave `engine.kev.configMapName` / `engine.advisory.configMapName`
-empty — a stock install therefore gets fresh KEV intel with no further configuration.
+By default the chart keeps those files fresh for you with a co-located **feed-fetcher
+sidecar** (`feedSync.enabled: true`) on the engine pod: a [native
+sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (an
+`initContainer` with `restartPolicy: Always`) that downloads the **full** public CISA KEV
+feed (and, if you set an advisory source, an advisory snapshot) into a shared `emptyDir`,
+then re-fetches on `feedSync.interval`. The engine container mounts the **same** volume
+read-only and reads `/var/lib/protector/feeds/kev.json` (and `advisory.json`) — wired
+automatically, no further configuration. The engine degrades gracefully if a file is
+missing or empty (the first-boot race before the sidecar's first fetch).
 
-KEV ships a default public source, so it auto-wires out of the box. Advisory has **no**
-default source, so opt in by pointing at your curated, CVE-keyed advisory feed:
+**Why a sidecar, not a ConfigMap?** Raw CISA KEV JSON is ~1.5 MiB — over Kubernetes'
+1 MiB ConfigMap limit (the retired CronJob path had to lossily strip it to CVE IDs), and
+advisory data does not fit at all. An `emptyDir` has no size limit, so the sidecar fetches
+and the engine reads the data in **full**. This supersedes the JEF-228 CronJob and the
+cancelled JEF-110 engine-fetch (see ADR-0015).
+
+KEV ships a default public source, so it works out of the box. Advisory has **no** default
+source; opt in by pointing at a curated, CVE-keyed advisory feed **already in the
+`AdvisoryStore` shape** (see the format note below):
 
 ```sh
 --set feedSync.advisoryUrl="https://your-internal/advisories.json"
 ```
 
-Tune the cadence with `feedSync.schedule`, the sources with `feedSync.kevUrl` /
-`feedSync.advisoryUrl`, and the image (official `bitnami/kubectl` by default) with
-`feedSync.image.*`.
+Tune the cadence with `feedSync.interval` (e.g. `12h`), the sources with `feedSync.kevUrl`
+/ `feedSync.advisoryUrl`, and the curl image with `feedSync.image.*`.
 
-**Egress boundary.** The CronJob is the **only** component the chart gives network egress
-to, and it is **on by default**. It makes outbound GETs to **public, read-only** feed URLs
-and writes to the in-cluster apiserver to upsert the ConfigMaps — it never reads cluster
-state and never transmits any cluster data outward. The **engine stays zero-egress**
-(ADR-0015): it only mounts the resulting snapshot files and makes no advisory/KEV network
-call of its own. The job runs as its **own dedicated ServiceAccount** whose Role grants
-get/update/patch (plus the first-run create) on **only** the two named ConfigMaps in the
-release namespace — least privilege, isolated from the engine's ServiceAccount.
+**Advisory format (important).** The sidecar fetches `advisoryUrl` **verbatim — no
+transform**. The engine's `AdvisoryStore` parses a specific CVE-keyed shape:
 
-**Framing:** *engine zero-egress is preserved; feed-sync egresses to public feeds by
-default — disable it for air-gapped.*
-
-#### Bring your own snapshots (override the auto-wire)
-
-To point the engine at ConfigMaps you sync yourself, set the names explicitly — an
-explicit name always wins over the auto-wire:
-
-```sh
---set engine.kev.configMapName=my-kev \
---set engine.advisory.configMapName=my-advisory
+```json
+{"CVE-2021-44228": {"summary": "...", "cwe": ["CWE-502"], "fix_ref": "2.17.0"}}
 ```
+
+(or `{"advisories": [{"id": "CVE-...", "summary": "...", "cwe": [...], "fix_ref": "..."}]}`).
+Point `advisoryUrl` at a source already in that shape. A raw public OSV/GHSA bulk feed is
+**not** in this shape — transforming it would need a JSON processor the curl-only image
+lacks, so an OSV/GHSA→`AdvisoryStore` transform is a documented follow-up (TODO). Don't
+point `advisoryUrl` at a raw OSV/GHSA dump; the engine would parse it to "no enrichment".
+KEV needs no transform.
+
+**Egress boundary.** The sidecar is the **only** component the chart gives network egress
+to, and it is **on by default**. It makes outbound GETs to **public, read-only** feed URLs
+and writes them to the shared volume — it makes **no apiserver call** (no ServiceAccount
+grant, no RBAC), never reads cluster state, and never transmits any cluster data outward.
+The **engine stays zero-egress** (ADR-0015): it only reads the resulting files and makes no
+advisory/KEV network call of its own. The sidecar runs unprivileged (uid 100 / gid 101,
+`allowPrivilegeEscalation: false`, read-only root filesystem, all capabilities dropped).
+
+**Framing:** *engine zero-egress is preserved; the sidecar egresses to public feeds by
+default — disable it for air-gapped.*
 
 #### Air-gapped / zero-egress
 
-To run with **no chart egress at all**, disable feed-sync and mount the snapshots by hand:
+To run with **no chart egress at all**, disable the feed-fetcher sidecar:
 
 ```sh
---set feedSync.enabled=false \
---set engine.kev.configMapName=kev-snapshot \
---set engine.advisory.configMapName=advisory-snapshot
+--set feedSync.enabled=false
 ```
 
-With `feedSync.enabled=false`, nothing extra is templated, the engine auto-wires nothing
-(so an unset `engine.kev.configMapName` mounts no KEV — set it to mount one), and **no
-component in the chart egresses**.
+With `feedSync.enabled=false`, no sidecar, no shared volume, and no feed env are
+templated, and **no component in the chart egresses**. To keep enrichment offline, mount
+your own `kev.json` / `advisory.json` into the engine container at
+`/var/lib/protector/feeds` (e.g. via a ConfigMap/Secret/PVC you manage) and set
+`PROTECTOR_KEV_FILE` / `PROTECTOR_ADVISORY_FILE` accordingly.
 
 ### Arm the engine (live actuation) — the careful two-step
 
@@ -259,8 +271,9 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `cert.create`                | `true`                               | cert-manager serving cert + caBundle injection.    |
 | `ingestAuth.enabled`         | `true`                               | Bearer-token authn on the :9999 ingest (engine + agent share a Secret). |
 | `ingestAuth.existingSecret`  | `""`                                 | Bring your own Secret (key `token`) for rotation.  |
-| `feedSync.enabled`           | `true`                               | Feed-sync CronJob (the one default-on egress); auto-wires the engine's KEV/advisory mounts. Set `false` for air-gapped. |
-| `feedSync.advisoryUrl`       | `""` (KEV only)                      | Set to a CVE-keyed advisory source to also sync + auto-wire advisory. |
+| `feedSync.enabled`           | `true`                               | Feed-fetcher sidecar (the one default-on egress); fetches the full KEV (+ advisory) into a shared volume the engine reads. Set `false` for air-gapped. |
+| `feedSync.advisoryUrl`       | `""` (KEV only)                      | Set to a CVE-keyed advisory source **already in the `AdvisoryStore` shape** to also fetch advisory (no transform — see feeds section). |
+| `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
 | `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy.        |
 | `webhook.enforcedNamespaceSelector` | `{}` (matches nothing)         | Label-select the namespaces that fail closed.      |
 | `resources`                  | 10m/64Mi → 250m/256Mi                | RAM-tight, arm64-friendly.                          |
