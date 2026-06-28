@@ -109,6 +109,7 @@ mod tests {
             verdict: verdict.map(|v| v.to_string()),
             path: Vec::new(),
             evidence: Default::default(),
+            recency: None,
         }
     }
 

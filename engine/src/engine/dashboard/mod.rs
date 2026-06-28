@@ -32,6 +32,7 @@ use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 pub mod components;
 pub(crate) mod model;
 mod page;
+pub(crate) mod recency;
 pub mod view_model;
 
 #[cfg(test)]
@@ -45,6 +46,10 @@ pub use model::{
     BakeStats, Finding, Findings, Judgement, JudgementLog, ModelHealth, ReadinessConfig,
     ReversionLog, ReversionRecord, VerdictStore,
 };
+// The per-entry recency / Δ types (JEF-201): the engine writes the display posture each pass
+// (`StoredPosture`) and reads back the resolved Δ (`RecencyInfo` on `Finding`); the view maps
+// them into the dense table's Δ column. Re-exported so the engine uses `dashboard::` paths.
+pub use recency::{Delta, RecencyInfo, StoredPosture};
 pub use view_model::readiness_data::Readiness;
 pub use view_model::report_data::{Report, ReportQuery};
 

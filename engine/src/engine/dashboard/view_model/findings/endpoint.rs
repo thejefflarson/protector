@@ -6,9 +6,9 @@
 //! maud, no markup.
 
 use super::{
-    EvidenceProps, GlyphProps, Posture, RailProps, Tier, evidence_props, glyph_props,
-    humanize_relation, is_broad, next_lever_tag, path_aria_label, plural, rail_facts, row_id,
-    terminal_reach_clause, verdict_gist, what_to_do,
+    EvidenceProps, GlyphProps, Posture, RailProps, RecencyCell, Tier, endpoint_recency,
+    evidence_props, glyph_props, humanize_relation, is_broad, next_lever_tag, path_aria_label,
+    plural, rail_facts, recency_cell, row_id, terminal_reach_clause, verdict_gist, what_to_do,
 };
 use crate::engine::dashboard::components::graph::{kind, short};
 use crate::engine::dashboard::model::{EntryEvidence, Finding, relative_time};
@@ -108,6 +108,11 @@ pub struct RowProps {
     pub lever: &'static str,
     /// The pass-age phrase ("as of Nm ago") — already humanized.
     pub age: String,
+    /// The per-finding recency / Δ cell (JEF-201): the glyph/age, its aria-label, and tone.
+    /// Derived from the endpoint's stored [`RecencyInfo`] (worst-case across its findings), so
+    /// the Δ survives the `/fragment` poll (the glyph was computed at pass time) and a
+    /// journal-restore (a restored endpoint reads `·`, never NEW).
+    pub recency: RecencyCell,
     pub calm: bool,
     /// Whether this summary row belongs to the collapsed Context group (JEF-202): the page
     /// composition sets it for context-tier endpoints so the row renders `hidden` behind the
@@ -301,6 +306,10 @@ pub fn endpoint_props(
         glyphs,
         lever,
         age: relative_time(last_pass),
+        // The Δ column (JEF-201): the endpoint's worst-case stored recency, shaped into the
+        // glyph/aria/tone cell. Resolved per-entry at `Findings::snapshot` time onto each
+        // finding, so it tracks the store, not the render clock.
+        recency: recency_cell(endpoint_recency(fs).as_ref()),
         calm: meta.calm,
         // Set by the page composition for context-tier endpoints (JEF-202); a row built here
         // is a standalone attention/watch row until the page groups it.

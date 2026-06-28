@@ -74,6 +74,7 @@ mod tests {
             verdict: verdict.map(str::to_string),
             path: Vec::new(),
             evidence: EntryEvidence::default(),
+            recency: None,
         }
     }
 

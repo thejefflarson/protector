@@ -15,6 +15,7 @@ use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 
+use crate::engine::dashboard::recency::{Delta, RecencyInfo, StoredPosture};
 use crate::engine::graph::{Behavior, SecurityGraph, Vulnerability};
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
@@ -67,6 +68,14 @@ pub struct Finding {
     /// two as divergent: CVEs are a SEVERITY/reachability input, runtime alerts the LIVE
     /// corroboration signal — the view presents them as two distinct labeled blocks.
     pub evidence: EntryEvidence,
+    /// The per-entry recency / Δ facts (JEF-201) — what changed for this entry since the last
+    /// pass (NEW / escalated / de-escalated / unchanged-age / restored). Resolved from the
+    /// shared verdict store at [`Findings::snapshot`] time, like [`verdict`](Self::verdict),
+    /// so the Δ tracks the stored first-seen / posture history rather than the render clock.
+    /// `None` on a row published before any recency update (the published rows carry no
+    /// recency of their own). Pure presentation metadata: gates nothing (ADR-0016).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recency: Option<RecencyInfo>,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
@@ -216,6 +225,9 @@ impl Finding {
                     to: l.to.0.clone(),
                 })
                 .collect(),
+            // Resolved per-entry from the verdict store at `Findings::snapshot` time
+            // (JEF-201), like `verdict`; the published row carries none of its own.
+            recency: None,
         }
     }
 }
@@ -415,6 +427,26 @@ pub struct VerdictEntry {
     /// grows the retry delay; a decisive verdict resets it. The verdict cache above still
     /// serves decisive verdicts — this only gates the re-judge of failed ones.
     pub backoff: EntryBackoff,
+    /// When this entry's key FIRST appeared (JEF-201) — set the first pass the key is seen,
+    /// never overwritten after. The Δ column's age is measured from here, NOT from render
+    /// time, so it survives the `/fragment` poll. A journal-restored entry seeds this with a
+    /// synthetic PAST instant (so it never reads as "this pass") via [`restored_recency`].
+    ///
+    /// [`restored_recency`]: Self::restored_recency
+    pub first_seen: Option<Instant>,
+    /// The DISPLAY posture this entry carried on the PREVIOUS pass (JEF-201), updated each
+    /// pass by diffing the new posture against it. `None` until the first recency update; the
+    /// diff against it yields the Δ glyph (escalated / de-escalated / unchanged).
+    pub prev_posture: Option<StoredPosture>,
+    /// The Δ verdict computed on the LAST recency update (JEF-201) — what changed at the most
+    /// recent pass. Held here (not recomputed at render) so a `/fragment` re-render with no
+    /// new pass shows the same Δ rather than flickering to NEW each poll. `None` until the
+    /// first recency update has run for the entry.
+    pub last_delta: Option<Delta>,
+    /// Whether this entry was RESTORED from the durable journal on boot (JEF-201, JEF-141) —
+    /// it existed before this run, so its first live recency update must read [`Delta::New`]'s
+    /// quieter sibling [`Delta::Restored`], never NEW. Cleared once a live pass re-judges it.
+    pub restored_recency: bool,
 }
 
 impl VerdictEntry {
@@ -427,6 +459,23 @@ impl VerdictEntry {
             .as_ref()
             .map(Verdict::summary)
             .or_else(|| self.restored.clone())
+    }
+
+    /// The entry's resolved recency facts at `now` (JEF-201): the stored Δ verdict and the
+    /// age since `first_seen`. The Δ is the one computed at the LAST recency update (held in
+    /// `last_delta`), so this is stable across `/fragment` polls — `now` only freshens the
+    /// human age, never the glyph. A restored entry reports no meaningful age (its first_seen
+    /// is synthetic). `None` Δ (no recency update yet) reads as `Unchanged` with no age.
+    pub(crate) fn recency_info(&self, now: Instant) -> RecencyInfo {
+        let delta = self.last_delta.unwrap_or(Delta::Unchanged);
+        // A restored entry's first_seen is synthetic — its age is not a real "seen N ago".
+        let age_secs = if self.restored_recency {
+            None
+        } else {
+            self.first_seen
+                .map(|fs| now.saturating_duration_since(fs).as_secs())
+        };
+        RecencyInfo { delta, age_secs }
     }
 }
 
@@ -484,8 +533,64 @@ impl VerdictStore {
 
     /// Seed a journal-restored verdict summary for an entry (JEF-141) — shown until a
     /// live verdict supersedes it. Does not touch the cache or the journaled-dedup key.
-    pub fn seed_restored(&self, entry: &str, summary: String) {
-        self.update(entry, |e| e.restored = Some(summary));
+    ///
+    /// JEF-201: a restored entry existed BEFORE this run, so it must never read as NEW in the
+    /// Δ column. This marks it `restored_recency` and seeds its `first_seen` with a synthetic
+    /// PAST instant (`restored_at`, the journal's last-pass time) so the recency tracker treats
+    /// it as pre-existing. The first live pass that re-judges it clears the restored flag.
+    pub fn seed_restored(&self, entry: &str, summary: String, restored_at: Instant) {
+        self.update(entry, |e| {
+            e.restored = Some(summary);
+            e.restored_recency = true;
+            e.first_seen.get_or_insert(restored_at);
+            // A restored entry already has a posture to diff future passes against; until a
+            // live pass lands, its Δ reads `Restored` (not `New`).
+            e.last_delta.get_or_insert(Delta::Restored);
+            e.prev_posture.get_or_insert(StoredPosture::Awaiting);
+        });
+    }
+
+    /// Record this pass's display POSTURE for an entry and compute its Δ (JEF-201): set
+    /// `first_seen` on first sight, diff the new posture against the stored `prev_posture`,
+    /// store the resulting [`Delta`], and roll `prev_posture` forward. `now` is injected (the
+    /// pass's single `Instant`) so the recency tracking is deterministic in tests and shares
+    /// the same clock as the JEF-234 backoff. Pure presentation metadata — never gates a
+    /// decision (ADR-0016). A previously-restored entry's first live posture clears the
+    /// restored flag and reads as `Restored` for one pass (it existed before this run), then
+    /// diffs normally.
+    pub fn record_recency(&self, entry: &str, posture: StoredPosture, now: Instant) {
+        self.update(entry, |e| {
+            let first = e.first_seen.is_none() && !e.restored_recency;
+            e.first_seen.get_or_insert(now);
+            let delta = if first {
+                // Brand-new key this run — NEW regardless of which posture it lands on.
+                Delta::New
+            } else if e.restored_recency {
+                // It was restored from history; its first live pass reads `Restored`, not NEW.
+                e.restored_recency = false;
+                Delta::Restored
+            } else {
+                match e.prev_posture {
+                    Some(prev) => StoredPosture::delta_from(prev, posture),
+                    // No previous posture but already seen (e.g. restored seeded Awaiting and
+                    // then cleared): treat as unchanged rather than fabricating an arrow.
+                    None => Delta::Unchanged,
+                }
+            };
+            e.last_delta = Some(delta);
+            e.prev_posture = Some(posture);
+        });
+    }
+
+    /// The entry's resolved recency facts at `now` (JEF-201) — the Δ verdict + age the Δ
+    /// column renders. `None` when the entry has no record yet (never seen). `now` is injected
+    /// for deterministic tests.
+    pub fn recency_for(&self, entry: &str, now: Instant) -> Option<RecencyInfo> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .map(|e| e.recency_info(now))
     }
 
     /// The cached decisive verdict for an entry whose fingerprint matches — the re-judge
@@ -660,6 +765,17 @@ impl Findings {
     /// the verdict is looked up per entry here, so a verdict the engine just wrote is
     /// visible immediately — there is no end-of-pass re-publish needed to surface it.
     pub fn snapshot(&self) -> Vec<Finding> {
+        self.snapshot_at(Instant::now())
+    }
+
+    /// The findings snapshot resolved against an injected `now` (JEF-201) — the seam the
+    /// recency tests drive deterministically (no real sleeps). The live [`snapshot`] passes
+    /// `Instant::now()`. Only the human AGE in the recency cell uses `now`; the Δ GLYPH was
+    /// already computed (and stored) at pass time with the pass's clock, so it is stable
+    /// across `/fragment` polls regardless of the render-time `now`.
+    ///
+    /// [`snapshot`]: Self::snapshot
+    pub(crate) fn snapshot_at(&self, now: Instant) -> Vec<Finding> {
         let mut rows = self.rows.lock().expect("findings mutex poisoned").clone();
         for f in &mut rows {
             // A breach-relevant finding's verdict is the model's per-entry call, the one
@@ -668,6 +784,9 @@ impl Findings {
             // enough — the verdict tracks the store, not the last `replace`.
             if f.breach_relevant {
                 f.verdict = self.verdicts.display_summary(&f.entry);
+                // The Δ / recency facts track the same per-entry store (JEF-201): the glyph is
+                // the one computed at pass time, only the age is freshened at `now`.
+                f.recency = self.verdicts.recency_for(&f.entry, now);
             }
         }
         rows

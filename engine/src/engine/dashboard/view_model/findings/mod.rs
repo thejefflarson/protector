@@ -9,6 +9,7 @@
 //! feeds see only the `Props` defined here.
 
 use crate::engine::dashboard::model::{AUTO_ELIGIBLE, CveEvidence, EntryEvidence, Finding};
+use crate::engine::dashboard::recency::{Delta, RecencyInfo};
 use std::collections::{BTreeMap, BTreeSet};
 
 // The graph node-key helpers live in the presentation graph module (pure over strings);
@@ -724,6 +725,126 @@ pub fn row_id(entry: &str) -> String {
         })
         .collect();
     format!("row-{slug}")
+}
+
+// ---- the recency / Δ column (JEF-201) --------------------------------------------------
+
+/// The dense table's Δ cell as PLAIN presentation data (JEF-201): the terse glyph/age, the
+/// screen-reader label (so meaning is carried in TEXT, never the glyph/color alone — AC #4),
+/// and the CSS tone class. The `components::findings::row` renderer emits this verbatim and
+/// imports none of the recency enums — exactly the ADR-0019 Props boundary the rail/evidence
+/// cells already follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecencyCell {
+    /// What the cell shows: `NEW` / `↑` / `↓`, or the quiet age (`2m`) for an unchanged row,
+    /// or `·` when there is no age yet. Glyph chars come from the closed [`Delta`] set.
+    pub glyph: String,
+    /// The meaning IN WORDS for `aria-label` (AC #4): "new this pass" / "escalated" / etc.
+    pub aria_label: String,
+    /// The CSS tone class — `rc-new` / `rc-up` / `rc-down` / `rc-steady` — so the glyph can be
+    /// styled WITHOUT being the sole carrier of meaning (the aria-label carries that).
+    pub tone: &'static str,
+}
+
+/// Humanize a whole-seconds age into a terse `Ns`/`Nm`/`Nh`/`Nd` (JEF-201) — the quiet age the
+/// steady-state Δ cell shows in place of a glyph. Mirrors `model::relative_time`'s buckets but
+/// over a raw seconds count (the recency age is an `Instant` delta, not a `SystemTime`).
+pub fn humanize_age_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// Shape the Δ cell from a resolved [`RecencyInfo`] (JEF-201). `None` (a row published before
+/// any recency update) reads as a quiet steady cell with no glyph — never a spurious NEW. An
+/// `Unchanged`/`Restored` cell shows the age (when known); the active deltas show their glyph.
+pub fn recency_cell(recency: Option<&RecencyInfo>) -> RecencyCell {
+    let Some(r) = recency else {
+        return RecencyCell {
+            glyph: "·".to_string(),
+            aria_label: "no recency yet".to_string(),
+            tone: "rc-steady",
+        };
+    };
+    let age = r.age_secs.map(humanize_age_secs);
+    let tone = match r.delta {
+        Delta::New => "rc-new",
+        Delta::Escalated => "rc-up",
+        Delta::DeEscalated => "rc-down",
+        Delta::Unchanged | Delta::Restored => "rc-steady",
+    };
+    // A steady/restored cell shows the age in place of the glyph; the active deltas show the
+    // glyph itself (the age still rides in the aria-label for the unchanged case).
+    let glyph = match r.delta {
+        Delta::Unchanged | Delta::Restored => age.clone().unwrap_or_else(|| "·".to_string()),
+        other => other.glyph().to_string(),
+    };
+    RecencyCell {
+        glyph,
+        aria_label: r.delta.aria_label(age.as_deref()),
+        tone,
+    }
+}
+
+/// The worst-case Δ across an endpoint's coalesced findings (JEF-201): one dense-table row
+/// represents every finding from an entry, so its Δ takes the most NOTEWORTHY of them —
+/// escalation first, then new, then de-escalation, then restored, then unchanged. Each
+/// endpoint's findings share one entry key, so they share one stored `RecencyInfo`; this
+/// simply picks the first present (and is robust if that ever changes).
+pub fn endpoint_recency(fs: &[&Finding]) -> Option<RecencyInfo> {
+    fn weight(d: Delta) -> u8 {
+        match d {
+            Delta::Escalated => 0,
+            Delta::New => 1,
+            Delta::DeEscalated => 2,
+            Delta::Restored => 3,
+            Delta::Unchanged => 4,
+        }
+    }
+    fs.iter()
+        .filter_map(|f| f.recency)
+        .min_by_key(|r| weight(r.delta))
+}
+
+/// The findings-region recency TALLY for the latest pass (JEF-201): how many endpoints are
+/// NEW this pass and how many newly FLAGGED (escalated). Rendered as the region header line
+/// "N new · M newly flagged since last pass". Counts only — pure presentation (ADR-0016).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecencyTally {
+    pub new: usize,
+    pub newly_flagged: usize,
+}
+
+impl RecencyTally {
+    /// Whether the tally has anything to announce (so the header line is omitted when nothing
+    /// changed, rather than reading a hollow "0 new").
+    pub fn is_empty(self) -> bool {
+        self.new == 0 && self.newly_flagged == 0
+    }
+}
+
+/// Tally the per-endpoint recency over a set of endpoint finding-groups (JEF-201): one count
+/// per ENDPOINT (not per finding), using each endpoint's worst-case Δ. `groups` is the same
+/// per-entry grouping the region renders.
+pub fn recency_tally<'a>(groups: impl IntoIterator<Item = &'a [&'a Finding]>) -> RecencyTally {
+    let mut tally = RecencyTally::default();
+    for fs in groups {
+        if let Some(r) = endpoint_recency(fs) {
+            if r.delta.is_new() {
+                tally.new += 1;
+            }
+            if r.delta.is_escalation() {
+                tally.newly_flagged += 1;
+            }
+        }
+    }
+    tally
 }
 
 // The per-endpoint card/row + remediation assembly (the heavier Props builders) live in a

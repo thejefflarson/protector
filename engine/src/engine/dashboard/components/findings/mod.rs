@@ -22,10 +22,10 @@ pub use row::row;
 use crate::engine::dashboard::view_model::findings::EndpointProps;
 use maud::{Markup, PreEscaped, html};
 
-/// The number of columns in the dense findings table (JEF-202):
-/// `tier · entry → reaches · verdict · evidence · next lever · age`. The detail row's
+/// The number of columns in the dense findings table (JEF-202, JEF-201):
+/// `tier · entry → reaches · verdict · evidence · next lever · age · Δ`. The detail row's
 /// `<td colspan>` spans all of them.
-pub const FINDINGS_COLS: usize = 6;
+pub const FINDINGS_COLS: usize = 7;
 
 /// One endpoint as a pair of dense-table rows (JEF-202): the SUMMARY `<tr>` (whose tier cell
 /// is the row-expand control) and a hidden DETAIL `<tr><td colspan>` carrying the full card
@@ -57,6 +57,9 @@ pub fn findings_table(rows: Markup) -> Markup {
                     th scope="col" { "evidence" }
                     th scope="col" { "next lever" }
                     th scope="col" { "age" }
+                    // The Δ recency column (JEF-201): "what changed since last pass". The
+                    // header glyph's meaning is given in words for screen readers.
+                    th scope="col" { abbr title="what changed since last pass" { "Δ" } }
                 }
             }
             tbody { (PreEscaped(rows.into_string())) }

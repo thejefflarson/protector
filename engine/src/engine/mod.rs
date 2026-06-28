@@ -354,6 +354,10 @@ impl Engine {
         let mut latest_at = std::time::SystemTime::UNIX_EPOCH;
         let mut restored_verdicts = 0usize;
         let mut restored_reversions = 0usize;
+        // The boot instant the recency tracker stamps as a restored entry's synthetic
+        // `first_seen` (JEF-201) — a past instant relative to any later pass, so a restored
+        // entry is never mislabeled NEW. (Restored ages are suppressed regardless.)
+        let restored_at = std::time::Instant::now();
         for entry in &entries {
             latest_at = latest_at.max(entry.at());
             match &entry.decision {
@@ -367,7 +371,13 @@ impl Engine {
                     // one is computed. Replayed in chronological order, so the final write
                     // per entry wins. Display-only: the action logic still uses the live
                     // verdict, never this restored string.
-                    self.verdicts.seed_restored(key, verdict.clone());
+                    //
+                    // JEF-201: a restored entry existed BEFORE this run, so it must never read
+                    // as NEW in the Δ column. `restored_at` (boot `Instant`) seeds its
+                    // `first_seen` in the past and flags it `restored`; the recency cell shows
+                    // `Restored`, not NEW, until a live pass re-judges it.
+                    self.verdicts
+                        .seed_restored(key, verdict.clone(), restored_at);
                     restored_verdicts += 1;
                 }
                 journal::Decision::Revert { cut, reason } => {
@@ -690,6 +700,16 @@ impl Engine {
             // an end-of-pass re-publish. A live verdict supersedes any journal-restored
             // one for this entry (handled inside `set_display`).
             self.verdicts.set_display(entry_key, display.clone());
+            // Record this pass's display POSTURE for the Δ / recency column (JEF-201): the
+            // store sets `first_seen` on first sight and diffs against the previous pass to
+            // derive the Δ glyph (NEW / ↑ / ↓ / steady). Shares `pass_now` with the JEF-234
+            // backoff so the recency clock is the single injected seam the tests drive. Pure
+            // presentation metadata — it gates nothing (ADR-0016: recency is a view).
+            self.verdicts.record_recency(
+                entry_key,
+                dashboard::StoredPosture::of_summary(Some(&display.summary())),
+                pass_now,
+            );
             // Append the breach decision to the durable journal (JEF-141) — but only a
             // DECISIVE verdict, and only when it changed from the last line we wrote for
             // this entry, so a steady-state cluster doesn't append an identical line every
