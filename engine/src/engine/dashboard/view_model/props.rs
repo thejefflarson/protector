@@ -106,7 +106,7 @@ impl DeltaProps {
     /// The glyph + word for the Δ cell (steady age has no glyph).
     pub fn glyph(&self) -> &'static str {
         match self {
-            DeltaProps::New => "\u{FF0B}",         // ＋
+            DeltaProps::New => "\u{2605}",         // ★ (not "+", which is the row expander)
             DeltaProps::Escalated => "\u{25B2}",   // ▲
             DeltaProps::DeEscalated => "\u{25BC}", // ▼
             DeltaProps::Restored => "\u{21BA}",    // ↺

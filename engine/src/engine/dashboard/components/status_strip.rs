@@ -33,15 +33,18 @@ pub fn status_strip(s: &StatusStripProps) -> Markup {
     }
 }
 
-/// The shadow/enforce mode pill — posture, not a gap (always shown so the operator SEES it).
+/// The shadow/enforce mode pill (upper-right). SHADOW is a **warning** posture — the engine is
+/// only proposing, not protecting — so it reads amber with a ⚠; ENFORCE is the intended, calm
+/// (blue) state. Always shown so the operator SEES which mode they're in.
 fn mode_pill(armed: bool) -> Markup {
-    let (cls, word, sub) = if armed {
-        ("pill mode-enforce", "ENFORCE", "acting")
+    let (cls, word, sub, glyph) = if armed {
+        ("pill mode-enforce", "ENFORCE", "acting", "")
     } else {
-        ("pill mode-shadow", "SHADOW", "proposes, never acts")
+        ("pill mode-shadow warn", "SHADOW", "proposes, never acts", "\u{26A0}")
     };
     html! {
         span class=(cls) {
+            @if !glyph.is_empty() { span.pill-glyph { (glyph) } }
             span.pill-word { (word) }
             span.pill-sub { (sub) }
         }
