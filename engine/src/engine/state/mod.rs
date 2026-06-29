@@ -1,4 +1,4 @@
-//! The engine's **output-state** domain layer (ADR-0019): the shared types the engine core
+//! The engine's **output-state** domain layer: the shared types the engine core
 //! writes each pass and the metrics mirror reads — the proven-chain [`Finding`] row and its
 //! evidence, the single per-entry [`VerdictStore`], the [`Findings`] / [`JudgementLog`] /
 //! [`ReversionLog`] handles, the [`BakeStats`] / [`ModelHealth`] / [`ReadinessConfig`] coverage

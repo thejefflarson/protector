@@ -39,7 +39,7 @@ pub mod observe;
 pub mod policy_log;
 pub mod reason;
 pub mod respond;
-// The engine's output-state domain layer (ADR-0019): the proven-chain findings, the per-entry
+// The engine's output-state domain layer: the proven-chain findings, the per-entry
 // verdict store, the judgement/reversion logs, the behavioral-bake snapshot, and the
 // would-have-acted / readiness aggregations the per-pass OTLP mirror reads.
 pub mod state;
