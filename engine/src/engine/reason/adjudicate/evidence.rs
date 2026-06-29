@@ -147,6 +147,34 @@ fn take_from_budget(field: String, budget: &mut usize) -> Option<String> {
     }
 }
 
+/// Is vulnerability `a` the WORSE instance of a shared CVE id, the one to keep when
+/// trivy reported the same CVE against several affected packages (JEF-133 dedup)?
+/// Worst = highest severity, tie-broken by highest CVSS score; if those are equal,
+/// prefer the instance that carries the most exploitability signal — a fix-availability
+/// indication (the workload is on a vulnerable version a fix exists for) and/or an EPSS
+/// probability — so deduping never drops a fix range or EPSS the other instance had.
+/// Total + deterministic on equal-id instances (the only thing it is asked to compare):
+/// equal severity, CVSS, and signal-count means neither is "worse" and the first
+/// encountered (id order) wins.
+fn worse_vuln(a: &Vulnerability, b: &Vulnerability) -> bool {
+    use std::cmp::Ordering;
+    // `score` is `Option<f64>`; an absent score sorts below any present one. NaN should
+    // never reach here (trivy emits finite CVSS), but treat it as the smallest so the
+    // comparison stays total rather than panicking.
+    let score = |v: &Vulnerability| v.score.unwrap_or(f64::NEG_INFINITY);
+    // Count the exploitability signals an instance carries, used only to break a
+    // severity+CVSS tie so the survivor keeps the richer fix/EPSS metadata.
+    let signal =
+        |v: &Vulnerability| usize::from(v.fixed_version.is_some()) + usize::from(v.epss.is_some());
+    // Highest severity, then highest CVSS, then most exploitability signal. `total_cmp`
+    // keeps the CVSS comparison total even for the NEG_INFINITY sentinel.
+    a.severity
+        .cmp(&b.severity)
+        .then_with(|| score(a).total_cmp(&score(b)))
+        .then_with(|| signal(a).cmp(&signal(b)))
+        == Ordering::Greater
+}
+
 /// The evidence behind an entry: the CVEs its image carries and the runtime signals
 /// observed on it — what the model needs to judge contextual realness. The raw evidence
 /// (structured `Vulnerability` + `Behavior`) comes from [`SecurityGraph::entry_evidence`],
@@ -175,6 +203,27 @@ pub(crate) fn entry_evidence(
     // in must not depend on graph-traversal order). The prompt re-sorts the rendered lines
     // anyway; sorting here just fixes the order the budget is consumed in.
     vulns.sort_by(|a, b| a.id.cmp(&b.id));
+    // Collapse duplicate CVE ids to one representative BEFORE rendering (JEF-133 source of
+    // truth, so both the prompt and the dashboard's per-finding evidence agree). Trivy
+    // reports the same CVE once PER affected package, so the same id can arrive several
+    // times with different CVSS / fix ranges; the prior string-level `cves.dedup()` in
+    // `build_judgment_prompt_with` can't collapse them (the trailing metadata differs), so
+    // the judge saw a noisy triplicate list. Keep the WORST instance per id so no signal is
+    // lost — see `worse_vuln`. `vulns` is already sorted by id, so equal ids are adjacent;
+    // deduping keeps id order and is therefore deterministic (the prompt re-sorts the
+    // rendered lines anyway, but the budget below must spend in a stable order).
+    vulns.dedup_by(|a, b| {
+        if a.id != b.id {
+            return false;
+        }
+        // `dedup_by` keeps the FIRST of each adjacent equal run (`b`) and drops `a`; fold
+        // `a`'s superiority into `b` so the survivor is the worst instance, not just the
+        // first-encountered one.
+        if worse_vuln(a, b) {
+            *b = a.clone();
+        }
+        true
+    });
     // Apply the per-entry AGGREGATE untrusted-free-text budget (JEF-106): a shared budget
     // is threaded across the lines so a CVE-heavy image can't aggregate an unbounded prompt
     // even when every per-field cap holds. Early CVE lines keep their prose; once the budget
