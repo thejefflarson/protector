@@ -6,13 +6,13 @@
 
 use super::respond::actuator::{ActuationScope, Actuator, DryRunActuator, EnabledActions};
 use super::{
-    Engine, Snapshot, dashboard, journal, model, notify, observe, policy_log, reason, respond,
+    Engine, Snapshot, journal, model, notify, observe, policy_log, reason, respond, state,
 };
 
-/// Replay the durable journal's admission lines (JEF-237) back into the shared `/policy` ring
-/// on boot, preserving each row's dedup `count` + last-seen, so the admission log isn't blank
-/// after a restart. Returns how many rows were restored. A disabled/empty journal restores
-/// nothing.
+/// Replay the durable journal's admission lines (JEF-237) back into the shared
+/// admission-decision log on boot, preserving each row's dedup `count` + last-seen, so the
+/// admission log isn't blank after a restart. Returns how many rows were restored. A
+/// disabled/empty journal restores nothing.
 fn restore_admission_log(
     journal: &journal::DecisionJournal,
     policy_log: &policy_log::PolicyDecisionLog,
@@ -93,7 +93,7 @@ fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
 /// governs). The model judges exploitability bidirectionally — vetoing a live chain
 /// the deterministic bar would act on, or promoting an exposed one it wouldn't.
 fn build_adjudicator(
-    journal: std::sync::Arc<dashboard::JudgementLog>,
+    journal: std::sync::Arc<state::JudgementLog>,
 ) -> Box<dyn reason::adjudicate::Adjudicator> {
     match model::config() {
         Some((endpoint, model)) => {
@@ -116,20 +116,19 @@ fn build_adjudicator(
 /// This path is exercised against a real cluster, not unit tests — the analysis it
 /// drives is what the tests cover.
 // This is the engine's top-level entrypoint: each argument is an independent wired-in
-// capability (client, arm-state, scope, the optional feed/dashboard addrs, the intel
-// snapshots, the admission-decision ring). Bundling them into a config struct belongs to
-// the JEF-218 split of this orchestrator, not this additive wiring (JEF-226).
+// capability (client, arm-state, scope, the optional feed addr, the intel snapshots, the
+// admission-decision ring). Bundling them into a config struct belongs to the JEF-218 split
+// of this orchestrator, not this additive wiring (JEF-226).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_watch(
     client: kube::Client,
     active: EnabledActions,
     scope: ActuationScope,
     runtime_addr: Option<std::net::SocketAddr>,
-    dashboard_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
     epss: observe::epss::EpssStore,
-    // The webhook's admission-decision ring (JEF-226), shared so the dashboard's `/policy`
-    // view can read the same decisions the webhook engine writes.
+    // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
+    // carries the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
@@ -140,10 +139,10 @@ pub async fn run_watch(
     use kube::runtime::{WatchStreamExt, reflector, watcher};
 
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
-    // shared from the adjudicator (writer) to the dashboard's `/judgements` (reader).
-    let journal = std::sync::Arc::new(dashboard::JudgementLog::new());
+    // written by the adjudicator for later inspection.
+    let journal = std::sync::Arc::new(state::JudgementLog::new());
     // The durable decision journal (JEF-141): reload pre-restart decisions onto the
-    // in-memory views so the dashboard isn't blank while the caches + CPU model warm.
+    // in-memory state so the output state isn't blank while the caches + CPU model warm.
     // Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no
     // crash) — the engine then behaves exactly as before.
     let mut engine = Engine::new(
@@ -160,50 +159,33 @@ pub async fn run_watch(
     .with_notifier(notify::BreachNotifier::from_env());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
-    // (JEF-237), so `/policy` isn't blank after a restart — parallel to how the engine's
-    // `replay_journal` restored the model verdicts above. The engine owns a handle to the
-    // same journal file the webhook persists admissions to; we replay its `Admission` lines
-    // (preserving each row's dedup count + last-seen) back into the shared ring.
+    // (JEF-237), so the admission-decision log isn't blank after a restart — parallel to how
+    // the engine's `replay_journal` restored the model verdicts above. The engine owns a
+    // handle to the same journal file the webhook persists admissions to; we replay its
+    // `Admission` lines (preserving each row's dedup count + last-seen) back into the shared
+    // ring.
     let restored_admissions = restore_admission_log(engine.journal().as_ref(), &policy_log);
     if restored_admissions > 0 {
         tracing::info!(
             restored_admissions,
-            "restored admission decisions onto /policy from the durable journal"
+            "restored admission decisions onto the admission-decision log from the durable journal"
         );
     }
 
-    // Findings dashboard (read-only): surfaces the proven chains, especially the
-    // latent-foothold proposals a human acts on, plus `/judgements` for diagnosis and
-    // `/reversions` for lifted cuts (JEF-141).
-    if let Some(addr) = dashboard_addr {
-        let findings = engine.findings();
-        let reversions = engine.reversions();
-        let judgements = journal.clone();
-        // The durable decision journal (JEF-143) backs the `/report` would-have-acted view.
-        let decisions = engine.journal();
-        // The readiness / coverage panel's config summary (JEF-160): presence/absence of
-        // each decision input, captured once here from the same env/handles the engine
-        // already reads. Presence/health only — no secret names, no endpoints, no values.
-        // The LIVE model health and behavioral-feed counts are read per render from the
-        // shared findings handle; this is the static "is it wired" half.
-        findings.set_readiness_config(dashboard::ReadinessConfig {
+    // The readiness / coverage config summary (JEF-160): presence/absence of each decision
+    // input, captured once here from the same env/handles the engine already reads.
+    // Presence/health only — no secret names, no endpoints, no values. The LIVE model health
+    // and behavioral-feed counts are stamped per pass into the shared findings handle; this is
+    // the static "is it wired" half that the readiness aggregation reads.
+    engine
+        .findings()
+        .set_readiness_config(state::ReadinessConfig {
             model_attached: model::config().is_some(),
             kev_count: kev.len(),
             epss_count: epss.len(),
-            journal_durable: decisions.is_enabled(),
+            journal_durable: engine.journal().is_enabled(),
             armed: !active.is_empty(),
         });
-        let admission = policy_log.clone();
-        tokio::spawn(async move {
-            if let Err(error) = dashboard::serve_dashboard(
-                addr, findings, judgements, reversions, decisions, admission,
-            )
-            .await
-            {
-                tracing::error!(%error, "dashboard stopped");
-            }
-        });
-    }
 
     // Keep-warm (JEF-107): warm the model at startup and ping it periodically so it
     // stays resident between judging passes — the first post-restart pass isn't glacial.

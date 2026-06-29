@@ -64,12 +64,8 @@ Then **watch the audit log** before arming anything:
 kubectl -n protector logs -l app.kubernetes.io/name=protector -f
 ```
 
-and review the engine's proposals on the read-only dashboard:
-
-```sh
-kubectl -n protector port-forward svc/protector-dashboard 8080:8080
-# open http://localhost:8080/
-```
+The engine's proposals, adjudications, and applied/reverted cuts are in those logs; its
+would-have-acted and readiness aggregations are mirrored to OTLP each pass.
 
 ## Opt-ins (each is one value change)
 

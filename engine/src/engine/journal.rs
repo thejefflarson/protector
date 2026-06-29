@@ -1,14 +1,14 @@
 //! The decision journal (JEF-141): a durable, append-only record of what the engine
-//! decided, so a pod restart doesn't wipe decision history and leave the dashboard
+//! decided, so a pod restart doesn't wipe decision history and leave the output state
 //! blank for ~20 min while the caches and the CPU model warm.
 //!
-//! Findings, the judgement ring, and the mitigation ledger are all in-memory: a
+//! The findings snapshot, the judgement ring, and the mitigation ledger are all in-memory: a
 //! restart loses them. The journal closes that gap. Each pass appends its **breach
 //! decisions** (the model's per-entry verdict) and its **ledger deltas** (a mitigation
 //! applied or a cut reverted, with the [`Reversion`](super::respond::actuator::Reversion)
 //! reason) as JSON lines to a file on a mounted volume; on boot the engine replays the
-//! tail so `/findings`, `/judgements`, and the reversions view populate immediately —
-//! before a fresh model pass lands.
+//! tail so the findings snapshot, the judgement record, and the reversion log populate
+//! immediately — before a fresh model pass lands.
 //!
 //! Shape and posture mirror the mounted-snapshot port (`exploit_intel.rs`, the KEV
 //! catalogue): the path is a `PROTECTOR_ENGINE_*` env var pointing at an
@@ -42,7 +42,8 @@ const MAX_BYTES: u64 = 1024 * 1024;
 
 /// The structured enrichment-coverage behind a breach decision (JEF-145): the SAME
 /// CVE/behavioral evidence the model was handed in the adjudication prompt, persisted at
-/// journal-append time so `/report` can classify an enrichment-coverage gap from FACT
+/// journal-append time so the would-have-acted report aggregation can classify an
+/// enrichment-coverage gap from FACT
 /// rather than grepping the verdict prose for a `CVE-` token (which misclassifies both
 /// ways: a prose mention with no real backing reads as covered; a well-enriched verdict
 /// that omits the id reads as a gap).
@@ -78,8 +79,8 @@ impl EnrichmentCoverage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Decision {
     /// One breach decision: the model's verdict for an internet-facing entry, over the
-    /// objectives it reaches. The raw material the dashboard's `/findings` and
-    /// `/judgements` views reload after a restart.
+    /// objectives it reaches. The raw material the findings snapshot and the judgement
+    /// record reload after a restart.
     Breach {
         /// The internet-facing entry that was judged.
         entry: String,
@@ -89,8 +90,9 @@ pub enum Decision {
         verdict: String,
         /// The structured enrichment-coverage behind this decision (JEF-145): the
         /// CVE/behavioral evidence the model was given. `None` on records written before
-        /// JEF-145 (via `#[serde(default)]`) — back-compat "unknown", which `/report`
-        /// treats as NOT a coverage gap rather than a false positive.
+        /// JEF-145 (via `#[serde(default)]`) — back-compat "unknown", which the
+        /// would-have-acted report aggregation treats as NOT a coverage gap rather than a
+        /// false positive.
         #[serde(default)]
         coverage: Option<EnrichmentCoverage>,
     },
@@ -108,11 +110,11 @@ pub enum Decision {
         reason: String,
     },
     /// One admission decision the webhook resolved (JEF-237): the deduped per-workload
-    /// signature/mesh allow/audit/deny record the `/policy` view shows. Persisted so the
-    /// admission log survives a restart and repopulates on boot (parallel to how
-    /// [`Breach`](Decision::Breach) repopulates `/findings`), rather than going blank.
-    /// Carries the full [`PolicyDecisionRecord`] (with its dedup `count` + last-seen), so
-    /// the replay restores the row verbatim.
+    /// signature/mesh allow/audit/deny record the admission decision log holds. Persisted so
+    /// the admission log survives a restart and repopulates on boot (parallel to how
+    /// [`Breach`](Decision::Breach) repopulates the findings snapshot), rather than going
+    /// blank. Carries the full [`PolicyDecisionRecord`] (with its dedup `count` + last-seen),
+    /// so the replay restores the row verbatim.
     Admission {
         /// The deduped admission-decision record (subject / image / signature / mesh /
         /// decision / reason / count / last-seen). Low-cardinality, no secret values.
@@ -121,7 +123,7 @@ pub enum Decision {
 }
 
 /// One journal line: a [`Decision`] stamped with when it was recorded. The timestamp is
-/// wall-clock (`SystemTime`) so the dashboard can render "NNs ago" and the operator has
+/// wall-clock (`SystemTime`) so a consumer can render "NNs ago" and the operator has
 /// a real audit time; serialized as a Unix-millis integer for a compact, stable line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
@@ -514,8 +516,8 @@ mod tests {
     fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
         // Back-compat (JEF-145): a journal line written before the structured
         // enrichment-coverage field existed has no `coverage` key. `#[serde(default)]`
-        // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per
-        // `/report`) NOT a false coverage gap.
+        // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per the
+        // would-have-acted report aggregation) NOT a false coverage gap.
         let line = r#"{"at_ms":1,"kind":"breach","entry":"workload/app/Pod/web","objectives":2,"verdict":"exploitable — reaches the secret"}"#;
         let entry: JournalEntry = serde_json::from_str(line).expect("old line still parses");
         match entry.decision {
@@ -560,7 +562,8 @@ mod tests {
     #[test]
     fn admission_decisions_round_trip_across_a_reopen() {
         // JEF-237 persistence: an admission record written before a "restart" replays after
-        // it, with its dedup count + last-seen intact, so `/policy` repopulates on boot.
+        // it, with its dedup count + last-seen intact, so the admission decision log
+        // repopulates on boot.
         use crate::engine::policy_log::PolicyDecisionRecord;
         let path = temp_path("admission");
         {

@@ -13,9 +13,9 @@ Watch the audit log before arming anything:
 
 {{- if .Values.engine.enabled }}
 
-Review the engine's proposals (read-only findings dashboard):
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "protector.fullname" . }}-dashboard {{ .Values.engine.dashboard.port }}:{{ .Values.engine.dashboard.port }}
-  # then open http://localhost:{{ .Values.engine.dashboard.port }}/
+Review the engine's proposals and verdicts (it logs proven chains, adjudications, and
+applied/reverted cuts; the would-have-acted and readiness aggregations are mirrored to OTLP):
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "protector.name" . }} -f
 {{- end }}
 
 {{- if .Values.cert.create }}

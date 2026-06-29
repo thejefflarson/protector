@@ -2,8 +2,8 @@
 //! ring of the webhook's per-event policy decisions — the signature / mesh allow / audit /
 //! deny verdicts the admission webhook resolves on each `AdmissionReview`.
 //!
-//! JEF-226 recorded ONLY violations (audit/deny), so a healthy cluster's `/policy` view was
-//! blank and read as broken. JEF-237 records EVERY resolved admission — including clean
+//! JEF-226 recorded ONLY violations (audit/deny), so a healthy cluster's admission-decision
+//! log was empty and read as broken. JEF-237 records EVERY resolved admission — including clean
 //! admits (signed + meshed) — so the operator sees the full picture: the good pods, not just
 //! the flagged ones. Each row carries the workload subject, the image ref, the coarse
 //! signature + mesh status, the namespace, the coarse decision word, the reason, and the time.
@@ -15,22 +15,22 @@
 //! distinct rows. So replica/CronJob churn coalesces into a single counted row instead of
 //! flooding the ring.
 //!
-//! This module mirrors [`dashboard::JudgementLog`]: a `Mutex`-guarded `VecDeque` written by
-//! the webhook [`Engine`](crate::policy::Engine) (the single recording chokepoint) and read
-//! by the dashboard's `/policy` view. Both the webhook server and the dashboard live in the
-//! same process, so the write handle is shared into the webhook engine and the read handle
-//! into the dashboard — the two halves of one `Arc`.
+//! This module mirrors [`state::JudgementLog`](crate::engine::state::JudgementLog): a
+//! `Mutex`-guarded `VecDeque` written by the webhook [`Engine`](crate::policy::Engine) (the
+//! single recording chokepoint) and read by any consumer of the admission-decision log. The
+//! write handle is shared into the webhook engine and the read handle out to consumers — the
+//! two halves of one `Arc`.
 //!
 //! Persistence (JEF-237): the webhook engine ALSO mirrors each recorded decision into the
 //! durable decision journal (JEF-141) so the log survives a restart. On boot the engine
 //! replays the journal's admission lines back into this ring (parallel to `restored_verdicts`),
-//! so the `/policy` view repopulates immediately rather than going blank for ~20 min.
+//! so the admission-decision log repopulates immediately rather than going blank for ~20 min.
 //!
 //! Payloads are deliberately LOW-CARDINALITY and carry NO secret values: the policy name, the
 //! coarse decision word, the workload subject (`kind/name`), the image ref, the coarse
 //! signature/mesh status, the namespace, and the same human-actionable reason text the
-//! deny/audit log already carries. Every text field is auto-escaped at render (the dashboard
-//! component treats it as untrusted), never trusted as markup.
+//! deny/audit log already carries. Every text field is untrusted free-text and must be escaped
+//! wherever it is later emitted, never trusted as markup.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -38,13 +38,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// One admission decision the webhook resolved, captured for the `/policy` view. Diagnostic /
-/// audit only — it complements (never replaces) the aggregate `/metrics` counter.
+/// One admission decision the webhook resolved, captured for the admission decision log.
+/// Diagnostic / audit only — it complements (never replaces) the aggregate `/metrics` counter.
 ///
-/// `Serialize`/`Deserialize` are the `/policy.json` contract AND the durable-journal shape:
+/// `Serialize`/`Deserialize` are the record's JSON contract AND the durable-journal shape:
 /// every field that post-dates JEF-226 uses `#[serde(default)]` so an older journal line still
-/// parses. Every text field is operator-facing and rendered through an auto-escaping maud
-/// brace; an attacker-controlled image ref or workload name cannot inject markup.
+/// parses. Every text field is operator-facing untrusted free-text and must be escaped wherever
+/// it is later emitted; an attacker-controlled image ref or workload name cannot inject markup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyDecisionRecord {
     /// The policy that rendered the verdict — its stable name
@@ -154,8 +154,8 @@ impl PolicyDecisionRecord {
 }
 
 /// A bounded, deduped, newest-last ring of [`PolicyDecisionRecord`]s, shared between the
-/// webhook engine (writer) and the dashboard's `/policy` view (reader). Mirrors
-/// [`JudgementLog`](crate::engine::dashboard::JudgementLog), but with **dedup**: recording a
+/// webhook engine (writer) and any reader of the admission-decision log. Mirrors
+/// [`JudgementLog`](crate::engine::state::JudgementLog), but with **dedup**: recording a
 /// decision whose `(subject, image, decision)` already exists bumps that row's `count` and
 /// `last_seen` and moves it to the newest position, instead of appending — so a Deployment's
 /// replicas or a CronJob's runs can't flood the ring. The cap bounds the number of *distinct*
@@ -243,8 +243,8 @@ impl PolicyDecisionLog {
     }
 
     /// Aggregate counts by coarse decision word — `(allow, audit, deny)` — summing each row's
-    /// dedup `count`. Drives the `/policy` activity header so liveness is visible even when the
-    /// (deduped) table is short.
+    /// dedup `count`. The admission decision log's activity totals, so liveness is visible even
+    /// when the (deduped) row set is short.
     pub fn tallies(&self) -> DecisionTallies {
         let rows = self
             .rows
@@ -263,8 +263,8 @@ impl PolicyDecisionLog {
     }
 }
 
-/// Coarse decision tallies for the `/policy` activity header (JEF-237): how many admissions
-/// the webhook admitted / audited / denied, summed over the deduped rows' counts.
+/// Coarse decision tallies for the admission decision log's activity totals (JEF-237): how many
+/// admissions the webhook admitted / audited / denied, summed over the deduped rows' counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecisionTallies {
     /// Clean admits (`allow`).
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn record_round_trips_through_json_with_back_compat_defaults() {
-        // The /policy.json + journal contract: a record serializes and a JEF-226-era line
+        // The record's JSON + journal contract: a record serializes and a JEF-226-era line
         // (no image/signature/mesh/count) still deserializes via #[serde(default)].
         let r = rec(
             "admission",

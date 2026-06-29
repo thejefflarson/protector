@@ -99,7 +99,7 @@ pub struct ProvenChain {
     pub exposed_entry: bool,
     /// The model's adjudication summary for this chain, when it was judged (ADR-0013)
     /// — both positive ("exploitable — …") and negative ("not exploitable — …")
-    /// calls, kept so the dashboard can show *why* the model did or didn't act. `None`
+    /// calls, kept so a consumer can show *why* the model did or didn't act. `None`
     /// when no model was consulted (no evidence to weigh, or no model configured).
     pub verdict: Option<String>,
     /// The path, entry → objective, in order.

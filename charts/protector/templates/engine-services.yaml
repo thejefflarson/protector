@@ -1,24 +1,4 @@
-{{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
-# Read-only findings dashboard. ClusterIP only — no Ingress is created. Expose it
-# yourself (Ingress / port-forward / tunnel) if you want it off-cluster.
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "protector.fullname" . }}-dashboard
-  labels:
-    {{- include "protector.labels" . | nindent 4 }}
-spec:
-  type: ClusterIP
-  selector:
-    {{- include "protector.selectorLabels" . | nindent 4 }}
-  ports:
-    - name: dashboard
-      port: {{ .Values.engine.dashboard.port }}
-      targetPort: dashboard
-      protocol: TCP
-{{- end }}
 {{- if and .Values.engine.enabled .Values.engine.falco.enabled }}
----
 # Runtime-evidence ingest. A Falco/falcosidekick deployment (and the optional eBPF
 # agent) POSTs alerts/observations here. ClusterIP only — keep it reachable only from
 # in-cluster senders (a NetworkPolicy / mesh authorization is the floor).

@@ -18,9 +18,9 @@ pub struct ModelAdjudicator {
     model: String,
     client: reqwest::Client,
     /// Optional diagnostic sink: every judgement's full prompt, raw reply, and
-    /// verdict, exposed at `/judgements`. `None` outside the served engine (tests,
-    /// the timer path) so journaling never affects the verdict.
-    journal: Option<std::sync::Arc<crate::engine::dashboard::JudgementLog>>,
+    /// verdict, recorded into the judgement log for inspection. `None` outside the
+    /// long-running engine (tests, the timer path) so journaling never affects the verdict.
+    journal: Option<std::sync::Arc<crate::engine::state::JudgementLog>>,
 }
 
 impl ModelAdjudicator {
@@ -34,10 +34,10 @@ impl ModelAdjudicator {
     }
 
     /// Attach a diagnostic judgement log; the adjudicator records each judgement's
-    /// prompt/reply/verdict into it for inspection at `/judgements`.
+    /// prompt/reply/verdict into it for inspection.
     pub fn with_journal(
         mut self,
-        journal: std::sync::Arc<crate::engine::dashboard::JudgementLog>,
+        journal: std::sync::Arc<crate::engine::state::JudgementLog>,
     ) -> Self {
         self.journal = Some(journal);
         self
@@ -53,7 +53,7 @@ impl ModelAdjudicator {
         verdict: &Verdict,
     ) {
         if let Some(journal) = &self.journal {
-            journal.record(crate::engine::dashboard::Judgement {
+            journal.record(crate::engine::state::Judgement {
                 entry: entry.0.clone(),
                 objectives,
                 verdict: format!("{verdict:?}"),
@@ -105,7 +105,7 @@ impl Adjudicator for ModelAdjudicator {
                 None => (None, Verdict::Uncertain("model unavailable".to_string())),
             };
         // Capture the prompt the model saw, its raw reply, and the guarded verdict so an
-        // `exploitable` call can be diagnosed at `/judgements` (JEF diagnostic).
+        // `exploitable` call can be diagnosed from the judgement record (JEF diagnostic).
         self.record_judgement(entry, objectives.len(), Some(prompt), reply, &verdict);
         verdict
     }

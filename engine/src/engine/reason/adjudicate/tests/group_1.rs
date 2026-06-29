@@ -36,7 +36,8 @@ fn sanitize_strips_prompt_injection_characters() {
 /// JEF-145: `entry_coverage` re-derives the structured enrichment-coverage from the
 /// SAME evidence the model is given (`entry_evidence`) — the matched CVE ids (sorted)
 /// and whether a behavioral signal was present. This is what the journal-append site
-/// persists so `/report` classifies a coverage gap from fact, not verdict prose.
+/// persists so the would-have-acted report aggregation classifies a coverage gap from fact,
+/// not verdict prose.
 #[test]
 fn entry_coverage_reflects_the_model_evidence() {
     use crate::engine::graph::{Behavior, Provenance, RuntimeSignal};

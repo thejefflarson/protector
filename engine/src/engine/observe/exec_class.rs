@@ -96,7 +96,7 @@ pub fn notable_exec(behavior: &Behavior) -> Option<&'static str> {
 /// annotation applied (JEF-55) — `executed /bin/bash (interactive shell in container)` for
 /// a notable exec, the plain [`Behavior::summary`] otherwise. This is the engine-side
 /// replacement for the annotation that used to live on `Behavior::summary` before the
-/// classifier moved out of the shared wire type (JEF-113). Prompt- and dashboard-building
+/// classifier moved out of the shared wire type (JEF-113). Prompt- and evidence-building
 /// code that wants the annotated line calls this instead of `Behavior::summary` directly.
 ///
 /// The label is a fixed internal string (never untrusted input), so it can't inject prompt
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn annotated_summary_appends_the_notable_label() {
         // A notable exec gets the engine annotation appended to the bare wire summary; an
-        // unremarkable behavior is unchanged. This reproduces the exact line the prompt /
-        // dashboard saw before the classifier moved out of the wire type (JEF-113).
+        // unremarkable behavior is unchanged. This reproduces the exact line the prompt and
+        // the evidence blocks saw before the classifier moved out of the wire type (JEF-113).
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
         };

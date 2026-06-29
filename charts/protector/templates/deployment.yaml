@@ -178,11 +178,6 @@ spec:
             - name: https
               containerPort: {{ .Values.service.port }}
               protocol: TCP
-            {{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
-            - name: dashboard
-              containerPort: {{ .Values.engine.dashboard.port }}
-              protocol: TCP
-            {{- end }}
             {{- if and .Values.engine.enabled .Values.engine.falco.enabled }}
             - name: falco-ingest
               containerPort: {{ .Values.engine.falco.port }}
@@ -275,10 +270,6 @@ spec:
               value: {{ .Values.engine.enable | quote }}
             - name: PROTECTOR_ENGINE_ACTUATOR
               value: {{ .Values.engine.actuator | quote }}
-            {{- if .Values.engine.dashboard.enabled }}
-            - name: PROTECTOR_DASHBOARD_ADDR
-              value: "0.0.0.0:{{ .Values.engine.dashboard.port }}"
-            {{- end }}
             {{- if .Values.engine.falco.enabled }}
             - name: PROTECTOR_FALCO_ADDR
               value: "0.0.0.0:{{ .Values.engine.falco.port }}"

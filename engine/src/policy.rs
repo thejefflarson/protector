@@ -208,9 +208,9 @@ pub trait Policy: Send + Sync {
     async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision;
 
     /// **Shadow** evaluation (JEF-246): the gate's counterfactual verdict for `req`, computed
-    /// regardless of [`applies`](Policy::applies) or enforced scope, so the dashboard can show
-    /// what protector WOULD do if this request were in scope and enforced. Display-only — it
-    /// never contributes to the API verdict (ADR-0016).
+    /// regardless of [`applies`](Policy::applies) or enforced scope, so the admission-decision
+    /// log can record what protector WOULD do if this request were in scope and enforced.
+    /// Display-only — it never contributes to the API verdict (ADR-0016).
     ///
     /// The default returns [`NotApplicable`](ShadowVerdict::NotApplicable); a gate that wants a
     /// what-if (signature, mesh) overrides it to compute its verdict for every request. A
@@ -231,15 +231,15 @@ pub trait Policy: Send + Sync {
 pub struct Engine {
     policies: Vec<Box<dyn Policy>>,
     metrics: Arc<Metrics>,
-    /// The bounded, deduped admission-decision ring (JEF-226/237): the per-workload log the
-    /// `/policy` dashboard view reads. Optional so the webhook can run without a dashboard
-    /// (and so the engine's existing tests construct without one). When present, EVERY
-    /// resolved admission — clean admit, audit, or deny — is mirrored here (JEF-237 records
-    /// the good pods too, not only violations).
+    /// The bounded, deduped admission-decision ring (JEF-226/237): the per-workload admission
+    /// decision log. Optional so the webhook can run without it (and so the engine's existing
+    /// tests construct without one). When present, EVERY resolved admission — clean admit,
+    /// audit, or deny — is mirrored here (JEF-237 records the good pods too, not only
+    /// violations).
     decisions: Option<Arc<PolicyDecisionLog>>,
     /// The durable decision journal (JEF-141/237). Optional. When present, each resolved
-    /// admission is also persisted so the `/policy` log survives a restart and repopulates
-    /// on boot. Disabled (a no-op) when no writable volume is configured.
+    /// admission is also persisted so the admission decision log survives a restart and
+    /// repopulates on boot. Disabled (a no-op) when no writable volume is configured.
     journal: Option<Arc<DecisionJournal>>,
 }
 
@@ -281,8 +281,9 @@ impl Engine {
     }
 
     /// Attach the admission-decision ring (JEF-226/237) so EVERY resolved decision — clean
-    /// admit, audit, or deny — is recorded for the `/policy` view in addition to the metric +
-    /// log. Builder-style so `new` stays the minimal constructor the existing tests use.
+    /// admit, audit, or deny — is recorded in the admission decision log in addition to the
+    /// metric + log. Builder-style so `new` stays the minimal constructor the existing tests
+    /// use.
     pub fn with_decision_log(mut self, decisions: Arc<PolicyDecisionLog>) -> Self {
         self.decisions = Some(decisions);
         self
@@ -297,8 +298,8 @@ impl Engine {
 
     /// Run every applicable policy in order. Meters + logs every violation (deny or audit),
     /// returns `Deny` on the first hard denial else `Allow`, and records the resolved
-    /// admission — clean admit included — into the `/policy` ring + journal. Audit findings
-    /// never deny (the discovery signal); a deny short-circuits the API verdict.
+    /// admission — clean admit included — into the admission decision log + journal. Audit
+    /// findings never deny (the discovery signal); a deny short-circuits the API verdict.
     pub async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
         let mut summary = AdmissionSummary {
             decision: "allow",
@@ -369,8 +370,8 @@ impl Engine {
         );
     }
 
-    /// Mirror the request's resolved admission into the bounded, deduped ring the `/policy`
-    /// view reads (JEF-237) AND the durable journal (so it survives a restart). One row per
+    /// Mirror the request's resolved admission into the bounded, deduped admission decision
+    /// log (JEF-237) AND the durable journal (so it survives a restart). One row per
     /// request — clean admits included — deduped by `(subject, image, decision)` so a
     /// Deployment's replicas or a CronJob's runs coalesce into a single counted row.
     /// Low-cardinality, no secret values.
@@ -651,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn records_clean_admit_as_an_allow_row() {
         // JEF-237's headline: a good pod (signed + meshed) is RECORDED as a green admit row,
-        // not dropped — so a healthy cluster's /policy view isn't blank.
+        // not dropped — so a healthy cluster's admission decision log isn't empty.
         let log = Arc::new(PolicyDecisionLog::new());
         let engine = Engine::new(
             vec![
@@ -741,7 +742,7 @@ mod tests {
     #[tokio::test]
     async fn resolved_admission_is_persisted_to_the_journal() {
         // JEF-237 persistence: with a journal attached, the resolved admission is written as a
-        // durable Admission line so /policy survives a restart.
+        // durable Admission line so the admission decision log survives a restart.
         use crate::engine::journal::{Decision as JournalDecision, DecisionJournal};
         let path = std::env::temp_dir().join(format!(
             "protector-policy-journal-{}-{}.jsonl",
