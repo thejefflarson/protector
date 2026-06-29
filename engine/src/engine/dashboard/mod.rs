@@ -67,7 +67,12 @@ pub struct DashboardState {
 
 impl DashboardState {
     /// Build the live readiness snapshot from the findings handle's config + per-pass health.
-    fn readiness(&self) -> Readiness {
+    ///
+    /// `pub` so the dev hot-reload preview example (`examples/dashboard_preview.rs`) can derive
+    /// readiness exactly as production does without re-exporting the crate-private
+    /// `state::derive_readiness`. Pure read of the handle's config/health/bake/last-pass — it
+    /// makes no decision and mutates nothing (ADR-0016).
+    pub fn readiness(&self) -> Readiness {
         let config: ReadinessConfig = self.findings.readiness_config();
         let health: ModelHealth = self.findings.model_health();
         let bake: BakeStats = self.findings.bake();

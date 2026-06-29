@@ -29,13 +29,13 @@ fn findings_table(v: &FindingsViewProps) -> Markup {
         table.findings {
             thead {
                 tr {
+                    th.col-expand scope="col" { span.visually-hidden { "expand" } }
                     th.col-delta scope="col" { "\u{0394}" }
                     th.col-posture scope="col" { "POSTURE" }
                     th.col-entry scope="col" { "ENTRY \u{2192} OBJECTIVE" }
                     th.col-path scope="col" { "PATH" }
                     th.col-evidence scope="col" { "EVIDENCE" }
-                    th.col-disposition scope="col" { "DISP" }
-                    th.col-live scope="col" { "LIVE?" }
+                    th.col-disposition scope="col" { "DISPOSITION" }
                 }
             }
             tbody {

@@ -1,8 +1,9 @@
 //! The evidence tables for a finding's detail panel (brief §5): the CVE table
 //! (id/sev/CVSS/KEV/EPSS/reachability/fix), the runtime split (corroborating vs context),
 //! the exposed-secrets / misconfig / RBAC tables. Severity is the COOLER, subordinate channel
-//! (style guide principle 2) — never as loud as posture. Empty blocks render an explicit "none"
-//! (invariant #3). Pure component; no domain types; all free-text auto-escaped.
+//! (style guide principle 2) — never as loud as posture. When a finding has NO evidence the whole
+//! section is omitted (no implied-absent text). Pure component; no domain types; all free-text
+//! auto-escaped.
 
 use maud::{Markup, html};
 
@@ -10,21 +11,20 @@ use crate::engine::dashboard::view_model::props::{
     BehaviorProps, CveProps, EvidenceProps, ScanProps,
 };
 
-/// Render all evidence tables for a finding. The whole-empty case is the honest "no evidence",
-/// never a blank.
+/// Render all evidence tables for a finding. When the finding has no evidence the whole section is
+/// omitted — nothing is rendered (no implied-absent text).
 pub(super) fn evidence_tables(ev: &EvidenceProps) -> Markup {
+    if ev.is_empty() {
+        return html! {};
+    }
     html! {
         section.detail-section.evidence-block {
             h3.detail-h { "evidence" }
-            @if ev.is_empty() {
-                p.evidence-none { "no evidence on this entry \u{2014} no CVEs, runtime signals, or scanner findings" }
-            } @else {
-                (cve_table(&ev.cves))
-                (runtime_block(&ev.corroborating, &ev.context))
-                (scan_table("exposed secrets", "exposed-secrets", &ev.exposed_secrets))
-                (scan_table("misconfigurations", "misconfigs", &ev.misconfigs))
-                (scan_table("RBAC findings", "rbac", &ev.rbac_findings))
-            }
+            (cve_table(&ev.cves))
+            (runtime_block(&ev.corroborating, &ev.context))
+            (scan_table("exposed secrets", "exposed-secrets", &ev.exposed_secrets))
+            (scan_table("misconfigurations", "misconfigs", &ev.misconfigs))
+            (scan_table("RBAC findings", "rbac", &ev.rbac_findings))
         }
     }
 }
@@ -108,7 +108,7 @@ fn behavior_item(b: &BehaviorProps) -> Markup {
 }
 
 /// A generic scanner-findings table (exposed secrets / misconfigs / RBAC). Empty groups render
-/// nothing here (the whole-empty case is handled by the parent's "no evidence").
+/// nothing here (the whole-empty case is handled by the parent omitting the section).
 fn scan_table(title: &str, css: &str, findings: &[ScanProps]) -> Markup {
     if findings.is_empty() {
         return html! {};
