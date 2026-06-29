@@ -302,6 +302,9 @@ summary:focus-visible,
   font-size: var(--fs-data);
   line-height: var(--lh-data);
 }
+/* Every cell's inline content centers on one axis so text baselines don't wander across the
+   row (mixed 11/12/13px chips otherwise sit at different heights). */
+.cell > * { vertical-align: middle; }
 
 /* posture cell: the rail is FLUSH to the row's left edge (its own padding lives on .posture-chip),
    so the rail texture reads as an intentional left border of the row, not floating inside the
@@ -398,8 +401,11 @@ summary:focus-visible,
 /* The whole summary row is the toggle; clicking anywhere opens its paired detail row. */
 .row { cursor: pointer; }
 
-/* the +/- expander cell + button (monospace, muted) */
-.cell-expand { width: 1%; white-space: nowrap; text-align: center; padding-right: 0; }
+/* The expander column is flush to the table's left edge so the first column lines up under the
+   header brand + the nav tabs (all share the --space-4 page gutter), not pushed in by cell
+   padding. */
+.cell-expand, .findings thead th.col-expand { padding-left: var(--space-2); padding-right: 0; }
+.cell-expand { width: 1%; white-space: nowrap; text-align: center; }
 .expander {
   appearance: none;
   -webkit-appearance: none;
