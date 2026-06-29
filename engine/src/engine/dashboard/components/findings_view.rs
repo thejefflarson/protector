@@ -29,6 +29,7 @@ fn findings_table(v: &FindingsViewProps) -> Markup {
         table.findings {
             thead {
                 tr {
+                    th.col-expand scope="col" { span.visually-hidden { "expand" } }
                     th.col-delta scope="col" { "\u{0394}" }
                     th.col-posture scope="col" { "POSTURE" }
                     th.col-entry scope="col" { "ENTRY \u{2192} OBJECTIVE" }

@@ -1,8 +1,9 @@
 // Protector dashboard — zero-dependency client script (served same-origin).
 //
 // Two jobs, both observational (the dashboard never acts):
-//   1. Persist which <details> "why" panels are expanded across live-poll swaps, keyed by the
-//      finding id (data-finding), so a refresh doesn't collapse what the operator opened.
+//   1. Persist which finding rows are expanded across live-poll swaps, keyed by the finding id
+//      (data-finding), so a refresh doesn't collapse what the operator opened. The whole
+//      summary row is the toggle; the first cell's +/- button mirrors the open state.
 //   2. Poll /fragment for the active tab and swap the live region IN PLACE, preserving scroll
 //      position, expansion state, and the current tab/filter query — so a model that just went
 //      down flips the honest banner without the operator losing their place (design brief §7).
@@ -35,35 +36,57 @@
 
   var expanded = loadExpanded();
 
-  // Wire every <details data-finding> to record its open/closed state on toggle.
-  function bindDetails(root) {
-    var nodes = root.querySelectorAll("details[data-finding]");
-    for (var i = 0; i < nodes.length; i++) {
-      (function (el) {
-        var id = el.getAttribute("data-finding");
-        // Restore prior state on (re)bind.
-        if (expanded.has(id)) {
-          el.open = true;
-        }
-        el.addEventListener("toggle", function () {
-          if (el.open) {
-            expanded.add(id);
-          } else {
-            expanded.delete(id);
-          }
-          saveExpanded(expanded);
-          syncAria(el);
-        });
-        syncAria(el);
-      })(nodes[i]);
+  // Apply the open/closed state of one finding row to the DOM: toggle the row's `open` class
+  // (CSS reveals the paired .row-detail), swap the +/- glyph, and keep aria-expanded honest.
+  function applyState(row, isOpen) {
+    if (isOpen) {
+      row.classList.add("open");
+    } else {
+      row.classList.remove("open");
+    }
+    var btn = row.querySelector(".expander");
+    if (btn) {
+      btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      var glyph = btn.querySelector(".expander-glyph");
+      if (glyph) {
+        glyph.textContent = isOpen ? "−" : "+"; // − when open, + when closed
+      }
     }
   }
 
-  // Keep the summary's aria-expanded in sync with the details state (accessibility gate §6).
-  function syncAria(details) {
-    var summary = details.querySelector("summary");
-    if (summary) {
-      summary.setAttribute("aria-expanded", details.open ? "true" : "false");
+  // Flip one row's expanded state, persist it, and reflect it in the DOM.
+  function toggleRow(row) {
+    var id = row.getAttribute("data-finding");
+    if (!id) {
+      return;
+    }
+    var nowOpen = !expanded.has(id);
+    if (nowOpen) {
+      expanded.add(id);
+    } else {
+      expanded.delete(id);
+    }
+    saveExpanded(expanded);
+    applyState(row, nowOpen);
+  }
+
+  // Wire every summary row (tr.row[data-finding]) as a click/keyboard toggle for its detail row,
+  // restoring the persisted open state on each (re)bind so a poll swap doesn't lose it.
+  function bindDetails(root) {
+    var rows = root.querySelectorAll("tr.row[data-finding]");
+    for (var i = 0; i < rows.length; i++) {
+      (function (row) {
+        var id = row.getAttribute("data-finding");
+        // Restore prior state on (re)bind.
+        applyState(row, expanded.has(id));
+        // The whole row is the toggle (the expander button lives inside it, so a click there
+        // bubbles up to here too — one handler covers both).
+        row.addEventListener("click", function () {
+          toggleRow(row);
+        });
+        // Keyboard activation on the expander button (Enter/Space) goes through the click event
+        // a <button> already synthesizes, so no extra keydown wiring is needed.
+      })(rows[i]);
     }
   }
 

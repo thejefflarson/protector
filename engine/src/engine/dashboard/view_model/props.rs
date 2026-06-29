@@ -49,7 +49,7 @@ impl Posture {
     pub fn word(self) -> &'static str {
         match self {
             Posture::Breach => "BREACH",
-            Posture::Cleared => "not exploitable",
+            Posture::Cleared => "no exploit evidence",
             Posture::Uncertain => "uncertain",
             Posture::Awaiting => "awaiting judgement",
         }
@@ -236,7 +236,8 @@ impl EvidenceSummary {
 /// One finding row + its expand-in-place "why" — the unit of the Findings view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingProps {
-    /// A stable id for the `<details>` toggle + deep-link fragment (derived from the entry key).
+    /// A stable id for the row toggle (the paired detail row is `detail-{id}`) + deep-link
+    /// fragment (derived from the entry key).
     pub id: String,
     pub posture: Posture,
     pub live_tag: LiveTag,

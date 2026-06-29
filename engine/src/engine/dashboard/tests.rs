@@ -246,6 +246,68 @@ fn empty_evidence_renders_no_evidence_not_blank() {
 }
 
 // ---------------------------------------------------------------------------
+// Row expand — the first-column +/- toggle (replaces the old "why" pulldown).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn finding_row_has_first_column_expander_toggle() {
+    let f = breach_finding("endpoint/a", Verdict::Confirmed);
+    let id = f.entry.clone();
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // The expander is a button with aria-expanded (accessibility gate), starting collapsed.
+    assert!(
+        html.contains("class=\"expander\""),
+        "the first column carries the +/- expander button"
+    );
+    assert!(
+        html.contains("aria-expanded=\"false\""),
+        "the expander exposes a collapsed aria-expanded state"
+    );
+    // It controls the paired detail row by id.
+    assert!(
+        html.contains("aria-controls=\"detail-"),
+        "the expander points at its detail row via aria-controls"
+    );
+    assert!(
+        html.contains("id=\"detail-"),
+        "the detail row carries the controlled id"
+    );
+    // The detail panel still renders inside the row-detail (just no <details>/why summary now).
+    assert!(html.contains("row-detail"), "the detail row is present");
+    let _ = id;
+}
+
+#[test]
+fn finding_row_drops_the_old_why_pulldown() {
+    let f = breach_finding("endpoint/a", Verdict::Confirmed);
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // The "why — verdict, path, evidence" summary text is gone.
+    assert!(
+        !html.contains("verdict, path, evidence"),
+        "the old why-pulldown summary text must not render"
+    );
+    // The row itself is no longer a <details data-finding> wrapper; the toggle is the row.
+    assert!(
+        !html.contains("<details data-finding"),
+        "the per-row <details data-finding> wrapper is gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Invariant #6 — untrusted free-text is escaped at render.
 // ---------------------------------------------------------------------------
 

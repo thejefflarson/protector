@@ -1,7 +1,8 @@
-//! One Findings-table row: the posture rail+chip, entry→objective, Δ, evidence cluster,
-//! disposition, and the live/judged sub-tag — with the expand-in-place `<details>` "why" panel
-//! (brief §5). Pure component; no domain types. The row is a real `<tr>` and the expander is a
-//! `<button>` with `aria-expanded` (style guide accessibility gate §6).
+//! One Findings-table row: a `+/-` expander, Δ, the posture rail+chip, entry→objective,
+//! evidence cluster, disposition, and the live/judged sub-tag — paired with a hidden detail
+//! row that the whole summary row toggles open in place (brief §5). Pure component; no domain
+//! types. The row is a real `<tr>` and the first cell carries a `<button>` with `aria-expanded`
+//! / `aria-controls` pointing at the detail row (style guide accessibility gate §6).
 
 use maud::{Markup, html};
 
@@ -11,11 +12,24 @@ use crate::engine::dashboard::view_model::props::{
 
 use super::finding_detail::detail_panel;
 
-/// Render one finding as a `<tr>` (the summary cells) followed by a full-width `<tr>` carrying
-/// the expand-in-place detail panel inside a `<details>` (so list context is kept on expand).
+/// Render one finding as a `<tr>` (the summary cells, the whole row a click-target toggle)
+/// followed by a full-width `<tr.row-detail>` carrying the expand-in-place detail panel. The
+/// detail row is hidden by default and revealed when the row is opened — its visibility is
+/// driven by the client toggling an `open` class (CSS-only fallback: it stays hidden, which is
+/// safe). The first cell is a `+/-` expander button wired to the detail row via `aria-controls`.
 pub(super) fn finding_row(f: &FindingProps) -> Markup {
+    let detail_id = format!("detail-{}", f.id);
     html! {
-        tr.row id=(f.id) data-posture=(f.posture.token()) {
+        tr.row id=(f.id) data-finding=(f.id) data-posture=(f.posture.token()) {
+            td.cell.cell-expand {
+                button.expander
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls=(detail_id)
+                    aria-label="expand finding detail" {
+                    span.expander-glyph aria-hidden="true" { "+" }
+                }
+            }
             td.cell.cell-delta { (delta_cell(&f.delta)) }
             td.cell.cell-posture { (posture_cell(f.posture, f.live_tag)) }
             td.cell.cell-entry { (entry_objective(f)) }
@@ -24,14 +38,9 @@ pub(super) fn finding_row(f: &FindingProps) -> Markup {
             td.cell.cell-disposition { span.disp { (f.disposition) } }
             td.cell.cell-live { (live_tag(f.live_tag)) }
         }
-        tr.row-detail {
-            td.detail-host colspan="7" {
-                details.why data-finding=(f.id) {
-                    summary.why-toggle role="button" aria-expanded="false" {
-                        span.why-open { "why \u{2014} verdict, path, evidence" }
-                    }
-                    (detail_panel(f))
-                }
+        tr.row-detail id=(detail_id) data-detail-for=(f.id) {
+            td.detail-host colspan="8" {
+                (detail_panel(f))
             }
         }
     }

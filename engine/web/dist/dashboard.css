@@ -81,6 +81,19 @@ html, body {
   font-family: var(--font-data);
 }
 
+/* ---- a11y: visually hidden but available to assistive tech ---- */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---- focus / a11y: focus ring always visible, visual = focus order ---- */
 a:focus-visible,
 button:focus-visible,
@@ -290,20 +303,30 @@ summary:focus-visible,
 .delta-restored { color: var(--delta-restored); }
 .delta-steady { color: var(--ink-3); font-size: 12px; }
 
-/* ============================ detail panel ============================ */
-.row-detail td { padding: 0; border: 0; }
-.why { background: var(--surface); }
-.why[open] { background: var(--surface-raised); }
-.why-toggle {
+/* ============================ row expand / detail panel ============================ */
+/* The whole summary row is the toggle; clicking anywhere opens its paired detail row. */
+.row { cursor: pointer; }
+
+/* the +/- expander cell + button (monospace, muted) */
+.cell-expand { width: 1%; white-space: nowrap; text-align: center; padding-right: 0; }
+.expander {
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
   cursor: pointer;
-  padding: var(--space-2) var(--space-4);
-  color: var(--mode-enforce);
-  font-size: 12px;
-  list-style: none;
+  padding: 0 var(--space-1);
+  color: var(--ink-3);
+  font-family: var(--font-data);
+  font-size: 14px;
+  line-height: 1;
 }
-.why-toggle::-webkit-details-marker { display: none; }
-.why-toggle::before { content: "\25B8 "; color: var(--ink-3); }
-.why[open] > .why-toggle::before { content: "\25BE "; }
+.expander-glyph { display: inline-block; width: 1ch; text-align: center; }
+
+/* the detail row is hidden by default; the client reveals it by setting `.open` on the row. */
+.row-detail { display: none; }
+.row.open + .row-detail { display: table-row; }
+.row-detail td { padding: 0; border: 0; }
 
 .detail {
   background: var(--surface-raised);
@@ -369,6 +392,17 @@ summary:focus-visible,
 .ev-sublabel { font-size: 11px; margin: var(--space-2) 0 var(--space-1); }
 
 .model-prompt { margin-top: var(--space-3); }
+/* the "show model prompt" disclosure summary (a real <details> nested in the detail panel) */
+.why-toggle {
+  cursor: pointer;
+  padding: var(--space-2) 0;
+  color: var(--mode-enforce);
+  font-size: 12px;
+  list-style: none;
+}
+.why-toggle::-webkit-details-marker { display: none; }
+.why-toggle::before { content: "\25B8 "; color: var(--ink-3); }
+.model-prompt[open] > .why-toggle::before { content: "\25BE "; }
 .prompt-body { padding: var(--space-2) 0; }
 .prompt-text {
   background: var(--surface); border: 1px solid var(--border);
