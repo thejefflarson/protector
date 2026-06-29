@@ -60,12 +60,18 @@ pub struct PolicyDecisionRecord {
     /// image-scoped. Part of the dedup key with `subject` + `decision`. UNTRUSTED at render.
     #[serde(default)]
     pub image: String,
-    /// Coarse signature status: `signed` (gated + verified), `unsigned` (gated + not trusted),
-    /// or `not-gated` (out of signature scope). Empty when not evaluated. Low-cardinality.
+    /// Three-state signature shadow status (JEF-246): `verified` (in scope, checked, passed),
+    /// `would-pass` (out of scope, shadow-checked, would pass), or `would-fail` (would deny if
+    /// enforced). Empty when the signature gate has no opinion (e.g. a non-Pod). The what-if is
+    /// computed for EVERY request so a green status can no longer mean "wasn't actually checked".
+    /// Pre-JEF-246 journal lines carry the old coarse words (`signed`/`unsigned`); `#[serde(default)]`
+    /// keeps them parseable. Low-cardinality. UNTRUSTED at render (it's a fixed word, but the
+    /// component escapes regardless).
     #[serde(default)]
     pub signature: String,
-    /// Coarse mesh status: `meshed`, `unmeshed`, or `n/a` (out of mesh scope — a one-shot/Job
-    /// pod). Empty when not evaluated. Low-cardinality.
+    /// Three-state mesh shadow status (JEF-246): `verified` / `would-pass` / `would-fail`, with
+    /// the same semantics as [`signature`](Self::signature). Empty when the mesh gate has no
+    /// opinion (a non-Pod, or a one-shot/Job pod out of mesh scope). Low-cardinality.
     #[serde(default)]
     pub mesh: String,
     /// The request's namespace (empty for a cluster-scoped object).
@@ -73,6 +79,12 @@ pub struct PolicyDecisionRecord {
     /// The human-actionable reason — the same prose the deny/audit log carries. Empty for a
     /// plain `allow`. UNTRUSTED at render (it can quote an attacker-chosen image ref).
     pub reason: String,
+    /// The net counterfactual (JEF-246): would this request be ADMITTED if every gate were
+    /// enforced? `false` when any shadow-evaluated gate would fail. Display-only — it never
+    /// gates the actual decision (ADR-0016); the honest API verdict is [`decision`](Self::decision).
+    /// Defaults to `true` so a pre-JEF-246 journal line (no field) reads as "no would-deny known".
+    #[serde(default = "yes")]
+    pub would_admit: bool,
     /// How many times this exact `(subject, image, decision)` was seen (dedup count). Starts
     /// at 1; bumped each time the same decision recurs (replica/CronJob churn).
     #[serde(default = "one")]
@@ -85,6 +97,12 @@ pub struct PolicyDecisionRecord {
 /// `serde` default for `count` on lines that predate the field (treat an old line as one hit).
 fn one() -> u64 {
     1
+}
+
+/// `serde` default for `would_admit` on lines that predate JEF-246: a pre-existing journal line
+/// has no counterfactual, so default to "would admit" (no known would-deny).
+fn yes() -> bool {
+    true
 }
 
 impl PolicyDecisionRecord {
@@ -111,12 +129,21 @@ impl PolicyDecisionRecord {
             mesh: mesh.into(),
             namespace: namespace.into(),
             reason: reason.into(),
+            would_admit: true,
             count: 1,
             at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or_default(),
         }
+    }
+
+    /// Set the net would-admit counterfactual (JEF-246). Builder-style so [`now`](Self::now)
+    /// stays the minimal positional constructor and the back-compat default holds for callers
+    /// (and journal lines) that don't set it.
+    pub fn with_would_admit(mut self, would_admit: bool) -> Self {
+        self.would_admit = would_admit;
+        self
     }
 
     /// The dedup identity: a distinct row is one `(subject, image, decision)` triple. Replica
@@ -169,6 +196,7 @@ impl PolicyDecisionLog {
             existing.reason = decision.reason;
             existing.signature = decision.signature;
             existing.mesh = decision.mesh;
+            existing.would_admit = decision.would_admit;
             rows.push_back(existing);
             return;
         }
@@ -613,5 +641,9 @@ mod tests {
         assert_eq!(parsed.signature, "");
         assert_eq!(parsed.mesh, "");
         assert_eq!(parsed.count, 1, "absent count defaults to one");
+        assert!(
+            parsed.would_admit,
+            "a pre-JEF-246 line with no would_admit defaults to true"
+        );
     }
 }

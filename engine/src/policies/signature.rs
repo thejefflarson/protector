@@ -15,7 +15,7 @@ use sigstore::registry::{Auth, OciReference};
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::policy::{Decision, EnforceScope, Policy};
+use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
 /// Decides whether a single image reference carries a trusted signature.
 ///
@@ -164,6 +164,59 @@ impl Policy for SignaturePolicy {
             req,
             format!("unsigned or untrusted image(s): {}", unsigned.join(", ")),
         )
+    }
+
+    async fn shadow_evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
+        // The counterfactual (JEF-246): what this gate WOULD do for `req` if it were in scope and
+        // enforced — computed for EVERY request, even out of scope. It shares enforcement's exact
+        // verification mechanism: the SAME digest-bounded `is_signed_cached`, so a shadow eval of
+        // an image already verified (this pass or a recent one — and so for every replica/pass)
+        // hits the cache and adds NO outbound calls. Zero-egress is preserved: shadow-verifying
+        // every request never reaches the registry/Rekor more than enforcement already does.
+        let Some(obj) = req.object.as_ref() else {
+            return ShadowVerdict::NotApplicable;
+        };
+        let enforced = self.enforce.enforces(req);
+
+        let mut gated: Vec<String> = Vec::new();
+        for image in pod_images(obj) {
+            if self.gated(&image) && !gated.contains(&image) {
+                gated.push(image);
+            }
+        }
+        // No gated images ⇒ the signature gate has no opinion about this Pod.
+        if gated.is_empty() {
+            return ShadowVerdict::NotApplicable;
+        }
+        if gated.len() > self.max_images {
+            return ShadowVerdict::fail(
+                enforced,
+                format!(
+                    "Pod references {} gated images (max {})",
+                    gated.len(),
+                    self.max_images
+                ),
+            );
+        }
+
+        // An image is a what-if FAIL if it's unsigned OR couldn't be verified: enforcing would
+        // deny either way, so the counterfactual must report would-fail (never a false green).
+        let mut failed = Vec::new();
+        for image in &gated {
+            match self.is_signed_cached(image).await {
+                Ok(true) => {}
+                Ok(false) => failed.push(image.clone()),
+                Err(_) => failed.push(image.clone()),
+            }
+        }
+        if failed.is_empty() {
+            ShadowVerdict::pass(enforced)
+        } else {
+            ShadowVerdict::fail(
+                enforced,
+                format!("unsigned or untrusted image(s): {}", failed.join(", ")),
+            )
+        }
     }
 }
 
@@ -610,5 +663,89 @@ mod tests {
             Decision::Deny { reason } => assert!(reason.contains("max 32")),
             other => panic!("expected deny, got {other:?}"),
         }
+    }
+
+    /// A checker that COUNTS calls to `is_signed`, so a test can prove the digest cache spares
+    /// repeated verification across the enforce + shadow paths (JEF-246's zero-egress constraint).
+    struct CountingChecker {
+        signed: bool,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SignatureChecker for CountingChecker {
+        async fn is_signed(&self, _image: &str) -> Result<bool> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.signed)
+        }
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_out_of_scope_unsigned_is_would_fail() {
+        // JEF-246: an out-of-scope (audit-only) unsigned gated image shadow-evaluates to
+        // would-fail — enforcing would deny — even though `evaluate` only audits.
+        let p = policy(&[("ghcr.io/thejefflarson/app:1", false)], false);
+        let req = pod_request(&["ghcr.io/thejefflarson/app:1"]);
+        assert!(matches!(p.evaluate(&req).await, Decision::Audit { .. }));
+        let v = p.shadow_evaluate(&req).await;
+        assert_eq!(v.status(), "would-fail");
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_signed_out_of_scope_is_would_pass() {
+        // A signed gated image out of enforced scope: `would-pass` (out of scope, shadow-checked,
+        // would pass) — not empty.
+        let p = policy(&[("ghcr.io/thejefflarson/app:1", true)], false);
+        let v = p
+            .shadow_evaluate(&pod_request(&["ghcr.io/thejefflarson/app:1"]))
+            .await;
+        assert_eq!(v.status(), "would-pass");
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_signed_in_scope_is_verified() {
+        let p = policy(&[("ghcr.io/thejefflarson/app:1", true)], true);
+        let v = p
+            .shadow_evaluate(&pod_request(&["ghcr.io/thejefflarson/app:1"]))
+            .await;
+        assert_eq!(v.status(), "verified");
+    }
+
+    #[tokio::test]
+    async fn ungated_image_has_no_signature_opinion() {
+        // The signature gate has no opinion on a third-party image — NotApplicable, an empty
+        // status (so the strip doesn't count it).
+        let p = policy(&[], false);
+        let v = p
+            .shadow_evaluate(&pod_request(&["docker.io/library/postgres:16"]))
+            .await;
+        assert_eq!(v.status(), "");
+    }
+
+    #[tokio::test]
+    async fn digest_cache_shares_verification_across_enforce_and_shadow_paths() {
+        // The zero-egress constraint (JEF-246): shadow-verifying every request must not repeat
+        // verification per replica/pass. The enforce path populates the cache; the shadow path
+        // (and a second enforce) reuse it — the checker is hit ONCE for the image.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = SignaturePolicy::new(
+            Arc::new(CountingChecker {
+                signed: true,
+                calls: calls.clone(),
+            }),
+            vec!["ghcr.io/thejefflarson/".to_string()],
+            scope(true),
+            32,
+            Duration::from_secs(300),
+        );
+        let req = pod_request(&["ghcr.io/thejefflarson/app:1"]);
+        let _ = p.evaluate(&req).await; // first call: verifies + caches
+        let _ = p.shadow_evaluate(&req).await; // cache hit, no new egress
+        let _ = p.evaluate(&req).await; // cache hit
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the image is verified once; replica/pass + shadow re-use the digest cache"
+        );
     }
 }

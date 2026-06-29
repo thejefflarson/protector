@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
 
-use crate::policy::{Decision, EnforceScope, Policy};
+use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
 /// Rejects Pods that aren't Linkerd-meshed, where enforcement is in scope.
 ///
@@ -39,30 +39,56 @@ impl Policy for MeshInjectionPolicy {
     }
 
     async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
-        let Some(obj) = req.object.as_ref() else {
-            return Decision::Allow;
-        };
-        // Mesh is for long-running, traffic-serving workloads. One-shot pods — Jobs,
-        // CronJobs, and ephemeral helper/task pods (`restartPolicy` Never/OnFailure,
-        // e.g. local-path-provisioner's PVC helpers) — don't serve traffic and
-        // shouldn't carry a mesh identity (Linkerd's own guidance), so they're out of
-        // scope. The webhook is blind to reachability — the engine's domain — and
-        // `restartPolicy` is the signal available at admission that separates a
-        // service from a task.
-        if !pod_is_long_running(obj) {
-            return Decision::Allow;
+        match self.verdict(req) {
+            // Out of mesh scope (non-Pod, missing object, or one-shot) or already meshed.
+            MeshVerdict::Pass => Decision::Allow,
+            // Unmeshed: deny where enforcement is in scope, audit everywhere else.
+            // Namespaces not on the enforce allowlist (the runner ns, by design) are
+            // still reported, so an unexpectedly-unmeshed workload is discoverable.
+            MeshVerdict::Unmeshed(reason) => self.enforce.decide(req, reason),
         }
-        if pod_is_meshed(obj) {
-            return Decision::Allow;
-        }
+    }
 
-        // Unmeshed: deny where enforcement is in scope, audit everywhere else.
-        // Namespaces not on the enforce allowlist (the runner ns, by design) are
-        // still reported, so an unexpectedly-unmeshed workload is discoverable.
-        self.enforce.decide(
-            req,
-            "Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string(),
-        )
+    async fn shadow_evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
+        // Mesh is cheap (label/annotation/spec) — safe to run for every request. The same
+        // `verdict` the enforced path uses (no new work, no egress), reported as the
+        // counterfactual regardless of scope.
+        let enforced = self.enforce.enforces(req);
+        match self.verdict(req) {
+            MeshVerdict::Pass => ShadowVerdict::pass(enforced),
+            MeshVerdict::Unmeshed(reason) => ShadowVerdict::fail(enforced, reason),
+        }
+    }
+}
+
+/// The mesh gate's scope-free verdict: would it pass, or is the Pod an unmeshed long-running
+/// service (the what-if failure)? The single source of truth shared by the enforced
+/// [`evaluate`](MeshInjectionPolicy::evaluate) and the shadow
+/// [`shadow_evaluate`](MeshInjectionPolicy::shadow_evaluate) so the counterfactual can never
+/// drift from what enforcement would actually do.
+enum MeshVerdict {
+    /// The gate would admit: out of mesh scope (non-Pod, no object, or a one-shot task) or
+    /// already meshed.
+    Pass,
+    /// A long-running, unmeshed service — would deny if enforced. Carries the actionable reason.
+    Unmeshed(String),
+}
+
+impl MeshInjectionPolicy {
+    /// Compute the mesh verdict for `req`, ignoring enforced scope. Mesh is for long-running,
+    /// traffic-serving workloads. One-shot pods — Jobs, CronJobs, and ephemeral helper/task pods
+    /// (`restartPolicy` Never/OnFailure, e.g. local-path-provisioner's PVC helpers) — don't serve
+    /// traffic and shouldn't carry a mesh identity (Linkerd's own guidance), so they're out of
+    /// scope. The webhook is blind to reachability — the engine's domain — and `restartPolicy` is
+    /// the signal available at admission that separates a service from a task.
+    fn verdict(&self, req: &AdmissionRequest<DynamicObject>) -> MeshVerdict {
+        let Some(obj) = req.object.as_ref() else {
+            return MeshVerdict::Pass;
+        };
+        if !pod_is_long_running(obj) || pod_is_meshed(obj) {
+            return MeshVerdict::Pass;
+        }
+        MeshVerdict::Unmeshed("Pod is not Linkerd-meshed (no injected linkerd-proxy)".to_string())
     }
 }
 
@@ -201,5 +227,59 @@ mod tests {
             p.evaluate(&pod_request("public", svc)).await,
             Decision::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn shadow_in_scope_unmeshed_is_would_fail_verified() {
+        // JEF-246: an in-scope (enforced) unmeshed service shadow-evaluates to a would-fail —
+        // the status() is `would-fail` (enforced + failed).
+        let p = policy();
+        let spec = json!({"containers": [{"name": "app", "image": "x"}]});
+        let v = p.shadow_evaluate(&pod_request("public", spec)).await;
+        assert_eq!(v.status(), "would-fail");
+    }
+
+    #[tokio::test]
+    async fn shadow_out_of_scope_unmeshed_is_would_fail_and_admits() {
+        // JEF-246 acceptance: an out-of-scope (runner ns "dev") unmeshed service WOULD be denied
+        // if enforced — the shadow status is `would-fail` — yet the ACTUAL decision is `audit`
+        // (allowed). The what-if is decoupled from enforcement.
+        let p = policy();
+        let spec = json!({"containers": [{"name": "runner", "image": "x"}]});
+        // Actual decision unchanged: out of scope ⇒ audit (allowed), never deny.
+        assert!(matches!(
+            p.evaluate(&pod_request("dev", spec.clone())).await,
+            Decision::Audit { .. }
+        ));
+        // But the counterfactual is reported.
+        let v = p.shadow_evaluate(&pod_request("dev", spec)).await;
+        assert_eq!(v.status(), "would-fail");
+    }
+
+    #[tokio::test]
+    async fn shadow_out_of_scope_meshed_would_admit() {
+        // JEF-246 acceptance: an out-of-scope MESHED service WOULD pass — `would-pass` (out of
+        // scope, shadow-checked, would pass) — not empty/ambiguous.
+        let p = policy();
+        let spec = json!({"containers": [
+            {"name": "app", "image": "x"},
+            {"name": "linkerd-proxy", "image": "cr.l5d.io/linkerd/proxy"}
+        ]});
+        let v = p.shadow_evaluate(&pod_request("dev", spec)).await;
+        assert_eq!(v.status(), "would-pass");
+    }
+
+    #[tokio::test]
+    async fn shadow_evaluate_does_not_change_the_actual_decision() {
+        // ADR-0016: the shadow path is a view, never a gate. For an out-of-scope unmeshed pod the
+        // actual `evaluate` is `audit` (allowed) whether or not the shadow path ran — they read
+        // the same `verdict`, but only `evaluate` applies enforced scope.
+        let p = policy();
+        let spec = json!({"containers": [{"name": "runner", "image": "x"}]});
+        let before = p.evaluate(&pod_request("dev", spec.clone())).await;
+        let _ = p.shadow_evaluate(&pod_request("dev", spec.clone())).await;
+        let after = p.evaluate(&pod_request("dev", spec)).await;
+        assert!(matches!(before, Decision::Audit { .. }));
+        assert!(matches!(after, Decision::Audit { .. }));
     }
 }
