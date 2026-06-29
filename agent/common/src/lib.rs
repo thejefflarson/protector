@@ -48,13 +48,31 @@ pub struct FileEvent {
 }
 
 /// The fixed prefix of every event in the ring buffer. `repr(C)`, at offset 0 of each
-/// body, so userspace can read `kind` (and `pid`) before it knows which body follows.
-/// `pid` is common to every event (userspace maps it via /proc/<pid>/cgroup → pod).
+/// body, so userspace can read `kind` (and `pid`/`cgroup_id`) before it knows which body
+/// follows.
+///
+/// `cgroup_id` (JEF-158) is the kernel cgroup id captured AT EVENT TIME via the stable
+/// `bpf_get_current_cgroup_id()` helper — the cgroup v2 directory's inode number.
+/// Userspace resolves pod attribution from it through a `cgroup_id → pod_uid` table built
+/// from `/sys/fs/cgroup`, which fixes the exited-process race: a short-lived in-container
+/// exec/shell exits before userspace can read its `/proc/<pid>/cgroup`, so the post-hoc
+/// `/proc` read missed it; the in-kernel id is recorded while the process is still live.
+/// `pid` is kept too (host-event separation + the `/proc` fallback when the table misses).
+///
+/// Layout note: adding a `u64` raises the header's alignment to 8, so every `repr(C)`
+/// body that embeds it grows by 8 bytes uniformly. The kernel and userspace are built
+/// from this one crate and ship together, so the byte layout stays a single contract —
+/// `kind` still discriminates the body, and an event shorter than its declared body fails
+/// the userspace length check in `decode` (dropped, never misparsed).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct EventHeader {
     pub kind: u32,
     pub pid: u32,
+    /// The cgroup id (cgroup v2 directory inode) of the task at event time, from
+    /// `bpf_get_current_cgroup_id()`. `0` means the kernel couldn't determine it (older
+    /// kernel / no cgroup v2) — userspace then falls back to the `/proc/<pid>/cgroup` read.
+    pub cgroup_id: u64,
 }
 
 /// One observed outbound connection (kind [`KIND_CONNECT`]). `header` first so the

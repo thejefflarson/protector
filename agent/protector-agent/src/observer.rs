@@ -64,7 +64,7 @@ mod ebpf {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::pod::{PodAttribution, classify_cgroup};
+    use crate::pod::{CgroupTable, PodAttribution, resolve_attribution, scan_cgroupfs};
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
@@ -100,37 +100,74 @@ mod ebpf {
     /// When full we clear it wholesale (cheap, rare) rather than track per-entry LRU.
     const PID_CACHE_CAP: usize = 8192;
 
+    /// How often the attribution worker rescans `/sys/fs/cgroup` to refresh the
+    /// `cgroup_id → pod_uid` table (JEF-158). The agent has no pod watch (no cluster
+    /// credentials, ADR-0014), so a periodic rescan is how it tracks pods coming and going.
+    /// 10s is well under a pod's lifetime: a pod created between scans simply attributes via
+    /// the `/proc` fallback until the next scan, then via the table — never a lost signal.
+    /// The scan is a cheap shallow walk of the kubepods hierarchy (a few dozen directories).
+    const CGROUP_RESCAN: Duration = Duration::from_secs(10);
+
+    /// The cgroup v2 mount root the table is scanned from. The DaemonSet mounts the host's
+    /// `/sys/fs/cgroup` read-only.
+    fn cgroup_root() -> &'static std::path::Path {
+        std::path::Path::new("/sys/fs/cgroup")
+    }
+
     /// A ring event parsed into typed fields but **not yet attributed** to a pod. This is
     /// the unit handed across the drain→worker boundary (JEF-64): the cheap `repr(C)`
     /// decode stays on the drain, the expensive cgroup read happens in the worker. One
     /// variant per probe — mirrors the `decode` dispatch.
     enum RawEvent {
         /// Outbound connect: destination IPv4 (network order) + port (host order).
-        Connect { pid: u32, daddr: u32, dport: u16 },
+        Connect {
+            attr: EventAttr,
+            daddr: u32,
+            dport: u16,
+        },
         /// tmpfs file open: the (already-truncated, NUL-trimmed) container path.
-        FileRead { pid: u32, path: String },
+        FileRead { attr: EventAttr, path: String },
         /// Executable mmap: the library basename (e.g. `libssl.so.3`).
-        LibraryLoad { pid: u32, name: String },
+        LibraryLoad { attr: EventAttr, name: String },
         /// Privilege escalation to root: the pre/post real UIDs (the eBPF side already
         /// filtered to `new_uid == 0 && old_uid != 0`).
         PrivChange {
-            pid: u32,
+            attr: EventAttr,
             old_uid: u32,
             new_uid: u32,
         },
         /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed.
-        Exec { pid: u32, path: String },
+        Exec { attr: EventAttr, path: String },
+    }
+
+    /// The pair of identities every event carries for attribution (JEF-158): the in-kernel
+    /// `cgroup_id` (the hot path — resolved via the [`CgroupTable`], works after the process
+    /// exits) and the `pid` (the `/proc/<pid>/cgroup` fallback when the table misses).
+    #[derive(Clone, Copy)]
+    struct EventAttr {
+        pid: u32,
+        cgroup_id: u64,
+    }
+
+    impl EventAttr {
+        /// Lift the shared header's identities into an [`EventAttr`].
+        fn from_header(header: &EventHeader) -> Self {
+            Self {
+                pid: header.pid,
+                cgroup_id: header.cgroup_id,
+            }
+        }
     }
 
     impl RawEvent {
-        /// The pid this event is attributed by — the key for the cgroup read and cache.
-        fn pid(&self) -> u32 {
+        /// The (cgroup_id, pid) identities this event is attributed by.
+        fn attr(&self) -> EventAttr {
             match self {
-                RawEvent::Connect { pid, .. }
-                | RawEvent::FileRead { pid, .. }
-                | RawEvent::LibraryLoad { pid, .. }
-                | RawEvent::PrivChange { pid, .. }
-                | RawEvent::Exec { pid, .. } => *pid,
+                RawEvent::Connect { attr, .. }
+                | RawEvent::FileRead { attr, .. }
+                | RawEvent::LibraryLoad { attr, .. }
+                | RawEvent::PrivChange { attr, .. }
+                | RawEvent::Exec { attr, .. } => *attr,
             }
         }
 
@@ -334,16 +371,25 @@ mod ebpf {
         }
 
         /// The attribution worker: the slow half of the split, off the drain path
-        /// (JEF-64). Receives parsed-but-unattributed [`RawEvent`]s, resolves each pid to
-        /// a pod UID via `/proc/<pid>/cgroup` (cached by pid), builds the
-        /// `RuntimeObservation`, and forwards it to `tx`. Exits when the drain drops its
-        /// sender (`recv` → `None`) or the report receiver is gone (`tx.send` errors) —
-        /// either way a clean shutdown.
+        /// (JEF-64). Receives parsed-but-unattributed [`RawEvent`]s, resolves each to a pod
+        /// UID, builds the `RuntimeObservation`, and forwards it to `tx`. Exits when the
+        /// drain drops its sender (`recv` → `None`) or the report receiver is gone
+        /// (`tx.send` errors) — either way a clean shutdown.
         ///
-        /// JEF-115: the cgroup read has three outcomes. A pod is forwarded; a readable
-        /// non-pod cgroup (the host-process firehose) is dropped and counted as a
-        /// `host_event` (EXPECTED, not a failure); an unreadable cgroup (pid gone) is the
-        /// only case counted as `unresolved` — a genuine miss.
+        /// JEF-158: attribution now resolves the event's in-kernel `cgroup_id` against a
+        /// [`CgroupTable`] built from `/sys/fs/cgroup` FIRST. A table hit needs no `/proc`
+        /// read, so a short-lived in-container exec/shell that has already exited still
+        /// attributes — the exited-process race the post-hoc `/proc/<pid>/cgroup` read keeps
+        /// losing. The `/proc` read stays as the fallback for a table miss (a host process,
+        /// or a pod cgroup created since the last scan). The table is refreshed on an
+        /// interval ([`CGROUP_RESCAN`]) — the agent has no cluster credentials and no pod
+        /// watch (ADR-0014), so a periodic rescan of the cgroup hierarchy is how it tracks
+        /// pods coming and going.
+        ///
+        /// JEF-115 (unchanged): three outcomes. A pod is forwarded; a readable non-pod
+        /// cgroup (the host-process firehose) is dropped and counted as a `host_event`
+        /// (EXPECTED, not a failure); an unreadable cgroup (pid gone) is the only case
+        /// counted as `unresolved` — a genuine miss.
         async fn attribution_worker(
             mut raw_rx: mpsc::Receiver<RawEvent>,
             tx: Sender<RuntimeObservation>,
@@ -351,9 +397,33 @@ mod ebpf {
             host_events: Arc<AtomicU64>,
             signals: Arc<AtomicU64>,
         ) {
-            let mut cache: HashMap<u32, PodAttribution> = HashMap::new();
-            while let Some(raw) = raw_rx.recv().await {
-                let uid = match Self::attribute(&mut cache, raw.pid(), read_cgroup) {
+            // The hot-path table (cgroup_id → pod_uid), rescanned from /sys/fs/cgroup on an
+            // interval. Built once up front so the very first events can resolve.
+            let mut table = scan_cgroupfs(cgroup_root());
+            tracing::info!(
+                pods = table.len(),
+                "cgroup attribution table built (JEF-158)"
+            );
+            let mut rescan = tokio::time::interval(CGROUP_RESCAN);
+            rescan.tick().await; // consume the immediate first tick
+            // Per-pid cache for the FALLBACK `/proc` read only — a table miss from a chatty
+            // host pid shouldn't re-read `/proc` per event. Bounded; cleared wholesale at cap.
+            let mut fallback_cache: HashMap<u32, PodAttribution> = HashMap::new();
+            loop {
+                let raw = tokio::select! {
+                    recv = raw_rx.recv() => match recv {
+                        Some(raw) => raw,
+                        None => return, // drain gone — clean shutdown
+                    },
+                    _ = rescan.tick() => {
+                        // Refresh the table to pick up pods added/removed since the last scan.
+                        table = scan_cgroupfs(cgroup_root());
+                        tracing::debug!(pods = table.len(), "cgroup attribution table rescanned");
+                        continue;
+                    }
+                };
+                let attr = raw.attr();
+                let uid = match Self::resolve(&table, &mut fallback_cache, attr) {
                     PodAttribution::Pod(uid) => uid,
                     PodAttribution::NotAPod => {
                         // The node-wide kprobe's expected host firehose — dropped (never
@@ -383,26 +453,29 @@ mod ebpf {
             }
         }
 
-        /// Resolve a pid to its [`PodAttribution`], memoized in `cache` so repeated events
-        /// from the same pid skip the `/proc` read. The `read` closure yields the pid's
-        /// cgroup text (injected so this is unit-testable without a real `/proc`); a `None`
-        /// from it means unreadable. Every outcome — pod, host non-pod, and unreadable —
-        /// is cached, so a flood from one pid doesn't re-read `/proc` per event. Bounded:
-        /// at `PID_CACHE_CAP` entries the cache is cleared wholesale before inserting
-        /// (cheap, rare; pids churn anyway).
-        fn attribute(
+        /// Resolve one event's [`EventAttr`] to a [`PodAttribution`] (JEF-158): the in-kernel
+        /// `cgroup_id` against `table` first (no `/proc` — the exited-process-safe hot path),
+        /// then the `/proc/<pid>/cgroup` fallback on a miss, memoized in `cache` so a flood
+        /// from one pid doesn't re-read `/proc`. Every fallback outcome (pod, host non-pod,
+        /// unreadable) is cached. Bounded: at [`PID_CACHE_CAP`] the cache is cleared wholesale
+        /// (cheap, rare; pids churn anyway). A table hit is NOT cached — the table is already
+        /// an in-memory map.
+        fn resolve(
+            table: &CgroupTable,
             cache: &mut HashMap<u32, PodAttribution>,
-            pid: u32,
-            read: impl Fn(u32) -> Option<String>,
+            attr: EventAttr,
         ) -> PodAttribution {
-            if let Some(cached) = cache.get(&pid) {
+            if let Some(uid) = table.lookup(attr.cgroup_id) {
+                return PodAttribution::Pod(uid.to_string());
+            }
+            if let Some(cached) = cache.get(&attr.pid) {
                 return cached.clone();
             }
-            let attribution = classify_cgroup(read(pid).as_deref());
+            let attribution = resolve_attribution(table, attr.cgroup_id, attr.pid, read_cgroup);
             if cache.len() >= PID_CACHE_CAP {
                 cache.clear();
             }
-            cache.insert(pid, attribution.clone());
+            cache.insert(attr.pid, attribution.clone());
             attribution
         }
 
@@ -523,7 +596,7 @@ mod ebpf {
         /// resolves UID → namespace/pod later, after the worker attributes the pid.
         fn connect(ev: &ConnEvent) -> Option<RawEvent> {
             Some(RawEvent::Connect {
-                pid: ev.header.pid,
+                attr: EventAttr::from_header(&ev.header),
                 daddr: ev.daddr,
                 dport: ev.dport,
             })
@@ -542,7 +615,7 @@ mod ebpf {
                 return None;
             }
             Some(RawEvent::FileRead {
-                pid: ev.header.pid,
+                attr: EventAttr::from_header(&ev.header),
                 path,
             })
         }
@@ -558,7 +631,7 @@ mod ebpf {
                 return None;
             }
             Some(RawEvent::LibraryLoad {
-                pid: ev.header.pid,
+                attr: EventAttr::from_header(&ev.header),
                 name: name.to_string(),
             })
         }
@@ -568,7 +641,7 @@ mod ebpf {
         /// this just carries the UIDs through. Pure (no `/proc`).
         fn priv_change(ev: &PrivEvent) -> Option<RawEvent> {
             Some(RawEvent::PrivChange {
-                pid: ev.header.pid,
+                attr: EventAttr::from_header(&ev.header),
                 old_uid: ev.old_uid,
                 new_uid: ev.new_uid,
             })
@@ -587,7 +660,7 @@ mod ebpf {
                 return None;
             }
             Some(RawEvent::Exec {
-                pid: ev.header.pid,
+                attr: EventAttr::from_header(&ev.header),
                 path,
             })
         }
@@ -613,79 +686,71 @@ mod ebpf {
 
     #[cfg(test)]
     mod tests {
-        use std::cell::Cell;
-
         use super::*;
 
         const POD_CGROUP: &str =
             "/kubepods/besteffort/pod3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b/abc123";
+        const POD_SLICE: &str = "/sys/fs/cgroup/kubepods.slice/\
+            kubepods-besteffort-pod3f5e1a2b_4c6d_7e8f_9a0b_1c2d3e4f5a6b.slice";
+        const POD_UID: &str = "3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b";
 
-        #[test]
-        fn attribute_resolves_and_memoizes_by_pid() {
-            let mut cache = HashMap::new();
-            let reads = Cell::new(0);
-            let read = |_pid: u32| {
-                reads.set(reads.get() + 1);
-                Some(POD_CGROUP.to_string())
-            };
-
-            let first = EbpfObserver::attribute(&mut cache, 42, &read);
-            let second = EbpfObserver::attribute(&mut cache, 42, &read);
-
-            assert_eq!(
-                first,
-                PodAttribution::Pod("3f5e1a2b-4c6d-7e8f-9a0b-1c2d3e4f5a6b".to_string())
-            );
-            assert_eq!(first, second);
-            // The second call must hit the cache, not re-read `/proc`.
-            assert_eq!(reads.get(), 1, "repeated pid should skip the cgroup read");
+        fn attr(pid: u32, cgroup_id: u64) -> EventAttr {
+            EventAttr { pid, cgroup_id }
         }
 
         #[test]
-        fn attribute_classifies_host_cgroup_as_not_a_pod() {
+        fn resolve_uses_the_table_and_never_reads_proc_on_a_cgroup_id_hit() {
+            // JEF-158 hot path: a cgroup_id table hit resolves with NO `/proc` read and NO
+            // fallback-cache entry — which is what lets an already-exited process attribute.
+            let table = crate::pod::build_cgroup_table([(100u64, POD_SLICE.to_string())]);
             let mut cache = HashMap::new();
-            let reads = Cell::new(0);
-            // A host process: readable cgroup, but not a pod's — expected, not a miss.
-            let read = |_pid: u32| {
-                reads.set(reads.get() + 1);
-                Some("/system.slice/sshd.service".to_string())
-            };
-
             assert_eq!(
-                EbpfObserver::attribute(&mut cache, 7, &read),
-                PodAttribution::NotAPod
+                EbpfObserver::resolve(&table, &mut cache, attr(4321, 100)),
+                PodAttribution::Pod(POD_UID.to_string())
             );
-            assert_eq!(
-                EbpfObserver::attribute(&mut cache, 7, &read),
-                PodAttribution::NotAPod
+            assert!(
+                cache.is_empty(),
+                "a table hit must not touch the /proc cache"
             );
-            // A flood from one host pid must not re-read `/proc` per event.
-            assert_eq!(reads.get(), 1, "host result should be cached too");
         }
 
         #[test]
-        fn attribute_classifies_unreadable_cgroup_as_unreadable() {
+        fn resolve_falls_back_to_proc_and_memoizes_on_a_table_miss() {
+            // A table miss falls through to the `/proc` read; a flood from one pid must not
+            // re-read it (the fallback cache).
+            let table = CgroupTable::default();
+            // Seed the fallback cache as the worker would, then confirm a repeat is cached.
             let mut cache = HashMap::new();
-            // An exited / unreadable pid yields `None` from the reader — a genuine miss.
-            let read = |_pid: u32| None;
-            assert_eq!(
-                EbpfObserver::attribute(&mut cache, 99, &read),
-                PodAttribution::Unreadable
-            );
-            assert!(cache.contains_key(&99), "missing cgroup should be cached");
+            let resolved = EbpfObserver::resolve(&table, &mut cache, attr(7, 0));
+            // pid 7 / cgroup_id 0 → table miss → /proc read of /proc/7/cgroup (absent in the
+            // test env) → Unreadable, and it's cached.
+            assert_eq!(resolved, PodAttribution::Unreadable);
+            assert!(cache.contains_key(&7), "fallback result should be cached");
         }
 
         #[test]
-        fn attribute_clears_cache_at_cap() {
+        fn resolve_clears_fallback_cache_at_cap() {
+            let table = CgroupTable::default();
             let mut cache = HashMap::new();
-            let read = |_pid: u32| Some(POD_CGROUP.to_string());
-            // Fill to capacity, then one more insert trips the wholesale clear.
+            // Fill the fallback cache to capacity (each distinct miss pid inserts once).
             for pid in 0..PID_CACHE_CAP as u32 {
-                EbpfObserver::attribute(&mut cache, pid, &read);
+                EbpfObserver::resolve(&table, &mut cache, attr(pid, 0));
             }
             assert_eq!(cache.len(), PID_CACHE_CAP);
-            EbpfObserver::attribute(&mut cache, PID_CACHE_CAP as u32, &read);
+            EbpfObserver::resolve(&table, &mut cache, attr(PID_CACHE_CAP as u32, 0));
             assert_eq!(cache.len(), 1, "cache should clear wholesale at the cap");
+        }
+
+        #[test]
+        fn proc_fallback_classifies_pod_cgroup_text() {
+            // The injected `/proc` reader path (via pod::resolve_attribution) still maps a
+            // pod cgroup text to its UID — the fallback for a table miss is unchanged.
+            assert_eq!(
+                crate::pod::resolve_attribution(&CgroupTable::default(), 0, 42, |_| Some(
+                    POD_CGROUP.to_string()
+                )),
+                PodAttribution::Pod(POD_UID.to_string())
+            );
         }
 
         #[test]
@@ -694,6 +759,7 @@ mod ebpf {
                 header: EventHeader {
                     kind: KIND_CONNECT,
                     pid: 1234,
+                    cgroup_id: 777,
                 },
                 daddr: u32::from_ne_bytes([8, 8, 8, 8]),
                 dport: 443,
@@ -705,8 +771,9 @@ mod ebpf {
                 )
             };
             match EbpfObserver::decode(bytes) {
-                Some(RawEvent::Connect { pid, daddr, dport }) => {
-                    assert_eq!(pid, 1234);
+                Some(RawEvent::Connect { attr, daddr, dport }) => {
+                    assert_eq!(attr.pid, 1234);
+                    assert_eq!(attr.cgroup_id, 777);
                     assert_eq!(daddr, ev.daddr);
                     assert_eq!(dport, 443);
                 }
@@ -720,6 +787,7 @@ mod ebpf {
                 header: EventHeader {
                     kind: KIND_PRIV_CHANGE,
                     pid: 4321,
+                    cgroup_id: 888,
                 },
                 old_uid: 1000,
                 new_uid: 0,
@@ -732,11 +800,12 @@ mod ebpf {
             };
             match EbpfObserver::decode(bytes) {
                 Some(RawEvent::PrivChange {
-                    pid,
+                    attr,
                     old_uid,
                     new_uid,
                 }) => {
-                    assert_eq!(pid, 4321);
+                    assert_eq!(attr.pid, 4321);
+                    assert_eq!(attr.cgroup_id, 888);
                     assert_eq!(old_uid, 1000);
                     assert_eq!(new_uid, 0);
                 }
@@ -765,6 +834,7 @@ mod ebpf {
                 header: EventHeader {
                     kind: KIND_EXEC,
                     pid: 4321,
+                    cgroup_id: 999,
                 },
                 len: bin.len() as u32,
                 path,
@@ -777,13 +847,14 @@ mod ebpf {
             };
             let raw = EbpfObserver::decode(bytes).expect("KIND_EXEC should decode");
             match &raw {
-                RawEvent::Exec { pid, path } => {
-                    assert_eq!(*pid, 4321);
+                RawEvent::Exec { attr, path } => {
+                    assert_eq!(attr.pid, 4321);
+                    assert_eq!(attr.cgroup_id, 999);
                     assert_eq!(path, "/usr/bin/bash");
                 }
                 _ => panic!("expected RawEvent::Exec"),
             }
-            assert_eq!(raw.pid(), 4321);
+            assert_eq!(raw.attr().pid, 4321);
             match raw.into_behavior() {
                 Behavior::ProcessExec { path } => {
                     assert_eq!(path, "/usr/bin/bash");
