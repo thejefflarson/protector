@@ -17,7 +17,7 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
             (path_block(&f.path))
             (evidence_tables(&f.evidence))
             (cut_block(f))
-            (model_prompt(&f.judgement))
+            (model_prompt(&f.id, &f.judgement))
         }
     }
 }
@@ -95,9 +95,11 @@ fn cut_block(f: &FindingProps) -> Markup {
 
 /// The "show model prompt" disclosure to the raw judgement (prompt + reply). Nested
 /// `<details>` so it is collapsed by default; honest about an absent prompt/reply.
-fn model_prompt(j: &JudgementProps) -> Markup {
+fn model_prompt(id: &str, j: &JudgementProps) -> Markup {
     html! {
-        details.model-prompt {
+        // `data-prompt` keys this disclosure so the client can persist its open state across the
+        // /fragment poll swap (otherwise it would snap shut every poll while being read).
+        details.model-prompt data-prompt=(id) {
             summary.why-toggle role="button" aria-expanded="false" { "show model prompt" }
             div.prompt-body {
                 @match &j.verdict {
