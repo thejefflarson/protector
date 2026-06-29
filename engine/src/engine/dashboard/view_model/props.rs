@@ -383,3 +383,190 @@ pub struct FindingsViewProps {
     /// Findings, already sorted by URGENCY (not severity) — brief §5.
     pub findings: Vec<FindingProps>,
 }
+
+// ---------------------------------------------------------------------------
+// Readiness view (brief §6) — one row per decision input, with the honest
+// Present/Absent/Degraded state, the live detail, why it matters, and the env
+// var to enable it. Rows that weaken decisions when absent float to the top.
+// ---------------------------------------------------------------------------
+
+/// The LIVE state of one decision input — the presentation mirror of the engine's
+/// `InputState`, carried as colour + glyph + word (never colour alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputStateProps {
+    /// Wired and live — contributing to decisions this pass.
+    Present,
+    /// Not configured (or loaded empty) — a coverage gap.
+    Absent,
+    /// Configured but not currently answering — a real, ambiguity-introducing gap.
+    Degraded,
+}
+
+impl InputStateProps {
+    /// The CSS token suffix (`--cov-{kind}`) for this state.
+    pub fn token(self) -> &'static str {
+        match self {
+            InputStateProps::Present => "present",
+            InputStateProps::Absent => "absent",
+            InputStateProps::Degraded => "degraded",
+        }
+    }
+
+    /// The glyph carrying the state without colour.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            InputStateProps::Present => "\u{2713}",  // ✓
+            InputStateProps::Absent => "\u{2014}",   // —
+            InputStateProps::Degraded => "\u{25D0}", // ◐
+        }
+    }
+
+    /// The word — always present alongside colour + glyph.
+    pub fn word(self) -> &'static str {
+        match self {
+            InputStateProps::Present => "present",
+            InputStateProps::Absent => "absent",
+            InputStateProps::Degraded => "degraded",
+        }
+    }
+
+    /// Whether the input is contributing (Present). The honesty side: Absent/Degraded never
+    /// read as covered.
+    pub fn is_present(self) -> bool {
+        matches!(self, InputStateProps::Present)
+    }
+}
+
+/// One readiness row — a decision input's live coverage (brief §6). Carries only owned strings
+/// and the small presentation enum; no engine type. A row that `weakens_decisions` when absent
+/// is the kind that demotes the model's call (the enrichment inputs of ADR-0016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessRowProps {
+    /// The input's machine id (`model`/`kev`/…) — used as a stable anchor.
+    pub id: String,
+    /// The human label for the input.
+    pub label: String,
+    pub state: InputStateProps,
+    /// One-line "why it matters" — what protector loses without this input.
+    pub why: String,
+    /// The single env var / mount to enable it. Empty for arm-state (a posture toggle).
+    pub enable: String,
+    /// A short live detail (a count, "last call ok", "shadow mode").
+    pub detail: String,
+    /// Whether this input being absent WEAKENS the model's decision.
+    pub weakens_decisions: bool,
+}
+
+/// The whole Readiness view's props: the persistent strip + the coverage rows, weakening-inputs
+/// first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessViewProps {
+    pub strip: StatusStripProps,
+    /// Coverage rows — weakening-when-absent inputs float to the top (brief §6).
+    pub rows: Vec<ReadinessRowProps>,
+}
+
+// ---------------------------------------------------------------------------
+// Trust view (would-have-acted, brief §6) — the arm/don't-arm evidence: would
+// have cut (sustained-first) vs left alone (the trust half), with the honest
+// journal-empty vs none-in-window distinction.
+// ---------------------------------------------------------------------------
+
+/// One workload the engine WOULD have isolated in the window — the scrutinize side of the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WouldActProps {
+    /// The internet-facing entry that reached the exploitable verdict (untrusted).
+    pub entry: String,
+    /// How many would-act episodes occurred (breach-condition recurrences).
+    pub episodes: usize,
+    /// How many breach decisions affirmed exploitability.
+    pub would_act_decisions: usize,
+    /// The longest projected would-be cut lifetime, human-formatted (`"4m"`, `"2h"`).
+    pub max_lifetime: String,
+    /// The longest episode is still OPEN — the cut would still be standing now.
+    pub open: bool,
+    /// Lifted within the threshold ⇒ likely false positive.
+    pub short_lived: bool,
+    /// Affirmed exploitability with NO CVE/behavioral backing — scrutinize first.
+    pub coverage_gap: bool,
+    /// The model's verdict for the most recent would-act episode (untrusted prose).
+    pub last_verdict: String,
+}
+
+/// One proven path the model deliberately CLEARED — the trust half of the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftAloneProps {
+    /// The internet-facing entry whose latest verdict cleared it (untrusted).
+    pub entry: String,
+    /// The model's clearing verdict (untrusted prose).
+    pub verdict: String,
+}
+
+/// The whole Trust view's props (brief §6): the strip + the headline counts + the would-cut and
+/// left-alone halves + the honest empty framing (`journal_empty` distinct from none-in-window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustViewProps {
+    pub strip: StatusStripProps,
+    /// The rolling window the report aggregates over, human-formatted (`"7d"`).
+    pub window_human: String,
+    /// The journal held NO breach decisions at all (durable history empty) — distinct from
+    /// "decisions, but none in this window".
+    pub journal_empty: bool,
+    /// How many breach decisions fell within the window (the raw material).
+    pub decisions_in_window: usize,
+    /// Workloads the engine would have cut, most-sustained first.
+    pub would_act: Vec<WouldActProps>,
+    /// Proven paths the model cleared and left alone.
+    pub left_alone: Vec<LeftAloneProps>,
+    /// Headline: distinct workloads that would have been cut.
+    pub would_act_count: usize,
+    /// Headline: would-acts flagged short-lived (the likely-FP subset).
+    pub short_lived_count: usize,
+    /// Headline: would-acts that fired during a coverage gap (scrutinize first).
+    pub coverage_gap_count: usize,
+    /// Headline: distinct proven-but-cleared paths.
+    pub left_alone_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Activity view (audit, brief §6) — the self-reverted-cuts log (the safety
+// story, kept visible) + the judgement ring (prompt/reply, for debugging).
+// ---------------------------------------------------------------------------
+
+/// One self-reverted cut for the Activity log — a lifted cut and why (the safety story).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReversionProps {
+    /// The cut signature that was lifted (untrusted node keys).
+    pub cut: String,
+    /// Why it was lifted (untrusted prose).
+    pub reason: String,
+    /// How long ago it was lifted, human-formatted (`"90s"`, `"4m"`).
+    pub age: String,
+}
+
+/// One judgement for the Activity ring — the verbatim prompt/reply behind a model call, for
+/// debugging. Mirrors [`JudgementProps`] but carries the entry it judged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgementEntryProps {
+    /// The internet-facing entry that was judged (untrusted).
+    pub entry: String,
+    /// How many objectives the entry reaches (the breadth the model weighed).
+    pub objectives: usize,
+    /// The final verdict (Debug form), if recorded.
+    pub verdict: Option<String>,
+    /// The full prompt the model saw. `None` ⇒ the deterministic pre-filter decided.
+    pub prompt: Option<String>,
+    /// The model's raw reply. `None` ⇒ the model was unavailable (timeout).
+    pub reply: Option<String>,
+}
+
+/// The whole Activity view's props (brief §6): the strip + the reversion log + the judgement
+/// ring, each with its honest empty state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityViewProps {
+    pub strip: StatusStripProps,
+    /// The self-reverted cuts, newest-first (the safety story).
+    pub reversions: Vec<ReversionProps>,
+    /// The judgement ring, newest-first (for debugging the model).
+    pub judgements: Vec<JudgementEntryProps>,
+}

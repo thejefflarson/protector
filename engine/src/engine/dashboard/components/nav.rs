@@ -1,5 +1,6 @@
-//! The 4-tab nav shell (brief §4) and the phase-2 stub view. The nav exists so all four
-//! surfaces are reachable; only Findings is built in phase 1. Pure component; no domain types.
+//! The 4-tab nav shell (brief §4). The nav exists so all four surfaces — Findings, Trust,
+//! Readiness, Activity — are reachable; all four are real views now (phase 2 landed the
+//! secondary three). Pure component; no domain types.
 
 use maud::{Markup, html};
 
@@ -18,24 +19,7 @@ pub fn nav_bar(active: Tab) -> Markup {
                    aria-current=[is_active.then_some("page")]
                    class=(if is_active { "tab tab-active" } else { "tab" }) {
                     (tab.label())
-                    @if matches!(tab, Tab::Trust | Tab::Readiness | Tab::Activity) {
-                        span.tab-phase { "phase 2" }
-                    }
                 }
-            }
-        }
-    }
-}
-
-/// A labelled phase-2 placeholder for the secondary tabs. Honest about what it will hold, so
-/// the nav is real rather than a dead link.
-pub fn stub_view(tab: Tab, blurb: &str) -> Markup {
-    html! {
-        main class={ "view view-stub view-" (tab.label()) } {
-            div.stub {
-                p.stub-head { (tab.label()) }
-                span.stub-badge { "phase 2" }
-                p.stub-sub.muted { (blurb) }
             }
         }
     }

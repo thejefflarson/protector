@@ -50,6 +50,34 @@ fn component_files() -> Vec<PathBuf> {
     out
 }
 
+/// Guard against the scan silently missing a component: every component the boundary checks must
+/// be present in the scanned set. Extended for the phase-2 views (Trust / Readiness / Activity) so
+/// a new view can never slip past the no-domain-import + no-inline-style scans.
+#[test]
+fn the_scan_covers_every_component_including_the_phase2_views() {
+    let names: Vec<String> = component_files()
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+        .collect();
+    for required in [
+        "findings_view.rs",
+        "finding_row.rs",
+        "finding_detail.rs",
+        "evidence.rs",
+        "status_strip.rs",
+        "nav.rs",
+        // phase 2:
+        "trust_view.rs",
+        "readiness_view.rs",
+        "activity_view.rs",
+    ] {
+        assert!(
+            names.iter().any(|n| n == required),
+            "the component boundary scan must include {required} (found: {names:?})"
+        );
+    }
+}
+
 /// Strip `//`-line comments from a source line, so an explanatory comment that names a domain
 /// type doesn't trip the import guard. Block comments are not used for domain references here.
 fn strip_line_comment(line: &str) -> &str {

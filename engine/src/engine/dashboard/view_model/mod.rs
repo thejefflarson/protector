@@ -9,27 +9,35 @@
 
 pub mod props;
 
+mod activity;
 mod findings;
 mod posture;
+mod readiness;
 mod strip;
+mod trust;
 
 use std::time::SystemTime;
 
-use crate::engine::state::{Finding, Judgement, Readiness};
+use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
 
-use props::{FindingsViewProps, Posture, StatusStripProps};
+use props::{
+    ActivityViewProps, FindingProps, FindingsViewProps, Posture, ReadinessViewProps,
+    StatusStripProps, TrustViewProps,
+};
 
-/// Build the whole Findings view's props from the engine's read-only state. `findings` is a
-/// findings snapshot (verdicts already resolved), `judgements` the newest-first judgement ring
-/// (for the verbatim "show model prompt" disclosure), `readiness` the coverage snapshot, and
-/// `last_pass` the freshness stamp. Pure given its inputs — driveable in tests with no engine.
-pub fn build_findings_view(
+/// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
+/// strip is carried on EVERY view (Findings, Trust, Readiness, Activity), and its honesty reading
+/// (all-clear / watching / blind) depends on the real breach/awaiting/uncertain counts — so a
+/// secondary tab must not zero them, or the strip would falsely read "all clear" while Findings
+/// holds a breach. The mapped findings rows are returned alongside so the Findings view reuses
+/// them without re-mapping.
+fn strip_from_findings(
     cluster: String,
     findings: &[Finding],
     judgements: &[Judgement],
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
-) -> FindingsViewProps {
+) -> (StatusStripProps, Vec<FindingProps>) {
     let rows = findings::map_findings(findings, judgements);
     let breach = rows.iter().filter(|r| r.posture == Posture::Breach).count();
     let awaiting = rows
@@ -51,18 +59,57 @@ pub fn build_findings_view(
     let strip = strip::status_strip(
         cluster, readiness, last_pass, breach, awaiting, uncertain, cleared, escalated,
     );
-    FindingsViewProps {
-        strip,
-        findings: rows,
-    }
+    (strip, rows)
 }
 
-/// Build only the status strip (for views that don't list findings — the phase-2 stubs still
-/// carry the persistent strip). The headline counts are zeroed; a stub view shows no findings.
+/// Build the whole Findings view's props from the engine's read-only state. `findings` is a
+/// findings snapshot (verdicts already resolved), `judgements` the newest-first judgement ring
+/// (for the verbatim "show model prompt" disclosure), `readiness` the coverage snapshot, and
+/// `last_pass` the freshness stamp. Pure given its inputs — driveable in tests with no engine.
+pub fn build_findings_view(
+    cluster: String,
+    findings: &[Finding],
+    judgements: &[Judgement],
+    readiness: &Readiness,
+    last_pass: Option<SystemTime>,
+) -> FindingsViewProps {
+    let (strip, findings) =
+        strip_from_findings(cluster, findings, judgements, readiness, last_pass);
+    FindingsViewProps { strip, findings }
+}
+
+/// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4) — the strip
+/// a secondary view (Trust / Readiness / Activity) shows, so its honesty reading reflects the real
+/// cluster posture, not a falsely-empty one. The mapped findings drive the counts but are
+/// discarded; the secondary view supplies its own body.
 pub fn build_status_strip(
     cluster: String,
+    findings: &[Finding],
+    judgements: &[Judgement],
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
 ) -> StatusStripProps {
-    strip::status_strip(cluster, readiness, last_pass, 0, 0, 0, 0, 0)
+    strip_from_findings(cluster, findings, judgements, readiness, last_pass).0
+}
+
+/// Build the whole Readiness view's props (brief §6): the persistent strip + one coverage row per
+/// decision input, weakening-when-absent inputs first. Pure given its inputs.
+pub fn build_readiness_view(strip: StatusStripProps, readiness: &Readiness) -> ReadinessViewProps {
+    readiness::build(strip, readiness)
+}
+
+/// Build the whole Trust (would-have-acted) view's props (brief §6): the persistent strip + the
+/// would-cut / left-alone diff from the report. Pure given its inputs.
+pub fn build_trust_view(strip: StatusStripProps, report: &Report) -> TrustViewProps {
+    trust::build(strip, report)
+}
+
+/// Build the whole Activity (audit) view's props (brief §6): the persistent strip + the
+/// self-reverted-cuts log + the judgement ring (both newest-first). Pure given its inputs.
+pub fn build_activity_view(
+    strip: StatusStripProps,
+    reversions: &[ReversionRecord],
+    judgements: &[Judgement],
+) -> ActivityViewProps {
+    activity::build(strip, reversions, judgements)
 }

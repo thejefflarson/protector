@@ -6,12 +6,15 @@ use std::time::SystemTime;
 
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::state::{
-    BakeStats, EntryEvidence, Finding, Judgement, ModelHealth, PathStep, Readiness,
-    ReadinessConfig, derive_readiness,
+    BakeStats, EntryEvidence, Finding, Judgement, LeftAloneEntry, ModelHealth, PathStep, Readiness,
+    ReadinessConfig, Report, ReversionRecord, WouldActEntry, derive_readiness,
 };
 
 use super::page;
-use super::view_model::{build_findings_view, build_status_strip};
+use super::view_model::{
+    build_activity_view, build_findings_view, build_readiness_view, build_status_strip,
+    build_trust_view,
+};
 
 /// A readiness snapshot for a fully-covered, actively-judging model.
 fn judging_readiness() -> Readiness {
@@ -498,9 +501,16 @@ fn non_breach_rows_carry_no_live_subtag() {
 
 #[test]
 fn shadow_mode_renders_the_warning_pill() {
-    // judging_readiness is armed:false ⇒ SHADOW.
-    let strip = build_status_strip("prod".into(), &judging_readiness(), Some(SystemTime::now()));
-    let html = page::stub_page(&strip, super::view_model::props::Tab::Findings, "x").into_string();
+    // judging_readiness is armed:false ⇒ SHADOW. The strip rides every page; an empty findings
+    // page carries it.
+    let view = build_findings_view(
+        "prod".into(),
+        &[],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
     assert!(html.contains("mode-shadow warn"), "shadow is the warn pill");
     assert!(html.contains("SHADOW"), "labelled SHADOW");
     assert!(html.contains("\u{26A0}"), "carries the ⚠ warning glyph");
@@ -548,17 +558,275 @@ fn untrusted_verdict_prose_is_escaped() {
 }
 
 // ---------------------------------------------------------------------------
-// Strip + nav smoke.
+// Strip + nav smoke; the secondary views (Trust / Readiness / Activity) are real.
 // ---------------------------------------------------------------------------
 
+/// Build the persistent strip from a given findings snapshot (for the secondary-view tests).
+fn strip_from(findings: &[Finding]) -> super::view_model::props::StatusStripProps {
+    build_status_strip(
+        "prod".into(),
+        findings,
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    )
+}
+
 #[test]
-fn stub_pages_carry_the_persistent_strip_and_nav() {
-    let strip = build_status_strip("prod".into(), &judging_readiness(), Some(SystemTime::now()));
-    let html =
-        page::stub_page(&strip, super::view_model::props::Tab::Trust, "trust blurb").into_string();
-    assert!(html.contains("phase 2"), "stub is labelled phase 2");
+fn secondary_views_carry_the_persistent_strip_and_nav_without_phase2_badge() {
+    // The Trust page (a real view now) carries the strip + the 4-tab nav, and the phase-2 badge
+    // is gone from the nav.
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 0,
+        journal_empty: true,
+        would_act: vec![],
+        left_alone: vec![],
+    };
+    let v = build_trust_view(strip_from(&[]), &report);
+    let html = page::trust_page(&v).into_string();
+    assert!(!html.contains("phase 2"), "the phase-2 badge is gone");
     assert!(html.contains("Findings"), "the nav still offers Findings");
+    assert!(html.contains("Trust"), "and the Trust tab");
     assert!(html.contains("model judging"), "the strip is present");
+}
+
+#[test]
+fn trust_view_distinguishes_journal_empty_from_none_in_window() {
+    // journal_empty ⇒ the "no decisions journaled yet" honest state.
+    let empty = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 0,
+        journal_empty: true,
+        would_act: vec![],
+        left_alone: vec![],
+    };
+    let html = page::trust_page(&build_trust_view(strip_from(&[]), &empty)).into_string();
+    assert!(
+        html.contains("no decisions journaled yet"),
+        "an empty journal reads as no-history, not all-clear"
+    );
+    assert!(html.contains("not an all-clear"));
+
+    // History, but none in window ⇒ the per-column "none in the last …" honest state instead.
+    let none_in_window = Report {
+        journal_empty: false,
+        ..empty
+    };
+    let html2 = page::trust_page(&build_trust_view(strip_from(&[]), &none_in_window)).into_string();
+    assert!(
+        !html2.contains("no decisions journaled yet"),
+        "history exists, so it is NOT the journal-empty state"
+    );
+    assert!(html2.contains("none in the last"), "it is none-in-window");
+}
+
+#[test]
+fn trust_view_renders_would_cut_and_left_alone_with_classification() {
+    let report = Report {
+        window_secs: 7 * 24 * 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 4,
+        journal_empty: false,
+        would_act: vec![
+            WouldActEntry {
+                entry: "deployment/edge/api".into(),
+                episodes: 1,
+                would_act_decisions: 2,
+                max_lifetime_secs: 600,
+                open: true,
+                short_lived: false,
+                coverage_gap: false,
+                last_verdict: "exploitable — KEV RCE reachable".into(),
+            },
+            WouldActEntry {
+                entry: "deployment/cron/job".into(),
+                episodes: 1,
+                would_act_decisions: 1,
+                max_lifetime_secs: 30,
+                open: false,
+                short_lived: true,
+                coverage_gap: true,
+                last_verdict: "exploitable — but cleared in 30s".into(),
+            },
+        ],
+        left_alone: vec![LeftAloneEntry {
+            entry: "deployment/web/marketing".into(),
+            verdict: "not exploitable — internal only".into(),
+        }],
+    };
+    let html = page::trust_page(&build_trust_view(strip_from(&[]), &report)).into_string();
+    assert!(html.contains("would have cut"));
+    assert!(html.contains("left alone"));
+    // Classification words ride alongside the glyph (meaning never by colour alone).
+    assert!(html.contains("still standing"), "the open episode");
+    assert!(
+        html.contains("likely false positive"),
+        "the short-lived one"
+    );
+    assert!(html.contains("scrutinise"), "the coverage-gap one");
+    assert!(html.contains("cleared"), "the left-alone half");
+    // Untrusted verdict prose + node keys are present (escaped by maud).
+    assert!(html.contains("deployment/edge/api"));
+}
+
+#[test]
+fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
+    // A model attached but KEV absent: the Readiness view shows the KEV row's "enable with" var.
+    let config = ReadinessConfig {
+        model_attached: true,
+        kev_count: 0, // absent
+        epss_count: 5,
+        journal_durable: true,
+        armed: false,
+    };
+    let mut bake = BakeStats::default();
+    bake.signals_by_variant.insert("alert".into(), 1);
+    let readiness = derive_readiness(&config, ModelHealth::Ok, &bake, Some(SystemTime::now()));
+    let v = build_readiness_view(strip_from(&[]), &readiness);
+    let html = page::readiness_page(&v).into_string();
+    assert!(html.contains("decision inputs"), "the section heading");
+    assert!(html.contains("KEV catalogue"), "the KEV row label");
+    // The absent KEV row surfaces the env var to enable it (the per-feed how-to-enable surface).
+    assert!(html.contains("PROTECTOR_KEV_FILE"));
+    assert!(
+        html.contains("enable with"),
+        "framed as an action for a gap"
+    );
+    // State carried by word, not colour alone.
+    assert!(html.contains("absent"));
+    assert!(html.contains("present"), "covered inputs read present");
+}
+
+#[test]
+fn activity_view_renders_reversions_and_judgements_with_honest_empties() {
+    // With data: the reversion + judgement render.
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let reversions = vec![ReversionRecord {
+        cut: "deployment/edge/legacy -[reaches/Tcp/8080]-> service/admin".into(),
+        reason: "breach condition cleared".into(),
+        at_ms: now_ms.saturating_sub(90_000),
+    }];
+    let judgements = vec![Judgement {
+        entry: "deployment/edge/api".into(),
+        objectives: 1,
+        verdict: "Exploitable".into(),
+        prompt: Some("the prompt".into()),
+        reply: None, // timed out ⇒ honest "no reply"
+    }];
+    let v = build_activity_view(strip_from(&[]), &reversions, &judgements);
+    let html = page::activity_page(&v).into_string();
+    assert!(html.contains("self-reverted cuts"));
+    assert!(html.contains("model judgements"));
+    assert!(
+        html.contains("breach condition cleared"),
+        "the reversion reason"
+    );
+    assert!(html.contains("deployment/edge/api"), "the judged entry");
+    assert!(
+        html.contains("no reply"),
+        "an absent reply renders the honest no-reply line, never a blank"
+    );
+
+    // Empty: both halves render their honest empty state, not a blank.
+    let empty = build_activity_view(strip_from(&[]), &[], &[]);
+    let html2 = page::activity_page(&empty).into_string();
+    assert!(html2.contains("no cuts have been lifted"));
+    assert!(html2.contains("no judgements recorded"));
+}
+
+#[test]
+fn secondary_view_strip_stays_non_green_when_findings_hold_a_breach() {
+    // The persistent strip must reflect the REAL cluster posture on a secondary tab: a breach in
+    // Findings keeps the Trust strip out of the green all-clear (invariant #1, carried everywhere).
+    let breach = breach_finding("endpoint/a", Verdict::Confirmed);
+    let strip = build_status_strip(
+        "prod".into(),
+        &[breach],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    assert_eq!(
+        strip.breach_count, 1,
+        "the strip carries the true breach count"
+    );
+    assert!(
+        !strip.all_clear(),
+        "a breach forbids the green all-clear on any tab"
+    );
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 0,
+        journal_empty: true,
+        would_act: vec![],
+        left_alone: vec![],
+    };
+    let html = page::trust_page(&build_trust_view(strip, &report)).into_string();
+    assert!(
+        !html.contains("all clear"),
+        "the Trust tab's strip never reads all-clear while Findings holds a breach"
+    );
+}
+
+#[test]
+fn untrusted_text_is_escaped_in_the_secondary_views() {
+    let evil = "<script>alert('x')</script>";
+    // Trust: an untrusted verdict + entry key.
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 1,
+        journal_empty: false,
+        would_act: vec![WouldActEntry {
+            entry: evil.into(),
+            episodes: 1,
+            would_act_decisions: 1,
+            max_lifetime_secs: 10,
+            open: true,
+            short_lived: false,
+            coverage_gap: false,
+            last_verdict: format!("exploitable {evil}"),
+        }],
+        left_alone: vec![],
+    };
+    let html = page::trust_page(&build_trust_view(strip_from(&[]), &report)).into_string();
+    assert!(
+        !html.contains("<script>alert"),
+        "raw script must not reach output"
+    );
+    assert!(html.contains("&lt;script&gt;"), "it is escaped");
+
+    // Activity: an untrusted reversion reason + cut + prompt.
+    let reversions = vec![ReversionRecord {
+        cut: format!("cut {evil}"),
+        reason: format!("reason {evil}"),
+        at_ms: 0,
+    }];
+    let judgements = vec![Judgement {
+        entry: evil.into(),
+        objectives: 1,
+        verdict: "x".into(),
+        prompt: Some(format!("prompt {evil}")),
+        reply: Some(format!("reply {evil}")),
+    }];
+    let html2 = page::activity_page(&build_activity_view(
+        strip_from(&[]),
+        &reversions,
+        &judgements,
+    ))
+    .into_string();
+    assert!(
+        !html2.contains("<script>alert"),
+        "raw script must not reach output"
+    );
+    assert!(html2.contains("&lt;script&gt;"), "it is escaped");
 }
 
 #[test]

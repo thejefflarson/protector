@@ -201,6 +201,9 @@ pub async fn run_watch(
                     findings: engine.findings(),
                     judgements: journal.clone(),
                     reversions: engine.reversions(),
+                    // The durable decision journal backs the Trust would-have-acted report
+                    // (replayed read-only). Distinct handle from `journal` (the JudgementLog).
+                    decision_journal: engine.journal(),
                     cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
                         .unwrap_or_else(|_| "cluster".to_string()),
                 };
