@@ -190,15 +190,16 @@ async fn main() -> Result<()> {
     let metrics = Arc::new(Metrics::new());
 
     // The bounded, deduped admission-decision ring (JEF-226/237): the webhook engine writes
-    // each resolved decision — clean admit, audit, or deny — here; the (separately-spawned)
-    // dashboard reads it for `/policy`. Both run in this one process, so the two halves are
-    // the same `Arc`. On boot the mitigation engine repopulates it from the durable journal.
+    // each resolved decision — clean admit, audit, or deny — here. On boot the mitigation
+    // engine repopulates it from the durable journal so the admission-decision log survives a
+    // restart.
     let policy_log = Arc::new(PolicyDecisionLog::new());
 
     // The durable decision journal (JEF-141/237): the webhook engine persists each resolved
-    // admission so `/policy` survives a restart. Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH`
-    // ⇒ disabled (in-memory only, no crash). The mitigation engine opens its own handle to the
-    // same path; both append-only writers share the file safely.
+    // admission so the admission-decision log survives a restart. Unset/unwritable
+    // `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no crash). The mitigation
+    // engine opens its own handle to the same path; both append-only writers share the file
+    // safely.
     let webhook_journal = Arc::new(protector::engine::journal::DecisionJournal::from_env());
 
     // The policy set is fixed at startup and shared (read-only) across requests.
@@ -247,10 +248,6 @@ async fn main() -> Result<()> {
         let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
-        // Read-only findings dashboard endpoint. Unset = no dashboard.
-        let dashboard_addr = env::var("PROTECTOR_DASHBOARD_ADDR")
-            .ok()
-            .and_then(|v| v.parse::<SocketAddr>().ok());
         // KEV catalogue (a synced ConfigMap of actively-exploited CVEs) for the
         // ExploitIntel "exploited-in-wild" signal. Unset = no exploit intel.
         let kev = match env::var("PROTECTOR_KEV_FILE") {
@@ -264,9 +261,9 @@ async fn main() -> Result<()> {
             Ok(path) => EpssStore::from_file(&path),
             Err(_) => EpssStore::empty(),
         };
-        // The dashboard (spawned inside run_watch) reads the webhook's admission-decision
-        // ring for `/policy` (JEF-226) — the same `Arc` the webhook engine writes to.
-        let dashboard_policy_log = policy_log.clone();
+        // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
+        // the durable journal on boot — the same `Arc` the webhook engine writes to.
+        let engine_policy_log = policy_log.clone();
         match kube::Client::try_default().await {
             Ok(client) => {
                 tracing::info!("starting mitigation engine (event-driven observer)");
@@ -276,10 +273,9 @@ async fn main() -> Result<()> {
                         active,
                         scope,
                         falco_addr,
-                        dashboard_addr,
                         kev,
                         epss,
-                        dashboard_policy_log,
+                        engine_policy_log,
                     )
                     .await
                     {

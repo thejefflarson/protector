@@ -3,7 +3,7 @@
 //! enrichment-coverage ([`EntryCoverage`]) the journal records. Split out of the
 //! adjudicate module root purely to keep every file under the 1,000-line cap (repo
 //! CLAUDE.md). The raw evidence is read from [`SecurityGraph::entry_evidence`] (the
-//! single source of truth shared with the dashboard), then rendered here.
+//! single source of truth shared with the findings snapshot), then rendered here.
 
 use super::guards::sanitize;
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
@@ -150,7 +150,7 @@ fn take_from_budget(field: String, budget: &mut usize) -> Option<String> {
 /// The evidence behind an entry: the CVEs its image carries and the runtime signals
 /// observed on it — what the model needs to judge contextual realness. The raw evidence
 /// (structured `Vulnerability` + `Behavior`) comes from [`SecurityGraph::entry_evidence`],
-/// the single source of truth shared with the dashboard's per-finding evidence blocks
+/// the single source of truth shared with the findings snapshot's per-finding evidence blocks
 /// (JEF-133), so the model and the operator can never see a different set of facts. Here
 /// the CVEs are rendered into the prompt-string form:
 ///
@@ -205,7 +205,7 @@ fn finding_evidence_budgeted(f: &ScanFinding, budget: &mut usize) -> String {
 }
 
 /// The non-CVE scanner findings behind an entry (JEF-244), rendered into prompt lines and
-/// drawn from the SAME [`SecurityGraph::entry_findings`] the dashboard reads. Returns
+/// drawn from the SAME [`SecurityGraph::entry_findings`] the findings snapshot reads. Returns
 /// `(exposed_secrets, static_posture)`: exposed secrets are kept separate because they ARE
 /// exploitation evidence (a usable credential baked into the image), while the config-audit
 /// and RBAC-assessment findings are folded together as STATIC POSTURE / severity context — on
@@ -249,8 +249,8 @@ pub(crate) fn cve_ids_of(cves: &[String]) -> std::collections::HashSet<String> {
 /// The structured enrichment-coverage behind an entry's breach decision (JEF-145): the
 /// CVE ids and the behavioral-signal presence that went into the model's prompt, read
 /// from the SAME evidence (`entry_evidence`) the model was handed. The journal-append
-/// site records this so `/report` classifies a coverage gap from fact, not by grepping
-/// the verdict prose for a `CVE-` token.
+/// site records this so the would-have-acted report aggregation classifies a coverage gap from
+/// fact, not by grepping the verdict prose for a `CVE-` token.
 ///
 /// Pure and deterministic: a no-op-cheap re-derivation of the prompt evidence for an
 /// entry. The CVE id set is sorted+deduped for a stable journal line.

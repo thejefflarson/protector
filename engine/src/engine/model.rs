@@ -358,7 +358,7 @@ pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) ->
 }
 
 /// Keep the configured model warm so the first judging pass after an engine restart
-/// isn't glacial (the "dashboard blank ~20 min after restart" pain, JEF-63). A CPU-only
+/// isn't glacial (the "no verdicts for ~20 min after restart" pain, JEF-63). A CPU-only
 /// local model takes minutes to load its weights; once Ollama unloads an idle model
 /// (default 5 min) the next adjudication eats that cold-load before any verdict lands.
 ///
@@ -367,7 +367,7 @@ pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) ->
 /// resident between judging passes. It is strictly **best-effort and shadow-safe**: the
 /// ping is a one-token no-op chat (see [`keep_warm`]) that touches no verdict, enable, or
 /// actuation path, and a down or slow endpoint is logged at debug and retried next tick —
-/// it never blocks the engine loop or the dashboard.
+/// it never blocks the engine loop or the output state.
 ///
 /// A **no-op when no model is configured** (`PROTECTOR_ENGINE_MODEL` empty → no task is
 /// spawned) and when keep-warm is disabled (`PROTECTOR_ENGINE_KEEPWARM_SECS=0`).

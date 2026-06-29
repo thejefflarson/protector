@@ -65,7 +65,7 @@ the live proof+enrichment, not a fixed timer.
 
 - **argo falls out correctly.** Provable chains via authorized RBAC (1); enrichment (2) is
   no CVE, no behavioral signal. The model decides *no breach* — no deterministic ground
-  forces it. It stays context in `/findings`, not an action.
+  forces it. It stays context in the findings output, not an action.
 - **The engine gets simpler.** Proof and enrichment are deterministic and testable; the
   judgement is the model's, holistically. We stop maintaining heuristic gates that
   approximated the model's job.

@@ -1,8 +1,8 @@
 //! The breach notifier (JEF-144): the **one** sanctioned outbound path (ADR-0018).
 //!
-//! Surfacing is otherwise pull-only — a breach decision lands on `/findings` and the
+//! Surfacing is otherwise pull-only — a breach decision lands in the findings snapshot and the
 //! durable journal ([`super::journal`]), but a solo operator never *learns* of it
-//! unless watching the dashboard. This notifier POSTs a breach decision to an
+//! unless actively reading that state. This notifier POSTs a breach decision to an
 //! operator-configured URL (`PROTECTOR_ENGINE_NOTIFY_URL`) — the inverse of the
 //! falcosidekick ingest — documented to target an in-cluster sink (Alertmanager /
 //! ntfy / gotify).
@@ -57,8 +57,8 @@ pub enum Enforcement {
 }
 
 impl Enforcement {
-    /// `Armed` when any action class is enabled, else `Shadow`. The same `armed` flag
-    /// that titles the dashboard's remediations section drives the notifier wording.
+    /// `Armed` when any action class is enabled, else `Shadow`. The same `armed` flag the
+    /// readiness aggregation reports as arm-state drives the notifier wording.
     pub fn from_armed(armed: bool) -> Self {
         if armed { Self::Armed } else { Self::Shadow }
     }

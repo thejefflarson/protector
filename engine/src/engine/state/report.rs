@@ -1,17 +1,17 @@
-//! The report DATA layer (ADR-0019): the would-have-acted [`Report`] aggregation and its
-//! shapes ([`WouldActEntry`] / [`LeftAloneEntry`]) and the [`aggregate_report`] fold over the
-//! journal's breach decisions.
+//! The would-have-acted report aggregation (JEF-143): the [`Report`] shape and its
+//! [`WouldActEntry`] / [`LeftAloneEntry`] rows, the [`aggregate_report`] fold over the journal's
+//! breach decisions, and [`default_window_report`] — the default-window aggregation the engine's
+//! per-pass OTLP mirror reads.
 //!
-//! This is data, not markup — it holds NO rendering. The v1 `/report` HTML/JSON tab was dropped
-//! in the JEF-255 rewrite; this aggregation stays SOLELY to back the engine's per-pass OTLP
-//! would-have-acted mirror ([`super::super::default_window_report`]), over the default window.
+//! This is data, not markup — it holds no rendering. The aggregation exists SOLELY to back the
+//! engine's per-pass OTLP would-have-acted mirror over the default window.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
-use crate::engine::journal::{Decision, EnrichmentCoverage, JournalEntry};
+use crate::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage, JournalEntry};
 
 /// Default rolling window for the OTLP would-have-acted mirror, in hours (7 days). The
 /// journal's own rotation bounds how far back history actually reaches.
@@ -24,7 +24,7 @@ pub(crate) const DEFAULT_SHORT_LIVED_SECS: u64 = 5 * 60;
 
 /// One workload the engine WOULD have isolated in the window: the entry, how often
 /// the breach condition held, the projected would-be cut lifetime, and the FP-vs-real
-/// classification. JSON-serializable so `/report.json` is self-contained.
+/// classification. JSON-serializable so the aggregation is self-contained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WouldActEntry {
     /// The internet-facing workload key that reached the exploitable verdict.
@@ -65,7 +65,7 @@ pub struct LeftAloneEntry {
 }
 
 /// The aggregated shadow report (JEF-143): the would-have-acted diff over a rolling
-/// window. JSON-serializable for `/report.json`; the HTML view renders the same data.
+/// window. JSON-serializable; the engine mirrors its headline counts to OTLP per pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
     /// The window length aggregated over, in seconds.
@@ -109,8 +109,8 @@ impl Report {
 /// A model verdict AFFIRMS exploitability when its own words begin with "exploitable"
 /// (or "confirmed" — an already-corroborated live attack that should stand). A "not
 /// exploitable — …" / "refuted" / "uncertain" verdict does not. This mirrors the
-/// dashboard's [`flagged`] convention so the report and the findings table agree on
-/// what counts as a would-act.
+/// posture convention so the aggregation and the findings snapshot agree on what counts
+/// as a would-act.
 pub(crate) fn verdict_would_act(verdict: &str) -> bool {
     let v = verdict.trim_start().to_ascii_lowercase();
     v.starts_with("exploitable") || v.starts_with("confirmed")
@@ -287,7 +287,119 @@ pub(crate) fn aggregate_report(
     }
 }
 
-// The would-have-acted aggregation ([`aggregate_report`], [`Report`] + its count methods)
-// stays here as the data the engine's per-pass OTLP mirror reads
-// ([`super::super::default_window_report`]); the v1 `/report` HTML/JSON tab and its renderer
-// were dropped in the JEF-255 rewrite.
+/// Aggregate the would-have-acted report over the DEFAULT window from a journal handle
+/// (JEF-143), for the engine to mirror its headline counts to OTLP per pass — the in-process
+/// metrics mirror like the bake counts. A disabled journal replays nothing, so this is an empty
+/// report (all-zero headline). This aggregation exists solely to feed the OTLP mirror in
+/// `engine::mod`.
+pub fn default_window_report(journal: &DecisionJournal) -> Report {
+    aggregate_report(
+        &journal.replay(),
+        SystemTime::now(),
+        Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+        Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn breach(at_ms: u64, entry: &str, verdict: &str) -> JournalEntry {
+        JournalEntry {
+            at_ms,
+            decision: Decision::Breach {
+                entry: entry.to_string(),
+                objectives: 1,
+                verdict: verdict.to_string(),
+                coverage: None,
+            },
+        }
+    }
+
+    #[test]
+    fn verdict_would_act_keys_on_affirmative_prefix() {
+        assert!(verdict_would_act("exploitable — CVE reachable"));
+        assert!(verdict_would_act("confirmed live attack"));
+        assert!(verdict_would_act("  Exploitable"));
+        assert!(!verdict_would_act("not exploitable — internal only"));
+        assert!(!verdict_would_act("refuted"));
+        assert!(!verdict_would_act("uncertain — model timed out"));
+    }
+
+    #[test]
+    fn aggregate_folds_an_open_would_act_episode() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let now_ms = 10_000_000;
+        let entries = vec![
+            breach(now_ms - 600_000, "web", "exploitable — RCE"),
+            breach(now_ms - 300_000, "web", "exploitable — RCE"),
+        ];
+        let report = aggregate_report(
+            &entries,
+            now,
+            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+        );
+        assert_eq!(report.would_act_count(), 1);
+        assert_eq!(report.left_alone_count(), 0);
+        let w = &report.would_act[0];
+        assert_eq!(w.entry, "web");
+        assert!(w.open, "still the latest verdict → open episode");
+        assert!(!w.short_lived, "an open episode is never short-lived");
+        assert_eq!(w.episodes, 1);
+        assert_eq!(w.would_act_decisions, 2);
+    }
+
+    #[test]
+    fn aggregate_classifies_a_cleared_path_as_left_alone() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let now_ms = 10_000_000;
+        let entries = vec![breach(
+            now_ms - 60_000,
+            "api",
+            "not exploitable — internal only",
+        )];
+        let report = aggregate_report(
+            &entries,
+            now,
+            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+        );
+        assert_eq!(report.would_act_count(), 0);
+        assert_eq!(report.left_alone_count(), 1);
+        assert_eq!(report.left_alone[0].entry, "api");
+    }
+
+    #[test]
+    fn aggregate_marks_a_short_lived_episode() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let now_ms = 10_000_000;
+        // An episode that opened then cleared within a minute (< the 5-minute threshold).
+        let entries = vec![
+            breach(now_ms - 120_000, "web", "exploitable — RCE"),
+            breach(now_ms - 90_000, "web", "not exploitable — patched"),
+        ];
+        let report = aggregate_report(
+            &entries,
+            now,
+            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+        );
+        assert_eq!(report.would_act_count(), 1);
+        assert!(report.would_act[0].short_lived);
+        assert_eq!(report.short_lived_count(), 1);
+    }
+
+    #[test]
+    fn empty_journal_reports_journal_empty() {
+        let report = aggregate_report(
+            &[],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
+            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
+        );
+        assert!(report.journal_empty);
+        assert_eq!(report.decisions_in_window, 0);
+    }
+}

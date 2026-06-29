@@ -149,13 +149,13 @@ fn engine_with_adjudicator(adj: Box<dyn reason::adjudicate::Adjudicator>) -> Eng
     )
 }
 
-/// JEF-157 (the no-lag fix): a judged entry's verdict is carried on `/findings` by the
-/// single shared verdict STORE, resolved at snapshot time — not stamped onto the rows
+/// JEF-157 (the no-lag fix): a judged entry's verdict is carried in the findings snapshot by
+/// the single shared verdict STORE, resolved at snapshot time — not stamped onto the rows
 /// by an end-of-pass re-publish. We prove the store is the source of truth: after a
-/// pass the verdict is on `/findings`, AND it equals the store's value for that entry
-/// (the same `Arc` the dashboard reads). With the store, a verdict written the instant
-/// the judging loop decides it is visible immediately — it never lags behind
-/// `/judgements` (the confirmed-live bug: `/judgements`=N while `/findings`=0).
+/// pass the verdict is in the findings snapshot, AND it equals the store's value for that
+/// entry (the same `Arc` a reader sees). With the store, a verdict written the instant
+/// the judging loop decides it is resolved immediately — it never lags behind the judgement
+/// record (the confirmed-live bug: judgements=N while findings=0).
 #[tokio::test]
 async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
     let mut engine = engine_with_adjudicator(Box::new(FixedAdjudicator(Verdict::Exploitable(
@@ -164,17 +164,17 @@ async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
     engine.process(&exposed_snapshot(true)).await;
 
     let findings = engine.findings();
-    // The verdict is on /findings, in the model's own words.
+    // The verdict is in the findings snapshot, in the model's own words.
     let snap = findings.snapshot();
     assert!(
         snap.iter().any(|f| f.breach_relevant
             && f.verdict.as_ref().map(|v| v.summary()).as_deref()
                 == Some("exploitable — RCE reaches the secret")),
-        "the judged verdict is on /findings (via the store)"
+        "the judged verdict is in the findings snapshot (via the store)"
     );
-    // And it is the SAME value the shared store holds for that entry — proving
-    // /findings derives the verdict from the store, the one source of truth, rather
-    // than a separately-stamped per-row copy. The dashboard reads this exact `Arc`.
+    // And it is the SAME value the shared store holds for that entry — proving the findings
+    // snapshot derives the verdict from the store, the one source of truth, rather
+    // than a separately-stamped per-row copy. A reader sees this exact `Arc`.
     let entry = snap
         .iter()
         .find(|f| f.breach_relevant)
@@ -183,12 +183,12 @@ async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
     assert_eq!(
         findings.verdicts().display_summary(&entry).as_deref(),
         Some("exploitable — RCE reaches the secret"),
-        "/findings and the store agree on the entry's verdict"
+        "the findings snapshot and the store agree on the entry's verdict"
     );
 }
 
 /// JEF-157 carry-forward: when a later pass comes back Uncertain (a transient model
-/// timeout), the dashboard keeps showing the prior DECISIVE verdict rather than
+/// timeout), the resolved posture keeps the prior DECISIVE verdict rather than
 /// regressing to "uncertain" — the store holds the carried-forward display verdict.
 #[tokio::test]
 async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
@@ -213,7 +213,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine_with_adjudicator(Box::new(FlakyAdjudicator(calls.clone())));
 
-    // Pass 1: decisive Exploitable, shown on /findings.
+    // Pass 1: decisive Exploitable, resolved in the findings snapshot.
     engine.process(&exposed_snapshot(true)).await;
     assert!(
         engine
@@ -227,7 +227,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
     );
 
     // Pass 2 with DIFFERENT evidence (no CVE) so the fingerprint changes and the model
-    // is re-consulted — and this time it returns Uncertain. The dashboard must keep
+    // is re-consulted — and this time it returns Uncertain. The resolved posture must keep
     // the prior decisive verdict, not regress to "uncertain".
     engine.process(&exposed_snapshot(false)).await;
     assert!(
@@ -242,12 +242,12 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             .any(|f| f.breach_relevant
                 && f.verdict.as_ref().map(|v| v.summary()).as_deref()
                     == Some("exploitable — RCE reaches the secret")),
-        "an Uncertain re-judge keeps the prior decisive verdict on /findings"
+        "an Uncertain re-judge keeps the prior decisive verdict in the findings snapshot"
     );
 }
 
 /// Findings are published even when adjudication can't run, so model latency or an
-/// outage never blanks the dashboard. With evidence present but the (counting)
+/// outage never blanks the findings snapshot. With evidence present but the (counting)
 /// model refuting, the breach finding is still there.
 #[tokio::test]
 async fn publishes_findings_independent_of_the_model() {
@@ -334,8 +334,8 @@ async fn corroboration_predicate_fires_on_a_live_alert() {
 
 /// `process` publishes the behavioral-bake snapshot (JEF-48) to the findings handle
 /// each pass: signal volume by variant, attribution resolved/unresolved mirroring the
-/// adapter rule, the live-store size, and corroborations fired — the dashboard's
-/// in-process mirror of the OTLP bake counters.
+/// adapter rule, the live-store size, and corroborations fired — the in-process
+/// mirror of the OTLP bake counters.
 #[tokio::test]
 async fn process_publishes_the_behavioral_bake_snapshot() {
     use crate::engine::observe::{Attribution, RuntimeObservation};
@@ -393,11 +393,11 @@ fn temp_journal_path(tag: &str) -> std::path::PathBuf {
     ))
 }
 
-/// JEF-141 acceptance: after a "restart", `/findings` shows the pre-restart breach
-/// verdict WITHOUT a fresh model pass, and the reversions ring + last-pass freshness
+/// JEF-141 acceptance: after a "restart", the findings snapshot shows the pre-restart breach
+/// verdict WITHOUT a fresh model pass, and the reversion log + last-pass freshness
 /// are seeded from the durable journal. We process once with a journal enabled (which
 /// appends the breach decision), then build a SECOND engine on the SAME journal path
-/// and assert the dashboard is populated from replay alone — before any `process`.
+/// and assert the output state is populated from replay alone — before any `process`.
 #[tokio::test]
 async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
     let path = temp_journal_path("restore");
@@ -445,8 +445,8 @@ async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
         "last-pass freshness is restored from the journal"
     );
 
-    // The restored verdict surfaces on /findings the moment the next pass publishes
-    // chains — without the (counting) model being consulted for it.
+    // The restored verdict surfaces in the findings snapshot the moment the next pass
+    // publishes chains — without the (counting) model being consulted for it.
     let mut engine2 = engine2;
     engine2.process(&exposed_snapshot(true)).await;
     let findings = engine2.findings().snapshot();
@@ -658,7 +658,7 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
     }
 }
 
-/// JEF-234 — while an entry backs off, the dashboard keeps showing its last DECISIVE
+/// JEF-234 — while an entry backs off, the resolved posture keeps its last DECISIVE
 /// verdict (no regression to "uncertain"), and once the model recovers a decisive verdict
 /// is cached and shown. We can't fast-forward the injected clock across `process()` here,
 /// so we assert the no-regression display property directly: a decisive verdict shows, and
@@ -703,8 +703,8 @@ async fn backing_off_entry_keeps_showing_the_last_decisive_verdict() {
 /// cooldown elapses, and a decisive success closes it immediately.
 #[test]
 fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
-    use crate::engine::dashboard::VerdictStore;
     use crate::engine::reason::backoff::{BREAKER_COOLDOWN, BREAKER_TRIP};
+    use crate::engine::state::VerdictStore;
     use std::time::{Duration, Instant};
 
     let store = VerdictStore::new();

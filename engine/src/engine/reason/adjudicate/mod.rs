@@ -75,8 +75,8 @@ impl Verdict {
         }
     }
 
-    /// A one-line, human summary of the model's call — kept on the finding so the
-    /// dashboard can show *both* positive (cut) and negative (don't-cut) decisions
+    /// A one-line, human summary of the model's call — kept on the finding so a consumer
+    /// can show *both* positive (cut) and negative (don't-cut) decisions
     /// with the model's own reasoning, not just the outcome.
     pub fn summary(&self) -> String {
         match self {
@@ -122,7 +122,7 @@ impl Adjudicator for NullAdjudicator {
 
 // Cohesive submodules, split out of this file to keep each under the 1,000-line cap
 // (repo CLAUDE.md). The public surface (the verdict types, the adjudicators, the
-// prompt builder, and the cache/journal helpers the engine + dashboard import) is
+// prompt builder, and the cache/journal helpers the engine + output state import) is
 // re-exported here so external paths (`reason::adjudicate::...`) resolve unchanged.
 mod evidence;
 mod guards;

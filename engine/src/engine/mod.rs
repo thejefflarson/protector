@@ -26,19 +26,23 @@
 //   observe/ — observed state + capability ports/adapters (ADR-0002/0003)
 //   reason/  — propose / prove / judge (ADR-0001/0005/0013)
 //   respond/ — proven chains → self-retiring controls, then apply (ADR-0002/0009)
-// model + dashboard are cross-cutting single files; this mod.rs is the orchestrator.
-pub mod dashboard;
+// `model` is a cross-cutting single file; `state` is the engine's output-state domain layer;
+// this mod.rs is the orchestrator.
 pub mod graph;
 pub mod journal;
 pub mod model;
 pub mod notify;
 pub mod observe;
 // JEF-226: the bounded admission-decision ring (written by the webhook engine, read by
-// the dashboard's `/policy` view). Standalone module to stay clear of the JEF-218
+// the admission decision log). Standalone module to stay clear of the JEF-218
 // file-split refactor of this orchestrator.
 pub mod policy_log;
 pub mod reason;
 pub mod respond;
+// The engine's output-state domain layer: the proven-chain findings, the per-entry
+// verdict store, the judgement/reversion logs, the behavioral-bake snapshot, and the
+// would-have-acted / readiness aggregations the per-pass OTLP mirror reads.
+pub mod state;
 
 use graph::delta::GraphSnapshot;
 use observe::Snapshot;
@@ -104,7 +108,8 @@ struct EngineMetrics {
     /// Shadow would-have-acted report headline (JEF-143): distinct workloads the engine
     /// WOULD have isolated over the default rolling window, as of this pass — the gates-
     /// exiting-shadow figure (JEF-50), mirrored to OTLP like the bake counts. A gauge:
-    /// the current window snapshot, the in-process mirror of the `/report` panel.
+    /// the current window snapshot, the in-process mirror of the would-have-acted report
+    /// aggregation.
     report_would_act: opentelemetry::metrics::Gauge<u64>,
     /// Shadow report headline: distinct proven-but-cleared paths the model left alone
     /// over the window (the trust half of the diff).
@@ -221,16 +226,15 @@ pub struct Engine {
     actuator: Box<dyn Actuator>,
     hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
     adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
-    findings: std::sync::Arc<dashboard::Findings>,
-    /// Recent lifted cuts + why (JEF-141), shared with the dashboard's `/reversions`.
-    /// Seeded from the journal on boot so a self-revert survives a restart.
-    reversions: std::sync::Arc<dashboard::ReversionLog>,
+    findings: std::sync::Arc<state::Findings>,
+    /// The reversion log (JEF-141): recent lifted cuts + why. Seeded from the journal on boot
+    /// so a self-revert survives a restart.
+    reversions: std::sync::Arc<state::ReversionLog>,
     /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
     /// apply/revert deltas are appended here so a restart replays them. Disabled (a
     /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
-    /// then runs exactly as it did before, in-memory only. Shared (`Arc`) with the
-    /// dashboard's `/report` view (JEF-143), which replays it read-only to aggregate the
-    /// shadow "would-have-acted" diff.
+    /// then runs exactly as it did before, in-memory only. Replayed read-only by the
+    /// would-have-acted report aggregation (JEF-143) the per-pass OTLP mirror reads.
     journal: std::sync::Arc<journal::DecisionJournal>,
     /// The breach notifier (JEF-144, ADR-0018): the one sanctioned outbound path. POSTs a
     /// redacted breach-decision summary to an operator-configured sink, fired on the SAME
@@ -242,8 +246,8 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
-    /// The SINGLE per-entry verdict store (JEF-157), shared (`Arc`) with the dashboard's
-    /// [`dashboard::Findings`]. One record per internet-facing ENTRY collapses what used
+    /// The SINGLE per-entry verdict store (JEF-157), shared (`Arc`) with the
+    /// [`state::Findings`] handle. One record per internet-facing ENTRY collapses what used
     /// to be four parallel maps:
     /// - the cross-pass verdict CACHE (evidence fingerprint → decisive verdict): the
     ///   model judges each breach-relevant entry holistically (ADR-0013), but a CPU-only
@@ -251,18 +255,18 @@ pub struct Engine {
     ///   only when its fingerprint changes (its CVEs/runtime OR its reachable-objective
     ///   set — a misconfig that newly exposes something re-triggers it);
     /// - the DISPLAY memory (the last verdict shown, decisive or inconclusive): carried
-    ///   forward so the dashboard never blanks while the slow model re-judges;
+    ///   forward so the resolved posture never blanks while the slow model re-judges;
     /// - the journal-RESTORED summary (JEF-141): the model's prior words shown on boot
     ///   until a live verdict supersedes them;
     /// - the JOURNALED-summary dedup key: a decisive verdict is journaled + notified only
     ///   when it changed for the entry.
     ///
-    /// Because both `/findings` (via [`dashboard::Findings::snapshot`]) and `/judgements`
-    /// derive an entry's verdict from this one store, they cannot disagree, and a verdict
-    /// is visible on the dashboard the instant the judging loop writes it here — there is
-    /// no end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral
-    /// workloads, removed exposure).
-    verdicts: std::sync::Arc<dashboard::VerdictStore>,
+    /// Because the findings snapshot (via [`state::Findings::snapshot`]) and the judgement
+    /// record both derive an entry's verdict from this one store, they cannot disagree, and a
+    /// verdict is resolved the instant the judging loop writes it here — there is no
+    /// end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral workloads,
+    /// removed exposure).
+    verdicts: std::sync::Arc<state::VerdictStore>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -284,13 +288,12 @@ impl Engine {
         } else {
             tracing::warn!("engine: action classes enabled — auto-application is on for them");
         }
-        let findings = std::sync::Arc::new(dashboard::Findings::new());
-        // The arm state reaches the dashboard via `ReadinessConfig.armed` (set in run_loop),
-        // which the v2 internals coverage row renders; the redundant `Findings` arm atomic was
-        // dropped in the JEF-255 rewrite.
+        let findings = std::sync::Arc::new(state::Findings::new());
+        // The arm state is reported via `ReadinessConfig.armed` (set in run_loop) in the
+        // readiness aggregation's coverage row.
         // The verdict store (JEF-157) is OWNED by the findings handle and SHARED with the
         // engine: both write/read the same `Arc`, so a verdict the judging loop writes is
-        // visible on `/findings` immediately.
+        // resolved into the findings snapshot immediately.
         let verdicts = findings.verdicts();
         Self {
             adapters: observe::adapter::default_adapters(),
@@ -300,7 +303,7 @@ impl Engine {
             hypothesizer,
             adjudicator,
             findings,
-            reversions: std::sync::Arc::new(dashboard::ReversionLog::new()),
+            reversions: std::sync::Arc::new(state::ReversionLog::new()),
             // Disabled by default — durability is opt-in via a mounted volume. The watch
             // path enables it from the env (see [`with_journal`]); tests run in-memory.
             journal: std::sync::Arc::new(journal::DecisionJournal::disabled()),
@@ -316,8 +319,9 @@ impl Engine {
     }
 
     /// Attach a durable decision journal (JEF-141) and replay it onto the in-memory
-    /// state, so `/findings`, `/judgements`, and the reversions view populate IMMEDIATELY
-    /// after a restart — before a fresh (slow CPU) model pass lands. A disabled journal
+    /// state, so the findings snapshot, the resolved verdicts, and the reversion log populate
+    /// IMMEDIATELY after a restart — before a fresh (slow CPU) model pass lands. A disabled
+    /// journal
     /// (no volume configured) replays nothing, leaving today's cold-start behaviour.
     /// Builder-style; called once on boot.
     pub fn with_journal(mut self, journal: journal::DecisionJournal) -> Self {
@@ -326,9 +330,9 @@ impl Engine {
         self
     }
 
-    /// A handle to the durable decision journal (JEF-143), for the dashboard's `/report`
-    /// view to replay read-only. Shares the same `Arc` the engine writes through, so the
-    /// report reflects every decision the live engine has journaled this run plus the
+    /// A handle to the durable decision journal (JEF-143), for the would-have-acted report
+    /// aggregation to replay read-only. Shares the same `Arc` the engine writes through, so the
+    /// aggregation reflects every decision the live engine has journaled this run plus the
     /// pre-restart history on disk.
     pub fn journal(&self) -> std::sync::Arc<journal::DecisionJournal> {
         self.journal.clone()
@@ -383,19 +387,20 @@ impl Engine {
                     restored_verdicts += 1;
                 }
                 journal::Decision::Revert { cut, reason } => {
-                    self.reversions.record(dashboard::ReversionRecord {
+                    self.reversions.record(state::ReversionRecord {
                         cut: cut.clone(),
                         reason: reason.clone(),
                         at_ms: entry.at_ms,
                     });
                     restored_reversions += 1;
                 }
-                // Applies are durable for the audit trail but don't seed a view directly
+                // Applies are durable for the audit trail but don't seed output state directly
                 // (the live ledger re-derives the active set from current proof each pass).
                 journal::Decision::Apply { .. } => {}
-                // Admission decisions (JEF-237) restore into the webhook's `/policy` ring, not
-                // the engine's findings/reversions views — `run_watch` does that restore from
-                // the same journal, since it (not the engine) holds the shared decision ring.
+                // Admission decisions (JEF-237) restore into the webhook's admission-decision
+                // log, not the engine's findings or reversion state — `run_watch` does that
+                // restore from the same journal, since it (not the engine) holds the shared
+                // decision ring.
                 journal::Decision::Admission { .. } => {}
             }
         }
@@ -406,18 +411,17 @@ impl Engine {
             decisions = entries.len(),
             restored_verdicts,
             restored_reversions,
-            "replayed decision journal on boot (dashboard populated from durable history)"
+            "replayed decision journal on boot (output state populated from durable history)"
         );
     }
 
-    /// A handle to the current findings, for the dashboard server to read.
-    pub fn findings(&self) -> std::sync::Arc<dashboard::Findings> {
+    /// A handle to the current findings snapshot (proven chains + verdicts), for a reader.
+    pub fn findings(&self) -> std::sync::Arc<state::Findings> {
         self.findings.clone()
     }
 
-    /// A handle to the recent-reversions ring (JEF-141), for the dashboard's
-    /// `/reversions` view.
-    pub fn reversions(&self) -> std::sync::Arc<dashboard::ReversionLog> {
+    /// A handle to the reversion log (JEF-141): the recent lifted-cuts ring.
+    pub fn reversions(&self) -> std::sync::Arc<state::ReversionLog> {
         self.reversions.clone()
     }
 
@@ -442,10 +446,10 @@ impl Engine {
             .runtime_store
             .record(snapshot.runtime_events.len() as u64, &[]);
         // Accumulate this pass's bake snapshot (JEF-48) alongside the OTLP counters: the
-        // same figures, surfaced on the dashboard so the shadow-bake exit criteria are
+        // same figures, surfaced in the output state so the shadow-bake exit criteria are
         // readable without an OTLP collector. Filled out (corroborations) after the chains
         // are proven below, then published to the findings handle.
-        let mut bake = dashboard::BakeStats {
+        let mut bake = state::BakeStats {
             runtime_store: snapshot.runtime_events.len() as u64,
             ..Default::default()
         };
@@ -512,18 +516,18 @@ impl Engine {
         }
 
         // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
-        // unreachable) adjudication. The dashboard must always reflect the current graph
-        // even while the model is judging or down — model latency must never blank the
-        // findings view. JEF-157: the rows carry NO per-chain verdict; each finding's
+        // unreachable) adjudication. The findings snapshot must always reflect the current
+        // graph even while the model is judging or down — model latency must never blank the
+        // findings state. JEF-157: the rows carry NO per-chain verdict; each finding's
         // verdict is resolved from the shared verdict store at snapshot time (the last-
         // known live verdict, or a journal-restored one). So this single publish already
         // shows the carried-forward verdict, and when the judging loop below writes a
-        // fresh verdict into the store it is visible IMMEDIATELY — no end-of-pass
+        // fresh verdict into the store it is resolved IMMEDIATELY — no end-of-pass
         // re-publish is needed to surface it.
         self.findings.replace(
             chains
                 .iter()
-                .map(|c| dashboard::Finding::from_chain(c, &graph))
+                .map(|c| state::Finding::from_chain(c, &graph))
                 .collect(),
         );
 
@@ -544,9 +548,9 @@ impl Engine {
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
         }
-        // Publish this pass's behavioral-bake snapshot for the dashboard (JEF-48). Done
+        // Publish this pass's behavioral-bake snapshot into the output state (JEF-48). Done
         // here, before the slow adjudication loop, for the same reason the findings are:
-        // the bake view must reflect the current pass even while the model is judging.
+        // the bake snapshot must reflect the current pass even while the model is judging.
         bake.corroborations = corroborations;
         self.findings.set_bake(bake);
 
@@ -568,7 +572,7 @@ impl Engine {
         // set), so it's re-judged when a scan lands a new CVE or a misconfig newly exposes
         // an objective. A local CPU model is slow, so this caching is what keeps steady
         // state quiet; the findings were already published above, so a slow or unavailable
-        // model never blocks the dashboard.
+        // model never blocks the findings state.
         //
         // Two consequences follow from the verdict:
         // - Corroborated chain (live runtime signal): a non-confirming verdict
@@ -675,13 +679,14 @@ impl Engine {
                             "ok"
                         }
                     };
-                    // Piggyback the readiness panel's LIVE model health (JEF-160) on this
-                    // call's outcome — cheap, no extra model call. A decisive verdict means
-                    // the model answered; an Uncertain ("model unavailable") means it timed
-                    // out / the endpoint is down. The coverage panel reads this back.
+                    // Piggyback the readiness aggregation's LIVE model health (JEF-160) on
+                    // this call's outcome — cheap, no extra model call. A decisive verdict
+                    // means the model answered; an Uncertain ("model unavailable") means it
+                    // timed out / the endpoint is down. The readiness aggregation reads this
+                    // back.
                     self.findings.set_model_health(match result {
-                        "ok" => dashboard::ModelHealth::Ok,
-                        _ => dashboard::ModelHealth::Timeout,
+                        "ok" => state::ModelHealth::Ok,
+                        _ => state::ModelHealth::Timeout,
                     });
                     self.metrics
                         .model_calls
@@ -691,7 +696,7 @@ impl Engine {
             };
             // Choose what to DISPLAY: if this pass came back inconclusive (a transient
             // model timeout — "model unavailable") but we have a prior decisive verdict,
-            // keep showing the decisive one rather than regressing the dashboard to
+            // keep showing the decisive one rather than regressing the resolved posture to
             // "uncertain". The action logic below still uses this pass's real `verdict`.
             let display = match (&verdict, self.verdicts.display_verdict(entry_key)) {
                 (reason::adjudicate::Verdict::Uncertain(_), Some(prior))
@@ -702,9 +707,9 @@ impl Engine {
                 _ => verdict.clone(),
             };
             // Write the displayed verdict to the single source of truth (JEF-157) the
-            // MOMENT it's decided — so `/findings` shows it immediately, not only after
-            // an end-of-pass re-publish. A live verdict supersedes any journal-restored
-            // one for this entry (handled inside `set_display`).
+            // MOMENT it's decided — so the findings snapshot resolves it immediately, not
+            // only after an end-of-pass re-publish. A live verdict supersedes any
+            // journal-restored one for this entry (handled inside `set_display`).
             self.verdicts.set_display(entry_key, display.clone());
             // Record this pass's display POSTURE for the Δ / recency column (JEF-201): the
             // store sets `first_seen` on first sight and diffs against the previous pass to
@@ -713,7 +718,7 @@ impl Engine {
             // presentation metadata — it gates nothing (ADR-0016: recency is a view).
             self.verdicts.record_recency(
                 entry_key,
-                dashboard::StoredPosture::of_verdict(Some(&display)),
+                state::StoredPosture::of_verdict(Some(&display)),
                 pass_now,
             );
             // Append the breach decision to the durable journal (JEF-141) — but only a
@@ -727,8 +732,9 @@ impl Engine {
             {
                 // Re-derive the structured enrichment-coverage (JEF-145) from the SAME
                 // evidence the model was given (`entry_evidence`, via `entry_coverage`),
-                // so `/report` classifies an enrichment-coverage gap from fact instead of
-                // grepping this verdict's prose for a `CVE-` token. Cheap and pure.
+                // so the would-have-acted report aggregation classifies an enrichment-coverage
+                // gap from fact instead of grepping this verdict's prose for a `CVE-` token.
+                // Cheap and pure.
                 let coverage = reason::adjudicate::entry_coverage(&graph, &entry);
                 self.journal.record(journal::Decision::Breach {
                     entry: entry_key.clone(),
@@ -757,9 +763,9 @@ impl Engine {
                     })
                     .await;
             }
-            // The entry's verdict applies to every chain from it. The dashboard derives
-            // the verdict from the shared store (JEF-157); this per-chain stamp is kept
-            // for the timer path's `chain.emit()` log and as the `from_chain` fallback.
+            // The entry's verdict applies to every chain from it. The findings snapshot
+            // derives the verdict from the shared store (JEF-157); this per-chain stamp is
+            // kept for the timer path's `chain.emit()` log and as the `from_chain` fallback.
             for &i in idxs {
                 *verdict_counts.entry(verdict.label()).or_insert(0) += 1;
                 chains[i].verdict = Some(display.summary());
@@ -799,7 +805,7 @@ impl Engine {
         // bake counts: the gates-exiting-shadow figures (JEF-50) over the default window,
         // read back from the durable journal we just appended this pass's breach decision
         // to. Cheap no-op when the journal is disabled (replay is empty). Read-only.
-        let report = dashboard::default_window_report(&self.journal);
+        let report = state::default_window_report(&self.journal);
         self.metrics
             .report_would_act
             .record(report.would_act_count() as u64, &[]);
@@ -824,12 +830,12 @@ impl Engine {
         // Re-publish the enriched chains — promotions move into remediations, vetoes flip
         // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
         // what this re-publish is for (it was already written to the shared store the
-        // instant each entry was judged, and `/findings` reads it from there) — this only
-        // refreshes the structural enrichment of the rows.
+        // instant each entry was judged, and the findings snapshot resolves it from there) —
+        // this only refreshes the structural enrichment of the rows.
         self.findings.replace(
             chains
                 .iter()
-                .map(|c| dashboard::Finding::from_chain(c, &graph))
+                .map(|c| state::Finding::from_chain(c, &graph))
                 .collect(),
         );
 
@@ -911,14 +917,14 @@ impl Engine {
                 .add(1, &[opentelemetry::KeyValue::new("action", "reverted")]);
             // Make the lifted cut VISIBLE and DURABLE (JEF-141): the self-revert is the
             // core safety story (ADR-0016), but it was previously invisible. Push it onto
-            // the in-memory reversions ring (for `/reversions`) and append it to the
-            // journal so it survives a restart.
+            // the in-memory reversion log and append it to the journal so it survives a
+            // restart.
             let cut = reversion.mitigation.cut_signature();
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            self.reversions.record(dashboard::ReversionRecord {
+            self.reversions.record(state::ReversionRecord {
                 cut: cut.clone(),
                 reason: reversion.reason.clone(),
                 at_ms: now_ms,
@@ -929,8 +935,8 @@ impl Engine {
             });
         }
 
-        // Mark the pass complete for the dashboard's "last pass NNs ago" freshness line
-        // (JEF-141), so a quiet/loading view reads as fresh rather than broken.
+        // Mark the pass complete for the output state's "last pass NNs ago" freshness line
+        // (JEF-141), so a quiet/loading reader sees fresh state rather than a broken one.
         self.findings.mark_pass(std::time::SystemTime::now());
 
         self.previous = current;

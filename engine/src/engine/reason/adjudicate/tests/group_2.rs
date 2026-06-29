@@ -74,7 +74,7 @@ async fn every_breach_relevant_entry_is_handed_to_the_model() {
     );
 }
 
-/// With a journal attached, every judgement is captured for `/judgements` WITH the full
+/// With a journal attached, every judgement is captured in the judgement record WITH the full
 /// prompt the model saw — there is no longer a prompt-less pre-filter refute (JEF-134
 /// retired it). Both an own-app entry and a cross-ns entry record the prompt they built;
 /// the reply is `None` here only because the endpoint is unreachable. This is the
@@ -82,7 +82,7 @@ async fn every_breach_relevant_entry_is_handed_to_the_model() {
 #[tokio::test]
 async fn judgements_are_journaled_with_prompt_and_verdict() {
     use crate::engine::graph::attack::DATA_FROM_REPOSITORY;
-    let journal = std::sync::Arc::new(crate::engine::dashboard::JudgementLog::new());
+    let journal = std::sync::Arc::new(crate::engine::state::JudgementLog::new());
     let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none")
         .with_journal(journal.clone());
 

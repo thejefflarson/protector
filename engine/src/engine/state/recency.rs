@@ -1,25 +1,23 @@
 //! Per-finding recency / Δ data (JEF-201): the small, pure types the verdict store tracks
-//! per entry to answer "what changed since I last looked?" — the [`StoredPosture`] the
-//! engine diffs pass-to-pass, the resulting [`Delta`] glyph verdict, and the [`RecencyInfo`]
-//! the view maps into the dense table's Δ column.
+//! per entry to answer "what changed since the last pass?" — the [`StoredPosture`] the
+//! engine diffs pass-to-pass, the resulting [`Delta`] verdict, and the [`RecencyInfo`] the
+//! findings snapshot carries per row.
 //!
-//! These are DATA-layer types (they live beside [`super::model`] and carry no markup). The
-//! recency they encode is derived from the store's first-seen / previous-posture history,
-//! NOT from render time, so it survives the `/fragment` 30s poll (a re-render with no new
-//! pass keeps the stored [`Delta`]) and a journal-restore on boot (a restored entry reads
-//! [`Delta::Restored`], never [`Delta::New`]). Pure presentation metadata: it gates nothing,
-//! feeds no model, and the engine stays SHADOW (ADR-0016: recency is a view).
+//! These are DATA-layer types: they carry no markup. The recency they encode is derived from
+//! the store's first-seen / previous-posture history, NOT from any render time, so it is stable
+//! across repeated reads (a re-read with no new pass keeps the stored [`Delta`]) and a
+//! journal-restore on boot (a restored entry reads [`Delta::Restored`], never [`Delta::New`]).
+//! Pure presentation metadata: it gates nothing, feeds no model, and the engine stays SHADOW
+//! (ADR-0016: recency is a view).
 
 use serde::Serialize;
 
 use crate::engine::reason::adjudicate::Verdict;
 
-/// The model's POSTURE for an entry as the recency tracker stores it (JEF-201) — the
-/// data-layer twin of the view's `Posture`, kept here so the engine can diff this pass's
-/// posture against the previous one WITHOUT pulling the presentation layer into the engine
-/// (the view's `Posture` lives in `view_model::posture`, which the components own). Derived
-/// from the TYPED [`Verdict`] by [`StoredPosture::of_verdict`] (JEF-255) — the single source
-/// of truth, so the recency diff and the rendered posture chip can never disagree.
+/// The model's POSTURE for an entry as the recency tracker stores it (JEF-201). Kept here so the
+/// engine can diff this pass's posture against the previous one without pulling in any
+/// presentation. Derived from the TYPED [`Verdict`] by [`StoredPosture::of_verdict`] (JEF-255) —
+/// the single source of truth, so the recency diff and any rendered posture can never disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoredPosture {
     /// The model affirmed a real breach (a `Confirmed` / `Exploitable` verdict).
@@ -34,9 +32,9 @@ impl StoredPosture {
     /// The posture a TYPED verdict carries (JEF-255) — `Confirmed`/`Exploitable`
     /// ([`Verdict::is_confirmed`]) is a BREACH, any decisive negative (`Refuted`/`Uncertain`)
     /// is `Safe`, and `None` (no verdict yet) is `Awaiting`. This is the one place posture is
-    /// derived; the view's `Posture::of_verdict` mirrors it from the same typed input, so the
-    /// recency diff and the rendered chip can never drift. (v1 string-matched the "exploitable"
-    /// prefix here and in the view 4×, and missed `Confirmed`; JEF-255 fixes that.)
+    /// derived from a verdict, so the recency diff and any downstream posture can never drift.
+    /// (v1 string-matched the "exploitable" prefix here, and missed `Confirmed`; JEF-255 fixes
+    /// that.)
     pub fn of_verdict(verdict: Option<&Verdict>) -> Self {
         match verdict {
             None => StoredPosture::Awaiting,
@@ -69,9 +67,9 @@ impl StoredPosture {
     }
 }
 
-/// The per-entry recency verdict the dashboard's Δ column renders (JEF-201) — "what changed
-/// since the last pass". Computed by the store from the diff of this pass's [`StoredPosture`]
-/// against the previous one (NOT from render time), so it survives the `/fragment` poll and a
+/// The per-entry recency verdict for the Δ a finding carries (JEF-201) — "what changed since the
+/// last pass". Computed by the store from the diff of this pass's [`StoredPosture`] against the
+/// previous one (NOT from render time), so it is stable across repeated reads and a
 /// journal-restore. Pure presentation metadata (ADR-0016: recency is a view).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -90,48 +88,21 @@ pub enum Delta {
 }
 
 impl Delta {
-    /// The terse glyph the Δ cell shows. Meaning is ALSO carried in text via the cell's
-    /// `aria-label` ([`Delta::aria_label`]) — never the glyph/arrow alone (JEF-201 AC #4).
-    /// `Unchanged` renders no glyph (the cell shows the quiet age instead).
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Delta::New => "NEW",
-            Delta::Escalated => "↑",
-            Delta::DeEscalated => "↓",
-            Delta::Restored => "·",
-            Delta::Unchanged => "·",
-        }
-    }
-
-    /// The screen-reader label for the Δ cell (JEF-201 AC #4): the meaning IN WORDS, so the
-    /// glyph never carries meaning by color/arrow alone. `age` (when present) personalizes
-    /// the unchanged/restored reading with a human age.
-    pub fn aria_label(self, age: Option<&str>) -> String {
-        match self {
-            Delta::New => "new this pass".to_string(),
-            Delta::Escalated => "escalated since last pass".to_string(),
-            Delta::DeEscalated => "de-escalated since last pass".to_string(),
-            Delta::Restored => "restored from history".to_string(),
-            Delta::Unchanged => match age {
-                Some(a) => format!("unchanged, first seen {a} ago"),
-                None => "unchanged".to_string(),
-            },
-        }
-    }
-
-    /// Whether this Δ counts toward the findings-region "N new" tally (JEF-201).
+    /// Whether this Δ counts toward the "N new this pass" tally (JEF-201).
+    #[allow(dead_code)]
     pub fn is_new(self) -> bool {
         matches!(self, Delta::New)
     }
 
     /// Whether this Δ counts toward the "N newly flagged since last pass" tally — a fresh
     /// escalation into (or onto) a breach. Escalations are the "newly flagged" signal.
+    #[allow(dead_code)]
     pub fn is_escalation(self) -> bool {
         matches!(self, Delta::Escalated)
     }
 }
 
-/// The resolved recency facts for one entry (JEF-201), the data the view maps into the Δ
+/// The resolved recency facts for one entry (JEF-201), the data a finding carries in its Δ
 /// glyph + age cell. Pulled from the verdict store at `Findings::snapshot` time, like the
 /// verdict itself, so the Δ tracks the stored first-seen / posture history rather than the
 /// render clock.
@@ -185,23 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn glyphs_and_aria_carry_meaning_in_words() {
-        assert_eq!(Delta::New.glyph(), "NEW");
-        assert_eq!(Delta::New.aria_label(None), "new this pass");
-        assert_eq!(
-            Delta::Escalated.aria_label(None),
-            "escalated since last pass"
-        );
-        assert_eq!(
-            Delta::DeEscalated.aria_label(None),
-            "de-escalated since last pass"
-        );
-        assert_eq!(
-            Delta::Unchanged.aria_label(Some("2m")),
-            "unchanged, first seen 2m ago"
-        );
+    fn delta_tally_predicates() {
         assert!(Delta::New.is_new());
         assert!(Delta::Escalated.is_escalation());
         assert!(!Delta::Unchanged.is_new());
+        assert!(!Delta::Unchanged.is_escalation());
     }
 }

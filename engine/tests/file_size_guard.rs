@@ -1,9 +1,7 @@
-//! Repo-wide file-size guard (JEF-218, generalizing the dashboard-scoped guard of
-//! JEF-208). The repo's hard rule (CLAUDE.md): **no source file may exceed 1,000
-//! lines.** A file that grows past the cap becomes unreviewable — the dashboard's
-//! 7,000-line slide into illegibility is the cautionary tale — so this test fails the
-//! build the moment any first-party `.rs` file crosses the line, forcing a split into
-//! cohesive submodules instead.
+//! Repo-wide file-size guard (JEF-218). The repo's hard rule (CLAUDE.md): **no source
+//! file may exceed 1,000 lines.** A file that grows past the cap becomes unreviewable, so
+//! this test fails the build the moment any first-party `.rs` file crosses the line, forcing
+//! a split into cohesive submodules instead.
 //!
 //! It walks every first-party crate `src/` tree under the repo root and asserts each
 //! `.rs` file is within the cap. Two things are deliberately excluded:

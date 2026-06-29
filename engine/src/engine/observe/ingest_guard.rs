@@ -3,8 +3,7 @@
 //! The ingest accepts observations that flip a chain's `corroborated-now`
 //! predicate — i.e. they can make a proven attack chain *actionable*. An
 //! unauthenticated caller could forge those observations, so this module supplies
-//! two axum layers applied ONLY to the ingest router (never the :8080 dashboard or
-//! the :8443 admission webhook):
+//! two axum layers applied ONLY to the ingest router (never the :8443 admission webhook):
 //!
 //!   * [`bearer_auth`] — a per-request middleware that requires
 //!     `Authorization: Bearer <token>` matching a shared secret, rejecting a

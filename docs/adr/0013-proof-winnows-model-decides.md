@@ -25,7 +25,7 @@ talking past each other because of it.
    the endpoint isn't wired. Deciding "present ∧ exposed ⇒ cut" is exactly the
    pattern-match a model is supposed to *replace*, not defer to.
 
-2. **The dashboard flagged every internal access path** — any workload that can read
+2. **The engine flagged every internal access path** — any workload that can read
    a secret or reach the database — as a finding. That is the normal shape of a
    Kubernetes cluster (assume-breach blast radius), not breach potential, and it
    buried the signal under ~1000 rows even on a small cluster.
@@ -47,7 +47,7 @@ A proven chain is a *finding* (and a candidate for action) only when its **entry
 internet-facing** (`ProvenChain::is_breach_relevant`) — an origin an external
 attacker can actually start from. An internal-only path (a control-plane workload
 that can read a secret, a backend that can reach the DB) is the assume-breach
-blast-radius map: still proven and still queryable in `/findings`, but it is
+blast-radius map: still proven and still in the findings output, but it is
 *context*, not a to-do. This is the search-space winnowing made explicit, and it is
 what hands the model a short candidate list instead of the whole graph.
 
@@ -77,7 +77,7 @@ judgement the model owns.
 `meets_action_bar` and `Mitigation::is_live_corroborated` require an internet-facing
 entry in addition to corroboration/promotion. The engine auto-acts only on
 **remote-exploitation** paths; it will not auto-cut internal-only activity even when a
-Falco signal corroborates it. Dashboard and actuator agree on the threat surface.
+Falco signal corroborates it. The findings and the actuator agree on the threat surface.
 
 ## Why this is still safe (proof remains the floor)
 
@@ -104,8 +104,7 @@ cut on an internet-exposed workload it affirmatively judges exploitable.*
 
 Easier / better:
 
-- The dashboard shows breach potential, not cluster topology — two graph sections
-  (active/proposed remediations; possible attack paths per endpoint), no category
+- The engine surfaces breach potential, not cluster topology — no category
   noise. The internal-access mass collapses to context.
 - The model does the job it's for: presence is no longer mistaken for
   exploitability. `granite4:3b-h` probed CALIBRATED on the real prompt (`exploitable`

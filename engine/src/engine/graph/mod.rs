@@ -134,7 +134,7 @@ impl NodeKey {
     }
 
     /// [`NodeKey::kind`] over a borrowed key string — the same parsing without owning a
-    /// `NodeKey`, so string-typed consumers (the dashboard) share this one parser.
+    /// `NodeKey`, so string-typed consumers (e.g. the findings snapshot) share this one parser.
     pub fn kind_of(key: &str) -> &str {
         key.split('/').next().unwrap_or(key)
     }
@@ -171,14 +171,14 @@ impl NodeKey {
 
     /// Everything after the kind prefix — the human-facing remainder of the key with the
     /// leading `<kind>/` stripped (e.g. `app/Pod/web` for `workload/app/Pod/web`). Falls
-    /// back to the whole key when there is no `/`. Used for compact labels (the dashboard)
-    /// where the kind is conveyed by node shape rather than by text.
+    /// back to the whole key when there is no `/`. Used for compact labels where the kind is
+    /// conveyed out of band rather than repeated in the text.
     pub fn short(&self) -> &str {
         Self::short_of(&self.0)
     }
 
     /// [`NodeKey::short`] over a borrowed key string — the same parsing without owning a
-    /// `NodeKey`, so string-typed consumers (the dashboard) share this one parser.
+    /// `NodeKey`, so string-typed consumers (e.g. the findings snapshot) share this one parser.
     pub fn short_of(key: &str) -> &str {
         key.split_once('/').map_or(key, |(_, rest)| rest)
     }
@@ -210,8 +210,8 @@ pub struct Workload {
     /// …) for this workload. STRUCTURAL severity/context for the model, NOT exploitation
     /// evidence; surfaced as static-posture findings the same way CVE severity is. Each
     /// finding's free-text is UNTRUSTED third-party scanner output, fenced/capped before it
-    /// reaches the prompt or escaped before the dashboard. Empty when trivy-operator's
-    /// config-audit reports are absent.
+    /// reaches the prompt and escaped before it is emitted anywhere else. Empty when
+    /// trivy-operator's config-audit reports are absent.
     pub misconfigs: Vec<ScanFinding>,
     /// FAILED role / cluster-role checks from trivy-operator's `RbacAssessmentReport`
     /// (JEF-244) — structural RBAC-exposure evidence (a role granting `*` verbs, secret
@@ -400,8 +400,8 @@ impl Reachability {
 /// for each: a stable rule/check id, a severity band, a category, and a short title.
 ///
 /// `title` (and any path baked into it) is UNTRUSTED third-party scanner text — it is
-/// fenced/capped before the prompt and HTML-escaped before the dashboard, exactly as the
-/// CVE `title` is. For an exposed secret the title carries trivy's already-**redacted**
+/// fenced/capped before the prompt and escaped before it is emitted anywhere else, exactly as
+/// the CVE `title` is. For an exposed secret the title carries trivy's already-**redacted**
 /// match only; the raw secret value never enters this type (the redaction guarantee).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScanFinding {
@@ -414,7 +414,7 @@ pub struct ScanFinding {
     /// short, low-cardinality classification; absent ⇒ `None`.
     pub category: Option<String>,
     /// A short human title/description trivy reports for the finding. UNTRUSTED free-text:
-    /// fenced+capped before the model prompt, HTML-escaped before the dashboard.
+    /// fenced+capped before the model prompt, escaped before it is emitted anywhere else.
     pub title: Option<String>,
     /// What the finding is about: the file path (exposed secret), or the audited
     /// resource/object. Untrusted — sanitized alongside `title`. Absent ⇒ `None`.
@@ -718,8 +718,8 @@ impl SecurityGraph {
     /// The evidence (ADR-0016 enrichment) attached to an `entry` node: the CVEs its
     /// image carries and the runtime [`Behavior`]s observed on it. This is the SINGLE
     /// source of truth for "what is the evidence on this entry" — the adjudicator's
-    /// prompt assembly and the dashboard's per-finding evidence blocks (JEF-133) both
-    /// read it, so the model and the operator see the same facts and can't drift.
+    /// prompt assembly and the per-finding evidence blocks of the findings snapshot (JEF-133)
+    /// both read it, so the model and the operator see the same facts and can't drift.
     ///
     /// CVE selection mirrors the deterministic foothold's compromise bar:
     /// exploited-in-wild (KEV) OR critical severity. Lower-severity CVEs are real but
@@ -762,7 +762,7 @@ impl SecurityGraph {
     /// workload itself. Companion to [`entry_evidence`](Self::entry_evidence) — kept separate
     /// so the established CVE/runtime evidence tuple (and its many callers) is untouched while
     /// the new trivy report kinds get one shared SOURCE OF TRUTH for the prompt and the
-    /// dashboard, so the model and the operator can never see a different set.
+    /// findings snapshot, so the model and the operator can never see a different set.
     ///
     /// Returns `(exposed_secrets, misconfigs, rbac_findings)`; all empty for an unknown key
     /// or a non-workload node. Exposed secrets are followed across the entry's `RunsImage`

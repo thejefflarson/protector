@@ -63,7 +63,7 @@ generate them from `/sys/kernel/btf/vmlinux` at build time — same kernel, no c
    - `attached fentry on security_file_open` → the hook loaded on this kernel.
    - sample path lines → `bpf_d_path` works; confirm secret mounts show
      `…/kubernetes.io~secret/…`.
-   - the engine's `runtime behavioral signals attached=N` line and the dashboard confirm
+   - the engine's `runtime behavioral signals attached=N` line confirms
      the end-to-end `SecretRead`.
 5. **Promote**: drop the verbose path logging, keep the secret-mount filter + emission,
    remove the spike gate.

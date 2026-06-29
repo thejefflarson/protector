@@ -277,11 +277,6 @@ engine:
   # Grant the SA create/delete on NetworkPolicies so a live actuator can apply isolation.
   # Keep false in shadow; turn on together with a live `actuator` + `enable: network`.
   actuationRBAC: false
-  # Read-only findings dashboard (HTML at /, JSON at /findings) — surfaces the
-  # latent-foothold proposals a human acts on. ClusterIP only (no ingress created).
-  dashboard:
-    enabled: true
-    port: 8080
   # Runtime-evidence ingest (the corroborated-now signal that makes a chain
   # live-actionable). A Falco/falcosidekick deployment POSTs alerts here; the optional
   # eBPF agent below also feeds this port. Enabling the listener is harmless on its own.
@@ -310,7 +305,7 @@ engine:
     name: ""
     # Per-call model timeout (s). CPU-only inference is slow; generous headroom keeps a
     # burst of adjudications from surfacing as `model unavailable`. Never blocks the
-    # dashboard (verdicts are cached per entry and carried forward).
+    # engine loop (verdicts are cached per entry and carried forward).
     timeoutSecs: 1200
   # Breach notifier (ADR-0018): an operator-configured webhook URL the engine POSTs a
   # redacted breach summary to. OFF by default (zero egress — no outbound calls). Opt in
@@ -340,7 +335,7 @@ engine:
 #
 # OFF by default: it needs the protector-agent image and the eBPF probes load-tested on
 # your kernel (see agent/README.md). When enabled it runs in SHADOW — the signals enrich
-# the model + dashboard; only an `alert` behavior corroborates the action bar.
+# the model + the engine's output state; only an `alert` behavior corroborates the action bar.
 agent:
   enabled: false
   image:
