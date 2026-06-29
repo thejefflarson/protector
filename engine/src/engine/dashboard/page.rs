@@ -6,10 +6,11 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    activity_view, findings_view, nav_bar, readiness_view, status_strip, trust_view,
+    activity_view, admission_view, findings_view, nav_bar, readiness_view, status_strip, trust_view,
 };
 use super::view_model::props::{
-    ActivityViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps, Tab, TrustViewProps,
+    ActivityViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
+    Tab, TrustViewProps,
 };
 
 /// The live-region id the JS polls and swaps. The status strip + active view live inside it so
@@ -37,6 +38,12 @@ pub fn activity_page(v: &ActivityViewProps) -> Markup {
     document(&v.strip, Tab::Activity, activity_view(v))
 }
 
+/// The full Admission/policy (webhook floor) page: the persistent strip + nav + the decision
+/// tallies header + the deduped decision rows.
+pub fn admission_page(v: &AdmissionViewProps) -> Markup {
+    document(&v.strip, Tab::Admission, admission_view(v))
+}
+
 /// The `/fragment` body for the Findings tab — only the live region's INNER content, for the
 /// JS to swap in place (preserving scroll/expansion/filter). No document shell.
 pub fn findings_fragment(v: &FindingsViewProps) -> Markup {
@@ -56,6 +63,11 @@ pub fn readiness_fragment(v: &ReadinessViewProps) -> Markup {
 /// The `/fragment` body for the Activity tab.
 pub fn activity_fragment(v: &ActivityViewProps) -> Markup {
     live_region_inner(&v.strip, Tab::Activity, activity_view(v))
+}
+
+/// The `/fragment` body for the Admission tab.
+pub fn admission_fragment(v: &AdmissionViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Admission, admission_view(v))
 }
 
 /// The document shell: head with same-origin assets (no third-party CSS/JS), then the live

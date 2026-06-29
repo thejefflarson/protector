@@ -769,3 +769,84 @@ summary:focus-visible,
 /* the judgement ring reuses the .model-prompt disclosure styling from the detail panel. */
 .judgement-entry .model-prompt { margin: 0; }
 .judgement-entry-key { color: var(--ink-1); }
+
+/* ============================ Admission view (the webhook floor) ============================ */
+.view > .admission-summary { margin-bottom: var(--section-gap); }
+
+/* the tallies header: admitted / audited / denied counts, honest at zero so the view is never
+   blank. Each carries colour + glyph + word (meaning never by colour alone). */
+.admission-tallies {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+.tally { display: inline-flex; align-items: baseline; gap: var(--space-1); }
+.tally .glyph { font-weight: var(--fw-bold); }
+.tally-admitted { color: var(--cov-present); }
+.tally-audited { color: var(--posture-uncertain); }
+.tally-denied { color: var(--posture-breach); }
+.tally-total { color: var(--ink-3); }
+
+/* the deduped decision rows, a real table so the machine columns align (keyboard/semantics gate). */
+.decisions {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: var(--hairline) solid var(--border);
+}
+.decisions thead th {
+  text-align: left;
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro);
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--hairline) solid var(--border);
+  white-space: nowrap;
+}
+.decisions tbody td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--hairline) solid var(--border);
+  vertical-align: top;
+  font-size: var(--fs-data);
+  line-height: var(--lh-data);
+}
+.decision-row:hover { background: var(--surface-hover); }
+/* a row the engine would reject if enforced is the attention case — a denied keyline. */
+.decision-row-attention td.cell-decision {
+  border-left: var(--rail-strong) solid var(--posture-breach);
+}
+
+.decision-chip {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  font-weight: var(--fw-bold);
+}
+.decision-chip .glyph { font-weight: var(--fw-bold); }
+.decision-allow { color: var(--cov-present); }
+.decision-audit { color: var(--posture-uncertain); }
+.decision-deny { color: var(--posture-breach); }
+.decision-other { color: var(--ink-3); }
+.decision-count { margin-left: var(--space-1); }
+
+.cell-workload { min-width: 0; }
+.workload-subject { color: var(--ink-1); word-break: break-all; display: block; }
+.workload-image { color: var(--ink-2); word-break: break-all; display: block; }
+.workload-ns { display: block; color: var(--ink-3); }
+.decision-reason { color: var(--ink-2); margin: var(--space-1) 0 0; }
+
+/* the per-gate shadow-status chips + the "if enforced" what-if: colour + glyph + word. */
+.gate-chip, .enforced-chip {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-bold);
+  letter-spacing: var(--track-micro); text-transform: uppercase;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid currentColor;
+  white-space: nowrap;
+}
+.gate-chip .glyph, .enforced-chip .glyph { font-weight: var(--fw-bold); }
+.gate-verified { color: var(--cov-present); }
+.gate-wouldpass { color: var(--ink-3); }
+.gate-wouldfail { color: var(--posture-breach); }
+.gate-na { color: var(--ink-3); }
+.enforced-admit { color: var(--cov-present); }
+.enforced-deny { color: var(--posture-breach); }
