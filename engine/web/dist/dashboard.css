@@ -367,19 +367,19 @@ summary:focus-visible,
 .cut-mark { color: var(--posture-breach); }
 
 /* evidence cluster (subordinate severity channel) */
-.evidence-cluster { display: inline-flex; align-items: center; gap: var(--space-2); }
-.evidence-none {
-  color: var(--ink-3); font-style: italic;
+/* The cluster text reads at the row's data size (13px), not micro — the runtime ⚡+count and
+   KEV/secret glyphs must be legible at a glance. */
+.evidence-cluster {
+  display: inline-flex; align-items: center; gap: var(--space-2);
   font-size: var(--fs-data); line-height: var(--lh-data);
 }
 .ev {
   display: inline-flex; align-items: center; gap: var(--space-1);
-  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-size: var(--fs-data); line-height: var(--lh-data);
   padding: 0 var(--space-1);
   border-radius: var(--radius-chip);
 }
 .ev-kev { background: var(--kev); color: #FFFFFF; font-weight: var(--fw-bold); padding: 0 var(--space-2); }
-.ev-cve { color: var(--ink-2); border: var(--hairline) solid var(--border); }
 .ev-runtime { color: var(--posture-breach); }
 .ev-secret { color: var(--sev-high); }
 
@@ -466,6 +466,17 @@ summary:focus-visible,
   background: var(--border);
   transform: translateX(-50%);
 }
+/* the staircase: each successive hop (node + its incoming edge) sits one step further right than
+   the one above, so the path visibly cascades entry → … → objective. The indent is applied as
+   left margin per depth class (chain-step-0..=6, capped) — one CSS rule per step, all off the
+   --space-4 token (no inline style; no raw px). Step 0 (entry) sits flush on the spine. */
+.chain-step-1 { margin-left: var(--space-4); }
+.chain-step-2 { margin-left: calc(var(--space-4) * 2); }
+.chain-step-3 { margin-left: calc(var(--space-4) * 3); }
+.chain-step-4 { margin-left: calc(var(--space-4) * 4); }
+.chain-step-5 { margin-left: calc(var(--space-4) * 5); }
+.chain-step-6 { margin-left: calc(var(--space-4) * 6); }
+
 .chain-glyph { font-size: var(--fs-body); }
 .chain-label { font-family: var(--font-data); }
 .chain-tag {
@@ -513,8 +524,6 @@ summary:focus-visible,
   border-radius: var(--radius-chip); padding: var(--space-1) var(--space-2);
   font-size: var(--fs-data); line-height: var(--lh-data);
 }
-.cut-revert { font-size: var(--fs-data); line-height: var(--lh-data); margin: var(--space-1) 0 0; }
-
 /* evidence tables — numerics right-aligned, severity muted */
 .ev-group { margin-bottom: var(--space-3); }
 .ev-table {

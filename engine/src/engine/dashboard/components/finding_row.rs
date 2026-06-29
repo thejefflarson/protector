@@ -115,19 +115,18 @@ fn path_summary(f: &FindingProps) -> Markup {
     }
 }
 
-/// The compact evidence cluster glyphs (CVE count + KEV + runtime alerts + secrets). Empty
-/// evidence renders an explicit "no evidence" — never a blank (invariant #3).
+/// The compact evidence cluster glyphs (KEV + runtime alerts + secrets). When a finding has no
+/// evidence the cell renders NOTHING — no implied-absent "no evidence" text. The bare CVE-count
+/// chip is gone from the row (a bare number next to the KEV badge + glyphs read ambiguously); the
+/// full CVE list stays in the expanded evidence table.
 fn evidence_cluster(s: &EvidenceSummary) -> Markup {
     if s.is_empty() {
-        return html! { span.evidence-none { "no evidence" } };
+        return html! {};
     }
     html! {
         span.evidence-cluster {
             @if s.kev {
                 span.ev.ev-kev { "KEV" }
-            }
-            @if s.cve_count > 0 {
-                span.ev.ev-cve { (s.cve_count) " CVE" @if s.cve_count != 1 { "s" } }
             }
             @if s.runtime_alerts > 0 {
                 span.ev.ev-runtime { span.glyph { "\u{26A1}" } (s.runtime_alerts) }

@@ -9,8 +9,10 @@
 //!   `style=`/`<style>`; every visual is a class mapped to a token in `docs/STYLEGUIDE.md`.
 //!
 //! The file-size cap (#7) is guarded by `file_size_guard.rs`. The remaining invariants
-//! (#1 honest-calm, #2 uncertain/awaiting-not-green, #3 no-blank-evidence, #6 escaping) are
-//! asserted at render in `engine/src/engine/dashboard/tests.rs`.
+//! (#1 honest-calm, #2 uncertain/awaiting-not-green, #6 escaping) are asserted at render in
+//! `engine/src/engine/dashboard/tests.rs`. (The former per-finding "no-blank-evidence" rule was
+//! dropped — a finding with no evidence now renders nothing rather than an implied-absent marker;
+//! the model-judging / coverage honesty invariants are unaffected.)
 
 use std::path::{Path, PathBuf};
 

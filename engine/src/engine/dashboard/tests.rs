@@ -228,11 +228,14 @@ fn awaiting_row_carries_the_elevated_treatment_hooks() {
 }
 
 // ---------------------------------------------------------------------------
-// Invariant #3 — empty evidence renders explicit "none", never a blank.
+// Empty evidence renders NOTHING — no implied-absent "no evidence" text in the
+// row, and no empty evidence section in the detail panel (per-finding-evidence
+// "none" rule dropped; the model-judging / coverage honesty invariants are
+// unaffected and asserted elsewhere).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn empty_evidence_renders_no_evidence_not_blank() {
+fn empty_evidence_renders_nothing_not_an_absent_marker() {
     let f = breach_finding("endpoint/a", Verdict::Confirmed); // default (empty) evidence
     let view = build_findings_view(
         "prod".into(),
@@ -242,7 +245,20 @@ fn empty_evidence_renders_no_evidence_not_blank() {
         Some(SystemTime::now()),
     );
     let html = page::findings_page(&view).into_string();
-    assert!(html.contains("no evidence"), "the row says 'no evidence'");
+    // No implied-absent text anywhere (row cluster or detail panel).
+    assert!(
+        !html.contains("no evidence"),
+        "no implied-absent 'no evidence' text renders for an empty finding"
+    );
+    assert!(
+        !html.contains("evidence-none"),
+        "the 'no evidence' marker element is gone"
+    );
+    // The detail panel omits the evidence section entirely when there is none.
+    assert!(
+        !html.contains("evidence-block"),
+        "an empty evidence section is omitted from the detail panel"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +381,57 @@ fn proven_path_is_honest_when_no_cut_exists() {
     );
     // And the proposed-cut section states the honest no-single-edge-cut message.
     assert!(html.contains("no single-edge cut"));
+}
+
+#[test]
+fn proven_path_cascades_as_an_indented_staircase() {
+    // A multi-hop path: each successive hop must sit one indent step deeper than the one above,
+    // so the chain reads as a staircase (entry flush at step 0, then 1, 2, 3 …).
+    let mut f = breach_finding("endpoint/a", Verdict::Confirmed);
+    f.path = vec![
+        PathStep {
+            from: "endpoint/a".into(),
+            relation: "reaches/Tcp/443".into(),
+            to: "svc/web".into(),
+        },
+        PathStep {
+            from: "svc/web".into(),
+            relation: "reaches/Tcp/8080".into(),
+            to: "svc/api".into(),
+        },
+        PathStep {
+            from: "svc/api".into(),
+            relation: "reaches/Tcp/5432".into(),
+            to: "secret/app/db-creds".into(),
+        },
+    ];
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // The entry node sits flush (step 0); each deeper hop carries an increasing step class.
+    assert!(html.contains("chain-step-0"), "the entry node is at step 0");
+    assert!(
+        html.contains("chain-step-1"),
+        "the first hop is indented one step"
+    );
+    assert!(
+        html.contains("chain-step-2"),
+        "the second hop is indented deeper"
+    );
+    assert!(
+        html.contains("chain-step-3"),
+        "the third hop is indented deeper still — a staircase"
+    );
+    // The indent is class-driven, never an inline style (no-inline-style guard).
+    assert!(
+        !html.contains("style="),
+        "the staircase indent uses depth classes, not inline style"
+    );
 }
 
 // ---------------------------------------------------------------------------

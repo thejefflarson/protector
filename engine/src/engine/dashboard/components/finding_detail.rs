@@ -1,8 +1,7 @@
 //! The expand-in-place "why" panel for a finding (brief §5): the verbatim verdict → the proven
-//! path as a vertical chain diagram (structural hops muted, the severable edge marked ✂) → the
-//! evidence tables → the proposed/applied cut + its self-revert condition → the "show model
-//! prompt" disclosure to the raw judgement. Pure component; no domain types; all free-text
-//! auto-escaped.
+//! path as an indented chain staircase (structural hops muted, the severable edge marked ✂) → the
+//! evidence tables → the proposed/applied cut signature → the "show model prompt" disclosure to
+//! the raw judgement. Pure component; no domain types; all free-text auto-escaped.
 
 use maud::{Markup, html};
 
@@ -36,11 +35,23 @@ fn verdict_block(f: &FindingProps) -> Markup {
     }
 }
 
+/// The deepest indent step the staircase cascades to before it stops stepping further right.
+/// Beyond this depth every remaining hop sits at the same (maximum) indent so a very long path
+/// never marches off the panel. The matching `.chain-step-0..=MAX` padding rules live in the CSS.
+const CHAIN_STEP_MAX: usize = 6;
+
+/// The depth class for a hop at index `step` (entry = 0), capped at `CHAIN_STEP_MAX` so the
+/// staircase reads as a cascade without ever overflowing the panel.
+fn chain_step_class(step: usize) -> String {
+    format!("chain-step-{}", step.min(CHAIN_STEP_MAX))
+}
+
 /// The proven path as a **vertical chain diagram** (brief §3): the internet/entry node at the
-/// top, each hop flowing down a connector spine to the objective node at the bottom. Each node
-/// carries its node-kind glyph + label; the relation is the labelled connector between nodes; the
-/// severable edge is marked with a prominent ✂ "cut here". Structural hops are muted; the
-/// objective node is emphasized. Honest when no path is recorded.
+/// top, then each successive hop indented one step deeper than the one above — a **staircase**
+/// that visibly cascades entry → … → objective. Each node carries its node-kind glyph + label;
+/// the relation is the labelled connector between nodes (an edge sits at the same indent as the
+/// node it leads into); the severable edge is marked with a prominent ✂ "cut here". Structural
+/// hops are muted; the objective node is emphasized. Honest when no path is recorded.
 fn path_block(path: &[HopProps]) -> Markup {
     html! {
         section.detail-section.path-block {
@@ -49,15 +60,18 @@ fn path_block(path: &[HopProps]) -> Markup {
                 p.muted { "no path recorded" }
             } @else {
                 ol.chain aria-label="proven attack path, entry to objective" {
-                    // The entry node (top of the chain) — the very first hop's `from`.
-                    (chain_node(&path[0].from_glyph, &path[0].from, true, false))
-                    // Then, for each hop, the labelled connector edge and its `to` node. The last
-                    // hop's `to` is the objective node, emphasized.
+                    // The entry node (top of the chain, step 0) — the very first hop's `from`.
+                    (chain_node(&path[0].from_glyph, &path[0].from, 0, true, false))
+                    // Then, for each hop, the labelled connector edge and its `to` node, each
+                    // indented one step deeper than the previous so the path cascades. The edge
+                    // and the node it leads into share the hop's indent; the last hop's `to` is
+                    // the objective node, emphasized.
                     @for (i, hop) in path.iter().enumerate() {
-                        (chain_edge(hop))
+                        (chain_edge(hop, i + 1))
                         (chain_node(
                             &hop.to_glyph,
                             &hop.to,
+                            i + 1,
                             false,
                             i == path.len() - 1, // the final node is the objective
                         ))
@@ -69,15 +83,17 @@ fn path_block(path: &[HopProps]) -> Markup {
 }
 
 /// One node in the vertical chain: its node-kind glyph + label on its own line, threaded onto the
-/// connector spine. The entry node and the objective node are emphasized; intermediate nodes are
-/// plain (structural muting rides on the *edge*, not the node).
-fn chain_node(glyph: &str, label: &str, is_entry: bool, is_objective: bool) -> Markup {
+/// connector spine and indented to its `step` depth (the staircase). The entry node and the
+/// objective node are emphasized; intermediate nodes are plain (structural muting rides on the
+/// *edge*, not the node).
+fn chain_node(glyph: &str, label: &str, step: usize, is_entry: bool, is_objective: bool) -> Markup {
+    let depth = chain_step_class(step);
     let role = if is_entry {
-        "chain-node chain-entry"
+        format!("chain-node chain-entry {depth}")
     } else if is_objective {
-        "chain-node chain-objective"
+        format!("chain-node chain-objective {depth}")
     } else {
-        "chain-node"
+        format!("chain-node {depth}")
     };
     html! {
         li class=(role) {
@@ -93,16 +109,18 @@ fn chain_node(glyph: &str, label: &str, is_entry: bool, is_objective: bool) -> M
     }
 }
 
-/// The labelled connector edge between two nodes: the relation, riding the spine. A structural
+/// The labelled connector edge between two nodes: the relation, riding the spine, indented to the
+/// `step` of the node it leads into so the staircase reads as one descent. A structural
 /// (substrate) edge is muted; the severable edge carries the prominent ✂ "cut here" marker in the
 /// breach colour — the actionable heart of the diagram (brief §3).
-fn chain_edge(hop: &HopProps) -> Markup {
+fn chain_edge(hop: &HopProps, step: usize) -> Markup {
+    let depth = chain_step_class(step);
     let cls = if hop.is_cut {
-        "chain-edge chain-edge-cut"
+        format!("chain-edge chain-edge-cut {depth}")
     } else if hop.structural {
-        "chain-edge chain-edge-structural"
+        format!("chain-edge chain-edge-structural {depth}")
     } else {
-        "chain-edge"
+        format!("chain-edge {depth}")
     };
     html! {
         li class=(cls) {
@@ -117,8 +135,8 @@ fn chain_edge(hop: &HopProps) -> Markup {
     }
 }
 
-/// The proposed/applied cut + its self-revert condition (the safety story). When there is no
-/// single-edge cut, that is stated honestly rather than left blank.
+/// The proposed/applied cut signature. When there is no single-edge cut, that is stated honestly
+/// rather than left blank.
 fn cut_block(f: &FindingProps) -> Markup {
     html! {
         section.detail-section.cut-block {
@@ -126,10 +144,6 @@ fn cut_block(f: &FindingProps) -> Markup {
             @match &f.cut {
                 Some(cut) => {
                     p.cut-sig { code { (cut) } }
-                    p.cut-revert.muted {
-                        "self-reverts when the breach condition clears \u{2014} the cut persists "
-                        "only while the chain \u{2227} its enrichment fingerprint hold (ADR-0017)."
-                    }
                 }
                 None => p.muted { "no single-edge cut \u{2014} this chain is not severable by one network edge" }
             }
