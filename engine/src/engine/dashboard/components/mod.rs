@@ -6,7 +6,7 @@
 //! No component emits an inline `<style>`/`style=` attribute (invariant #5) — every visual is
 //! driven by a class mapped to a token in `docs/STYLEGUIDE.md` (served as `dashboard.css`).
 
-mod activity_view;
+mod action_view;
 mod admission_view;
 mod evidence;
 mod finding_detail;
@@ -15,12 +15,10 @@ mod findings_view;
 mod nav;
 mod readiness_view;
 mod status_strip;
-mod trust_view;
 
-pub use activity_view::activity_view;
+pub use action_view::action_view;
 pub use admission_view::admission_view;
 pub use findings_view::findings_view;
 pub use nav::nav_bar;
 pub use readiness_view::readiness_view;
 pub use status_strip::status_strip;
-pub use trust_view::trust_view;

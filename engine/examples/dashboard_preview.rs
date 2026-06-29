@@ -744,9 +744,9 @@ struct PreviewQuery {
 
 fn resolve_tab(tab: Option<&str>) -> Tab {
     match tab {
-        Some("trust") => Tab::Trust,
+        // The merged Action tab + its legacy soft-aliases (trust/activity), matching production.
+        Some("action") | Some("trust") | Some("activity") => Tab::Action,
         Some("readiness") => Tab::Readiness,
-        Some("activity") => Tab::Activity,
         Some("admission") => Tab::Admission,
         _ => Tab::Findings,
     }
@@ -775,25 +775,22 @@ fn preview_findings(state: &DashboardState) -> view_model::props::FindingsViewPr
     )
 }
 
-/// Build the Trust view props through the public render path.
-fn preview_trust(state: &DashboardState) -> view_model::props::TrustViewProps {
+/// Build the merged Action view props through the public render path (the would-have-acted report
+/// from the decision journal + the self-reverted-cuts ring + the judgement ring).
+fn preview_action(state: &DashboardState) -> view_model::props::ActionViewProps {
     use protector::engine::state::default_window_report;
     let report = default_window_report(&state.decision_journal);
-    view_model::build_trust_view(preview_strip(state), &report)
+    view_model::build_action_view(
+        preview_strip(state),
+        &report,
+        &state.reversions.snapshot(),
+        &state.judgements.snapshot(),
+    )
 }
 
 /// Build the Readiness view props through the public render path.
 fn preview_readiness(state: &DashboardState) -> view_model::props::ReadinessViewProps {
     view_model::build_readiness_view(preview_strip(state), &state.readiness())
-}
-
-/// Build the Activity view props through the public render path.
-fn preview_activity(state: &DashboardState) -> view_model::props::ActivityViewProps {
-    view_model::build_activity_view(
-        preview_strip(state),
-        &state.reversions.snapshot(),
-        &state.judgements.snapshot(),
-    )
 }
 
 /// Build the Admission view props through the public render path.
@@ -809,9 +806,8 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
 fn render_page(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_page(&preview_findings(state)),
-        Tab::Trust => page::trust_page(&preview_trust(state)),
+        Tab::Action => page::action_page(&preview_action(state)),
         Tab::Readiness => page::readiness_page(&preview_readiness(state)),
-        Tab::Activity => page::activity_page(&preview_activity(state)),
         Tab::Admission => page::admission_page(&preview_admission(state)),
     };
     markup.into_string()
@@ -821,9 +817,8 @@ fn render_page(state: &DashboardState, tab: Tab) -> String {
 fn render_fragment(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_fragment(&preview_findings(state)),
-        Tab::Trust => page::trust_fragment(&preview_trust(state)),
+        Tab::Action => page::action_fragment(&preview_action(state)),
         Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),
-        Tab::Activity => page::activity_fragment(&preview_activity(state)),
         Tab::Admission => page::admission_fragment(&preview_admission(state)),
     };
     markup.into_string()
@@ -894,6 +889,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     println!("dashboard preview (hot-reload) on http://{addr}/  (Ctrl-C to stop)");
     println!("  scenarios: /?scenario=clear | watching | breach | blind  (default: breach)");
+    println!("  tabs:      /?tab=findings | action | readiness | admission  (default: findings)");
     println!(
         "  assets served from disk: {:?}",
         dist_path("dashboard.css")

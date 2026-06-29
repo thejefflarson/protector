@@ -6,11 +6,11 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    activity_view, admission_view, findings_view, nav_bar, readiness_view, status_strip, trust_view,
+    action_view, admission_view, findings_view, nav_bar, readiness_view, status_strip,
 };
 use super::view_model::props::{
-    ActivityViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
-    Tab, TrustViewProps,
+    ActionViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
+    Tab,
 };
 
 /// The live-region id the JS polls and swaps. The status strip + active view live inside it so
@@ -22,20 +22,15 @@ pub fn findings_page(v: &FindingsViewProps) -> Markup {
     document(&v.strip, Tab::Findings, findings_view(v))
 }
 
-/// The full Trust (would-have-acted) page: the persistent strip + nav + the would-cut/left-alone
-/// diff.
-pub fn trust_page(v: &TrustViewProps) -> Markup {
-    document(&v.strip, Tab::Trust, trust_view(v))
+/// The full Action page: the persistent strip + nav + the merged action story (proposed cuts →
+/// left alone → judgement audit).
+pub fn action_page(v: &ActionViewProps) -> Markup {
+    document(&v.strip, Tab::Action, action_view(v))
 }
 
 /// The full Readiness (coverage) page: the persistent strip + nav + the per-input coverage rows.
 pub fn readiness_page(v: &ReadinessViewProps) -> Markup {
     document(&v.strip, Tab::Readiness, readiness_view(v))
-}
-
-/// The full Activity (audit) page: the persistent strip + nav + the reversion log + judgement ring.
-pub fn activity_page(v: &ActivityViewProps) -> Markup {
-    document(&v.strip, Tab::Activity, activity_view(v))
 }
 
 /// The full Admission/policy (webhook floor) page: the persistent strip + nav + the decision
@@ -50,19 +45,14 @@ pub fn findings_fragment(v: &FindingsViewProps) -> Markup {
     live_region_inner(&v.strip, Tab::Findings, findings_view(v))
 }
 
-/// The `/fragment` body for the Trust tab.
-pub fn trust_fragment(v: &TrustViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Trust, trust_view(v))
+/// The `/fragment` body for the Action tab.
+pub fn action_fragment(v: &ActionViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Action, action_view(v))
 }
 
 /// The `/fragment` body for the Readiness tab.
 pub fn readiness_fragment(v: &ReadinessViewProps) -> Markup {
     live_region_inner(&v.strip, Tab::Readiness, readiness_view(v))
-}
-
-/// The `/fragment` body for the Activity tab.
-pub fn activity_fragment(v: &ActivityViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Activity, activity_view(v))
 }
 
 /// The `/fragment` body for the Admission tab.

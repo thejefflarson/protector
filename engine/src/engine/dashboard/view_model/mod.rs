@@ -9,13 +9,12 @@
 
 pub mod props;
 
-mod activity;
+mod action;
 mod admission;
 mod findings;
 mod posture;
 mod readiness;
 mod strip;
-mod trust;
 
 use std::time::SystemTime;
 
@@ -23,12 +22,12 @@ use crate::engine::policy_log::{DecisionTallies, PolicyDecisionRecord};
 use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
-    ActivityViewProps, AdmissionViewProps, FindingProps, FindingsViewProps, Posture,
-    ReadinessViewProps, StatusStripProps, TrustViewProps,
+    ActionViewProps, AdmissionViewProps, FindingProps, FindingsViewProps, Posture,
+    ReadinessViewProps, StatusStripProps,
 };
 
 /// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
-/// strip is carried on EVERY view (Findings, Trust, Readiness, Activity), and its honesty reading
+/// strip is carried on EVERY view (Findings, Action, Readiness, Admission), and its honesty reading
 /// (all-clear / watching / blind) depends on the real breach/awaiting/uncertain counts — so a
 /// secondary tab must not zero them, or the strip would falsely read "all clear" while Findings
 /// holds a breach. The mapped findings rows are returned alongside so the Findings view reuses
@@ -81,7 +80,7 @@ pub fn build_findings_view(
 }
 
 /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4) — the strip
-/// a secondary view (Trust / Readiness / Activity) shows, so its honesty reading reflects the real
+/// a secondary view (Action / Readiness / Admission) shows, so its honesty reading reflects the real
 /// cluster posture, not a falsely-empty one. The mapped findings drive the counts but are
 /// discarded; the secondary view supplies its own body.
 pub fn build_status_strip(
@@ -100,20 +99,16 @@ pub fn build_readiness_view(strip: StatusStripProps, readiness: &Readiness) -> R
     readiness::build(strip, readiness)
 }
 
-/// Build the whole Trust (would-have-acted) view's props (brief §6): the persistent strip + the
-/// would-cut / left-alone diff from the report. Pure given its inputs.
-pub fn build_trust_view(strip: StatusStripProps, report: &Report) -> TrustViewProps {
-    trust::build(strip, report)
-}
-
-/// Build the whole Activity (audit) view's props (brief §6): the persistent strip + the
-/// self-reverted-cuts log + the judgement ring (both newest-first). Pure given its inputs.
-pub fn build_activity_view(
+/// Build the whole Action view's props (brief §4/§6) — the merged Trust + Activity story in
+/// lifecycle order: the persistent strip + the proposed cuts (would-act proposals + self-reverted
+/// cuts) + the left-alone (cleared) paths + the judgement audit. Pure given its inputs.
+pub fn build_action_view(
     strip: StatusStripProps,
+    report: &Report,
     reversions: &[ReversionRecord],
     judgements: &[Judgement],
-) -> ActivityViewProps {
-    activity::build(strip, reversions, judgements)
+) -> ActionViewProps {
+    action::build(strip, report, reversions, judgements)
 }
 
 /// Build the whole Admission/policy (webhook floor) view's props (brief §6): the persistent strip +

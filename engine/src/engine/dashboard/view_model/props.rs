@@ -344,14 +344,15 @@ pub struct CoverageChip {
     pub degraded: bool,
 }
 
-/// Which top-level tab is active (the 5-tab nav shell). Admission is the webhook floor — a peer
-/// surface (brief §4), placed last alongside the audit-flavoured Activity tab.
+/// Which top-level tab is active (the 4-tab nav shell). **Action** sits second (the old Trust
+/// slot); it tells the engine's whole action story — proposed cuts, what was left alone, and the
+/// judgement audit (it absorbs the former Trust + Activity tabs). Admission is the webhook floor —
+/// a peer surface (brief §4), placed last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Findings,
-    Trust,
+    Action,
     Readiness,
-    Activity,
     Admission,
 }
 
@@ -360,9 +361,8 @@ impl Tab {
     pub fn path(self) -> &'static str {
         match self {
             Tab::Findings => "/",
-            Tab::Trust => "/?tab=trust",
+            Tab::Action => "/?tab=action",
             Tab::Readiness => "/?tab=readiness",
-            Tab::Activity => "/?tab=activity",
             Tab::Admission => "/?tab=admission",
         }
     }
@@ -371,9 +371,8 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Findings => "Findings",
-            Tab::Trust => "Trust",
+            Tab::Action => "Action",
             Tab::Readiness => "Readiness",
-            Tab::Activity => "Activity",
             Tab::Admission => "Admission",
         }
     }
@@ -471,12 +470,17 @@ pub struct ReadinessViewProps {
 }
 
 // ---------------------------------------------------------------------------
-// Trust view (would-have-acted, brief §6) — the arm/don't-arm evidence: would
-// have cut (sustained-first) vs left alone (the trust half), with the honest
-// journal-empty vs none-in-window distinction.
+// Action view (brief §4/§6) — the engine's whole action story in LIFECYCLE order
+// (the merged Trust + Activity tabs): PROPOSED CUTS (would-act proposals + their
+// self-reverted continuations) → LEFT ALONE (proven paths the model cleared) →
+// JUDGEMENT AUDIT (the verbatim prompt/reply ring). Honest empties throughout:
+// `journal_empty` distinct from none-in-window; "no cuts reverted yet"; "no
+// judgements recorded".
 // ---------------------------------------------------------------------------
 
-/// One workload the engine WOULD have isolated in the window — the scrutinize side of the diff.
+/// One workload the engine WOULD have isolated in the window — a still-standing proposed cut (the
+/// scrutinize side of the diff). Carries its lifecycle classification (open / short-lived /
+/// coverage-gap) so the Action view's "proposed cuts" section can tag each row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WouldActProps {
     /// The internet-facing entry that reached the exploitable verdict (untrusted).
@@ -506,38 +510,9 @@ pub struct LeftAloneProps {
     pub verdict: String,
 }
 
-/// The whole Trust view's props (brief §6): the strip + the headline counts + the would-cut and
-/// left-alone halves + the honest empty framing (`journal_empty` distinct from none-in-window).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustViewProps {
-    pub strip: StatusStripProps,
-    /// The rolling window the report aggregates over, human-formatted (`"7d"`).
-    pub window_human: String,
-    /// The journal held NO breach decisions at all (durable history empty) — distinct from
-    /// "decisions, but none in this window".
-    pub journal_empty: bool,
-    /// How many breach decisions fell within the window (the raw material).
-    pub decisions_in_window: usize,
-    /// Workloads the engine would have cut, most-sustained first.
-    pub would_act: Vec<WouldActProps>,
-    /// Proven paths the model cleared and left alone.
-    pub left_alone: Vec<LeftAloneProps>,
-    /// Headline: distinct workloads that would have been cut.
-    pub would_act_count: usize,
-    /// Headline: would-acts flagged short-lived (the likely-FP subset).
-    pub short_lived_count: usize,
-    /// Headline: would-acts that fired during a coverage gap (scrutinize first).
-    pub coverage_gap_count: usize,
-    /// Headline: distinct proven-but-cleared paths.
-    pub left_alone_count: usize,
-}
-
-// ---------------------------------------------------------------------------
-// Activity view (audit, brief §6) — the self-reverted-cuts log (the safety
-// story, kept visible) + the judgement ring (prompt/reply, for debugging).
-// ---------------------------------------------------------------------------
-
-/// One self-reverted cut for the Activity log — a lifted cut and why (the safety story).
+/// One self-reverted cut for the Action view's "proposed cuts" section — a cut that was applied
+/// then self-reverted when the breach condition lifted (the safety story, kept visible). It is the
+/// REVERTED end of the proposed-cut lifecycle (was-cut → self-reverted).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReversionProps {
     /// The cut signature that was lifted (untrusted node keys).
@@ -548,8 +523,8 @@ pub struct ReversionProps {
     pub age: String,
 }
 
-/// One judgement for the Activity ring — the verbatim prompt/reply behind a model call, for
-/// debugging. Mirrors [`JudgementProps`] but carries the entry it judged.
+/// One judgement for the Action view's judgement-audit section — the verbatim prompt/reply behind a
+/// model call, for debugging. Mirrors [`JudgementProps`] but carries the entry it judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgementEntryProps {
     /// The internet-facing entry that was judged (untrusted).
@@ -564,15 +539,47 @@ pub struct JudgementEntryProps {
     pub reply: Option<String>,
 }
 
-/// The whole Activity view's props (brief §6): the strip + the reversion log + the judgement
-/// ring, each with its honest empty state.
+/// The whole **Action** view's props (brief §4/§6) — the merged Trust + Activity story, laid out in
+/// LIFECYCLE order:
+///
+/// 1. **Proposed cuts** — the would-act proposals ([`would_act`](Self::would_act), still standing,
+///    each classified open / short-lived / coverage-gap) PLUS the cuts that were applied then
+///    self-reverted ([`reversions`](Self::reversions) — the reverted tail of the lifecycle).
+/// 2. **Left alone (cleared)** — proven paths the model cleared ([`left_alone`](Self::left_alone)),
+///    the trust half.
+/// 3. **Judgement audit** — the verbatim prompt/reply ring ([`judgements`](Self::judgements)).
+///
+/// Honest empties are preserved: [`journal_empty`](Self::journal_empty) (no journal history) is
+/// distinct from "none in this window"; an empty reversion/judgement set renders its own explicit
+/// "none yet" line, never a blank.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivityViewProps {
+pub struct ActionViewProps {
     pub strip: StatusStripProps,
-    /// The self-reverted cuts, newest-first (the safety story).
+    /// The rolling window the would-act report aggregates over, human-formatted (`"7d"`).
+    pub window_human: String,
+    /// The journal held NO breach decisions at all (durable history empty) — distinct from
+    /// "decisions, but none in this window".
+    pub journal_empty: bool,
+    /// How many breach decisions fell within the window (the raw material).
+    pub decisions_in_window: usize,
+    /// Still-standing proposed cuts the engine would have made, most-sustained first.
+    pub would_act: Vec<WouldActProps>,
+    /// Cuts that were applied then self-reverted, newest-first (the reverted tail of the lifecycle).
     pub reversions: Vec<ReversionProps>,
-    /// The judgement ring, newest-first (for debugging the model).
+    /// Proven paths the model cleared and left alone.
+    pub left_alone: Vec<LeftAloneProps>,
+    /// The judgement ring, newest-first (the model-debug audit).
     pub judgements: Vec<JudgementEntryProps>,
+    /// Headline: distinct workloads that would have been cut.
+    pub would_act_count: usize,
+    /// Headline: would-acts flagged short-lived (the likely-FP subset).
+    pub short_lived_count: usize,
+    /// Headline: would-acts that fired during a coverage gap (scrutinize first).
+    pub coverage_gap_count: usize,
+    /// Headline: distinct proven-but-cleared paths.
+    pub left_alone_count: usize,
+    /// Headline: cuts that were applied then self-reverted (the reverted count).
+    pub reverted_count: usize,
 }
 
 // ---------------------------------------------------------------------------
