@@ -6,9 +6,8 @@ must follow.
 
 ## File size — hard limit
 
-**No source file may exceed 1,000 lines.** This is a hard cap, not a guideline. The
-dashboard grew past 7,000 lines and became unreadable and unreviewable; that must not
-recur anywhere.
+**No source file may exceed 1,000 lines.** This is a hard cap, not a guideline. A file
+that grows unbounded becomes unreadable and unreviewable; that must not recur anywhere.
 
 - When a file approaches 1,000 lines, split it into a module directory of focused
   submodules — one cohesive responsibility each — rather than letting it grow.
@@ -16,17 +15,6 @@ recur anywhere.
   `tests.rs` / `*_tests.rs` files alongside the code they cover.
 - Write new code as small, single-purpose modules from the start. Prefer many small
   files over one large one.
-
-## Dashboard structure (the canonical UI pattern)
-
-The server-rendered dashboard follows a React-like split (see ADR-0019):
-
-- `view_model/` shapes engine domain state into plain `Props` (the data layer).
-- `components/` are pure `maud` renderers (`Props -> Markup`) and **must not import
-  `engine::` domain types** — they receive only their `Props`.
-- `page.rs` composes components into pages/fragments; `mod.rs` wires routes and state.
-
-New UI work composes these small components; it does not grow a monolith.
 
 ## Invariants (enforced; see docs/adr)
 

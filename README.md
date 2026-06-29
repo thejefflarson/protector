@@ -69,14 +69,9 @@ finding.
 
 ## The dashboard
 
-A read-only dashboard (`/` for HTML, `/findings` for JSON) shows three things:
-
-1. **Remediations** the engine has applied, or would apply in shadow.
-2. **Attack vectors (ATT&CK)** — a summary of which tactic→technique outcomes are
-   reachable, and how many the model judged exploitable.
-3. **Attack paths** — a graph per internet-facing endpoint, each captioned with the
-   model's exploitability call *in its own words* ("not exploitable — …") rather than
-   a rule-based label.
+A read-only operator dashboard is served at `/` on the dashboard port. It is a **view
+over** the engine's findings and decisions and never gates them (shadow-by-default). Its
+information architecture is being redesigned.
 
 ## Run it
 
