@@ -71,18 +71,23 @@ convention.
 |---|---|---|---|
 | **Status strip** (persistent, every view) | Q3 + freshness | the cluster | always-on |
 | **Findings** (primary / landing) | Q1 + Q2 | an exposed `Finding` (entry→objective) | P0 |
-| **Trust** (would-have-acted) | Q4 | a `WouldActEntry` / `LeftAloneEntry` | P1 |
+| **Action** (would-have-acted + audit) | Q4 + Q5 | a `WouldActEntry` / `ReversionRecord` / `LeftAloneEntry` / `Judgement` | P1 |
 | **Readiness** (coverage detail) | Q3 | a decision input (`ReadinessRow`) | P1 |
-| **Activity** (audit) | Q5 | a `ReversionRecord` / `Judgement` | P2 |
 
-Navigation: persistent status strip + a 4-tab bar, default **Findings**. Findings drill
-**in place** (row → detail panel); "show the model's prompt" deep-links into Activity. Never
-deeper than two levels. **Admission/policy** decisions fold in as a peer surface.
+The four-tab bar is **Findings · Action · Readiness · Admission**. **Action** sits second (the
+old Trust slot) and tells the engine's whole action story — it merges the former *Trust*
+(would-have-acted) and *Activity* (audit) tabs into one lifecycle view (§6). **Admission/policy**
+is the webhook-floor peer surface (the fourth tab).
+
+Navigation: persistent status strip + the 4-tab bar, default **Findings**. Findings drill
+**in place** (row → detail panel); "show the model's prompt" deep-links into the Action tab's
+judgement-audit section. Never deeper than two levels. The legacy `?tab=trust` / `?tab=activity`
+deep-links resolve to **Action** (soft-aliases), so they don't 404.
 
 ```
 ┌─ protector ▸ prod-east ───────────────────────  [ SHADOW · proposes, never acts ] ─┐
 │ ● model judging · KEV ✓ · EPSS ✓ · agent quiet · last pass 12s ago     ← status strip│
-│ [ Findings ]  Trust  Readiness  Activity                                ← tab nav     │
+│ [ Findings ]  Action  Readiness  Admission                              ← tab nav     │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │  1 BREACH · 2 awaiting · 14 cleared          ▲1 escalated since last pass             │
 ├──┬──────────┬───────────────────────┬──────────────────────┬─────────┬──────┬────────┤
@@ -116,19 +121,25 @@ deeper than two levels. **Admission/policy** decisions fold in as a peer surface
 - **Fan-out** (argocd reaching ~120 objectives): collapse to `→ ×N secrets` with drill-in,
   framed as reachable-but-cleared, never alarm.
 
-## 6. Secondary views (phase 2)
+## 6. Secondary views
 
-- **Trust (would-have-acted)** — the arm/don't-arm evidence from `Report`: *Would have cut*
-  (`would_act`, sustained-first; `short_lived` = likely FP; `coverage_gap` = affirmed with no
-  CVE backing → scrutinise first; `open` = still standing) vs *Left alone* (`left_alone` —
-  proven paths the model cleared; the trust half). Honest empty: `journal_empty` vs
-  "none-in-window".
+- **Action (would-have-acted + audit)** — the engine's whole action story, the merged *Trust* +
+  *Activity* tabs, in **lifecycle order** as three stacked sections:
+  1. **Proposed cuts** — the lifecycle of a would-be cut. The still-standing *would-act*
+     proposals from `Report` (`would_act`, sustained-first; each tagged with its lifecycle
+     status — would-cut-`open` = still standing; `short_lived` = likely FP; `coverage_gap` =
+     affirmed with no CVE backing → scrutinise first), then the cuts that were applied then
+     **self-reverted** (`ReversionLog` — reason + age, the safety story kept visible). Honest
+     empties: `journal_empty` (no history) is distinct from "none-in-window", and an empty
+     reversion set reads "no cuts reverted yet".
+  2. **Left alone (cleared)** — proven paths the model judged not exploitable and deliberately
+     cleared (`Report::left_alone`; the trust half).
+  3. **Judgement audit (model debug)** — the `Judgement` ring (verbatim prompt/reply per call, as
+     collapsed disclosures). Findings' "show model prompt" conceptually deep-links here.
 - **Readiness (coverage)** — one row per input (model / KEV / EPSS / Falco / eBPF / journal /
   arm-state): state (Present/Absent/Degraded) · live detail · why it matters · the env var to
   enable it. Inputs that `weakens_decisions` when absent float up. A quiet feed reads
   "no signals (quiet, or sensor down)" — the ambiguity preserved, not falsely resolved.
-- **Activity (audit)** — `ReversionLog` (self-reverted cuts + reason + age — the safety story,
-  kept visible) + the `Judgement` ring (prompt/reply per judgement, for debugging the model).
 - **Admission/policy** — the webhook floor: `DecisionTallies` header (admitted/audited/denied,
   so a healthy view is never blank) + deduped decision rows (signature/mesh/decision + the
   "if enforced" what-if).

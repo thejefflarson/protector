@@ -51,11 +51,11 @@ fn component_files() -> Vec<PathBuf> {
 }
 
 /// Guard against the scan silently missing a component: every component the boundary checks must
-/// be present in the scanned set. Extended for the phase-2 views (Trust / Readiness / Activity) and
-/// the Admission/policy view (the webhook floor) so a new view can never slip past the
-/// no-domain-import + no-inline-style scans.
+/// be present in the scanned set. Covers the merged Action view (the former Trust + Activity tabs),
+/// Readiness, and the Admission/policy view (the webhook floor) so a new view can never slip past
+/// the no-domain-import + no-inline-style scans.
 #[test]
-fn the_scan_covers_every_component_including_the_phase2_views() {
+fn the_scan_covers_every_component_including_the_secondary_views() {
     let names: Vec<String> = component_files()
         .iter()
         .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
@@ -67,10 +67,9 @@ fn the_scan_covers_every_component_including_the_phase2_views() {
         "evidence.rs",
         "status_strip.rs",
         "nav.rs",
-        // phase 2:
-        "trust_view.rs",
+        // the merged would-act + audit story:
+        "action_view.rs",
         "readiness_view.rs",
-        "activity_view.rs",
         // the webhook floor:
         "admission_view.rs",
     ] {

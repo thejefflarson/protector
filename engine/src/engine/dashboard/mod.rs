@@ -33,8 +33,8 @@ use super::state::{
     default_window_report, derive_readiness,
 };
 use view_model::props::{
-    ActivityViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
-    Tab, TrustViewProps,
+    ActionViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
+    Tab,
 };
 
 /// The light-theme stylesheet, generated from the `docs/STYLEGUIDE.md` tokens. Served
@@ -53,11 +53,12 @@ pub struct DashboardState {
     /// freshness / bake / readiness-config / model-health the engine stamps.
     pub findings: Arc<Findings>,
     /// The bounded judgement ring (prompt + reply per judgement) for the verbatim "show model
-    /// prompt" disclosure (Findings drill-in + the Activity judgement ring).
+    /// prompt" disclosure (Findings drill-in + the Action tab's judgement-audit section).
     pub judgements: Arc<JudgementLog>,
-    /// The self-reverted-cuts ring (the audit/safety story) — read by the Activity tab.
+    /// The self-reverted-cuts ring (the audit/safety story) — read by the Action tab's proposed-cuts
+    /// section (the reverted tail of the cut lifecycle).
     pub reversions: Arc<ReversionLog>,
-    /// The durable decision journal — replayed read-only to build the Trust (would-have-acted)
+    /// The durable decision journal — replayed read-only to build the Action tab's would-have-acted
     /// report. Named `decision_journal` (not `journal`) so it never collides with the
     /// `JudgementLog` the run-loop binds as `journal`.
     pub decision_journal: Arc<DecisionJournal>,
@@ -85,8 +86,8 @@ impl DashboardState {
 
     /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The
     /// strip is shown on EVERY tab, so its honesty reading reflects the real cluster posture even
-    /// on a secondary view — a breach in Findings keeps the strip non-green on Trust/Readiness/
-    /// Activity too. Pure read of the live handles.
+    /// on a secondary view — a breach in Findings keeps the strip non-green on Action/Readiness/
+    /// Admission too. Pure read of the live handles.
     fn status_strip(&self) -> StatusStripProps {
         let findings = self.findings.snapshot();
         let judgements = self.judgements.snapshot();
@@ -114,11 +115,15 @@ impl DashboardState {
         )
     }
 
-    /// Build the Trust (would-have-acted) view props: the persistent strip + the would-cut /
-    /// left-alone diff, aggregated read-only over the default window from the decision journal.
-    fn trust_view(&self) -> TrustViewProps {
+    /// Build the Action view props (the merged Trust + Activity story): the persistent strip + the
+    /// proposed cuts (the would-cut / left-alone diff aggregated read-only over the default window
+    /// from the decision journal, plus the self-reverted-cuts ring) + the judgement audit (both
+    /// rings newest-first).
+    fn action_view(&self) -> ActionViewProps {
         let report = default_window_report(&self.decision_journal);
-        view_model::build_trust_view(self.status_strip(), &report)
+        let reversions = self.reversions.snapshot();
+        let judgements = self.judgements.snapshot();
+        view_model::build_action_view(self.status_strip(), &report, &reversions, &judgements)
     }
 
     /// Build the Readiness (coverage) view props: the persistent strip + one row per decision
@@ -126,14 +131,6 @@ impl DashboardState {
     fn readiness_view(&self) -> ReadinessViewProps {
         let readiness = self.readiness();
         view_model::build_readiness_view(self.status_strip(), &readiness)
-    }
-
-    /// Build the Activity (audit) view props: the persistent strip + the self-reverted-cuts log +
-    /// the judgement ring (both newest-first).
-    fn activity_view(&self) -> ActivityViewProps {
-        let reversions = self.reversions.snapshot();
-        let judgements = self.judgements.snapshot();
-        view_model::build_activity_view(self.status_strip(), &reversions, &judgements)
     }
 
     /// Build the Admission/policy (webhook floor) view props: the persistent strip + the decision
@@ -145,7 +142,9 @@ impl DashboardState {
     }
 }
 
-/// The tab query parameter (`?tab=trust`). Defaults to Findings.
+/// The tab query parameter (`?tab=action`). Defaults to Findings. The legacy `trust`/`activity`
+/// words are kept as soft-aliases that resolve to the merged `Action` tab, so old deep-links (and a
+/// Findings "show model prompt" link that still says `activity`) don't 404.
 #[derive(serde::Deserialize, Default)]
 struct TabQuery {
     tab: Option<String>,
@@ -154,9 +153,9 @@ struct TabQuery {
 impl TabQuery {
     fn resolve(&self) -> Tab {
         match self.tab.as_deref() {
-            Some("trust") => Tab::Trust,
+            // The merged Action tab + its legacy soft-aliases.
+            Some("action") | Some("trust") | Some("activity") => Tab::Action,
             Some("readiness") => Tab::Readiness,
-            Some("activity") => Tab::Activity,
             Some("admission") => Tab::Admission,
             _ => Tab::Findings,
         }
@@ -167,9 +166,8 @@ impl TabQuery {
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_page(&state.findings_view()),
-        Tab::Trust => page::trust_page(&state.trust_view()),
+        Tab::Action => page::action_page(&state.action_view()),
         Tab::Readiness => page::readiness_page(&state.readiness_view()),
-        Tab::Activity => page::activity_page(&state.activity_view()),
         Tab::Admission => page::admission_page(&state.admission_view()),
     };
     Html(markup.into_string())
@@ -181,9 +179,8 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_fragment(&state.findings_view()),
-        Tab::Trust => page::trust_fragment(&state.trust_view()),
+        Tab::Action => page::action_fragment(&state.action_view()),
         Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
-        Tab::Activity => page::activity_fragment(&state.activity_view()),
         Tab::Admission => page::admission_fragment(&state.admission_view()),
     };
     Html(markup.into_string())

@@ -1,20 +1,15 @@
-//! The 5-tab nav shell (brief §4). The nav exists so all five surfaces — Findings, Trust,
-//! Readiness, Activity, Admission — are reachable; all five are real views now (phase 2 landed the
-//! secondary three; Admission is the webhook-floor peer). Pure component; no domain types.
+//! The 4-tab nav shell (brief §4). The nav exists so all four surfaces — Findings, Action,
+//! Readiness, Admission — are reachable; all four are real views (Action merges the former Trust +
+//! Activity tabs into the engine's whole action story; Admission is the webhook-floor peer). Pure
+//! component; no domain types.
 
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::Tab;
 
-/// The five top-level tabs, in priority order (default Findings; Admission — the webhook
-/// floor — last, alongside the audit-flavoured Activity).
-const TABS: [Tab; 5] = [
-    Tab::Findings,
-    Tab::Trust,
-    Tab::Readiness,
-    Tab::Activity,
-    Tab::Admission,
-];
+/// The four top-level tabs, in priority order (default Findings; Action — the merged would-act +
+/// audit story — second, in the old Trust slot; Admission — the webhook floor — last).
+const TABS: [Tab; 4] = [Tab::Findings, Tab::Action, Tab::Readiness, Tab::Admission];
 
 /// Render the tab nav bar, marking the active tab.
 pub fn nav_bar(active: Tab) -> Markup {

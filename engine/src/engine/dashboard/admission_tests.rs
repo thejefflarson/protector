@@ -1,6 +1,6 @@
 //! Render-level tests for the Admission/policy view (the webhook floor, brief §6): the tallies
 //! header (never blank, honest at zero), the deduped decision rows + the "if enforced" what-if, the
-//! honest-empty case, the real fifth nav tab, and escaping of the untrusted image/subject/reason
+//! honest-empty case, the real fourth nav tab, and escaping of the untrusted image/subject/reason
 //! text. These drive the view_model + component directly (no HTTP, no engine), so they are fast and
 //! pure. Kept in their own file so `tests.rs` stays under the 1,000-line cap (CLAUDE.md).
 
@@ -62,13 +62,20 @@ fn admission_rec(
 }
 
 #[test]
-fn admission_nav_tab_is_a_real_fifth_surface() {
-    // The five tabs are all reachable; the Admission tab links to its real route.
+fn admission_nav_tab_is_a_real_fourth_surface() {
+    // The four tabs are all reachable; the Admission tab links to its real route. The merged
+    // Action tab replaces the former Trust + Activity pair.
     let v = build_admission_view(strip_from(&[]), DecisionTallies::default(), &[]);
     let html = page::admission_page(&v).into_string();
-    for tab in ["Findings", "Trust", "Readiness", "Activity", "Admission"] {
+    for tab in ["Findings", "Action", "Readiness", "Admission"] {
         assert!(html.contains(tab), "the nav offers the {tab} tab");
     }
+    // The retired tabs are gone from the nav.
+    assert!(!html.contains(">Trust<"), "no Trust nav label remains");
+    assert!(
+        !html.contains(">Activity<"),
+        "no Activity nav label remains"
+    );
     assert!(
         html.contains("?tab=admission"),
         "the Admission tab links to its real route"

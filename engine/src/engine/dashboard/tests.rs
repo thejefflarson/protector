@@ -12,8 +12,7 @@ use crate::engine::state::{
 
 use super::page;
 use super::view_model::{
-    build_activity_view, build_findings_view, build_readiness_view, build_status_strip,
-    build_trust_view,
+    build_action_view, build_findings_view, build_readiness_view, build_status_strip,
 };
 
 /// A readiness snapshot for a fully-covered, actively-judging model.
@@ -572,9 +571,14 @@ fn strip_from(findings: &[Finding]) -> super::view_model::props::StatusStripProp
     )
 }
 
+/// Build an Action view over the given report, with no reversions/judgements (the trust-only cases).
+fn action_view_for(report: &Report) -> super::view_model::props::ActionViewProps {
+    build_action_view(strip_from(&[]), report, &[], &[])
+}
+
 #[test]
 fn secondary_views_carry_the_persistent_strip_and_nav_without_phase2_badge() {
-    // The Trust page (a real view now) carries the strip + the 4-tab nav, and the phase-2 badge
+    // The Action page (a real view) carries the strip + the 4-tab nav, and the phase-2 badge
     // is gone from the nav.
     let report = Report {
         window_secs: 3600,
@@ -584,16 +588,46 @@ fn secondary_views_carry_the_persistent_strip_and_nav_without_phase2_badge() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let v = build_trust_view(strip_from(&[]), &report);
-    let html = page::trust_page(&v).into_string();
+    let html = page::action_page(&action_view_for(&report)).into_string();
     assert!(!html.contains("phase 2"), "the phase-2 badge is gone");
     assert!(html.contains("Findings"), "the nav still offers Findings");
-    assert!(html.contains("Trust"), "and the Trust tab");
+    assert!(html.contains("Action"), "and the merged Action tab");
+    // The old Trust/Activity labels are gone from the nav.
+    assert!(!html.contains(">Trust<"), "no Trust nav label remains");
+    assert!(
+        !html.contains(">Activity<"),
+        "no Activity nav label remains"
+    );
     assert!(html.contains("model judging"), "the strip is present");
 }
 
 #[test]
-fn trust_view_distinguishes_journal_empty_from_none_in_window() {
+fn action_view_has_the_three_lifecycle_sections_in_order() {
+    // Proposed cuts → left alone → judgement audit, top to bottom.
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 0,
+        journal_empty: false,
+        would_act: vec![],
+        left_alone: vec![],
+    };
+    let html = page::action_page(&action_view_for(&report)).into_string();
+    let proposed = html.find("proposed cuts").expect("proposed cuts section");
+    let cleared = html
+        .find("left alone (cleared)")
+        .expect("left alone section");
+    let audit = html
+        .find("judgement audit")
+        .expect("judgement audit section");
+    assert!(
+        proposed < cleared && cleared < audit,
+        "the sections render in lifecycle order: proposed cuts → left alone → judgement audit"
+    );
+}
+
+#[test]
+fn action_view_distinguishes_journal_empty_from_none_in_window() {
     // journal_empty ⇒ the "no decisions journaled yet" honest state.
     let empty = Report {
         window_secs: 3600,
@@ -603,19 +637,19 @@ fn trust_view_distinguishes_journal_empty_from_none_in_window() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::trust_page(&build_trust_view(strip_from(&[]), &empty)).into_string();
+    let html = page::action_page(&action_view_for(&empty)).into_string();
     assert!(
         html.contains("no decisions journaled yet"),
         "an empty journal reads as no-history, not all-clear"
     );
     assert!(html.contains("not an all-clear"));
 
-    // History, but none in window ⇒ the per-column "none in the last …" honest state instead.
+    // History, but none in window ⇒ the "none in the last …" honest state instead.
     let none_in_window = Report {
         journal_empty: false,
         ..empty
     };
-    let html2 = page::trust_page(&build_trust_view(strip_from(&[]), &none_in_window)).into_string();
+    let html2 = page::action_page(&action_view_for(&none_in_window)).into_string();
     assert!(
         !html2.contains("no decisions journaled yet"),
         "history exists, so it is NOT the journal-empty state"
@@ -624,7 +658,7 @@ fn trust_view_distinguishes_journal_empty_from_none_in_window() {
 }
 
 #[test]
-fn trust_view_renders_would_cut_and_left_alone_with_classification() {
+fn action_view_renders_proposed_cuts_and_left_alone_with_lifecycle_status() {
     let report = Report {
         window_secs: 7 * 24 * 3600,
         short_lived_secs: 300,
@@ -657,11 +691,14 @@ fn trust_view_renders_would_cut_and_left_alone_with_classification() {
             verdict: "not exploitable — internal only".into(),
         }],
     };
-    let html = page::trust_page(&build_trust_view(strip_from(&[]), &report)).into_string();
-    assert!(html.contains("would have cut"));
-    assert!(html.contains("left alone"));
-    // Classification words ride alongside the glyph (meaning never by colour alone).
-    assert!(html.contains("still standing"), "the open episode");
+    let html = page::action_page(&action_view_for(&report)).into_string();
+    assert!(html.contains("proposed cuts"));
+    assert!(html.contains("left alone (cleared)"));
+    // Lifecycle status words ride alongside the glyph (meaning never by colour alone).
+    assert!(
+        html.contains("would cut") && html.contains("still standing"),
+        "the open episode carries the would-cut-open lifecycle status"
+    );
     assert!(
         html.contains("likely false positive"),
         "the short-lived one"
@@ -670,6 +707,37 @@ fn trust_view_renders_would_cut_and_left_alone_with_classification() {
     assert!(html.contains("cleared"), "the left-alone half");
     // Untrusted verdict prose + node keys are present (escaped by maud).
     assert!(html.contains("deployment/edge/api"));
+}
+
+#[test]
+fn action_view_renders_reverted_cuts_under_proposed_with_honest_empty() {
+    // A self-reverted cut appears in the proposed-cuts section as the reverted tail of the lifecycle.
+    let now_ms = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 1,
+        journal_empty: false,
+        would_act: vec![],
+        left_alone: vec![],
+    };
+    let reversions = vec![ReversionRecord {
+        cut: "deployment/edge/legacy -[reaches/Tcp/8080]-> service/admin".into(),
+        reason: "breach condition cleared".into(),
+        at_ms: now_ms.saturating_sub(90_000),
+    }];
+    let v = build_action_view(strip_from(&[]), &report, &reversions, &[]);
+    let html = page::action_page(&v).into_string();
+    assert!(html.contains("reverted"), "the reverted tag");
+    assert!(html.contains("breach condition cleared"), "the reason");
+
+    // Empty reversions ⇒ the honest "no cuts reverted yet" line, never a blank.
+    let v2 = build_action_view(strip_from(&[]), &report, &[], &[]);
+    let html2 = page::action_page(&v2).into_string();
+    assert!(html2.contains("no cuts reverted yet"));
 }
 
 #[test]
@@ -701,17 +769,16 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
 }
 
 #[test]
-fn activity_view_renders_reversions_and_judgements_with_honest_empties() {
-    // With data: the reversion + judgement render.
-    let now_ms = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let reversions = vec![ReversionRecord {
-        cut: "deployment/edge/legacy -[reaches/Tcp/8080]-> service/admin".into(),
-        reason: "breach condition cleared".into(),
-        at_ms: now_ms.saturating_sub(90_000),
-    }];
+fn action_view_renders_judgement_audit_with_honest_empties() {
+    // With data: the judgement renders in the judgement-audit section.
+    let report = Report {
+        window_secs: 3600,
+        short_lived_secs: 300,
+        decisions_in_window: 1,
+        journal_empty: false,
+        would_act: vec![],
+        left_alone: vec![],
+    };
     let judgements = vec![Judgement {
         entry: "deployment/edge/api".into(),
         objectives: 1,
@@ -719,31 +786,25 @@ fn activity_view_renders_reversions_and_judgements_with_honest_empties() {
         prompt: Some("the prompt".into()),
         reply: None, // timed out ⇒ honest "no reply"
     }];
-    let v = build_activity_view(strip_from(&[]), &reversions, &judgements);
-    let html = page::activity_page(&v).into_string();
-    assert!(html.contains("self-reverted cuts"));
-    assert!(html.contains("model judgements"));
-    assert!(
-        html.contains("breach condition cleared"),
-        "the reversion reason"
-    );
+    let v = build_action_view(strip_from(&[]), &report, &[], &judgements);
+    let html = page::action_page(&v).into_string();
+    assert!(html.contains("judgement audit"));
     assert!(html.contains("deployment/edge/api"), "the judged entry");
     assert!(
         html.contains("no reply"),
         "an absent reply renders the honest no-reply line, never a blank"
     );
 
-    // Empty: both halves render their honest empty state, not a blank.
-    let empty = build_activity_view(strip_from(&[]), &[], &[]);
-    let html2 = page::activity_page(&empty).into_string();
-    assert!(html2.contains("no cuts have been lifted"));
+    // Empty: the judgement section renders its honest empty state, not a blank.
+    let empty = build_action_view(strip_from(&[]), &report, &[], &[]);
+    let html2 = page::action_page(&empty).into_string();
     assert!(html2.contains("no judgements recorded"));
 }
 
 #[test]
 fn secondary_view_strip_stays_non_green_when_findings_hold_a_breach() {
     // The persistent strip must reflect the REAL cluster posture on a secondary tab: a breach in
-    // Findings keeps the Trust strip out of the green all-clear (invariant #1, carried everywhere).
+    // Findings keeps the Action strip out of the green all-clear (invariant #1, carried everywhere).
     let breach = breach_finding("endpoint/a", Verdict::Confirmed);
     let strip = build_status_strip(
         "prod".into(),
@@ -768,17 +829,18 @@ fn secondary_view_strip_stays_non_green_when_findings_hold_a_breach() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::trust_page(&build_trust_view(strip, &report)).into_string();
+    let html = page::action_page(&build_action_view(strip, &report, &[], &[])).into_string();
     assert!(
         !html.contains("all clear"),
-        "the Trust tab's strip never reads all-clear while Findings holds a breach"
+        "the Action tab's strip never reads all-clear while Findings holds a breach"
     );
 }
 
 #[test]
-fn untrusted_text_is_escaped_in_the_secondary_views() {
+fn untrusted_text_is_escaped_in_the_action_view() {
     let evil = "<script>alert('x')</script>";
-    // Trust: an untrusted verdict + entry key.
+    // An untrusted would-act verdict + entry key, an untrusted reversion reason + cut, and an
+    // untrusted judgement prompt — all three sections at once.
     let report = Report {
         window_secs: 3600,
         short_lived_secs: 300,
@@ -794,16 +856,11 @@ fn untrusted_text_is_escaped_in_the_secondary_views() {
             coverage_gap: false,
             last_verdict: format!("exploitable {evil}"),
         }],
-        left_alone: vec![],
+        left_alone: vec![LeftAloneEntry {
+            entry: evil.into(),
+            verdict: format!("cleared {evil}"),
+        }],
     };
-    let html = page::trust_page(&build_trust_view(strip_from(&[]), &report)).into_string();
-    assert!(
-        !html.contains("<script>alert"),
-        "raw script must not reach output"
-    );
-    assert!(html.contains("&lt;script&gt;"), "it is escaped");
-
-    // Activity: an untrusted reversion reason + cut + prompt.
     let reversions = vec![ReversionRecord {
         cut: format!("cut {evil}"),
         reason: format!("reason {evil}"),
@@ -816,17 +873,18 @@ fn untrusted_text_is_escaped_in_the_secondary_views() {
         prompt: Some(format!("prompt {evil}")),
         reply: Some(format!("reply {evil}")),
     }];
-    let html2 = page::activity_page(&build_activity_view(
+    let html = page::action_page(&build_action_view(
         strip_from(&[]),
+        &report,
         &reversions,
         &judgements,
     ))
     .into_string();
     assert!(
-        !html2.contains("<script>alert"),
+        !html.contains("<script>alert"),
         "raw script must not reach output"
     );
-    assert!(html2.contains("&lt;script&gt;"), "it is escaped");
+    assert!(html.contains("&lt;script&gt;"), "it is escaped");
 }
 
 #[test]
