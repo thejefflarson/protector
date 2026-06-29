@@ -183,6 +183,11 @@ spec:
               containerPort: {{ .Values.engine.falco.port }}
               protocol: TCP
             {{- end }}
+            {{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
+            - name: dashboard
+              containerPort: {{ .Values.engine.dashboard.port }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -273,6 +278,15 @@ spec:
             {{- if .Values.engine.falco.enabled }}
             - name: PROTECTOR_FALCO_ADDR
               value: "0.0.0.0:{{ .Values.engine.falco.port }}"
+            {{- end }}
+            {{- if .Values.engine.dashboard.enabled }}
+            # The read-only operator dashboard (ADR-0019). Zero-egress, in-cluster only —
+            # reads the engine's output state and serves a server-rendered view. Reach it
+            # through the cluster's own ingress/mesh; it terminates no TLS of its own.
+            - name: PROTECTOR_DASHBOARD_ADDR
+              value: "0.0.0.0:{{ .Values.engine.dashboard.port }}"
+            - name: PROTECTOR_CLUSTER_LABEL
+              value: {{ .Values.engine.dashboard.clusterLabel | quote }}
             {{- end }}
             {{- if $feeds }}
             # KEV catalogue file the feed-fetcher sidecar writes into the shared emptyDir

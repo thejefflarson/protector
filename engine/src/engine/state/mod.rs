@@ -23,7 +23,10 @@ mod verdict_store;
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 pub use findings::{Finding, Findings, PathStep};
 pub use judgement::{Judgement, JudgementLog};
-pub use readiness::Readiness;
+pub use readiness::{InputState, Readiness};
+// The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's
+// config + per-pass health, the same pure aggregation the OTLP mirror reads.
+pub(crate) use readiness::derive_readiness;
 pub use recency::{Delta, RecencyInfo, StoredPosture};
 pub use report::{Report, default_window_report};
 pub use reversion::{ReversionLog, ReversionRecord};

@@ -283,6 +283,15 @@ engine:
   falco:
     enabled: true
     port: 9999
+  # Read-only operator dashboard (ADR-0019). A server-rendered, zero-egress view of the
+  # engine's output state (findings, verdicts, coverage). It reads only state the engine
+  # already holds and NEVER mutates it, so it is strictly observational. It terminates no
+  # TLS of its own — expose it through the cluster's ingress/mesh. ClusterIP service below.
+  dashboard:
+    enabled: true
+    port: 8080
+    # The cluster label shown in the dashboard's status strip.
+    clusterLabel: cluster
   # Two exploitation-intel feeds drive the engine's exploit intel + model reasoning
   # (ADR-0015): the CISA KEV catalogue (actively-exploited CVEs, known NOW) and the FIRST.org
   # EPSS scores (the PREDICTIVE per-CVE exploitation probability — JEF-243). The engine NEVER

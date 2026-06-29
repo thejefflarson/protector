@@ -6,7 +6,8 @@
 
 use super::respond::actuator::{ActuationScope, Actuator, DryRunActuator, EnabledActions};
 use super::{
-    Engine, Snapshot, journal, model, notify, observe, policy_log, reason, respond, state,
+    Engine, Snapshot, dashboard, journal, model, notify, observe, policy_log, reason, respond,
+    state,
 };
 
 /// Replay the durable journal's admission lines (JEF-237) back into the shared
@@ -186,6 +187,31 @@ pub async fn run_watch(
             journal_durable: engine.journal().is_enabled(),
             armed: !active.is_empty(),
         });
+
+    // The read-only operator dashboard (ADR-0019), served behind `PROTECTOR_DASHBOARD_ADDR`
+    // (e.g. `0.0.0.0:8080`). Off when unset — zero-egress, in-cluster only. It reads the SAME
+    // `state::` handles the engine writes each pass (findings, the judgement ring, the reversion
+    // log), never mutating them, so it is strictly observational and a bad render can never
+    // affect the engine (ADR-0016: presentation is a view, never a gate). A bind failure logs
+    // and the task exits; the engine loop is unaffected.
+    if let Ok(addr_str) = std::env::var("PROTECTOR_DASHBOARD_ADDR") {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let state = dashboard::DashboardState {
+                    findings: engine.findings(),
+                    judgements: journal.clone(),
+                    reversions: engine.reversions(),
+                    cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
+                        .unwrap_or_else(|_| "cluster".to_string()),
+                };
+                tokio::spawn(dashboard::serve_dashboard(addr, state));
+            }
+            Err(error) => tracing::error!(
+                %error, addr = %addr_str,
+                "PROTECTOR_DASHBOARD_ADDR is not a host:port socket address; dashboard disabled"
+            ),
+        }
+    }
 
     // Keep-warm (JEF-107): warm the model at startup and ping it periodically so it
     // stays resident between judging passes — the first post-restart pass isn't glacial.
