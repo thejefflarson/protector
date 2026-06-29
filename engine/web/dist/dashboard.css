@@ -19,7 +19,10 @@
   --posture-breach: #D92D20;
   --posture-cleared: #067647;
   --posture-uncertain: #B54708;
-  --posture-awaiting: #667085;
+  /* awaiting (pre-judgement): a muted ochre — slightly elevated, clearly below uncertain's
+     intensity; reads as "pending the model's call", not "fine" and not "uncertain". */
+  --posture-awaiting: #9A6B2E;
+  --posture-awaiting-tint: #FBF6EC;
 
   /* severity — CVE (subordinate, muted) */
   --sev-critical: #B42318;
@@ -136,6 +139,9 @@ summary:focus-visible,
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--posture-cleared); display: inline-block;
 }
+/* Judging-but-not-finished ("watching"): elevated ochre, calm — NEVER the cleared green
+   (invariant #1). Distinct from the loud breach channel and from the blind/warming banner. */
+.judging.watching { color: var(--posture-awaiting); font-weight: 600; }
 /* NOT-judging banners are amber/slate, NEVER the cleared green (invariant #1). */
 .judging.warming { color: var(--posture-uncertain); font-weight: 600; }
 .judging.blind { color: var(--posture-uncertain); font-weight: 600; }
@@ -164,7 +170,9 @@ summary:focus-visible,
 }
 .count { display: inline-flex; align-items: center; gap: var(--space-1); }
 .count-breach { color: var(--posture-breach); font-weight: 600; }
+/* awaiting reads slightly elevated (ochre), below uncertain's stronger amber-brown. */
 .count-awaiting { color: var(--posture-awaiting); }
+.count-uncertain { color: var(--posture-uncertain); }
 .count-cleared { color: var(--ink-2); }
 .count-escalated { color: var(--delta-up); font-weight: 600; }
 
@@ -231,7 +239,17 @@ summary:focus-visible,
 .chip-breach { color: var(--posture-breach); }
 .chip-cleared { color: var(--posture-cleared); }
 .chip-uncertain { color: var(--posture-uncertain); }
-.chip-awaiting { color: var(--posture-awaiting); }
+/* awaiting reads slightly elevated: ochre ink + a soft tint behind the chip — mild attention,
+   not calm slate, and clearly below uncertain (no dashed rail). */
+.chip-awaiting {
+  color: var(--posture-awaiting);
+  background: var(--posture-awaiting-tint);
+  border-radius: var(--radius-chip);
+  padding: 0 var(--space-1);
+}
+/* the whole un-judged row carries a subtle ochre tint so a pending path doesn't read as "fine". */
+.row[data-posture="awaiting"] { background: var(--posture-awaiting-tint); }
+.row[data-posture="awaiting"]:hover { background: var(--surface-hover); }
 
 .eo { display: inline-flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
 .entry { display: inline-flex; align-items: center; gap: var(--space-1); }
@@ -372,6 +390,8 @@ summary:focus-visible,
 .empty-sub, .stub-sub { margin: 0 auto; max-width: 60ch; }
 /* "all clear" is the ONLY posture-coloured empty state — and only when honestly earned. */
 .empty-clear .empty-head { color: var(--posture-cleared); }
+/* watching: judged but not yet all-clear — elevated ochre, never green (invariant #1). */
+.empty-watching .empty-head { color: var(--posture-awaiting); }
 .empty-warming .empty-head { color: var(--posture-uncertain); }
 .empty-blind .empty-head { color: var(--posture-uncertain); }
 .stub-badge {

@@ -8,8 +8,12 @@ calm by default, loud only on a real breach.
 
 ## Principles
 
-1. **Honesty over reassurance.** Green/calm is shown ONLY while the model is judging; unknown
-   and awaiting are never green. (Test-enforced — see the gate.)
+1. **Honesty over reassurance.** The overall green/all-clear is shown ONLY when the model has
+   *affirmatively cleared everything it is looking at* — judging AND covered AND zero breaches
+   AND zero entries still awaiting judgement AND zero uncertain. If any entry is still awaiting
+   or uncertain, the model isn't yet sure, so the posture is the elevated **"watching"** state
+   (calm but not green), never all-clear. Unknown and awaiting are never green. (Test-enforced —
+   see the gate.)
 2. **Posture ≠ severity.** The model's verdict is the loud channel; CVE severity is a cooler,
    subordinate channel. A wall of critical CVEs must never look like a wall of breaches.
 3. **Meaning never by colour alone.** Every status carries colour **+ glyph + word**.
@@ -38,9 +42,12 @@ calm by default, loud only on a real breach.
 | `--posture-breach` | `#D92D20` | ● filled | BREACH / EXPLOITABLE | 3px solid |
 | `--posture-cleared` | `#067647` | ○ open | not exploitable | 2px solid |
 | `--posture-uncertain` | `#B54708` | ◐ half | uncertain | 2px **dashed** |
-| `--posture-awaiting` | `#667085` | ◌ dotted | awaiting judgement | 2px **dotted** |
+| `--posture-awaiting` | `#9A6B2E` | ◌ dotted | awaiting judgement | 2px **dotted** |
 
-Uncertain & awaiting are amber-brown / slate — **never** the cleared green. Dashed/dotted
+Uncertain is a stronger amber-brown; **awaiting is a softer, muted ochre — slightly elevated,
+clearly *below* uncertain's intensity**. Neither is ever the cleared green. An un-judged exposed
+path reads as "pending the model's call / mild attention," not "fine" and not "uncertain." A
+subtle ochre tint backs the awaiting row/chip (`--posture-awaiting-tint: #FBF6EC`). Dashed/dotted
 rails make "not decided" texturally distinct even in greyscale.
 
 ### Colour — severity (CVE/`ScanFinding`; subordinate, muted)
@@ -81,7 +88,7 @@ Two weights only (400/600). Emphasis via weight + ink value, not a third weight.
 | Component | Tokens |
 |---|---|
 | Page / app frame | `--bg`, `--font-ui` |
-| Status strip | `--surface-raised`; posture-* count chips; honest banner uses `--posture-uncertain`/`--posture-awaiting`, **never** `--posture-cleared` |
+| Status strip | `--surface-raised`; posture-* count chips; green all-clear (`--posture-cleared`) only when judging+covered+nothing breach/awaiting/uncertain; elevated "watching" (judged+covered but still awaiting/uncertain) and the blind/warming banner use `--posture-awaiting`/`--posture-uncertain`, **never** `--posture-cleared` |
 | Finding row | `--surface`, `--row-h`, `--border` grid; entry/path `--font-data` `--text-data` |
 | Posture cell | `--posture-*` (rail style: solid=decisive, dashed=uncertain, dotted=awaiting) + glyph + word |
 | Severity chip | `--sev-*` border (muted); KEV → `--kev` fill |
@@ -96,9 +103,14 @@ Two weights only (400/600). Emphasis via weight + ink value, not a third weight.
 1. **Contrast:** body/status text ≥ **4.5:1** on its surface; chips/rails/glyphs ≥ **3:1**.
 2. **Meaning not by colour alone:** every posture / severity / Δ / coverage state renders a
    non-empty **glyph + text label** in addition to colour. (Assert each enum→(glyph,label).)
-3. **Honest-calm invariant:** `model_judging == false` OR `warming_up` ⇒ the status strip
-   never resolves to `--posture-cleared`/green and the honest banner renders. `Verdict::Uncertain`
-   and awaiting (`None`) never map to the cleared/green token.
+3. **Honest-calm invariant:** the overall green/all-clear resolves to `--posture-cleared`/green
+   ONLY when the model has affirmatively cleared everything — `model_judging == true` AND not
+   `warming_up` AND **covered** AND **zero breaches AND zero awaiting AND zero uncertain**. If
+   `model_judging == false` OR `warming_up`, the honest blind/warming banner renders. If the
+   model is judging+covered but **any** entry is still awaiting or uncertain, the strip renders
+   the elevated **"watching"** state (`--posture-awaiting` toned, calm — *not* green): the model
+   hasn't finished, so quiet is not clearance. `Verdict::Uncertain` and awaiting (`None`) never
+   map to the cleared/green token.
 4. **No implied-absent blanks:** any empty evidence/coverage field renders explicit
    "none"/"unknown".
 5. **Escaping:** all untrusted free-text (verdict prose, CVE/finding titles, model prompts,

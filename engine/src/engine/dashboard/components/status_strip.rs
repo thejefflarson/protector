@@ -48,11 +48,33 @@ fn mode_pill(armed: bool) -> Markup {
     }
 }
 
-/// The decided/judging axis. This is where the honest-calm invariant lives: only a judging,
-/// warmed model shows the calm "model judging" reading; otherwise the honest banner.
+/// The decided/judging axis. This is where the honest-calm invariant lives (#1): the GREEN
+/// "all clear" reading is shown ONLY when the model has affirmatively cleared everything it is
+/// looking at (judging + covered + nothing breach/awaiting/uncertain). When the model is up but
+/// hasn't finished (something still awaiting/uncertain), it shows the elevated, NON-green
+/// "watching" reading. When the model is down/warming, the honest blind/warming banner.
 fn judging_axis(s: &StatusStripProps) -> Markup {
-    // The honest-calm invariant (#1): calm only when judging AND not warming.
-    if s.calm_is_honest() {
+    // Affirmatively-cleared everything ⇒ the only honest green all-clear.
+    if s.all_clear() {
+        return html! {
+            span.axis.judging.ok {
+                span.dot {}
+                "model judging \u{2014} all clear"
+            }
+        };
+    }
+    // Model up but not finished (awaiting/uncertain still open, or a feed degraded): elevated
+    // "watching" — calm, NOT green. Quiet here is "hasn't finished", not "cleared".
+    if s.watching() {
+        return html! {
+            span.axis.judging.watching {
+                span.glyph { "\u{25CC}" }
+                "model judging \u{2014} watching (not yet all-clear)"
+            }
+        };
+    }
+    // Model up with a breach is loud elsewhere (the headline/rows); the axis just states it judges.
+    if s.model_is_up() {
         return html! {
             span.axis.judging.ok {
                 span.dot {}
@@ -60,7 +82,7 @@ fn judging_axis(s: &StatusStripProps) -> Markup {
             }
         };
     }
-    // Not honestly calm — render the distinct, NON-green honest banner. The wording tells the
+    // Model down/warming — render the distinct, NON-green honest banner. The wording tells the
     // operator WHY quiet is not clearance.
     let (cls, glyph, text) = if s.warming_up {
         (
@@ -118,14 +140,15 @@ fn coverage_chip(chip: &CoverageChip) -> Markup {
     }
 }
 
-/// The findings headline line: breach / awaiting / cleared counts + the Δ escalation note. The
-/// breach count is the only loud chip; awaiting/cleared are calm. Counts are honest even at
-/// zero (never blank).
+/// The findings headline line: breach / awaiting / uncertain / cleared counts + the Δ escalation
+/// note. The breach count is the only loud chip; awaiting (ochre) and uncertain (amber-brown) are
+/// elevated-but-calm; cleared is muted. Counts are honest even at zero (never blank).
 fn headline(s: &StatusStripProps) -> Markup {
     html! {
         div.headline {
             span.count.count-breach { (s.breach_count) " breach" }
             span.count.count-awaiting { (s.awaiting_count) " awaiting" }
+            span.count.count-uncertain { (s.uncertain_count) " uncertain" }
             span.count.count-cleared { (s.cleared_count) " cleared" }
             @if s.escalated_count > 0 {
                 span.count.count-escalated {

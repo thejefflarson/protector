@@ -36,6 +36,10 @@ pub fn build_findings_view(
         .iter()
         .filter(|r| r.posture == Posture::Awaiting)
         .count();
+    let uncertain = rows
+        .iter()
+        .filter(|r| r.posture == Posture::Uncertain)
+        .count();
     let cleared = rows
         .iter()
         .filter(|r| r.posture == Posture::Cleared)
@@ -45,7 +49,7 @@ pub fn build_findings_view(
         .filter(|r| matches!(r.delta, props::DeltaProps::Escalated))
         .count();
     let strip = strip::status_strip(
-        cluster, readiness, last_pass, breach, awaiting, cleared, escalated,
+        cluster, readiness, last_pass, breach, awaiting, uncertain, cleared, escalated,
     );
     FindingsViewProps {
         strip,
@@ -60,5 +64,5 @@ pub fn build_status_strip(
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
 ) -> StatusStripProps {
-    strip::status_strip(cluster, readiness, last_pass, 0, 0, 0, 0)
+    strip::status_strip(cluster, readiness, last_pass, 0, 0, 0, 0, 0)
 }

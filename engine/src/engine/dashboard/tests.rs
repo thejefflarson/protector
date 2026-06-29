@@ -124,6 +124,51 @@ fn judging_empty_is_the_only_state_that_says_all_clear() {
     assert!(html.contains("model judging"));
 }
 
+#[test]
+fn judging_but_awaiting_entry_is_watching_not_all_clear() {
+    // Refinement A: green/all-clear is forbidden when ANY entry is still awaiting, even though
+    // the model is actively judging. The strip shows the elevated "watching" state instead.
+    let mut awaiting = breach_finding("endpoint/a", Verdict::Confirmed);
+    awaiting.verdict = None; // no verdict yet ⇒ Awaiting
+    let view = build_findings_view(
+        "prod".into(),
+        &[awaiting],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    assert!(
+        !html.contains("all clear"),
+        "an awaiting entry forbids the green all-clear"
+    );
+    assert!(
+        html.contains("watching"),
+        "it is the elevated watching state instead"
+    );
+    assert!(html.contains("not yet all-clear"));
+}
+
+#[test]
+fn judging_but_uncertain_entry_is_not_all_clear() {
+    // Refinement A: an Uncertain entry likewise forbids the green all-clear.
+    let f = breach_finding("endpoint/a", Verdict::Uncertain("timed out".into()));
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    assert!(
+        !html.contains("all clear"),
+        "an uncertain entry forbids the green all-clear"
+    );
+    // The watching reading is present on the strip (the model is up but not finished).
+    assert!(html.contains("watching"));
+}
+
 // ---------------------------------------------------------------------------
 // Invariant #2 — Uncertain & awaiting never map to the cleared/green token.
 // ---------------------------------------------------------------------------
@@ -153,6 +198,33 @@ fn uncertain_and_awaiting_rows_are_not_green() {
     assert!(html.contains("awaiting judgement"));
     // They must NOT be wearing the cleared chip.
     assert!(!html.contains("chip-cleared\""), "no cleared chip leaked");
+}
+
+#[test]
+fn awaiting_row_carries_the_elevated_treatment_hooks() {
+    // Refinement B: an un-judged (awaiting) entry must render the elevated chip + a row the CSS
+    // can tint (data-posture="awaiting") — slightly elevated, not calm slate. Meaning stays
+    // carried by glyph + word too (never colour alone).
+    let mut awaiting = breach_finding("endpoint/a", Verdict::Confirmed);
+    awaiting.verdict = None;
+    let view = build_findings_view(
+        "prod".into(),
+        &[awaiting],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    assert!(
+        html.contains("data-posture=\"awaiting\""),
+        "the row exposes the awaiting hook the tint CSS targets"
+    );
+    assert!(
+        html.contains("chip-awaiting"),
+        "the chip carries the ochre tone"
+    );
+    // Meaning not by colour alone: the word stays.
+    assert!(html.contains("awaiting judgement"));
 }
 
 // ---------------------------------------------------------------------------

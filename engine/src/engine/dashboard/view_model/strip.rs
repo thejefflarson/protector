@@ -50,12 +50,14 @@ fn armed_from(readiness: &Readiness) -> bool {
 /// Build the status-strip props. `cluster` is the cluster label; `last_pass` the engine's
 /// last-pass time (for the freshness line); the headline counts come from the mapped findings
 /// (filled by the caller — see [`super::build_status_strip`]). Pure given its inputs.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn status_strip(
     cluster: String,
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
     breach_count: usize,
     awaiting_count: usize,
+    uncertain_count: usize,
     cleared_count: usize,
     escalated_count: usize,
 ) -> StatusStripProps {
@@ -69,6 +71,7 @@ pub(super) fn status_strip(
         last_pass: last_pass.map(last_pass_age),
         breach_count,
         awaiting_count,
+        uncertain_count,
         cleared_count,
         escalated_count,
     }
@@ -103,8 +106,11 @@ mod tests {
         let mut bake = BakeStats::default();
         bake.signals_by_variant.insert("alert".into(), 1);
         let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
-        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 3, 0);
-        assert!(strip.calm_is_honest());
+        // Judging + covered + nothing breach/awaiting/uncertain (3 cleared) ⇒ honest all-clear.
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0);
+        assert!(strip.model_is_up());
+        assert!(strip.all_clear());
+        assert!(!strip.watching());
         assert!(!strip.armed);
         // KEV/EPSS present; Falco present (alert signal); eBPF absent.
         let falco = strip.coverage.iter().find(|c| c.label == "Falco").unwrap();
@@ -121,8 +127,10 @@ mod tests {
             &BakeStats::default(),
             Some(SystemTime::now()),
         );
-        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 0);
-        assert!(!strip.calm_is_honest());
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 0, 0);
+        assert!(!strip.model_is_up());
+        assert!(!strip.all_clear());
+        assert!(!strip.watching()); // model down ⇒ neither all-clear nor watching
         assert!(strip.model_attached); // configured, just not answering
     }
 
@@ -134,9 +142,30 @@ mod tests {
             &BakeStats::default(),
             None,
         );
-        let strip = status_strip("prod".into(), &r, None, 0, 0, 0, 0);
-        assert!(!strip.calm_is_honest());
+        let strip = status_strip("prod".into(), &r, None, 0, 0, 0, 0, 0);
+        assert!(!strip.model_is_up());
+        assert!(!strip.all_clear());
         assert!(strip.warming_up);
         assert!(strip.last_pass.is_none());
+    }
+
+    /// Judging + covered but an entry is still awaiting/uncertain ⇒ NOT all-clear; the elevated
+    /// "watching" state (the model hasn't finished — quiet is not clearance). Refinement A.
+    #[test]
+    fn judging_with_pending_entries_is_watching_not_all_clear() {
+        let mut bake = BakeStats::default();
+        bake.signals_by_variant.insert("alert".into(), 1);
+        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        // One entry still awaiting, one still uncertain — model hasn't cleared everything.
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 1, 1, 4, 0);
+        assert!(strip.model_is_up());
+        assert!(
+            !strip.all_clear(),
+            "pending entries forbid the green all-clear"
+        );
+        assert!(
+            strip.watching(),
+            "it is the elevated watching state instead"
+        );
     }
 }

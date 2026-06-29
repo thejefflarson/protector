@@ -51,7 +51,10 @@ fn findings_table(v: &FindingsViewProps) -> Markup {
 /// judging; when blind/warming the empty list reads as "we haven't looked", never as safe
 /// (the cardinal sin the design exists to prevent — brief §0/§9 invariant #1).
 fn empty_state(v: &FindingsViewProps) -> Markup {
-    if v.strip.calm_is_honest() {
+    // GREEN all-clear only when the model has affirmatively cleared everything (judging +
+    // covered + nothing breach/awaiting/uncertain). An empty list satisfies the count side, so
+    // here it turns on whether the model is up AND fully covered (invariant #1).
+    if v.strip.all_clear() {
         return html! {
             div.empty.empty-clear {
                 p.empty-head { "all clear" }
@@ -61,7 +64,20 @@ fn empty_state(v: &FindingsViewProps) -> Markup {
             }
         };
     }
-    // Not honestly calm: an empty list is NOT a clearance. Say so, in the matching non-green
+    // Model up but not fully covered (a feed is degraded): the empty list is calm but NOT a green
+    // all-clear — the elevated "watching" register (the model isn't fully equipped to clear).
+    if v.strip.watching() {
+        return html! {
+            div.empty.empty-watching {
+                p.empty-head { "watching" }
+                p.empty-sub.muted {
+                    "no breach-relevant exposed paths yet, but a decision feed is degraded \u{2014} \
+                     the model is judging but not fully equipped to clear. This is not an all-clear."
+                }
+            }
+        };
+    }
+    // Model down/warming: an empty list is NOT a clearance. Say so, in the matching non-green
     // amber/slate register.
     let (cls, head, sub) = if v.strip.warming_up {
         (

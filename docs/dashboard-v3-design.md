@@ -52,9 +52,15 @@ Three **orthogonal axes** that must never collapse into one signal:
 - **decided vs awaiting** — has the model judged this entry yet?
 - **covered vs blind** — is the model up and are the feeds loaded?
 
-**Green/calm is only honest when `model_judging == true`.** If `warming_up` or
-`!model_judging`, exposed paths are *unjudged, not cleared*, and the UI says so. `Uncertain`
-and `Awaiting` are **never** green. This is enforced by tests, not just convention.
+**The overall green/all-clear is only honest when the model has affirmatively cleared everything
+it is looking at** — `model_judging == true` AND not `warming_up` AND **covered** (no feed
+degraded) AND **zero breaches AND zero entries still awaiting AND zero uncertain**. "Quiet because
+the model affirmatively cleared it" (green) must look different from "quiet because the model
+hasn't finished." If the model is up but anything is still `Awaiting` or `Uncertain`, the overall
+posture is the elevated **"watching"** state — calm but **not** green (the model isn't sure yet).
+If `warming_up` or `!model_judging`, exposed paths are *unjudged, not cleared*, and the UI says
+so. `Uncertain` and `Awaiting` are **never** green. This is enforced by tests, not just
+convention.
 
 ## 4. Information architecture
 
@@ -155,7 +161,7 @@ deeper than two levels. **Admission/policy** decisions fold in as a peer surface
 
 ## 9. Invariants (test-enforced)
 
-1. `!model_judging` or `warming_up` ⇒ the status strip never renders the green/all-clear path; the honest banner renders.
+1. The overall green/all-clear renders ONLY when judging + covered + zero breach/awaiting/uncertain; if `!model_judging` or `warming_up`, the honest blind/warming banner renders; if judging but anything is still awaiting/uncertain, the elevated "watching" (non-green) state renders.
 2. `Verdict::Uncertain` and awaiting (`None`) never map to the cleared/green token.
 3. Empty evidence/coverage renders explicit "none"/"unknown", never a blank.
 4. Components import no `engine::`/`state::` domain type (the view_model/component boundary).

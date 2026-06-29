@@ -282,20 +282,49 @@ pub struct StatusStripProps {
     pub coverage: Vec<CoverageChip>,
     /// Human "last pass NNs ago", or `None` before the first pass.
     pub last_pass: Option<String>,
-    /// The headline counts (breach / awaiting / cleared) for the findings summary line.
+    /// The headline counts (breach / awaiting / uncertain / cleared) for the findings summary
+    /// line.
     pub breach_count: usize,
     pub awaiting_count: usize,
+    /// Entries the model could not decide (`Verdict::Uncertain`) — not safe, never green.
+    pub uncertain_count: usize,
     pub cleared_count: usize,
     /// Newly-escalated since last pass (the Δ headline).
     pub escalated_count: usize,
 }
 
 impl StatusStripProps {
-    /// Whether a calm/all-clear render is HONEST: only when the model is actively judging and
-    /// not warming up (invariant #1). When false, the honest "blind/warming" banner renders
-    /// instead of any green all-clear.
-    pub fn calm_is_honest(&self) -> bool {
+    /// Whether the model is up and answering (not warming/blind). This is the floor for a
+    /// non-blind render — but it is NOT enough for a green all-clear (see [`Self::all_clear`]).
+    pub fn model_is_up(&self) -> bool {
         self.model_judging && !self.warming_up
+    }
+
+    /// Whether the engine is **covered** enough to call an all-clear: the model is up and no feed
+    /// is *degraded* (configured but not answering — a real, ambiguity-introducing coverage gap).
+    /// A feed that is simply absent (never deployed, e.g. the optional eBPF agent) is an honest
+    /// known-absence, not a degradation, so it does not by itself block the all-clear.
+    pub fn fully_covered(&self) -> bool {
+        self.model_is_up() && self.coverage.iter().all(|c| !c.degraded)
+    }
+
+    /// Whether the overall **green/all-clear** is HONEST: the model has affirmatively cleared
+    /// EVERYTHING it is looking at — judging, not warming, fully covered, and zero breaches AND
+    /// zero entries still awaiting AND zero uncertain (the tightened honesty gate, invariant #1).
+    /// "Quiet because the model affirmatively cleared it" is the ONLY thing that may go green.
+    pub fn all_clear(&self) -> bool {
+        self.fully_covered()
+            && self.breach_count == 0
+            && self.awaiting_count == 0
+            && self.uncertain_count == 0
+    }
+
+    /// Whether the strip should show the elevated **"watching"** state: the model is up but has
+    /// NOT yet affirmatively cleared everything — something is still awaiting or uncertain (or a
+    /// feed is missing). Calm, but **not** green — the model isn't sure yet. Distinct from a
+    /// breach (which is loud) and from blind/warming (model down).
+    pub fn watching(&self) -> bool {
+        self.model_is_up() && self.breach_count == 0 && !self.all_clear()
     }
 }
 
