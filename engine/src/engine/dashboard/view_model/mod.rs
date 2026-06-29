@@ -1,36 +1,30 @@
-//! The dashboard's DATA layer (ADR-0019): pure functions that shape engine domain state
-//! into the plain `Props` structs the `components` renderers consume. No maud, no markup —
-//! just the mapping from `Finding`s / readiness / arm-state into component-shaped data.
+//! The dashboard's VIEW-MODEL layer (ADR-0019, JEF-255): the data shaping that turns the
+//! engine's domain state into plain `Props` the pure `components` render. This layer may name
+//! `engine::` domain types (it is the boundary); the components below it must not.
 //!
-//! Two of its submodules hold the aggregations the JSON routes serialize directly — the
-//! readiness snapshot ([`readiness_data`]: `/readiness`) and the would-have-acted report
-//! ([`report_data`]: `/report.json`). They are pure data with no rendering; the `_props`
-//! mappers turn them into the component `Props`.
+//! The v2 single-page IA (JEF-255) shapes one answer — "is anything compromised right now, and
+//! if not am I covered or blind?" — into focused prop modules:
+//!
+//! - [`posture`] — the typed-verdict → [`Posture`] SSOT (derived once, never re-parsed prose).
+//! - [`status`] — the one-line status props (breach/endpoints/awaiting/model/coverage).
+//! - [`entry`] — the per-endpoint dense-row props and its expanded detail props.
+//! - [`evidence`] — the row glyph strip and the expanded evidence blocks.
+//! - [`hops`] — the proven attack path as a text hop-list (Mermaid retired).
+//! - [`admission`] — the compact admission strip props.
+//! - [`internals`] — the demoted engine-internals disclosure props.
+//!
+//! [`readiness_data`] and [`report_data`] remain the DATA layer: `readiness_data` is the live
+//! coverage snapshot the status line + internals read; `report_data` backs the engine's
+//! per-pass OTLP would-have-acted mirror ([`super::default_window_report`]).
 
-pub mod attack_vectors;
-pub mod bake;
-pub mod findings;
-pub mod judgements;
-pub mod policy;
-pub mod readiness;
+pub mod admission;
+pub mod entry;
+pub mod evidence;
+pub mod hops;
+pub mod internals;
+pub mod posture;
 pub mod readiness_data;
-pub mod report;
 pub mod report_data;
-pub mod reversions;
 pub mod status;
 
-pub use attack_vectors::{AttackVectorRow, AttackVectorsProps, attack_vectors_props};
-pub use bake::{BakeProps, BakeVariantRow, bake_props};
-pub use judgements::{JudgementCardProps, JudgementLead, JudgementsProps, judgements_props};
-pub use policy::{PolicyDecisionRow, PolicyProps, policy_props};
-pub use readiness::{
-    FirstRunItemProps, FirstRunProps, ReadinessProps, ReadinessRowProps, first_run_props,
-    readiness_props,
-};
-pub use report::{
-    LeftAloneRow, Lifetime, ReportBody, ReportDiff, ReportProps, WouldActRow, report_props,
-};
-pub use reversions::{ReversionRow, ReversionsProps, reversions_props};
-pub use status::{
-    BannerProps, ClusterStatus, NavItem, NavProps, banner_props, cluster_status, nav_props,
-};
+pub use posture::Posture;

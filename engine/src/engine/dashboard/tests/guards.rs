@@ -1,20 +1,20 @@
-//! Structural guard tests for the dashboard (JEF-208) — cheap grep-style invariants over the
-//! dashboard's own source + asset files, SCOPED to the dashboard (they never walk the rest of
-//! the repo). They fail the build the moment the ADR-0019 boundaries regress:
+//! Structural guard tests for the v2 dashboard (ported from JEF-208, extended for JEF-255) —
+//! cheap grep-style invariants over the dashboard's own source + asset files, SCOPED to the
+//! dashboard (they never walk the rest of the repo). They fail the build the moment the
+//! ADR-0019 boundaries regress:
 //!
 //! 1. a raw hex color outside the `:root{…}` token block in `dashboard.css`;
-//! 2. an inline `<style>` reappearing in any dashboard render path; or
-//! 3. a presentational `components/*` module *importing* an `engine::` domain type.
-//!
-//! These are the "do not let it drift back" rails for the maud migration: the token system,
-//! the zero-inline-CSS asset delivery (JEF-203), and the renderer/domain boundary.
+//! 2. an inline `<style>` reappearing in any dashboard render path;
+//! 3. a presentational `components/*` module *importing* an `engine::` domain type; and
+//! 4. (JEF-255) a `PreEscaped` outside the `chips` allowlist — the rewrite targets zero
+//!    unescaped HTML, with only the byte-stable structural/entity constants in `chips`.
 
 use std::path::{Path, PathBuf};
 
 use crate::engine::dashboard::DASHBOARD_CSS;
 
-/// The dashboard source directory (`engine/src/engine/dashboard`), resolved from the crate
-/// manifest dir so the test runs from any working directory.
+/// The dashboard source directory, resolved from the crate manifest dir so the test runs from
+/// any working directory.
 fn dashboard_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/dashboard")
 }
@@ -33,10 +33,7 @@ fn rs_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The production (non-test) half of a source file: everything before the first
-/// `#[cfg(test)]` marker. The dashboard's components each keep their tests in a single
-/// bottom `#[cfg(test)] mod tests`, so this cleanly excludes the test-only imports (which DO
-/// legitimately name engine domain types to build fixtures).
+/// The production (non-test) half of a source file: everything before the first `#[cfg(test)]`.
 fn production_source(src: &str) -> &str {
     match src.find("#[cfg(test)]") {
         Some(i) => &src[..i],
@@ -44,14 +41,11 @@ fn production_source(src: &str) -> &str {
     }
 }
 
-/// (a) No raw hex color (`#abc` / `#aabbcc`) appears in `dashboard.css` outside the single
-/// `:root{ … }` token block. The token block is the palette's one source of truth; every
-/// rule body must consume a `var(--…)`, never a literal — see docs/STYLEGUIDE.md.
+/// (a) No raw hex color appears in `dashboard.css` outside the single `:root{ … }` token block.
 #[test]
 fn no_raw_hex_outside_root_in_dashboard_css() {
     let css = DASHBOARD_CSS;
     let root_open = css.find(":root").expect(":root token block present");
-    // The `:root` block runs from `:root` to its closing brace (the first `}` after `{`).
     let brace = css[root_open..]
         .find('{')
         .map(|o| root_open + o)
@@ -61,16 +55,14 @@ fn no_raw_hex_outside_root_in_dashboard_css() {
         .map(|c| brace + c)
         .expect(":root has a closing brace");
 
-    let hex = regex_lite_hex;
     for (lineno, line) in css.lines().enumerate() {
-        // Byte offset of this line's start, to tell whether it sits inside the :root block.
         let line_start = line.as_ptr() as usize - css.as_ptr() as usize;
         let inside_root = line_start > root_open && line_start < root_end;
         if inside_root {
             continue;
         }
         assert!(
-            !hex(line),
+            !regex_lite_hex(line),
             "raw hex color outside :root in dashboard.css (line {}): {line}\n\
              Add a primitive token in :root and consume it via var(--…).",
             lineno + 1
@@ -96,22 +88,16 @@ fn regex_lite_hex(line: &str) -> bool {
     false
 }
 
-/// (b) No inline `<style>` reappears in any dashboard render path. The CSS is delivered as a
-/// self-hosted, same-origin asset (JEF-203); an inline `<style>` would regress that (and the
-/// zero-egress / CSP posture). We scan every dashboard `.rs` source for the literal tag.
+/// (b) No inline `<style>` reappears in any dashboard render path.
 #[test]
 fn no_inline_style_in_any_dashboard_render_path() {
     for path in rs_files(&dashboard_dir()) {
-        // Scope to RENDER paths: skip the `tests/` tree (whose assertions name the tag as a
-        // string literal). Only the production half of each render file is checked.
         if path.components().any(|c| c.as_os_str() == "tests") {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("source readable");
         let prod = production_source(&src);
         for (lineno, line) in prod.lines().enumerate() {
-            // Doc/line comments legitimately MENTION `<style>` to describe its absence; the
-            // guard targets EMITTED markup, so strip the comment tail before scanning.
             let code = strip_line_comment(line);
             assert!(
                 !code.contains("<style>") && !code.contains("<style "),
@@ -123,8 +109,7 @@ fn no_inline_style_in_any_dashboard_render_path() {
     }
 }
 
-/// Drop a `//` line/doc comment from a source line (whatever follows the first `//`). Good
-/// enough for the guard: the dashboard never embeds `//` inside a string the renderer emits.
+/// Drop a `//` line/doc comment from a source line.
 fn strip_line_comment(line: &str) -> &str {
     match line.find("//") {
         Some(i) => &line[..i],
@@ -133,23 +118,17 @@ fn strip_line_comment(line: &str) -> &str {
 }
 
 /// (c) A presentational `components/*` module must not IMPORT an `engine::` domain type
-/// (ADR-0019): a component receives only its `Props`. We flag any production `use
-/// crate::engine::{graph,journal,reason,respond,...}` in a component file — the domain layer
-/// belongs in `view_model`/`mod.rs`, never the renderer. (Pure string helpers that call a
-/// fully-qualified static like `crate::engine::graph::NodeKey::short_of(&str) -> &str` import
-/// no type and are out of scope; the boundary is about a domain TYPE entering the view.)
+/// (ADR-0019): a component receives only its `Props`.
 #[test]
 fn no_component_imports_an_engine_domain_type() {
-    // The `engine::` submodules that hold domain types the renderer must never import. The
-    // dashboard's own `crate::engine::dashboard::{components,view_model,model}` paths are the
-    // presentation/data layers, not domain types, so they are explicitly allowed.
-    const DOMAIN_MODS: [&str; 6] = [
+    const DOMAIN_MODS: [&str; 7] = [
         "crate::engine::graph",
         "crate::engine::journal",
         "crate::engine::reason",
         "crate::engine::respond",
         "crate::engine::actuator",
         "crate::engine::detect",
+        "crate::engine::policy_log",
     ];
 
     let components = dashboard_dir().join("components");
@@ -170,6 +149,36 @@ fn no_component_imports_an_engine_domain_type() {
                     trimmed.trim()
                 );
             }
+        }
+    }
+}
+
+/// (d) JEF-255: no `PreEscaped` (unescaped HTML) outside the `chips` allowlist. The rewrite
+/// targets zero unescaped HTML; only the byte-stable structural/entity constants in
+/// `components/chips.rs` (`<!doctype html>`, `&nbsp;`) may use it.
+#[test]
+fn no_preescaped_outside_chips_allowlist() {
+    for path in rs_files(&dashboard_dir()) {
+        if path.components().any(|c| c.as_os_str() == "tests") {
+            continue;
+        }
+        // The single allowlisted home for the structural/entity constants.
+        if path.file_name().is_some_and(|f| f == "chips.rs")
+            && path.components().any(|c| c.as_os_str() == "components")
+        {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("source readable");
+        let prod = production_source(&src);
+        for (lineno, line) in prod.lines().enumerate() {
+            let code = strip_line_comment(line);
+            assert!(
+                !code.contains("PreEscaped"),
+                "PreEscaped (unescaped HTML) outside the chips allowlist: {} (line {}).\n\
+                 Render through a maud `{{ }}` brace so the value is auto-escaped.",
+                path.display(),
+                lineno + 1
+            );
         }
     }
 }

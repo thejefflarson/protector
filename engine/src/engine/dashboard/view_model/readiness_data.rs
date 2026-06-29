@@ -1,9 +1,9 @@
 //! The readiness DATA layer (ADR-0019): the [`Readiness`] snapshot and its rows, and the
 //! pure [`derive_readiness`] that builds them from the engine's config summary + live state.
 //!
-//! This is data, not markup — it holds NO rendering. `/readiness` serializes [`Readiness`]
-//! directly, and `view_model::readiness` shapes the same snapshot into the panel `Props` the
-//! `components::panels::readiness` / `first_run` renderers consume.
+//! This is data, not markup — it holds NO rendering. In the v2 dashboard (JEF-255) it is the
+//! coverage data the `status` view-model reads for the status line's `coverage X%` / blind
+//! state and the `internals` view-model reads for the demoted coverage disclosure.
 
 use std::time::SystemTime;
 
@@ -33,17 +33,6 @@ impl InputState {
     pub(crate) fn word(self) -> &'static str {
         match self {
             InputState::Present => "present",
-            InputState::Absent => "absent",
-            InputState::Degraded => "degraded",
-        }
-    }
-
-    /// The CSS tone class — maps to the readiness tokens in `web/dist/dashboard.css`:
-    /// green for present (the JEF-159 `#1a7f37` token), red for an absent input that
-    /// weakens decisions, amber for degraded.
-    pub(crate) fn tone(self) -> &'static str {
-        match self {
-            InputState::Present => "ok",
             InputState::Absent => "absent",
             InputState::Degraded => "degraded",
         }
@@ -111,6 +100,16 @@ impl Readiness {
     /// Whether ANY decision input is unmet (absent or degraded) — the first-run gate.
     pub fn has_unmet(&self) -> bool {
         self.unmet_count() > 0
+    }
+
+    /// Whether a model adjudicator is CONFIGURED at all (JEF-255) — the model row is anything
+    /// but `Absent`. Distinct from [`model_judging`](Self::model_judging) (configured AND
+    /// answering): the status line needs to tell "no model" from "model down" honestly.
+    pub fn model_attached(&self) -> bool {
+        self.inputs
+            .iter()
+            .find(|r| r.id == "model")
+            .is_some_and(|r| r.state != InputState::Absent)
     }
 }
 
@@ -292,8 +291,6 @@ pub(crate) fn signals_detail(state: InputState, signals: u64) -> String {
     }
 }
 
-// The readiness / coverage panel and the instructional first-run checklist migrated to maud
-// (`view_model::readiness` + `components::panels::{readiness,first_run}`) in JEF-206
-// (ADR-0019); their string-concat builders were removed from here. The `Readiness` data
-// type and `derive_readiness` above stay — they are the DATA layer the panel view-model and
-// the `/readiness` JSON route both read.
+// The v1 readiness HTML panel + first-run checklist (and the `/readiness` JSON route) were
+// dropped in the JEF-255 rewrite. The `Readiness` data type and `derive_readiness` stay — they
+// are the DATA layer the v2 `status` + `internals` view-models read.

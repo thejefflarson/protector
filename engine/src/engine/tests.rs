@@ -168,7 +168,8 @@ async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
     let snap = findings.snapshot();
     assert!(
         snap.iter().any(|f| f.breach_relevant
-            && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+            && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                == Some("exploitable — RCE reaches the secret")),
         "the judged verdict is on /findings (via the store)"
     );
     // And it is the SAME value the shared store holds for that entry — proving
@@ -220,7 +221,8 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             .snapshot()
             .iter()
             .any(|f| f.breach_relevant
-                && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+                && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                    == Some("exploitable — RCE reaches the secret")),
         "the first decisive verdict shows"
     );
 
@@ -238,7 +240,8 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             .snapshot()
             .iter()
             .any(|f| f.breach_relevant
-                && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+                && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                    == Some("exploitable — RCE reaches the secret")),
         "an Uncertain re-judge keeps the prior decisive verdict on /findings"
     );
 }
@@ -686,7 +689,8 @@ async fn backing_off_entry_keeps_showing_the_last_decisive_verdict() {
             .snapshot()
             .iter()
             .any(|f| f.breach_relevant
-                && f.verdict.as_deref() == Some("exploitable — RCE reaches the secret")),
+                && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                    == Some("exploitable — RCE reaches the secret")),
         "the decisive verdict is shown and stays shown"
     );
 }
