@@ -6,12 +6,12 @@
 
 ## Context
 
-Surfacing today is **pull-only**: a breach decision lands on `/findings` and
-`/judgements`, and the durable journal ([JEF-141](journal.rs)) replays it after a
-restart — but a solo operator never *learns* protector decided a breach unless they
-are watching the dashboard. The motivating pain is exactly that gap (the
-"dashboard blank after restart" memo): the decision is made, recorded, and then sits
-there unseen.
+Surfacing today is **pull-only**: a breach decision is recorded in the findings
+snapshot and the judgement record, and the durable journal ([JEF-141](journal.rs))
+replays it after a restart — but a solo operator never *learns* protector decided a
+breach unless they are watching the engine's output. The motivating pain is exactly
+that gap (the post-restart blind-window memo): the decision is made, recorded, and
+then sits there unseen.
 
 The obvious fix is an outbound notification — the inverse of the falcosidekick
 ingest the engine already accepts. But the platform's whole posture is in-cluster,
@@ -82,7 +82,7 @@ identity (entry + verdict summary), so durability and notification can never dri
 The message states whether protector **would isolate** (shadow — no action class
 armed, the default posture) or **isolated** (armed). The operator must never have to
 guess whether a decision was acted on; the same `armed` flag that titles the
-dashboard's remediations section drives the wording.
+engine's remediation proposal drives the wording.
 
 ### 5. Bounded client, fail-safe, never blocks the loop
 
@@ -98,7 +98,7 @@ posture.
 Easier / better:
 
 - A solo operator learns of a breach decision the moment it is made, without watching
-  the dashboard — closing the pull-only gap.
+  the engine's output — closing the pull-only gap.
 - The zero-egress posture is preserved as the **default**: the one outbound path is
   opt-in, redacted, sanitized, and deduped, and is invisible until a URL is set.
 - Dedupe and durability share one identity (the journal's), so they can't diverge.

@@ -91,7 +91,7 @@ impl Behavior {
     /// [`Behavior::ProcessExec`] this is the bare `executed {path}` — *classification* of a
     /// notable exec (shell / package manager in container) is engine policy
     /// (`engine::observe::exec_class`, JEF-113), not a property of this shared wire type, so
-    /// the engine annotates the path when it builds the prompt/dashboard line rather than
+    /// the engine annotates the path when it builds the prompt/output line rather than
     /// this crate baking a Falco-rule list into the contract.
     pub fn summary(&self) -> String {
         match self {
@@ -109,7 +109,7 @@ impl Behavior {
             // Just the exec'd path. Whether it's a *notable* exec (a shell or package
             // manager run in the container — JEF-55) is engine classification policy
             // (`engine::observe::exec_class`), applied by the engine when it builds the
-            // prompt/dashboard line — this shared wire type stays pure data (JEF-113).
+            // prompt/output line — this shared wire type stays pure data (JEF-113).
             Behavior::ProcessExec { path } => format!("executed {path}"),
         }
     }
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn process_exec_summary_is_the_bare_path() {
         // The shared wire type emits only the path — engine policy decides if it's notable
-        // (a shell / package manager) and annotates the prompt/dashboard line (JEF-113).
+        // (a shell / package manager) and annotates the prompt/output line (JEF-113).
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
         };

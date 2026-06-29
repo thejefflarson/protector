@@ -156,5 +156,5 @@ Shadow-first, mirroring the engine's posture ([ADR-0001](0001-async-mitigation-e
 2. **The agent.** Build `protector-agent` (aya) — network connections first, then secret
    reads and library loads — emitting normalized signals. Graceful degradation per hook.
 3. **Deploy.** Add the DaemonSet to the chart with the scoped capabilities, **in shadow**
-   — signals only enrich the dashboard and the model's prompt. Only after a bake does any
+   — signals only enrich the engine's output state and the model's prompt. Only after a bake does any
    behavioral signal feed the action-bar corroboration that can promote a cut.
