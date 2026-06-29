@@ -1,6 +1,3 @@
-//! Unit tests for the security graph (split out of `graph/mod.rs` to keep that file
-//! under the 1,000-line cap, CLAUDE.md; behavior-preserving move, JEF-255 gate fix).
-
 use super::*;
 
 #[test]

@@ -27,9 +27,6 @@
 pub mod attack;
 pub mod delta;
 
-#[cfg(test)]
-mod tests;
-
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
@@ -794,3 +791,6 @@ impl SecurityGraph {
         (exposed_secrets, misconfigs, rbac_findings)
     }
 }
+
+#[cfg(test)]
+mod tests;
