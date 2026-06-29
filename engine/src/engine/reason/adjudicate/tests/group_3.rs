@@ -49,9 +49,12 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
     let (g, e) = graph_with_vuln(v);
     let prompt = build_judgment_prompt(&e, &[], &g);
 
-    // The whole prompt is small despite the megabyte input — the cap bounds it hard.
+    // The whole prompt is small despite the megabyte input — the cap bounds it hard. The
+    // bound is on the UNTRUSTED payload, not the static template (the floor here is the
+    // ~4.3 KB static prompt + the per-field-capped title); a megabyte of title would blow
+    // past this by orders of magnitude if the cap failed, so the assertion still proves it.
     assert!(
-        prompt.len() < 4_000,
+        prompt.len() < 5_000,
         "prompt must stay bounded; was {} bytes",
         prompt.len()
     );
@@ -287,5 +290,43 @@ fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
     assert!(
         !prompt.contains("executed /app/server ("),
         "bare exec was wrongly annotated:\n{prompt}"
+    );
+}
+
+/// The prompt clarifies (at the source of the watcher-server false breach) that a
+/// workload's OWN observed activity — outbound network connections, file reads, library
+/// loads, reading its own mounted secrets — is normal behavior and NOT a live signal;
+/// only an ALERT or hands-on-keyboard action counts as the runtime exploitation signal.
+#[test]
+fn prompt_clarifies_benign_runtime_activity_is_not_a_live_signal() {
+    let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    assert!(
+        prompt.contains("network connections") && prompt.contains("NOT a live signal"),
+        "prompt must say a workload's own network connections are NOT a live signal:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("only an ALERT or hands-on-keyboard action counts"),
+        "prompt must restrict the runtime signal to alert/hands-on-keyboard:\n{prompt}"
+    );
+}
+
+/// The prompt clarifies that reaching a `secret/…` objective (a Credential-Access OUTCOME
+/// in the reachable-objectives list) is NOT the same as an exposed secret baked into the
+/// image — only a credential in the "Exposed secrets baked into this image" field is
+/// exploitation evidence. (The watcher judge conflated the two.)
+#[test]
+fn prompt_clarifies_reaching_a_secret_objective_is_not_an_exposed_secret() {
+    let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    assert!(
+        prompt.contains("Reaching a `secret/…` objective")
+            && prompt.contains("is NOT an exposed secret"),
+        "prompt must distinguish reaching a secret objective from an exposed secret:\n{prompt}"
+    );
+    assert!(
+        prompt
+            .contains("only a credential listed in the \"Exposed secrets baked into this image\""),
+        "prompt must point to the exposed-secrets field as the sole secret evidence:\n{prompt}"
     );
 }

@@ -6,14 +6,15 @@
 
 use super::super::evidence::{cve_evidence, cve_ids_of, entry_evidence};
 use super::super::guards::{
-    extract_cve_ids, fence, fence_list, guard_fabricated_cve, ns_marker, objective_reach,
+    extract_cve_ids, fence, fence_list, guard_fabricated_cve, guard_unsupported_exploitable,
+    ns_marker, objective_reach,
 };
 use super::super::*;
 use super::{critical_cve, entry_reaching_db, graph_with_vuln, graph_with_vulns, objectives_of};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
-    Trust, Vulnerability, Workload,
+    Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
+    Severity, Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -323,6 +324,141 @@ fn hallucination_guard_normalizes_cosmetic_cve_spellings() {
             &real,
         ),
         Verdict::Exploitable(_)
+    ));
+}
+
+/// The zero-anchor backstop (symmetric to the fabrication guard): an `Exploitable` with
+/// NO CVE, NO exposed secret, and NO corroborating runtime behavior is downgraded to
+/// `Refuted` — reachability is not a breach. Models the watcher-server false breach: the
+/// internet-facing entry had CVEs `(none)`, no baked-in secret, and only benign
+/// `NetworkConnection`s to its own DB/metrics.
+#[test]
+fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
+    let benign = vec![
+        Behavior::NetworkConnection {
+            peer: "10.42.0.1:8086".into(),
+            internet: false,
+        },
+        Behavior::NetworkConnection {
+            peer: "10.42.0.2:8090".into(),
+            internet: false,
+        },
+        Behavior::NetworkConnection {
+            peer: "10.42.0.3:4318".into(),
+            internet: false,
+        },
+    ];
+    // The watcher case: Exploitable + no CVE + no exposed secret + only benign connections.
+    let v = guard_unsupported_exploitable(
+        Verdict::Exploitable("connects to exposed secrets which are mounted into the pod".into()),
+        &[],
+        &benign,
+        false,
+    );
+    assert!(
+        matches!(v, Verdict::Refuted(_)) && !v.promotes(),
+        "zero-anchor exploitable must downgrade to refuted, got {v:?}"
+    );
+
+    // Other benign behaviors (file read, library load, secret read) are likewise no anchor.
+    let benign_misc = vec![
+        Behavior::FileRead {
+            path: "/etc/config".into(),
+        },
+        Behavior::LibraryLoaded {
+            name: "libc.so.6".into(),
+        },
+        Behavior::SecretRead {
+            secret: "app/own-creds".into(),
+        },
+    ];
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("reaches its own mounted secret".into()),
+            &[],
+            &benign_misc,
+            false,
+        ),
+        Verdict::Refuted(_)
+    ));
+}
+
+/// The guard is conservative: ANY single anchor — a CVE in the list (even
+/// reachability:not-observed), an exposed-secret finding, or a corroborating runtime
+/// behavior (a critical Falco alert, or a notable shell/package-manager exec, JEF-117) —
+/// leaves the model's `Exploitable` call untouched. Those are the model's (debatable)
+/// calls, not this guard's to override.
+#[test]
+fn unsupported_exploitable_guard_preserves_each_anchored_case() {
+    let no_behaviors: Vec<Behavior> = vec![];
+
+    // Anchor 1 — a CVE is present in the evidence list (the rendered line, any reachability).
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("CVE running on the path".into()),
+            &["CVE-2021-44228 [severity: critical] [reachability: not-observed]".to_string()],
+            &no_behaviors,
+            false,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // Anchor 2 — an exposed-secret finding is present for the entry.
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("usable credential baked into the image".into()),
+            &[],
+            &no_behaviors,
+            true,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // Anchor 3a — a corroborating runtime behavior: a critical Falco alert (is_alert()).
+    let alert = vec![Behavior::Alert {
+        rule: "Terminal shell in container".into(),
+    }];
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("alert fired on the path".into()),
+            &[],
+            &alert,
+            false,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // Anchor 3b — a corroborating runtime behavior: a notable exec (notable_exec(), JEF-117).
+    let notable = vec![Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+    }];
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("interactive shell spawned".into()),
+            &[],
+            &notable,
+            false,
+        ),
+        Verdict::Exploitable(_)
+    ));
+}
+
+/// The guard only ever acts on `Exploitable` (mirrors `guard_exploitable`): every other
+/// verdict passes through unchanged even with zero anchors present.
+#[test]
+fn unsupported_exploitable_guard_leaves_non_exploitable_verdicts_untouched() {
+    let none: Vec<Behavior> = vec![];
+    assert!(matches!(
+        guard_unsupported_exploitable(Verdict::Refuted("benign".into()), &[], &none, false),
+        Verdict::Refuted(_)
+    ));
+    assert!(matches!(
+        guard_unsupported_exploitable(Verdict::Confirmed, &[], &none, false),
+        Verdict::Confirmed
+    ));
+    assert!(matches!(
+        guard_unsupported_exploitable(Verdict::Uncertain("unclear".into()), &[], &none, false),
+        Verdict::Uncertain(_)
     ));
 }
 
