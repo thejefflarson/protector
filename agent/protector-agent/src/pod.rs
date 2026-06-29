@@ -114,7 +114,10 @@ impl CgroupTable {
         self.by_id.len()
     }
 
-    /// Whether the table holds no pod cgroups.
+    /// Whether the table holds no pod cgroups. The `clippy::len_without_is_empty` companion to
+    /// `len()`; the shipping (`ebpf`) build calls `len()` for heartbeat visibility but not this,
+    /// so allow the dead-code warning rather than drop the clippy-required pair.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
