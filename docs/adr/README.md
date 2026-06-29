@@ -26,5 +26,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0016](0016-severity-vs-urgency.md) | The breach model: prove chains, enrich them, the model decides and isolates until clear | Accepted (amended by 0017) |
 | [0017](0017-isolation-persists-on-the-breach-condition.md) | Isolation persists on the breach condition: chain ∧ enrichment fingerprint (revert keys on `entry_fingerprint`) | Accepted |
 | [0018](0018-operator-configured-redacted-breach-notifier.md) | The breach notifier is the one sanctioned outbound path: operator-configured, off by default, redacted by default | Accepted |
+| [0019](0019-dashboard-v3-presentation-architecture.md) | Dashboard v3: server-rendered (maud), zero-egress, light-theme presentation — the view_model/component/page split + the honesty invariants | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.

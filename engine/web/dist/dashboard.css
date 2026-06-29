@@ -1,0 +1,381 @@
+/* Protector dashboard — light theme, generated from docs/STYLEGUIDE.md tokens.
+ * Served same-origin (no third-party CSS). A dense, light-theme information console:
+ * white/near-white surface, dark ink, monospace for all machine data. Calm by default,
+ * loud only on a real breach. Meaning is never carried by colour alone — every status
+ * also carries a glyph + word (the markup) and a distinct rail texture. */
+
+:root {
+  /* surfaces & ink (light) */
+  --bg: #FCFCFD;
+  --surface: #FFFFFF;
+  --surface-raised: #F4F6F8;
+  --surface-hover: #F0F2F5;
+  --border: #E2E6EB;
+  --ink-1: #1A1F26;
+  --ink-2: #5A6473;
+  --ink-3: #6B7280;
+
+  /* posture — the model's verdict (the loud channel) */
+  --posture-breach: #D92D20;
+  --posture-cleared: #067647;
+  --posture-uncertain: #B54708;
+  --posture-awaiting: #667085;
+
+  /* severity — CVE (subordinate, muted) */
+  --sev-critical: #B42318;
+  --sev-high: #B54708;
+  --sev-medium: #854A0E;
+  --sev-low: #6B7280;
+  --kev: #D92D20;
+
+  /* recency Δ, coverage, mode */
+  --delta-new: #1570EF;
+  --delta-up: #D92D20;
+  --delta-down: #067647;
+  --delta-restored: #6B7280;
+  --cov-present: #067647;
+  --cov-degraded: #B54708;
+  --cov-absent: #6B7280;
+  --mode-shadow: #667085;
+  --mode-enforce: #1570EF;
+
+  /* space (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* type */
+  --font-ui: Inter, system-ui, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, monospace;
+
+  /* geometry */
+  --row-h: 36px;
+  --radius-chip: 3px;
+  --radius-panel: 6px;
+  --rail-strong: 3px;
+  --rail-soft: 2px;
+  --focus-ring: 2px solid #1570EF;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink-1);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* All machine data is monospace/tabular so columns align. */
+.mono, code, pre,
+.entry-label, .path-summary, .hop-list, .cut-sig,
+.ev-table td.mono, .cov-label, .count, .freshness {
+  font-family: var(--font-data);
+}
+
+/* ---- focus / a11y: focus ring always visible, visual = focus order ---- */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+.tab:focus-visible,
+.why-toggle:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ============================ status strip ============================ */
+.strip {
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) var(--space-4);
+}
+.strip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.strip-cluster { display: flex; align-items: center; gap: var(--space-2); }
+.brand { font-weight: 600; font-size: 16px; }
+.strip-cluster .sep { color: var(--ink-3); }
+.strip-cluster .cluster { color: var(--ink-2); font-family: var(--font-data); }
+
+.pill {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.pill-word { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; }
+.pill-sub { font-size: 11px; color: var(--ink-3); }
+.mode-shadow .pill-word { color: var(--mode-shadow); }
+.mode-enforce .pill-word { color: var(--mode-enforce); }
+
+.strip-axes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+  font-size: 13px;
+}
+.axis { display: inline-flex; align-items: center; gap: var(--space-2); }
+.axis .glyph { font-weight: 600; }
+
+/* the decided/judging axis — the honesty surface */
+.judging.ok { color: var(--posture-cleared); }
+.judging.ok .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--posture-cleared); display: inline-block;
+}
+/* NOT-judging banners are amber/slate, NEVER the cleared green (invariant #1). */
+.judging.warming { color: var(--posture-uncertain); font-weight: 600; }
+.judging.blind { color: var(--posture-uncertain); font-weight: 600; }
+
+.coverage { gap: var(--space-2); }
+.cov {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--border);
+  font-size: 11px; font-weight: 500;
+}
+.cov-label { letter-spacing: 0.04em; }
+.cov-present { color: var(--cov-present); border-color: var(--cov-present); }
+.cov-degraded { color: var(--cov-degraded); border-color: var(--cov-degraded); }
+.cov-absent { color: var(--cov-absent); }
+
+.freshness { color: var(--ink-2); }
+.muted { color: var(--ink-3); }
+
+.headline {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  font-size: 13px;
+}
+.count { display: inline-flex; align-items: center; gap: var(--space-1); }
+.count-breach { color: var(--posture-breach); font-weight: 600; }
+.count-awaiting { color: var(--posture-awaiting); }
+.count-cleared { color: var(--ink-2); }
+.count-escalated { color: var(--delta-up); font-weight: 600; }
+
+/* ============================ tab nav ============================ */
+.tabs {
+  display: flex; gap: var(--space-1);
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  font-size: 14px;
+}
+.tab:hover { background: var(--surface-hover); }
+.tab-active { color: var(--ink-1); font-weight: 600; border-bottom-color: var(--mode-enforce); }
+.tab-phase {
+  font-size: 10px; color: var(--ink-3);
+  border: 1px solid var(--border); border-radius: var(--radius-chip);
+  padding: 0 var(--space-1);
+}
+
+/* ============================ findings table ============================ */
+.view { padding: var(--space-4); }
+.findings {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.findings thead th {
+  text-align: left;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.findings th.num, .ev-table th.num, .ev-table td.num { text-align: right; }
+.row { height: var(--row-h); }
+.row:hover { background: var(--surface-hover); }
+.cell {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  font-size: 13px;
+}
+
+/* posture cell: rail texture conveys decisive/uncertain/awaiting even in greyscale */
+.posture { display: inline-flex; align-items: center; padding-left: var(--space-2); }
+.rail-breach { border-left: var(--rail-strong) solid var(--posture-breach); }
+.rail-cleared { border-left: var(--rail-soft) solid var(--posture-cleared); }
+.rail-uncertain { border-left: var(--rail-soft) dashed var(--posture-uncertain); }
+.rail-awaiting { border-left: var(--rail-soft) dotted var(--posture-awaiting); }
+
+.posture-chip { display: inline-flex; align-items: center; gap: var(--space-2); }
+.posture-chip .glyph { font-size: 13px; }
+.posture-word { font-size: 11px; font-weight: 600; letter-spacing: 0.03em; }
+.chip-breach { color: var(--posture-breach); }
+.chip-cleared { color: var(--posture-cleared); }
+.chip-uncertain { color: var(--posture-uncertain); }
+.chip-awaiting { color: var(--posture-awaiting); }
+
+.eo { display: inline-flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
+.entry { display: inline-flex; align-items: center; gap: var(--space-1); }
+.kind-glyph { font-size: 13px; }
+.entry-label { font-weight: 600; }
+.arrow, .hop-arrow { color: var(--ink-3); }
+.objective { color: var(--ink-2); font-family: var(--font-data); }
+.objective.fanout { color: var(--ink-2); font-style: italic; }
+.path-summary { color: var(--ink-2); font-size: 12px; }
+.cut-mark { color: var(--posture-breach); }
+
+/* evidence cluster (subordinate severity channel) */
+.evidence-cluster { display: inline-flex; align-items: center; gap: var(--space-2); }
+.evidence-none { color: var(--ink-3); font-style: italic; }
+.ev {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 11px; padding: 0 var(--space-1);
+  border-radius: var(--radius-chip);
+}
+.ev-kev { background: var(--kev); color: #fff; font-weight: 600; padding: 0 var(--space-2); }
+.ev-cve { color: var(--ink-2); border: 1px solid var(--border); }
+.ev-runtime { color: var(--posture-breach); }
+.ev-secret { color: var(--sev-high); }
+
+.disp { color: var(--ink-2); font-size: 12px; }
+
+.subtag { font-size: 11px; font-weight: 600; }
+.subtag-live { color: var(--posture-breach); }
+.subtag-judged { color: var(--posture-uncertain); }
+.subtag-none { color: var(--ink-3); }
+
+/* Δ cell */
+.delta { display: inline-flex; align-items: center; }
+.delta .glyph { font-weight: 600; }
+.delta-new { color: var(--delta-new); }
+.delta-up { color: var(--delta-up); }
+.delta-down { color: var(--delta-down); }
+.delta-restored { color: var(--delta-restored); }
+.delta-steady { color: var(--ink-3); font-size: 12px; }
+
+/* ============================ detail panel ============================ */
+.row-detail td { padding: 0; border: 0; }
+.why { background: var(--surface); }
+.why[open] { background: var(--surface-raised); }
+.why-toggle {
+  cursor: pointer;
+  padding: var(--space-2) var(--space-4);
+  color: var(--mode-enforce);
+  font-size: 12px;
+  list-style: none;
+}
+.why-toggle::-webkit-details-marker { display: none; }
+.why-toggle::before { content: "\25B8 "; color: var(--ink-3); }
+.why[open] > .why-toggle::before { content: "\25BE "; }
+
+.detail {
+  background: var(--surface-raised);
+  padding: var(--space-4);
+  border-left: var(--rail-strong) solid var(--border);
+  border-radius: 0 0 var(--radius-panel) 0;
+}
+.detail.rail-breach { border-left-color: var(--posture-breach); }
+.detail.rail-cleared { border-left-color: var(--posture-cleared); }
+.detail.rail-uncertain { border-left-color: var(--posture-uncertain); }
+.detail.rail-awaiting { border-left-color: var(--posture-awaiting); }
+
+.detail-section { margin-bottom: var(--space-4); }
+.detail-h {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--space-2);
+}
+.verdict-prose { margin: 0; font-size: 14px; line-height: 20px; }
+
+.hop-list { margin: 0; padding-left: var(--space-6); font-size: 13px; }
+.hop { margin: var(--space-1) 0; }
+.hop-structural { color: var(--ink-3); }
+.hop-rel { color: var(--ink-3); }
+.hop-cut { color: var(--posture-breach); font-weight: 600; }
+
+.cut-sig code {
+  display: inline-block;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-chip); padding: 2px var(--space-2);
+  font-size: 12px;
+}
+.cut-revert { font-size: 12px; margin: var(--space-1) 0 0; }
+
+/* evidence tables — numerics right-aligned, severity muted */
+.ev-group { margin-bottom: var(--space-3); }
+.ev-table {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--font-data); font-size: 12px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.ev-table th {
+  text-align: left; font-size: 11px; font-weight: 500; letter-spacing: 0.04em;
+  color: var(--ink-3); text-transform: uppercase;
+  padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border);
+}
+.ev-table td { padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); }
+.ev-subrow td { color: var(--ink-3); }
+
+.sev { font-size: 11px; font-weight: 600; }
+.sev-critical { color: var(--sev-critical); }
+.sev-high { color: var(--sev-high); }
+.sev-medium { color: var(--sev-medium); }
+.sev-low { color: var(--sev-low); }
+
+.behavior-list { margin: var(--space-1) 0; padding-left: var(--space-4); font-size: 12px; }
+.behavior { margin: 2px 0; }
+.behavior-alert { color: var(--posture-breach); }
+.behavior-variant {
+  font-family: var(--font-data); font-size: 11px;
+  color: var(--ink-2); margin-right: var(--space-2);
+}
+.ev-sublabel { font-size: 11px; margin: var(--space-2) 0 var(--space-1); }
+
+.model-prompt { margin-top: var(--space-3); }
+.prompt-body { padding: var(--space-2) 0; }
+.prompt-text {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  padding: var(--space-2); font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow: auto;
+}
+
+/* ============================ empty / stub states ============================ */
+.empty, .stub {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  padding: var(--space-8);
+  text-align: center;
+}
+.empty-head, .stub-head { font-size: 18px; font-weight: 600; margin: 0 0 var(--space-2); }
+.empty-sub, .stub-sub { margin: 0 auto; max-width: 60ch; }
+/* "all clear" is the ONLY posture-coloured empty state — and only when honestly earned. */
+.empty-clear .empty-head { color: var(--posture-cleared); }
+.empty-warming .empty-head { color: var(--posture-uncertain); }
+.empty-blind .empty-head { color: var(--posture-uncertain); }
+.stub-badge {
+  display: inline-block; font-size: 11px; color: var(--ink-3);
+  border: 1px solid var(--border); border-radius: var(--radius-chip);
+  padding: 0 var(--space-2); margin-bottom: var(--space-3);
+}

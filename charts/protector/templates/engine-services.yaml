@@ -18,3 +18,24 @@ spec:
       targetPort: falco-ingest
       protocol: TCP
 {{- end }}
+{{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
+---
+# The read-only operator dashboard (ADR-0019). ClusterIP only — a server-rendered,
+# zero-egress view of the engine's output state. It terminates no TLS of its own; reach it
+# through the cluster's own ingress/mesh (a NetworkPolicy / mesh authorization is the floor).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "protector.fullname" . }}-dashboard
+  labels:
+    {{- include "protector.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "protector.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: dashboard
+      port: {{ .Values.engine.dashboard.port }}
+      targetPort: dashboard
+      protocol: TCP
+{{- end }}

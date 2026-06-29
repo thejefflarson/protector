@@ -28,6 +28,10 @@
 //   respond/ — proven chains → self-retiring controls, then apply (ADR-0002/0009)
 // `model` is a cross-cutting single file; `state` is the engine's output-state domain layer;
 // this mod.rs is the orchestrator.
+// The server-rendered operator dashboard (ADR-0019): the read-only presentation platform for
+// the engine's output state (zero-egress, light theme). view_model → components → page → routes;
+// wired into the watch loop behind PROTECTOR_DASHBOARD_ADDR.
+pub mod dashboard;
 pub mod graph;
 pub mod journal;
 pub mod model;
