@@ -10,6 +10,7 @@
 pub mod props;
 
 mod activity;
+mod admission;
 mod findings;
 mod posture;
 mod readiness;
@@ -18,11 +19,12 @@ mod trust;
 
 use std::time::SystemTime;
 
+use crate::engine::policy_log::{DecisionTallies, PolicyDecisionRecord};
 use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
-    ActivityViewProps, FindingProps, FindingsViewProps, Posture, ReadinessViewProps,
-    StatusStripProps, TrustViewProps,
+    ActivityViewProps, AdmissionViewProps, FindingProps, FindingsViewProps, Posture,
+    ReadinessViewProps, StatusStripProps, TrustViewProps,
 };
 
 /// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
@@ -112,4 +114,15 @@ pub fn build_activity_view(
     judgements: &[Judgement],
 ) -> ActivityViewProps {
     activity::build(strip, reversions, judgements)
+}
+
+/// Build the whole Admission/policy (webhook floor) view's props (brief §6): the persistent strip +
+/// the decision tallies header (so a healthy view is never blank) + the deduped decision rows.
+/// Pure given its inputs.
+pub fn build_admission_view(
+    strip: StatusStripProps,
+    tallies: DecisionTallies,
+    rows: &[PolicyDecisionRecord],
+) -> AdmissionViewProps {
+    admission::build(strip, tallies, rows)
 }

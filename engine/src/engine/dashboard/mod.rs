@@ -27,12 +27,14 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use super::journal::DecisionJournal;
+use super::policy_log::PolicyDecisionLog;
 use super::state::{
     BakeStats, Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
     default_window_report, derive_readiness,
 };
 use view_model::props::{
-    ActivityViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps, Tab, TrustViewProps,
+    ActivityViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
+    Tab, TrustViewProps,
 };
 
 /// The light-theme stylesheet, generated from the `docs/STYLEGUIDE.md` tokens. Served
@@ -59,6 +61,9 @@ pub struct DashboardState {
     /// report. Named `decision_journal` (not `journal`) so it never collides with the
     /// `JudgementLog` the run-loop binds as `journal`.
     pub decision_journal: Arc<DecisionJournal>,
+    /// The webhook's admission-decision log (JEF-226/237) — the bounded, deduped ring of policy
+    /// decisions read by the Admission tab (the webhook floor). Read-only here.
+    pub policy_log: Arc<PolicyDecisionLog>,
     /// The cluster label shown in the strip.
     pub cluster: String,
 }
@@ -130,6 +135,14 @@ impl DashboardState {
         let judgements = self.judgements.snapshot();
         view_model::build_activity_view(self.status_strip(), &reversions, &judgements)
     }
+
+    /// Build the Admission/policy (webhook floor) view props: the persistent strip + the decision
+    /// tallies header (so a healthy view is never blank) + the deduped decision rows (newest-first).
+    fn admission_view(&self) -> AdmissionViewProps {
+        let tallies = self.policy_log.tallies();
+        let rows = self.policy_log.snapshot();
+        view_model::build_admission_view(self.status_strip(), tallies, &rows)
+    }
 }
 
 /// The tab query parameter (`?tab=trust`). Defaults to Findings.
@@ -144,6 +157,7 @@ impl TabQuery {
             Some("trust") => Tab::Trust,
             Some("readiness") => Tab::Readiness,
             Some("activity") => Tab::Activity,
+            Some("admission") => Tab::Admission,
             _ => Tab::Findings,
         }
     }
@@ -156,6 +170,7 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
         Tab::Trust => page::trust_page(&state.trust_view()),
         Tab::Readiness => page::readiness_page(&state.readiness_view()),
         Tab::Activity => page::activity_page(&state.activity_view()),
+        Tab::Admission => page::admission_page(&state.admission_view()),
     };
     Html(markup.into_string())
 }
@@ -169,6 +184,7 @@ async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>
         Tab::Trust => page::trust_fragment(&state.trust_view()),
         Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
         Tab::Activity => page::activity_fragment(&state.activity_view()),
+        Tab::Admission => page::admission_fragment(&state.admission_view()),
     };
     Html(markup.into_string())
 }
@@ -222,3 +238,6 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod admission_tests;

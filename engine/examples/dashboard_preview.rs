@@ -39,6 +39,7 @@ use axum::routing::get;
 use protector::engine::dashboard::view_model::props::Tab;
 use protector::engine::dashboard::{DashboardState, page, view_model};
 use protector::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage};
+use protector::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use protector::engine::reason::adjudicate::Verdict;
 use protector::engine::state::{
     BakeStats, CveEvidence, EntryEvidence, Finding, Findings, Judgement, JudgementLog, ModelHealth,
@@ -268,6 +269,74 @@ fn sample_journal() -> Arc<DecisionJournal> {
     Arc::new(journal)
 }
 
+/// A populated admission-decision log for the Admission tab (the webhook floor): a representative
+/// mix of clean admits, an audited would-deny-but-allowed, and an enforced deny — including at
+/// least one `would-fail` shadow gate so the "if enforced" what-if shows a would-deny. Deduped
+/// counts mirror replica churn (an `allow` seen across N replicas folds to one counted row).
+fn sample_policy_log() -> Arc<PolicyDecisionLog> {
+    let log = PolicyDecisionLog::new();
+    // A clean admit, signed + meshed — seen across 12 replicas (folds to one counted row).
+    for _ in 0..12 {
+        log.record(
+            PolicyDecisionRecord::now(
+                "admission",
+                "allow",
+                "Deployment/edge/api-gateway",
+                "ghcr.io/acme/api-gateway:1.8.2",
+                "verified",
+                "verified",
+                "edge",
+                "",
+            )
+            .with_would_admit(true),
+        );
+    }
+    // Another clean admit, signature verified, mesh out-of-scope but would-pass (a Job pod).
+    log.record(
+        PolicyDecisionRecord::now(
+            "admission",
+            "allow",
+            "Job/data/nightly-export",
+            "ghcr.io/acme/export:3.0.0",
+            "verified",
+            "would-pass",
+            "data",
+            "",
+        )
+        .with_would_admit(true),
+    );
+    // An AUDITED would-deny-but-allowed: the signature gate would fail (unsigned image), but the
+    // webhook is in shadow so the request is allowed — the "if enforced" what-if is would-deny.
+    log.record(
+        PolicyDecisionRecord::now(
+            "admission",
+            "audit",
+            "Deployment/web/legacy-storefront",
+            "docker.io/library/storefront:latest",
+            "would-fail",
+            "verified",
+            "web",
+            "unsigned or untrusted image(s): docker.io/library/storefront:latest",
+        )
+        .with_would_admit(false),
+    );
+    // An enforced DENY: a out-of-mesh pod whose mesh gate would fail AND is enforced here.
+    log.record(
+        PolicyDecisionRecord::now(
+            "mesh-injection",
+            "deny",
+            "Pod/payments/debug-shell",
+            "alpine:3.19",
+            "would-pass",
+            "would-fail",
+            "payments",
+            "pod not sidecar-injected and namespace requires the mesh",
+        )
+        .with_would_admit(false),
+    );
+    Arc::new(log)
+}
+
 /// A representative bake/coverage summary used by the covered scenarios.
 fn covered_bake() -> BakeStats {
     let mut bake = BakeStats::default();
@@ -374,6 +443,8 @@ fn build_clear() -> DashboardState {
         reversions,
         // The clear scenario still has would-have-acted history to calibrate trust against.
         decision_journal: sample_journal(),
+        // The webhook floor: a populated admission log (admits + an audited + an enforced deny).
+        policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
     }
 }
@@ -446,6 +517,7 @@ fn build_watching() -> DashboardState {
         judgements,
         reversions,
         decision_journal: sample_journal(),
+        policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
     }
 }
@@ -570,6 +642,7 @@ fn build_breach() -> DashboardState {
         judgements,
         reversions,
         decision_journal: sample_journal(),
+        policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
     }
 }
@@ -621,6 +694,9 @@ fn build_blind() -> DashboardState {
         judgements,
         reversions,
         decision_journal: journal,
+        // The blind scenario keeps the admission log EMPTY so the Admission tab shows its honest
+        // "no admission decisions recorded yet" empty state (the empty case the brief asks for).
+        policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
     }
 }
@@ -671,6 +747,7 @@ fn resolve_tab(tab: Option<&str>) -> Tab {
         Some("trust") => Tab::Trust,
         Some("readiness") => Tab::Readiness,
         Some("activity") => Tab::Activity,
+        Some("admission") => Tab::Admission,
         _ => Tab::Findings,
     }
 }
@@ -719,6 +796,15 @@ fn preview_activity(state: &DashboardState) -> view_model::props::ActivityViewPr
     )
 }
 
+/// Build the Admission view props through the public render path.
+fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionViewProps {
+    view_model::build_admission_view(
+        preview_strip(state),
+        state.policy_log.tallies(),
+        &state.policy_log.snapshot(),
+    )
+}
+
 /// Render the full page for a tab through the dashboard's PUBLIC render path (all four real).
 fn render_page(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
@@ -726,6 +812,7 @@ fn render_page(state: &DashboardState, tab: Tab) -> String {
         Tab::Trust => page::trust_page(&preview_trust(state)),
         Tab::Readiness => page::readiness_page(&preview_readiness(state)),
         Tab::Activity => page::activity_page(&preview_activity(state)),
+        Tab::Admission => page::admission_page(&preview_admission(state)),
     };
     markup.into_string()
 }
@@ -737,6 +824,7 @@ fn render_fragment(state: &DashboardState, tab: Tab) -> String {
         Tab::Trust => page::trust_fragment(&preview_trust(state)),
         Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),
         Tab::Activity => page::activity_fragment(&preview_activity(state)),
+        Tab::Admission => page::admission_fragment(&preview_admission(state)),
     };
     markup.into_string()
 }
