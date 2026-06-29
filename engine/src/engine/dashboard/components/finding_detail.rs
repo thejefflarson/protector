@@ -1,7 +1,7 @@
 //! The expand-in-place "why" panel for a finding (brief §5): the verbatim verdict → the proven
-//! path as a text hop-list (structural hops muted, the cut point marked) → the evidence tables
-//! → the proposed/applied cut + its self-revert condition → the "show model prompt" disclosure
-//! to the raw judgement. Pure component; no domain types; all free-text auto-escaped.
+//! path as an indented chain staircase (structural hops muted, the severable edge marked ✂) → the
+//! evidence tables → the proposed/applied cut signature → the "show model prompt" disclosure to
+//! the raw judgement. Pure component; no domain types; all free-text auto-escaped.
 
 use maud::{Markup, html};
 
@@ -17,7 +17,7 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
             (path_block(&f.path))
             (evidence_tables(&f.evidence))
             (cut_block(f))
-            (model_prompt(&f.judgement))
+            (model_prompt(&f.id, &f.judgement))
         }
     }
 }
@@ -35,8 +35,23 @@ fn verdict_block(f: &FindingProps) -> Markup {
     }
 }
 
-/// The proven path as a text hop-list: `entry ─relation→ … → objective`. Structural hops are
-/// muted; the cut point is marked.
+/// The deepest indent step the staircase cascades to before it stops stepping further right.
+/// Beyond this depth every remaining hop sits at the same (maximum) indent so a very long path
+/// never marches off the panel. The matching `.chain-step-0..=MAX` padding rules live in the CSS.
+const CHAIN_STEP_MAX: usize = 6;
+
+/// The depth class for a hop at index `step` (entry = 0), capped at `CHAIN_STEP_MAX` so the
+/// staircase reads as a cascade without ever overflowing the panel.
+fn chain_step_class(step: usize) -> String {
+    format!("chain-step-{}", step.min(CHAIN_STEP_MAX))
+}
+
+/// The proven path as a **vertical chain diagram** (brief §3): the internet/entry node at the
+/// top, then each successive hop indented one step deeper than the one above — a **staircase**
+/// that visibly cascades entry → … → objective. Each node carries its node-kind glyph + label;
+/// the relation is the labelled connector between nodes (an edge sits at the same indent as the
+/// node it leads into); the severable edge is marked with a prominent ✂ "cut here". Structural
+/// hops are muted; the objective node is emphasized. Honest when no path is recorded.
 fn path_block(path: &[HopProps]) -> Markup {
     html! {
         section.detail-section.path-block {
@@ -44,9 +59,22 @@ fn path_block(path: &[HopProps]) -> Markup {
             @if path.is_empty() {
                 p.muted { "no path recorded" }
             } @else {
-                ol.hop-list {
-                    @for hop in path {
-                        (hop_item(hop))
+                ol.chain aria-label="proven attack path, entry to objective" {
+                    // The entry node (top of the chain, step 0) — the very first hop's `from`.
+                    (chain_node(&path[0].from_glyph, &path[0].from, 0, true, false))
+                    // Then, for each hop, the labelled connector edge and its `to` node, each
+                    // indented one step deeper than the previous so the path cascades. The edge
+                    // and the node it leads into share the hop's indent; the last hop's `to` is
+                    // the objective node, emphasized.
+                    @for (i, hop) in path.iter().enumerate() {
+                        (chain_edge(hop, i + 1))
+                        (chain_node(
+                            &hop.to_glyph,
+                            &hop.to,
+                            i + 1,
+                            false,
+                            i == path.len() - 1, // the final node is the objective
+                        ))
                     }
                 }
             }
@@ -54,27 +82,61 @@ fn path_block(path: &[HopProps]) -> Markup {
     }
 }
 
-/// One hop in the list. A structural (substrate) hop is muted; the cut hop carries the scissors.
-fn hop_item(hop: &HopProps) -> Markup {
-    let cls = if hop.structural {
-        "hop hop-structural"
+/// One node in the vertical chain: its node-kind glyph + label on its own line, threaded onto the
+/// connector spine and indented to its `step` depth (the staircase). The entry node and the
+/// objective node are emphasized; intermediate nodes are plain (structural muting rides on the
+/// *edge*, not the node).
+fn chain_node(glyph: &str, label: &str, step: usize, is_entry: bool, is_objective: bool) -> Markup {
+    let depth = chain_step_class(step);
+    let role = if is_entry {
+        format!("chain-node chain-entry {depth}")
+    } else if is_objective {
+        format!("chain-node chain-objective {depth}")
     } else {
-        "hop"
+        format!("chain-node {depth}")
     };
     html! {
-        li class=(cls) {
-            span.hop-from { (hop.from) }
-            span.hop-rel { " \u{2500}[" (hop.relation) "]\u{2192} " }
-            span.hop-to { (hop.to) }
-            @if hop.is_cut {
-                span.hop-cut title="minimal cut severs here" { " \u{2702} cut" }
+        li class=(role) {
+            span.chain-dot aria-hidden="true" {}
+            span.chain-glyph { (glyph) }
+            span.chain-label { (label) }
+            @if is_objective {
+                span.chain-tag { "objective" }
+            } @else if is_entry {
+                span.chain-tag { "entry" }
             }
         }
     }
 }
 
-/// The proposed/applied cut + its self-revert condition (the safety story). When there is no
-/// single-edge cut, that is stated honestly rather than left blank.
+/// The labelled connector edge between two nodes: the relation, riding the spine, indented to the
+/// `step` of the node it leads into so the staircase reads as one descent. A structural
+/// (substrate) edge is muted; the severable edge carries the prominent ✂ "cut here" marker in the
+/// breach colour — the actionable heart of the diagram (brief §3).
+fn chain_edge(hop: &HopProps, step: usize) -> Markup {
+    let depth = chain_step_class(step);
+    let cls = if hop.is_cut {
+        format!("chain-edge chain-edge-cut {depth}")
+    } else if hop.structural {
+        format!("chain-edge chain-edge-structural {depth}")
+    } else {
+        format!("chain-edge {depth}")
+    };
+    html! {
+        li class=(cls) {
+            span.chain-rel { span.chain-rel-line aria-hidden="true" { "\u{2500}[" } (hop.relation) span.chain-rel-line aria-hidden="true" { "]\u{2192}" } }
+            @if hop.is_cut {
+                span.chain-cut title="minimal cut severs this edge" {
+                    span.chain-cut-glyph { "\u{2702}" }
+                    span.chain-cut-label { "cut here" }
+                }
+            }
+        }
+    }
+}
+
+/// The proposed/applied cut signature. When there is no single-edge cut, that is stated honestly
+/// rather than left blank.
 fn cut_block(f: &FindingProps) -> Markup {
     html! {
         section.detail-section.cut-block {
@@ -82,10 +144,6 @@ fn cut_block(f: &FindingProps) -> Markup {
             @match &f.cut {
                 Some(cut) => {
                     p.cut-sig { code { (cut) } }
-                    p.cut-revert.muted {
-                        "self-reverts when the breach condition clears \u{2014} the cut persists "
-                        "only while the chain \u{2227} its enrichment fingerprint hold (ADR-0017)."
-                    }
                 }
                 None => p.muted { "no single-edge cut \u{2014} this chain is not severable by one network edge" }
             }
@@ -95,9 +153,11 @@ fn cut_block(f: &FindingProps) -> Markup {
 
 /// The "show model prompt" disclosure to the raw judgement (prompt + reply). Nested
 /// `<details>` so it is collapsed by default; honest about an absent prompt/reply.
-fn model_prompt(j: &JudgementProps) -> Markup {
+fn model_prompt(id: &str, j: &JudgementProps) -> Markup {
     html! {
-        details.model-prompt {
+        // `data-prompt` keys this disclosure so the client can persist its open state across the
+        // /fragment poll swap (otherwise it would snap shut every poll while being read).
+        details.model-prompt data-prompt=(id) {
             summary.why-toggle role="button" aria-expanded="false" { "show model prompt" }
             div.prompt-body {
                 @match &j.verdict {

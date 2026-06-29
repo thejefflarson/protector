@@ -40,7 +40,7 @@ calm by default, loud only on a real breach.
 | Token | Value | Glyph | Word | Rail |
 |---|---|---|---|---|
 | `--posture-breach` | `#D92D20` | ● filled | BREACH / EXPLOITABLE | 3px solid |
-| `--posture-cleared` | `#067647` | ○ open | not exploitable | 2px solid |
+| `--posture-cleared` | `#067647` | ○ open | no exploit evidence | 2px solid |
 | `--posture-uncertain` | `#B54708` | ◐ half | uncertain | 2px **dashed** |
 | `--posture-awaiting` | `#9A6B2E` | ◌ dotted | awaiting judgement | 2px **dotted** |
 
