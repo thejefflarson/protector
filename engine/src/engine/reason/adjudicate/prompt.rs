@@ -156,7 +156,7 @@ Decide:
   "exploitable" — a reached objective WITH exploitation evidence: a CVE from the list above actually running, an alert/hands-on-keyboard runtime signal, OR an exposed secret baked into the image.
   "refuted"     — no CVE running, no live signal, and no exposed secret: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, and however many misconfig/RBAC posture findings.
   "confirmed"   — only for an already-corroborated live attack that should stand.
-  "uncertain"   — you genuinely cannot tell.
+  "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: no CVE running, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
 
 Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above — never invent, recall, or copy a CVE id from anywhere else; if the CVE list is "(none)", do not name any CVE."#,
         entry = fence(&entry.0),

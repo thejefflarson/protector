@@ -9,7 +9,7 @@ use super::super::guards::{
     extract_cve_ids, fence, fence_list, guard_fabricated_cve, ns_marker, objective_reach,
 };
 use super::super::*;
-use super::{critical_cve, entry_reaching_db, graph_with_vuln, objectives_of};
+use super::{critical_cve, entry_reaching_db, graph_with_vuln, graph_with_vulns, objectives_of};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
     Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
@@ -437,6 +437,88 @@ fn prompt_includes_the_chain_evidence() {
             && prompt.contains("NEVER a breach by itself")
             && prompt.contains("cross-namespace"),
         "frames breach as exploitation evidence only — reachability (incl. cross-namespace) is severity, not a breach"
+    );
+    // Calibration: the verdict menu now FORBIDS the `uncertain` escape hatch for
+    // absence-of-evidence. The argocd-server false-uncertain reason ("No exposed secrets,
+    // no live runtime signals, and no critical CVEs running") was a textbook refute; the
+    // strengthened menu line directs that case to `refuted`, reserving `uncertain` for
+    // self-contradictory / unintelligible evidence only.
+    assert!(
+        prompt.contains(
+            "\"uncertain\"   — ONLY when the evidence is self-contradictory or unintelligible. \
+             Absence of evidence is NOT uncertainty: no CVE running, no live signal, and no \
+             exposed secret is a confident \"refuted\", not \"uncertain\"."
+        ),
+        "absence of evidence is directed to refuted, not the uncertain escape hatch"
+    );
+}
+
+/// JEF-133 dedup: trivy reports the same CVE once per affected package, so an image can
+/// carry the same id several times with different CVSS / fix ranges. `entry_evidence` must
+/// collapse them to exactly ONE rendered line per id BEFORE rendering (the string-level
+/// dedup in `build_judgment_prompt_with` can't, since the trailing metadata differs), and
+/// the survivor must be the WORST instance — highest severity, tie-broken by highest CVSS —
+/// so the judge sees one clean line, not a noisy triplicate, and loses no severity/score.
+#[test]
+fn entry_evidence_dedups_cves_by_id_keeping_the_worst() {
+    // The argocd-style triplicate: the SAME id three times, differing CVSS and fix range.
+    // Two High instances (7.4, then 8.1 with a fix) and one Critical instance (cvss 10.0).
+    let id = "CVE-2025-68121";
+    let dup = |severity, score, fixed: Option<&str>| Vulnerability {
+        id: id.into(),
+        severity,
+        score: Some(score),
+        fixed_version: fixed.map(str::to_string),
+        ..Default::default()
+    };
+    let (g, e) = graph_with_vulns(vec![
+        dup(Severity::High, 7.4, None),
+        dup(Severity::Critical, 10.0, Some("2.13.0")),
+        dup(Severity::High, 8.1, Some("2.12.0")),
+    ]);
+    let (cves, _behaviors) = entry_evidence(&g, &e);
+
+    // Exactly one rendered line for the id (no triplicate).
+    let lines: Vec<&String> = cves.iter().filter(|l| l.contains(id)).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the triplicate CVE collapses to a single rendered line: {cves:?}"
+    );
+    let line = lines[0];
+    // The survivor is the WORST instance: Critical severity + the highest CVSS (10.0).
+    assert!(
+        line.contains("severity: critical"),
+        "keeps the worst severity (critical): {line}"
+    );
+    assert!(
+        line.contains("[cvss: 10.0]"),
+        "keeps the highest CVSS (10.0): {line}"
+    );
+    // And `cve_ids_of` collapses to the single id (coverage stays honest).
+    let ids = cve_ids_of(&cves);
+    assert_eq!(ids.len(), 1);
+    assert!(ids.contains(id));
+}
+
+/// JEF-133 dedup, tie-break: when two instances of one id share the WORST severity and
+/// CVSS, the survivor is the one carrying the most exploitability signal (a fix-availability
+/// indication and/or EPSS), so deduping never silently drops a fix range the judge needs.
+#[test]
+fn entry_evidence_dedup_prefers_the_instance_with_fix_signal() {
+    let id = "CVE-2025-00001";
+    let mut with_fix = critical_cve(id);
+    with_fix.score = Some(9.8);
+    with_fix.fixed_version = Some("3.1.4".into());
+    let mut without_fix = critical_cve(id);
+    without_fix.score = Some(9.8);
+    // Order the no-fix one FIRST so a naive "keep first" would lose the fix range.
+    let (g, e) = graph_with_vulns(vec![without_fix, with_fix]);
+    let (cves, _) = entry_evidence(&g, &e);
+    let line = cves.iter().find(|l| l.contains(id)).expect("one line");
+    assert!(
+        line.contains("fix available: 3.1.4"),
+        "the surviving instance carries the fix-availability signal: {line}"
     );
 }
 
