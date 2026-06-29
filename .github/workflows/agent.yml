@@ -84,12 +84,11 @@ jobs:
             cacert=/home/runner/buildkit-certs/ca.crt
             cert=/home/runner/buildkit-certs/tls.crt
             key=/home/runner/buildkit-certs/tls.key
-      # NOTE: the eBPF compile (the Dockerfile `ebpf` stage: LLVM 19 + bpf-linker) is
-      # deliberately NOT run here — it's too heavy for the shared homelab buildkit and
-      # starves the cluster. The probe + toolchain stage are committed and build on any
-      # host with the toolchain; that compile loop belongs on a dedicated builder, not
-      # the production cluster (ADR-0014). This workflow only builds the light userspace
-      # image until the eBPF is wired in.
+      # The image is built WITH the eBPF probe: agent/Dockerfile runs
+      # `cargo build --release -p protector-agent --features ebpf`, and its build.rs compiles
+      # the sibling protector-agent-ebpf crate to a BPF object (bpf-linker, nightly) embedded in
+      # the binary and CO-RE-relocated against the node's BTF at load (ADR-0014). The default
+      # (no-feature) build — a no-op observer — exists only for toolchain-free local dev/test.
       - name: Build and push agent image
         id: build-and-push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7

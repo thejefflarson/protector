@@ -11,9 +11,13 @@ use tokio::sync::mpsc::Sender;
 
 /// Default observer: collects nothing. The real collection is the eBPF probes; this
 /// keeps the binary runnable (healthy DaemonSet, exercisable report path) when built
-/// without them, and says how to turn them on.
+/// without them, and says how to turn them on. Gated to the non-`ebpf` build — its only
+/// user (main.rs picks `EbpfObserver` under `--features ebpf`) — so the shipping ebpf
+/// image doesn't carry it as dead code.
+#[cfg(not(feature = "ebpf"))]
 pub struct NoopObserver;
 
+#[cfg(not(feature = "ebpf"))]
 impl NoopObserver {
     pub async fn run(self, _tx: Sender<RuntimeObservation>) {
         tracing::warn!(
