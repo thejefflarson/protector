@@ -40,6 +40,77 @@ impl Decision {
     }
 }
 
+/// A gate's **counterfactual** verdict for a request — what it WOULD do if the request were in
+/// scope and enforced — decoupled from whether enforcement is actually on (JEF-246, the shadow
+/// what-if of ADR-0016 applied to admission). Unlike [`evaluate`](Policy::evaluate), this is
+/// computed for EVERY request, even one [`applies`](Policy::applies) skips, so the operator can
+/// answer "if I turned enforcement on for this namespace, what would happen?".
+///
+/// It is presentation-only: the engine records it but it MUST NOT influence the API verdict
+/// (ADR-0016 — presentation is a view, never a gate). Only [`evaluate`](Policy::evaluate)
+/// decides admit/deny.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShadowVerdict {
+    /// This gate has no opinion about this request (e.g. a non-Pod for a Pod-only gate). It
+    /// contributes no signature/mesh status and never flips the net would-admit.
+    NotApplicable,
+    /// The gate shadow-evaluated the request. `passed` is the gate's verdict ignoring scope;
+    /// `enforced` is whether the request is in this gate's enforced scope (so the status can
+    /// distinguish a *verified* in-scope pass from a *would-pass* out-of-scope one). `reason`
+    /// is the human-actionable prose for a failure (empty on a pass).
+    Evaluated {
+        passed: bool,
+        enforced: bool,
+        reason: String,
+    },
+}
+
+impl ShadowVerdict {
+    /// A passing shadow verdict, tagged with whether the request is in enforced scope.
+    pub fn pass(enforced: bool) -> Self {
+        ShadowVerdict::Evaluated {
+            passed: true,
+            enforced,
+            reason: String::new(),
+        }
+    }
+
+    /// A failing shadow verdict (the gate would deny if enforced), with the reason.
+    pub fn fail(enforced: bool, reason: impl Into<String>) -> Self {
+        ShadowVerdict::Evaluated {
+            passed: false,
+            enforced,
+            reason: reason.into(),
+        }
+    }
+
+    /// The coarse three-state status word for this gate's column, given the per-gate vocabulary
+    /// (`signed`/`meshed` family). `verified` = in scope, checked, passed; `would-pass` = out of
+    /// scope, shadow-checked, would pass; `would-fail` = would deny if enforced. Returns the
+    /// empty string for [`NotApplicable`](ShadowVerdict::NotApplicable).
+    pub fn status(&self) -> &'static str {
+        match self {
+            ShadowVerdict::NotApplicable => "",
+            ShadowVerdict::Evaluated {
+                passed: true,
+                enforced: true,
+                ..
+            } => "verified",
+            ShadowVerdict::Evaluated {
+                passed: true,
+                enforced: false,
+                ..
+            } => "would-pass",
+            ShadowVerdict::Evaluated { passed: false, .. } => "would-fail",
+        }
+    }
+
+    /// True if this gate would admit the request under enforcement (a pass, or no opinion).
+    fn would_admit(&self) -> bool {
+        !matches!(self, ShadowVerdict::Evaluated { passed: false, .. })
+    }
+}
+
 /// Where a policy enforces (denies) versus merely audits (logs + allows).
 ///
 /// Audit is the default everywhere; enforcement is opt-in via an allowlist. A
@@ -135,6 +206,19 @@ pub trait Policy: Send + Sync {
     /// Evaluate the request. Only called when [`applies`](Policy::applies)
     /// returned `true`.
     async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision;
+
+    /// **Shadow** evaluation (JEF-246): the gate's counterfactual verdict for `req`, computed
+    /// regardless of [`applies`](Policy::applies) or enforced scope, so the dashboard can show
+    /// what protector WOULD do if this request were in scope and enforced. Display-only — it
+    /// never contributes to the API verdict (ADR-0016).
+    ///
+    /// The default returns [`NotApplicable`](ShadowVerdict::NotApplicable); a gate that wants a
+    /// what-if (signature, mesh) overrides it to compute its verdict for every request. A
+    /// gate's shadow path MUST share enforcement's evaluation mechanism (and its caches), adding
+    /// **no** new egress (zero-egress invariant).
+    async fn shadow_evaluate(&self, _req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
+        ShadowVerdict::NotApplicable
+    }
 }
 
 /// The ordered set of policies applied to every admission request.
@@ -160,23 +244,30 @@ pub struct Engine {
 }
 
 /// The holistic, engine-derived view of one request's resolved admission — the per-workload
-/// row JEF-237 records (one row per request, deduped, not one per policy). The signature/mesh
-/// statuses are COARSE and derived from each policy's outcome: the engine stays policy-agnostic
-/// (it never re-implements gating/mesh logic), so `signed` means "passed the signature gate"
-/// (covers verified AND out-of-gate-scope) and `meshed` means "passed the mesh gate" (covers
-/// meshed AND out-of-mesh-scope). A would-deny/deny from a policy flips its status to the
-/// flagged form (`unsigned` / `unmeshed`).
+/// row JEF-237 records (one row per request, deduped, not one per policy).
+///
+/// JEF-246 changed the signature/mesh statuses from a COARSE two-state ("passed the gate" vs
+/// flagged, which conflated *verified* with *not-checked*) to the THREE-state shadow what-if,
+/// sourced from each gate's [`shadow_evaluate`](Policy::shadow_evaluate) (computed for EVERY
+/// request, even out of scope): `verified` (in scope, checked, passed) · `would-pass` (out of
+/// scope, shadow-checked, would pass) · `would-fail` (would deny if enforced). The engine stays
+/// policy-agnostic — it keys on the stable gate NAME and never re-derives gating/mesh logic.
 struct AdmissionSummary {
     /// `allow` (clean admit), `audit` (would-deny, allowed), or `deny` (rejected) — the
-    /// strongest outcome across the request's applicable policies.
+    /// strongest ACTUAL outcome across the request's applicable policies. Unchanged by the
+    /// shadow what-if (ADR-0016): this is the honest API verdict.
     decision: &'static str,
     /// The first deny/audit reason (the actionable prose), empty for a clean admit.
     reason: String,
-    /// Coarse signature status (`signed` / `unsigned`), empty if the signature policy
-    /// didn't run for this request.
+    /// Three-state signature shadow status (`verified` / `would-pass` / `would-fail`), empty if
+    /// the signature gate has no opinion (e.g. a non-Pod).
     signature: String,
-    /// Coarse mesh status (`meshed` / `unmeshed`), empty if the mesh policy didn't run.
+    /// Three-state mesh shadow status (`verified` / `would-pass` / `would-fail`), empty if the
+    /// mesh gate has no opinion.
     mesh: String,
+    /// The net counterfactual: would the request be ADMITTED if every gate were enforced?
+    /// `true` while no shadow-evaluated gate would fail. Display-only (ADR-0016).
+    would_admit: bool,
 }
 
 impl Engine {
@@ -214,18 +305,22 @@ impl Engine {
             reason: String::new(),
             signature: String::new(),
             mesh: String::new(),
+            would_admit: true,
         };
+
+        // Shadow what-if (JEF-246): compute every gate's counterfactual verdict — for ALL
+        // gates, regardless of `applies()`/scope — and fold it into the recorded row's
+        // three-state signature/mesh status + net would-admit. This is display-only and runs
+        // BEFORE the real decision loop so the status is present even on a deny short-circuit
+        // (and even for a request the real loop would skip entirely). It NEVER touches the
+        // returned `Decision` (ADR-0016: presentation is a view, never a gate).
+        self.shadow_what_if(req, &mut summary).await;
+
         for policy in &self.policies {
             if !policy.applies(req) {
                 continue;
             }
             let outcome = policy.evaluate(req).await;
-            let word = match &outcome {
-                Decision::Allow => "allow",
-                Decision::Audit { .. } => "audit",
-                Decision::Deny { .. } => "deny",
-            };
-            summary.note_policy(policy.name(), word);
             match outcome {
                 Decision::Allow => {}
                 Decision::Audit { reason } => {
@@ -294,7 +389,8 @@ impl Engine {
             summary.mesh.clone(),
             namespace,
             summary.reason.clone(),
-        );
+        )
+        .with_would_admit(summary.would_admit);
         if let Some(decisions) = &self.decisions {
             decisions.record(record.clone());
         }
@@ -304,21 +400,27 @@ impl Engine {
     }
 }
 
-impl AdmissionSummary {
-    /// Fold one policy's coarse outcome into the per-request signature/mesh status. The engine
-    /// stays policy-agnostic: it keys on the stable policy NAME and never re-derives gating or
-    /// mesh logic. `allow` from a gate ⇒ it passed (`signed` / `meshed`); `audit`/`deny` ⇒ the
-    /// flagged form (`unsigned` / `unmeshed`).
-    fn note_policy(&mut self, policy: &str, word: &str) {
-        let passed = word == "allow";
-        match policy {
-            "image-signature" => {
-                self.signature = if passed { "signed" } else { "unsigned" }.to_string();
+impl Engine {
+    /// Run every gate's [`shadow_evaluate`](Policy::shadow_evaluate) — regardless of `applies()`
+    /// or enforced scope (JEF-246) — and fold the verdicts into the summary's three-state
+    /// signature/mesh status and net would-admit. Keyed on the stable gate NAME so the engine
+    /// stays policy-agnostic. Display-only: this records the counterfactual; it never decides.
+    async fn shadow_what_if(
+        &self,
+        req: &AdmissionRequest<DynamicObject>,
+        summary: &mut AdmissionSummary,
+    ) {
+        for policy in &self.policies {
+            let verdict = policy.shadow_evaluate(req).await;
+            if !verdict.would_admit() {
+                summary.would_admit = false;
             }
-            "mesh-injection" => {
-                self.mesh = if passed { "meshed" } else { "unmeshed" }.to_string();
+            let status = verdict.status();
+            match policy.name() {
+                "image-signature" => summary.signature = status.to_string(),
+                "mesh-injection" => summary.mesh = status.to_string(),
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -407,6 +509,16 @@ mod tests {
         }
         async fn evaluate(&self, _req: &AdmissionRequest<DynamicObject>) -> Decision {
             self.decision.clone()
+        }
+        /// Mirror the fixed decision as the shadow verdict so the engine's three-state status
+        /// folding is exercised: `Allow` ⇒ a `verified` pass (in scope), `Deny` ⇒ a `would-fail`
+        /// in scope, `Audit` ⇒ a `would-fail` out of scope (the would-deny-but-allowed case).
+        async fn shadow_evaluate(&self, _req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
+            match &self.decision {
+                Decision::Allow => ShadowVerdict::pass(true),
+                Decision::Deny { reason } => ShadowVerdict::fail(true, reason.clone()),
+                Decision::Audit { reason } => ShadowVerdict::fail(false, reason.clone()),
+            }
         }
     }
 
@@ -520,8 +632,15 @@ mod tests {
         );
         assert_eq!(r.subject, "Pod/demo");
         assert_eq!(r.image, "ghcr.io/org/app:1");
-        assert_eq!(r.signature, "unsigned", "the signature gate audited");
-        assert_eq!(r.mesh, "meshed", "the mesh gate passed");
+        assert_eq!(
+            r.signature, "would-fail",
+            "the signature gate audited (would deny if enforced)"
+        );
+        assert_eq!(r.mesh, "verified", "the mesh gate passed in scope");
+        assert!(
+            !r.would_admit,
+            "a would-fail gate flips the net would-admit"
+        );
         assert_eq!(r.namespace, "default");
         assert_eq!(
             r.reason,
@@ -559,8 +678,9 @@ mod tests {
         assert_eq!(snap.len(), 1, "the clean admit is recorded");
         let r = &snap[0];
         assert_eq!(r.decision, "allow");
-        assert_eq!(r.signature, "signed");
-        assert_eq!(r.mesh, "meshed");
+        assert_eq!(r.signature, "verified");
+        assert_eq!(r.mesh, "verified");
+        assert!(r.would_admit, "a clean admit would also admit if enforced");
         assert!(r.reason.is_empty(), "a clean admit carries no reason");
     }
 
@@ -586,7 +706,11 @@ mod tests {
         let snap = log.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].decision, "deny");
-        assert_eq!(snap[0].signature, "unsigned");
+        assert_eq!(
+            snap[0].signature, "would-fail",
+            "the shadow status is present even on a deny short-circuit"
+        );
+        assert!(!snap[0].would_admit);
         assert_eq!(snap[0].reason, "unsigned");
     }
 
@@ -676,5 +800,84 @@ mod tests {
             engine.evaluate(&pod_request()).await,
             Decision::Allow
         ));
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_would_deny_is_recorded_but_admitted() {
+        // JEF-246 acceptance: an out-of-scope gate (here a `Fixed` that audits — the would-deny-
+        // but-allowed case) still ADMITS the request (the actual decision is `audit`, allowed),
+        // yet the shadow what-if records `would-fail` + `would_admit = false` so the operator
+        // sees what enforcement would do.
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![Box::new(Fixed {
+                name: "image-signature",
+                applies: true,
+                decision: Decision::audit("unsigned or untrusted image(s): ghcr.io/org/app:1"),
+            })],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+
+        let verdict = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
+        // Display-only: the API still admits (audit never denies).
+        assert!(matches!(verdict, Decision::Allow));
+        let snap = log.snapshot();
+        assert_eq!(snap[0].decision, "audit");
+        assert_eq!(snap[0].signature, "would-fail");
+        assert!(!snap[0].would_admit, "the net what-if is would-DENY");
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_would_admit_records_the_clean_counterfactual() {
+        // JEF-246 acceptance: an out-of-scope image that WOULD pass both gates is recorded with
+        // a passing shadow status and `would_admit = true` — not empty/ambiguous. (`would-pass`
+        // here because the gate, while passing, is modeled out of enforced scope via a separate
+        // policy below; for `Fixed::Allow` the model reports `verified`, the in-scope pass.)
+        let log = Arc::new(PolicyDecisionLog::new());
+        let engine = Engine::new(
+            vec![
+                Box::new(Fixed {
+                    name: "image-signature",
+                    applies: true,
+                    decision: Decision::Allow,
+                }),
+                Box::new(Fixed {
+                    name: "mesh-injection",
+                    applies: true,
+                    decision: Decision::Allow,
+                }),
+            ],
+            Arc::new(Metrics::new()),
+        )
+        .with_decision_log(log.clone());
+
+        let verdict = engine
+            .evaluate(&pod_request_with_image("ghcr.io/org/app:1"))
+            .await;
+        assert!(matches!(verdict, Decision::Allow));
+        let snap = log.snapshot();
+        assert!(snap[0].would_admit, "both gates would admit if enforced");
+        assert_ne!(snap[0].signature, "", "the counterfactual is not empty");
+        assert_ne!(snap[0].mesh, "");
+    }
+
+    #[tokio::test]
+    async fn shadow_what_if_never_changes_the_api_verdict() {
+        // ADR-0016: presentation is a view, never a gate. A gate whose shadow verdict is a
+        // would-fail (audit) MUST NOT deny — the returned `Decision` is byte-identical to the
+        // no-shadow path. Here every applicable policy allows/audits, so the verdict is `Allow`
+        // regardless of the would-DENY counterfactual.
+        let engine = engine(vec![Box::new(Fixed {
+            name: "image-signature",
+            applies: true,
+            decision: Decision::audit("would deny if enforced"),
+        })]);
+        assert!(
+            matches!(engine.evaluate(&pod_request()).await, Decision::Allow),
+            "the what-if must not flip the actual admit"
+        );
     }
 }

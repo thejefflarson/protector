@@ -132,15 +132,19 @@ fn safe_row_has_no_what_to_do() {
 }
 
 #[test]
-fn admission_strip_renders_fractions_and_audit_seam() {
+fn admission_strip_renders_actual_tally_and_the_if_enforced_what_if() {
+    // JEF-246: the strip carries the ACTUAL tally (admitted/audit/denied) AND the shadow
+    // "if enforced" line — the would-be signed + meshed fractions (over every shadow-evaluated
+    // record) and the net would-DENY. The second record is an out-of-scope would-fail (audit,
+    // but `would_admit = false`), so the what-if reports one would-DENY.
     let records = vec![
         PolicyDecisionRecord::now(
             "admission",
             "allow",
             "Deployment/web",
             "img@sha",
-            "signed",
-            "meshed",
+            "verified",
+            "verified",
             "app",
             "ok",
         ),
@@ -149,11 +153,12 @@ fn admission_strip_renders_fractions_and_audit_seam() {
             "audit",
             "Deployment/api",
             "img@sha",
-            "unsigned",
-            "meshed",
+            "would-fail",
+            "would-pass",
             "app",
             "would-deny",
-        ),
+        )
+        .with_would_admit(false),
     ];
     let tallies = DecisionTallies {
         admitted: 1,
@@ -170,9 +175,14 @@ fn admission_strip_renders_fractions_and_audit_seam() {
         &BTreeMap::new(),
     );
     assert!(html.contains("admission:"));
+    // Actual tally, honest.
+    assert!(html.contains("1 admitted"));
+    assert!(html.contains("would-deny (audit)"));
+    // The "if enforced" what-if: signature passes 1/2 (verified vs would-fail), mesh 2/2.
+    assert!(html.contains("if enforced"));
     assert!(html.contains("signed <b>1/2</b>"));
     assert!(html.contains("meshed <b>2/2</b>"));
-    assert!(html.contains("would-deny (audit)"));
+    assert!(html.contains("1 would-DENY"));
 }
 
 #[test]
