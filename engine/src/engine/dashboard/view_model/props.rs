@@ -106,10 +106,10 @@ impl DeltaProps {
     /// The glyph + word for the Δ cell (steady age has no glyph).
     pub fn glyph(&self) -> &'static str {
         match self {
-            DeltaProps::New => "\u{2605}",         // ★ (not "+", which is the row expander)
-            DeltaProps::Escalated => "\u{25B2}",   // ▲
+            DeltaProps::New => "\u{2605}", // ★ (not "+", which is the row expander)
+            DeltaProps::Escalated => "\u{25B2}", // ▲
             DeltaProps::DeEscalated => "\u{25BC}", // ▼
-            DeltaProps::Restored => "\u{21BA}",    // ↺
+            DeltaProps::Restored => "\u{21BA}", // ↺
             DeltaProps::Unchanged { .. } => "",
         }
     }
@@ -165,13 +165,19 @@ pub struct BehaviorProps {
     pub corroborating: bool,
 }
 
-/// One hop of the proven path, rendered as a text hop-list. Structural hops are muted; the
-/// cut point is marked (brief §5).
+/// One hop of the proven path, rendered as a vertical chain diagram (brief §3). Each hop is a
+/// `from ─[relation]→ to` edge; the diagram threads the hops top-to-bottom (entry → objective)
+/// down a connector spine. Structural hops are muted; the cut point is marked on its edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HopProps {
     pub from: String,
+    /// The node-kind glyph for `from` (workload ▢ / secret 🔑 / host 🖥 / …; 🌐 for an internet
+    /// entry). Carries the node kind without colour (style guide principle 3).
+    pub from_glyph: String,
     pub relation: String,
     pub to: String,
+    /// The node-kind glyph for `to`.
+    pub to_glyph: String,
     /// Whether this is a structural (substrate) hop — rendered muted.
     pub structural: bool,
     /// Whether the proposed cut severs at this hop.

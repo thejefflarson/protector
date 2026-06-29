@@ -162,6 +162,40 @@ fn judgement_prompt_is_attached_by_entry() {
 }
 
 #[test]
+fn path_props_carry_node_glyphs_and_mark_the_cut() {
+    // A two-hop path: internet-facing workload → db → secret, with the first edge as the cut.
+    let mut f = finding(
+        "deployment/edge/api",
+        "secret/app/db-creds",
+        Some(Verdict::Confirmed),
+    );
+    f.foothold = true;
+    f.path = vec![
+        PathStep {
+            from: "deployment/edge/api".into(),
+            relation: "reaches/Tcp/5432".into(),
+            to: "statefulset/app/db".into(),
+        },
+        PathStep {
+            from: "statefulset/app/db".into(),
+            relation: "mounts".into(),
+            to: "secret/app/db-creds".into(),
+        },
+    ];
+    f.cut = Some("deployment/edge/api -[reaches/Tcp/5432]-> statefulset/app/db".into());
+    let rows = map_findings(&[f], &[]);
+    let path = &rows[0].path;
+    assert_eq!(path.len(), 2);
+    // The foothold entry node reads as the internet front door (🌐), not its bare kind.
+    assert_eq!(path[0].from_glyph, "\u{1F310}");
+    // Each node carries its kind glyph (secret ⇒ 🔑).
+    assert_eq!(path[1].to_glyph, "\u{1F511}");
+    // The severable edge is marked; the structural `mounts` edge is not the cut.
+    assert!(path[0].is_cut);
+    assert!(!path[1].is_cut);
+}
+
+#[test]
 fn verdict_summary_is_the_models_verbatim_words() {
     let f = finding(
         "endpoint/a",

@@ -40,13 +40,20 @@ fn mode_pill(armed: bool) -> Markup {
     let (cls, word, sub, glyph) = if armed {
         ("pill mode-enforce", "ENFORCE", "acting", "")
     } else {
-        ("pill mode-shadow warn", "SHADOW", "proposes, never acts", "\u{26A0}")
+        (
+            "pill mode-shadow warn",
+            "SHADOW",
+            "proposes, never acts",
+            "\u{26A0}",
+        )
     };
     html! {
         span class=(cls) {
-            @if !glyph.is_empty() { span.pill-glyph { (glyph) } }
-            span.pill-word { (word) }
-            span.pill-sub { (sub) }
+            @if !glyph.is_empty() { span.pill-glyph aria-hidden="true" { (glyph) } }
+            span.pill-text {
+                span.pill-word { (word) }
+                span.pill-sub { (sub) }
+            }
         }
     }
 }

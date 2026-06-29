@@ -36,10 +36,9 @@ pub(super) fn finding_row(f: &FindingProps) -> Markup {
             td.cell.cell-path { (path_summary(f)) }
             td.cell.cell-evidence { (evidence_cluster(&f.evidence_summary)) }
             td.cell.cell-disposition { span.disp { (f.disposition) } }
-            td.cell.cell-live { (live_tag(f.live_tag)) }
         }
         tr.row-detail id=(detail_id) data-detail-for=(f.id) {
-            td.detail-host colspan="8" {
+            td.detail-host colspan="7" {
                 (detail_panel(f))
             }
         }
@@ -67,13 +66,16 @@ fn delta_cell(d: &DeltaProps) -> Markup {
 }
 
 /// The posture cell: a coloured rail + chip carrying colour + glyph + word. Uncertain &
-/// awaiting are texturally distinct (dashed/dotted rails) and never green.
-fn posture_cell(p: Posture, _tag: LiveTag) -> Markup {
+/// awaiting are texturally distinct (dashed/dotted rails) and never green. On a breach the
+/// live (`Confirmed`) / judged (`Exploitable`) sub-tag rides INSIDE the chip — there is no
+/// standalone LIVE? column, so non-breach rows carry no dash noise (brief item 4).
+fn posture_cell(p: Posture, tag: LiveTag) -> Markup {
     html! {
         span class={ "posture rail-" (p.token()) } {
             span class={ "posture-chip chip-" (p.token()) } {
                 span.glyph { (p.glyph()) }
                 span.posture-word { (p.word()) }
+                (live_tag(tag))
             }
         }
     }
@@ -137,11 +139,13 @@ fn evidence_cluster(s: &EvidenceSummary) -> Markup {
     }
 }
 
-/// The live/judged sub-tag, or an em-dash when neither applies.
+/// The live/judged sub-tag rendered inline in the posture chip. `Live` (a runtime signal backed
+/// the chain) and `Judged` (model-promoted only) appear only on breach rows; everything else
+/// renders NOTHING (no em-dash noise — the standalone LIVE? column is gone, brief item 4).
 fn live_tag(tag: LiveTag) -> Markup {
     match tag {
         LiveTag::Live => html! { span.subtag.subtag-live { "live" } },
         LiveTag::Judged => html! { span.subtag.subtag-judged { "judged" } },
-        LiveTag::None => html! { span.subtag.subtag-none { "\u{2014}" } },
+        LiveTag::None => html! {},
     }
 }

@@ -2,7 +2,11 @@
  * Served same-origin (no third-party CSS). A dense, light-theme information console:
  * white/near-white surface, dark ink, monospace for all machine data. Calm by default,
  * loud only on a real breach. Meaning is never carried by colour alone — every status
- * also carries a glyph + word (the markup) and a distinct rail texture. */
+ * also carries a glyph + word (the markup) and a distinct rail texture.
+ *
+ * Sizing discipline (JEF-256): EVERY size/spacing value comes from a token — the --space-*
+ * 4px scale for spacing, the --fs/--lh-* scale for type, and the geometry tokens. No raw px
+ * appears outside the :root token block (a guard test asserts this — the no-raw-hex spirit). */
 
 :root {
   /* surfaces & ink (light) */
@@ -39,7 +43,10 @@
   --cov-present: #067647;
   --cov-degraded: #B54708;
   --cov-absent: #6B7280;
-  --mode-shadow: #667085;
+  /* SHADOW is a WARNING posture — the engine is only proposing, not protecting — so it reads
+     amber (was slate #667085), with a soft amber tint behind the chip + a ⚠. ENFORCE is the
+     intended, calm blue. */
+  --mode-shadow: #B54708;
   --mode-enforce: #1570EF;
 
   /* space (4px base) */
@@ -50,9 +57,23 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  /* type */
+  /* type — fonts */
   --font-ui: Inter, system-ui, sans-serif;
   --font-data: "JetBrains Mono", ui-monospace, monospace;
+
+  /* type — the styleguide scale (size / line-height), two weights only (400 / 600).
+     Every font-size/line-height in the sheet comes from one of these tokens — no ad-hoc values.
+       display 22/28 600 · h2 16/24 600 · body 14/20 400
+       data 13/18 400 (strong 600) · micro 11/16 500 (uppercase, tracked) */
+  --fs-display: 22px;   --lh-display: 28px;
+  --fs-h2: 16px;        --lh-h2: 24px;
+  --fs-body: 14px;      --lh-body: 20px;
+  --fs-data: 13px;      --lh-data: 18px;
+  --fs-micro: 11px;     --lh-micro: 16px;
+  --fw-regular: 400;
+  --fw-bold: 600;
+  --fw-micro: 500;
+  --track-micro: 0.06em; /* the micro (column-header / chip) letter-spacing */
 
   /* geometry */
   --row-h: 36px;
@@ -60,7 +81,9 @@
   --radius-panel: 6px;
   --rail-strong: 3px;
   --rail-soft: 2px;
+  --hairline: 1px;
   --focus-ring: 2px solid #1570EF;
+  --focus-offset: 1px;
 }
 
 * { box-sizing: border-box; }
@@ -70,13 +93,24 @@ html, body {
   background: var(--bg);
   color: var(--ink-1);
   font-family: var(--font-ui);
-  font-size: 14px;
-  line-height: 20px;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+/* ---- the type scale, applied as named roles (primary/secondary/tertiary by weight + ink) ---- */
+.t-display { font-size: var(--fs-display); line-height: var(--lh-display); font-weight: var(--fw-bold); }
+.t-h2     { font-size: var(--fs-h2); line-height: var(--lh-h2); font-weight: var(--fw-bold); }
+.t-body   { font-size: var(--fs-body); line-height: var(--lh-body); font-weight: var(--fw-regular); }
+.t-data   { font-size: var(--fs-data); line-height: var(--lh-data); font-weight: var(--fw-regular); }
+.t-data-strong { font-size: var(--fs-data); line-height: var(--lh-data); font-weight: var(--fw-bold); }
+.t-micro  {
+  font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-micro);
+  letter-spacing: var(--track-micro); text-transform: uppercase;
 }
 
 /* All machine data is monospace/tabular so columns align. */
 .mono, code, pre,
-.entry-label, .path-summary, .hop-list, .cut-sig,
+.entry-label, .path-summary, .chain, .cut-sig,
 .ev-table td.mono, .cov-label, .count, .freshness {
   font-family: var(--font-data);
 }
@@ -84,10 +118,10 @@ html, body {
 /* ---- a11y: visually hidden but available to assistive tech ---- */
 .visually-hidden {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  width: var(--hairline);
+  height: var(--hairline);
   padding: 0;
-  margin: -1px;
+  margin: calc(-1 * var(--hairline));
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
@@ -101,13 +135,14 @@ summary:focus-visible,
 .tab:focus-visible,
 .why-toggle:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: 1px;
+  outline-offset: var(--focus-offset);
 }
 
 /* ============================ status strip ============================ */
+/* Symmetric padding off the 4px scale; one vertical rhythm (--space-3) between rows. */
 .strip {
   background: var(--surface-raised);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
   padding: var(--space-3) var(--space-4);
 }
 .strip-top {
@@ -117,23 +152,45 @@ summary:focus-visible,
   gap: var(--space-4);
 }
 .strip-cluster { display: flex; align-items: center; gap: var(--space-2); }
-.brand { font-weight: 600; font-size: 16px; }
+.brand {
+  font-size: var(--fs-h2); line-height: var(--lh-h2); font-weight: var(--fw-bold);
+}
 .strip-cluster .sep { color: var(--ink-3); }
-.strip-cluster .cluster { color: var(--ink-2); font-family: var(--font-data); }
+.strip-cluster .cluster {
+  color: var(--ink-2); font-family: var(--font-data);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
 
+/* mode pill (upper-right) — column of word + sub. SHADOW reads as a warning chip. */
 .pill {
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
+  align-items: center;
+  gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-chip);
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   background: var(--surface);
 }
-.pill-word { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; }
-.pill-sub { font-size: 11px; color: var(--ink-3); }
-.mode-shadow .pill-word { color: var(--mode-shadow); }
+.pill-text { display: inline-flex; flex-direction: column; align-items: flex-end; }
+.pill-glyph { font-size: var(--fs-h2); line-height: var(--lh-micro); }
+.pill-word {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-bold); letter-spacing: var(--track-micro);
+}
+.pill-sub { font-size: var(--fs-micro); line-height: var(--lh-micro); color: var(--ink-3); }
+
+/* ENFORCE: the intended, calm blue. */
 .mode-enforce .pill-word { color: var(--mode-enforce); }
+
+/* SHADOW: a WARNING chip — amber ink + ⚠, a soft amber tint background and an amber border, so
+   the operator clearly sees "you're in shadow — only proposing, not protecting". */
+.mode-shadow.warn {
+  background: var(--posture-awaiting-tint);
+  border-color: var(--mode-shadow);
+}
+.mode-shadow.warn .pill-word { color: var(--mode-shadow); }
+.mode-shadow.warn .pill-glyph { color: var(--mode-shadow); }
+.mode-shadow.warn .pill-sub { color: var(--mode-shadow); }
 
 .strip-axes {
   display: flex;
@@ -141,33 +198,34 @@ summary:focus-visible,
   align-items: center;
   gap: var(--space-4);
   margin-top: var(--space-3);
-  font-size: 13px;
+  font-size: var(--fs-data);
+  line-height: var(--lh-data);
 }
 .axis { display: inline-flex; align-items: center; gap: var(--space-2); }
-.axis .glyph { font-weight: 600; }
+.axis .glyph { font-weight: var(--fw-bold); }
 
 /* the decided/judging axis — the honesty surface */
 .judging.ok { color: var(--posture-cleared); }
 .judging.ok .dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: var(--space-2); height: var(--space-2); border-radius: 50%;
   background: var(--posture-cleared); display: inline-block;
 }
 /* Judging-but-not-finished ("watching"): elevated ochre, calm — NEVER the cleared green
    (invariant #1). Distinct from the loud breach channel and from the blind/warming banner. */
-.judging.watching { color: var(--posture-awaiting); font-weight: 600; }
+.judging.watching { color: var(--posture-awaiting); font-weight: var(--fw-bold); }
 /* NOT-judging banners are amber/slate, NEVER the cleared green (invariant #1). */
-.judging.warming { color: var(--posture-uncertain); font-weight: 600; }
-.judging.blind { color: var(--posture-uncertain); font-weight: 600; }
+.judging.warming { color: var(--posture-uncertain); font-weight: var(--fw-bold); }
+.judging.blind { color: var(--posture-uncertain); font-weight: var(--fw-bold); }
 
 .coverage { gap: var(--space-2); }
 .cov {
   display: inline-flex; align-items: center; gap: var(--space-1);
-  padding: 1px var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-chip);
-  border: 1px solid var(--border);
-  font-size: 11px; font-weight: 500;
+  border: var(--hairline) solid var(--border);
+  font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-micro);
 }
-.cov-label { letter-spacing: 0.04em; }
+.cov-label { letter-spacing: var(--track-micro); }
 .cov-present { color: var(--cov-present); border-color: var(--cov-present); }
 .cov-degraded { color: var(--cov-degraded); border-color: var(--cov-degraded); }
 .cov-absent { color: var(--cov-absent); }
@@ -179,36 +237,38 @@ summary:focus-visible,
   display: flex; flex-wrap: wrap; align-items: center;
   gap: var(--space-3);
   margin-top: var(--space-3);
-  font-size: 13px;
+  font-size: var(--fs-data);
+  line-height: var(--lh-data);
 }
 .count { display: inline-flex; align-items: center; gap: var(--space-1); }
-.count-breach { color: var(--posture-breach); font-weight: 600; }
+.count-breach { color: var(--posture-breach); font-weight: var(--fw-bold); }
 /* awaiting reads slightly elevated (ochre), below uncertain's stronger amber-brown. */
 .count-awaiting { color: var(--posture-awaiting); }
 .count-uncertain { color: var(--posture-uncertain); }
 .count-cleared { color: var(--ink-2); }
-.count-escalated { color: var(--delta-up); font-weight: 600; }
+.count-escalated { color: var(--delta-up); font-weight: var(--fw-bold); }
 
 /* ============================ tab nav ============================ */
 .tabs {
   display: flex; gap: var(--space-1);
   padding: 0 var(--space-4);
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
 }
 .tab {
   display: inline-flex; align-items: center; gap: var(--space-2);
-  padding: var(--space-3) var(--space-3);
+  padding: var(--space-3);
   color: var(--ink-2);
   text-decoration: none;
-  border-bottom: 2px solid transparent;
-  font-size: 14px;
+  border-bottom: var(--rail-soft) solid transparent;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
 }
 .tab:hover { background: var(--surface-hover); }
-.tab-active { color: var(--ink-1); font-weight: 600; border-bottom-color: var(--mode-enforce); }
+.tab-active { color: var(--ink-1); font-weight: var(--fw-bold); border-bottom-color: var(--mode-enforce); }
 .tab-phase {
-  font-size: 10px; color: var(--ink-3);
-  border: 1px solid var(--border); border-radius: var(--radius-chip);
+  font-size: var(--fs-micro); line-height: var(--lh-micro); color: var(--ink-3);
+  border: var(--hairline) solid var(--border); border-radius: var(--radius-chip);
   padding: 0 var(--space-1);
 }
 
@@ -218,15 +278,18 @@ summary:focus-visible,
   width: 100%;
   border-collapse: collapse;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
 }
+/* Header and body cells share ONE padding rhythm (--space-2 vertical / --space-3 horizontal)
+   so the column gutters line up exactly between thead and tbody. */
 .findings thead th {
   text-align: left;
-  font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro);
   text-transform: uppercase;
   color: var(--ink-3);
   padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
   white-space: nowrap;
 }
 .findings th.num, .ev-table th.num, .ev-table td.num { text-align: right; }
@@ -234,21 +297,34 @@ summary:focus-visible,
 .row:hover { background: var(--surface-hover); }
 .cell {
   padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--hairline) solid var(--border);
   vertical-align: middle;
-  font-size: 13px;
+  font-size: var(--fs-data);
+  line-height: var(--lh-data);
 }
 
-/* posture cell: rail texture conveys decisive/uncertain/awaiting even in greyscale */
-.posture { display: inline-flex; align-items: center; padding-left: var(--space-2); }
+/* posture cell: the rail is FLUSH to the row's left edge (its own padding lives on .posture-chip),
+   so the rail texture reads as an intentional left border of the row, not floating inside the
+   cell's padding. The expander cell sits to its left but the posture cell is the first data cell. */
+.cell-posture { padding-left: 0; }
+.posture {
+  display: inline-flex; align-items: stretch;
+  min-height: var(--row-h);
+}
 .rail-breach { border-left: var(--rail-strong) solid var(--posture-breach); }
 .rail-cleared { border-left: var(--rail-soft) solid var(--posture-cleared); }
 .rail-uncertain { border-left: var(--rail-soft) dashed var(--posture-uncertain); }
 .rail-awaiting { border-left: var(--rail-soft) dotted var(--posture-awaiting); }
 
-.posture-chip { display: inline-flex; align-items: center; gap: var(--space-2); }
-.posture-chip .glyph { font-size: 13px; }
-.posture-word { font-size: 11px; font-weight: 600; letter-spacing: 0.03em; }
+.posture-chip {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding-left: var(--space-3);
+}
+.posture-chip .glyph { font-size: var(--fs-data); }
+.posture-word {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-bold); letter-spacing: var(--track-micro);
+}
 .chip-breach { color: var(--posture-breach); }
 .chip-cleared { color: var(--posture-cleared); }
 .chip-uncertain { color: var(--posture-uncertain); }
@@ -258,50 +334,65 @@ summary:focus-visible,
   color: var(--posture-awaiting);
   background: var(--posture-awaiting-tint);
   border-radius: var(--radius-chip);
-  padding: 0 var(--space-1);
 }
 /* the whole un-judged row carries a subtle ochre tint so a pending path doesn't read as "fine". */
 .row[data-posture="awaiting"] { background: var(--posture-awaiting-tint); }
 .row[data-posture="awaiting"]:hover { background: var(--surface-hover); }
 
+/* the live/judged sub-tag rides inside the posture chip on breach rows (no LIVE? column). */
+.subtag {
+  font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-bold);
+  letter-spacing: var(--track-micro); text-transform: uppercase;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid currentColor;
+}
+.subtag-live { color: var(--posture-breach); }
+.subtag-judged { color: var(--posture-uncertain); }
+
 .eo { display: inline-flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
 .entry { display: inline-flex; align-items: center; gap: var(--space-1); }
-.kind-glyph { font-size: 13px; }
-.entry-label { font-weight: 600; }
+.kind-glyph { font-size: var(--fs-data); }
+.entry-label { font-weight: var(--fw-bold); }
 .arrow, .hop-arrow { color: var(--ink-3); }
-.objective { color: var(--ink-2); font-family: var(--font-data); }
+.objective {
+  color: var(--ink-2); font-family: var(--font-data);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
 .objective.fanout { color: var(--ink-2); font-style: italic; }
-.path-summary { color: var(--ink-2); font-size: 12px; }
+.path-summary {
+  color: var(--ink-2);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
 .cut-mark { color: var(--posture-breach); }
 
 /* evidence cluster (subordinate severity channel) */
 .evidence-cluster { display: inline-flex; align-items: center; gap: var(--space-2); }
-.evidence-none { color: var(--ink-3); font-style: italic; }
+.evidence-none {
+  color: var(--ink-3); font-style: italic;
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
 .ev {
-  display: inline-flex; align-items: center; gap: 2px;
-  font-size: 11px; padding: 0 var(--space-1);
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  padding: 0 var(--space-1);
   border-radius: var(--radius-chip);
 }
-.ev-kev { background: var(--kev); color: #fff; font-weight: 600; padding: 0 var(--space-2); }
-.ev-cve { color: var(--ink-2); border: 1px solid var(--border); }
+.ev-kev { background: var(--kev); color: #FFFFFF; font-weight: var(--fw-bold); padding: 0 var(--space-2); }
+.ev-cve { color: var(--ink-2); border: var(--hairline) solid var(--border); }
 .ev-runtime { color: var(--posture-breach); }
 .ev-secret { color: var(--sev-high); }
 
-.disp { color: var(--ink-2); font-size: 12px; }
-
-.subtag { font-size: 11px; font-weight: 600; }
-.subtag-live { color: var(--posture-breach); }
-.subtag-judged { color: var(--posture-uncertain); }
-.subtag-none { color: var(--ink-3); }
+.disp { color: var(--ink-2); font-size: var(--fs-data); line-height: var(--lh-data); }
 
 /* Δ cell */
 .delta { display: inline-flex; align-items: center; }
-.delta .glyph { font-weight: 600; }
+.delta .glyph { font-weight: var(--fw-bold); }
 .delta-new { color: var(--delta-new); }
 .delta-up { color: var(--delta-up); }
 .delta-down { color: var(--delta-down); }
 .delta-restored { color: var(--delta-restored); }
-.delta-steady { color: var(--ink-3); font-size: 12px; }
+.delta-steady { color: var(--ink-3); font-size: var(--fs-data); line-height: var(--lh-data); }
 
 /* ============================ row expand / detail panel ============================ */
 /* The whole summary row is the toggle; clicking anywhere opens its paired detail row. */
@@ -318,7 +409,7 @@ summary:focus-visible,
   padding: 0 var(--space-1);
   color: var(--ink-3);
   font-family: var(--font-data);
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1;
 }
 .expander-glyph { display: inline-block; width: 1ch; text-align: center; }
@@ -339,57 +430,124 @@ summary:focus-visible,
 .detail.rail-uncertain { border-left-color: var(--posture-uncertain); }
 .detail.rail-awaiting { border-left-color: var(--posture-awaiting); }
 
-.detail-section { margin-bottom: var(--space-4); }
+/* one consistent vertical rhythm between detail sections; the last section has no trailing gap. */
+.detail-section { margin-bottom: var(--space-6); }
+.detail-section:last-child { margin-bottom: 0; }
 .detail-h {
-  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-bold); letter-spacing: var(--track-micro); text-transform: uppercase;
   color: var(--ink-3);
   margin: 0 0 var(--space-2);
 }
-.verdict-prose { margin: 0; font-size: 14px; line-height: 20px; }
+.verdict-prose { margin: 0; font-size: var(--fs-body); line-height: var(--lh-body); }
 
-.hop-list { margin: 0; padding-left: var(--space-6); font-size: 13px; }
-.hop { margin: var(--space-1) 0; }
-.hop-structural { color: var(--ink-3); }
-.hop-rel { color: var(--ink-3); }
-.hop-cut { color: var(--posture-breach); font-weight: 600; }
+/* ---- proven path: the vertical chain diagram (brief §3) ---- */
+/* A single connector spine runs down the left of the chain; nodes and labelled edges thread
+   onto it so the whole path reads as one descent from entry to objective. */
+.chain {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 var(--space-3);
+  border-left: var(--rail-soft) solid var(--border); /* the connector spine */
+  font-size: var(--fs-data);
+  line-height: var(--lh-data);
+}
+.chain-node {
+  position: relative;
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+/* the spine dot marking each node, sitting on the rail */
+.chain-dot {
+  position: absolute;
+  left: calc(-1 * var(--space-3) - var(--rail-soft));
+  width: var(--space-2); height: var(--space-2);
+  border-radius: 50%;
+  background: var(--border);
+  transform: translateX(-50%);
+}
+.chain-glyph { font-size: var(--fs-body); }
+.chain-label { font-family: var(--font-data); }
+.chain-tag {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro); text-transform: uppercase;
+  color: var(--ink-3);
+}
+/* entry node — emphasized (the front door). */
+.chain-entry .chain-label { font-weight: var(--fw-bold); color: var(--ink-1); }
+.chain-entry .chain-dot { background: var(--ink-2); }
+/* objective node — emphasized end of the chain. */
+.chain-objective .chain-label { font-weight: var(--fw-bold); color: var(--ink-1); }
+.chain-objective .chain-dot { background: var(--ink-1); }
+.chain-objective .chain-tag { color: var(--ink-2); }
+
+/* the labelled connector edge between two nodes — the relation, riding the spine. */
+.chain-edge {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) 0;
+  color: var(--ink-2);
+}
+.chain-rel { font-family: var(--font-data); font-size: var(--fs-data); }
+.chain-rel-line { color: var(--ink-3); }
+/* a structural (substrate) edge is muted — it is plumbing, not the actionable edge. */
+.chain-edge-structural { color: var(--ink-3); }
+.chain-edge-structural .chain-rel { color: var(--ink-3); }
+/* the SEVERABLE edge: the actionable heart — ✂ "cut here" in the breach colour, prominent. */
+.chain-edge-cut .chain-rel { color: var(--posture-breach); font-weight: var(--fw-bold); }
+.chain-cut {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid var(--posture-breach);
+  color: var(--posture-breach);
+}
+.chain-cut-glyph { font-size: var(--fs-body); }
+.chain-cut-label {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-bold); letter-spacing: var(--track-micro); text-transform: uppercase;
+}
 
 .cut-sig code {
   display: inline-block;
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius-chip); padding: 2px var(--space-2);
-  font-size: 12px;
+  background: var(--surface); border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-chip); padding: var(--space-1) var(--space-2);
+  font-size: var(--fs-data); line-height: var(--lh-data);
 }
-.cut-revert { font-size: 12px; margin: var(--space-1) 0 0; }
+.cut-revert { font-size: var(--fs-data); line-height: var(--lh-data); margin: var(--space-1) 0 0; }
 
 /* evidence tables — numerics right-aligned, severity muted */
 .ev-group { margin-bottom: var(--space-3); }
 .ev-table {
   width: 100%; border-collapse: collapse;
-  font-family: var(--font-data); font-size: 12px;
-  background: var(--surface); border: 1px solid var(--border);
+  font-family: var(--font-data);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+  background: var(--surface); border: var(--hairline) solid var(--border);
 }
 .ev-table th {
-  text-align: left; font-size: 11px; font-weight: 500; letter-spacing: 0.04em;
+  text-align: left;
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro);
   color: var(--ink-3); text-transform: uppercase;
-  padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border);
+  padding: var(--space-1) var(--space-2); border-bottom: var(--hairline) solid var(--border);
 }
-.ev-table td { padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); }
+.ev-table td { padding: var(--space-1) var(--space-2); border-bottom: var(--hairline) solid var(--border); }
 .ev-subrow td { color: var(--ink-3); }
 
-.sev { font-size: 11px; font-weight: 600; }
+.sev { font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-bold); }
 .sev-critical { color: var(--sev-critical); }
 .sev-high { color: var(--sev-high); }
 .sev-medium { color: var(--sev-medium); }
 .sev-low { color: var(--sev-low); }
 
-.behavior-list { margin: var(--space-1) 0; padding-left: var(--space-4); font-size: 12px; }
-.behavior { margin: 2px 0; }
+.behavior-list { margin: var(--space-1) 0; padding-left: var(--space-4); font-size: var(--fs-data); line-height: var(--lh-data); }
+.behavior { margin: var(--space-1) 0; }
 .behavior-alert { color: var(--posture-breach); }
 .behavior-variant {
-  font-family: var(--font-data); font-size: 11px;
+  font-family: var(--font-data);
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
   color: var(--ink-2); margin-right: var(--space-2);
 }
-.ev-sublabel { font-size: 11px; margin: var(--space-2) 0 var(--space-1); }
+.ev-sublabel { font-size: var(--fs-micro); line-height: var(--lh-micro); margin: var(--space-2) 0 var(--space-1); }
 
 .model-prompt { margin-top: var(--space-3); }
 /* the "show model prompt" disclosure summary (a real <details> nested in the detail panel) */
@@ -397,7 +555,7 @@ summary:focus-visible,
   cursor: pointer;
   padding: var(--space-2) 0;
   color: var(--mode-enforce);
-  font-size: 12px;
+  font-size: var(--fs-data); line-height: var(--lh-data);
   list-style: none;
 }
 .why-toggle::-webkit-details-marker { display: none; }
@@ -405,22 +563,26 @@ summary:focus-visible,
 .model-prompt[open] > .why-toggle::before { content: "\25BE "; }
 .prompt-body { padding: var(--space-2) 0; }
 .prompt-text {
-  background: var(--surface); border: 1px solid var(--border);
+  background: var(--surface); border: var(--hairline) solid var(--border);
   border-radius: var(--radius-chip);
-  padding: var(--space-2); font-size: 12px;
+  padding: var(--space-2);
+  font-size: var(--fs-data); line-height: var(--lh-data);
   white-space: pre-wrap; word-break: break-word;
-  max-height: 320px; overflow: auto;
+  max-height: 20rem; overflow: auto;
 }
 
 /* ============================ empty / stub states ============================ */
 .empty, .stub {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: var(--hairline) solid var(--border);
   border-radius: var(--radius-panel);
   padding: var(--space-8);
   text-align: center;
 }
-.empty-head, .stub-head { font-size: 18px; font-weight: 600; margin: 0 0 var(--space-2); }
+.empty-head, .stub-head {
+  font-size: var(--fs-h2); line-height: var(--lh-h2); font-weight: var(--fw-bold);
+  margin: 0 0 var(--space-2);
+}
 .empty-sub, .stub-sub { margin: 0 auto; max-width: 60ch; }
 /* "all clear" is the ONLY posture-coloured empty state — and only when honestly earned. */
 .empty-clear .empty-head { color: var(--posture-cleared); }
@@ -429,7 +591,8 @@ summary:focus-visible,
 .empty-warming .empty-head { color: var(--posture-uncertain); }
 .empty-blind .empty-head { color: var(--posture-uncertain); }
 .stub-badge {
-  display: inline-block; font-size: 11px; color: var(--ink-3);
-  border: 1px solid var(--border); border-radius: var(--radius-chip);
+  display: inline-block;
+  font-size: var(--fs-micro); line-height: var(--lh-micro); color: var(--ink-3);
+  border: var(--hairline) solid var(--border); border-radius: var(--radius-chip);
   padding: 0 var(--space-2); margin-bottom: var(--space-3);
 }

@@ -308,6 +308,146 @@ fn finding_row_drops_the_old_why_pulldown() {
 }
 
 // ---------------------------------------------------------------------------
+// Item 3 — the proven path renders as a vertical chain diagram, not a text line.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn proven_path_renders_as_a_vertical_chain_with_marked_cut() {
+    // breach_finding builds a single-hop path whose hop IS the cut signature.
+    let f = breach_finding("endpoint/a", Verdict::Confirmed);
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // The chain container + node/edge structure (not the old flat hop-list).
+    assert!(
+        html.contains("class=\"chain\""),
+        "the path is a chain diagram"
+    );
+    assert!(html.contains("chain-node"), "it has node lines");
+    assert!(html.contains("chain-edge"), "it has labelled edge lines");
+    // The entry and objective nodes are tagged at the ends of the chain.
+    assert!(html.contains("chain-entry"), "the entry node is emphasized");
+    assert!(
+        html.contains("chain-objective"),
+        "the objective node is emphasized"
+    );
+    // The severable edge carries the prominent ✂ cut-here marker (the actionable heart).
+    assert!(html.contains("chain-edge-cut"), "the cut edge is marked");
+    assert!(
+        html.contains("cut here"),
+        "with an explicit 'cut here' label"
+    );
+    assert!(html.contains("\u{2702}"), "and the scissors glyph");
+}
+
+#[test]
+fn proven_path_is_honest_when_no_cut_exists() {
+    // A finding without a cut still renders the chain, but no edge is marked severable.
+    let mut f = breach_finding("endpoint/a", Verdict::Confirmed);
+    f.cut = None;
+    let view = build_findings_view(
+        "prod".into(),
+        &[f],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    assert!(html.contains("class=\"chain\""), "still a chain diagram");
+    assert!(
+        !html.contains("chain-edge-cut"),
+        "no edge is marked severable when there is no single-edge cut"
+    );
+    // And the proposed-cut section states the honest no-single-edge-cut message.
+    assert!(html.contains("no single-edge cut"));
+}
+
+// ---------------------------------------------------------------------------
+// Item 4 — no standalone LIVE? column; the live/judged tag rides in the posture chip.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn live_column_is_dropped_and_tag_rides_in_the_posture_chip() {
+    let live = breach_finding("endpoint/a", Verdict::Confirmed); // ⇒ live
+    let judged = breach_finding("endpoint/b", Verdict::Exploitable("RCE".into())); // ⇒ judged
+    let view = build_findings_view(
+        "prod".into(),
+        &[live, judged],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // The standalone column header is gone.
+    assert!(
+        !html.contains("LIVE?"),
+        "the LIVE? column header is dropped"
+    );
+    assert!(!html.contains("col-live"), "no LIVE? column cell");
+    // The breach rows carry their inline tag.
+    assert!(html.contains("subtag-live"), "the live tag rides inline");
+    assert!(
+        html.contains("subtag-judged"),
+        "the judged tag rides inline"
+    );
+    // No em-dash noise: the old subtag-none placeholder is gone.
+    assert!(
+        !html.contains("subtag-none"),
+        "non-breach rows carry no dash-noise sub-tag"
+    );
+    // The detail row now spans 7 columns (was 8 with the LIVE? column).
+    assert!(
+        html.contains("colspan=\"7\""),
+        "the detail row spans 7 columns"
+    );
+    assert!(!html.contains("colspan=\"8\""), "no longer 8 columns");
+}
+
+#[test]
+fn non_breach_rows_carry_no_live_subtag() {
+    // A cleared row is not a breach ⇒ no live/judged sub-tag at all (no dash).
+    let cleared = breach_finding("endpoint/a", Verdict::Refuted("internal".into()));
+    let view = build_findings_view(
+        "prod".into(),
+        &[cleared],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    assert!(!html.contains("subtag-live"));
+    assert!(!html.contains("subtag-judged"));
+    assert!(!html.contains("subtag-none"));
+}
+
+// ---------------------------------------------------------------------------
+// Item 1 — SHADOW reads as a warning chip; ENFORCE stays calm.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shadow_mode_renders_the_warning_pill() {
+    // judging_readiness is armed:false ⇒ SHADOW.
+    let strip = build_status_strip("prod".into(), &judging_readiness(), Some(SystemTime::now()));
+    let html = page::stub_page(&strip, super::view_model::props::Tab::Findings, "x").into_string();
+    assert!(html.contains("mode-shadow warn"), "shadow is the warn pill");
+    assert!(html.contains("SHADOW"), "labelled SHADOW");
+    assert!(html.contains("\u{26A0}"), "carries the ⚠ warning glyph");
+    assert!(
+        html.contains("proposes, never acts"),
+        "states it only proposes"
+    );
+    assert!(
+        !html.contains("ENFORCE"),
+        "not the enforce reading in shadow"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Invariant #6 — untrusted free-text is escaped at render.
 // ---------------------------------------------------------------------------
 

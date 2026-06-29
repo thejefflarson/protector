@@ -18,12 +18,10 @@ use super::props::{
 /// (argocd → ~120 secrets), collapsed to `→ ×N` rather than listed as alarms (brief §5/§10).
 const FANOUT_THRESHOLD: usize = 8;
 
-/// Map a finding's entry node key to a kind glyph. An internet foothold is the globe; the
-/// other kinds get a compact glyph so the entry column reads structurally.
-fn entry_glyph(key: &str, foothold: bool) -> String {
-    if foothold {
-        return "\u{1F310}".to_string(); // 🌐
-    }
+/// Map a node key to its kind glyph (workload ▢ / secret 🔑 / host 🖥 / capability ⚡ / …) so a
+/// node carries its kind without colour (style guide principle 3). The single source of truth for
+/// the node-kind glyph seam — used for the entry column AND every node in the path-viz chain.
+fn node_kind_glyph(key: &str) -> &'static str {
     match NodeKey::kind_of(key) {
         "workload" => "\u{25A2}",   // ▢
         "secret" => "\u{1F511}",    // 🔑
@@ -34,7 +32,15 @@ fn entry_glyph(key: &str, foothold: bool) -> String {
         "capability" => "\u{26A1}", // ⚡
         _ => "\u{2022}",            // •
     }
-    .to_string()
+}
+
+/// The glyph for a finding's entry node. An internet foothold is the globe; otherwise the node's
+/// kind glyph.
+fn entry_glyph(key: &str, foothold: bool) -> String {
+    if foothold {
+        return "\u{1F310}".to_string(); // 🌐
+    }
+    node_kind_glyph(key).to_string()
 }
 
 /// Project a CVE evidence record into its props (the subordinate severity channel).
@@ -103,16 +109,28 @@ fn evidence_summary(ev: &EntryEvidence) -> EvidenceSummary {
     }
 }
 
-/// Map the proven path's hops, marking structural (substrate) hops muted and the cut point.
-/// `cut` is the cut signature (`from -[relation]-> to`); a hop matching it is marked.
-fn path_props(path: &[PathStep], cut: Option<&str>) -> Vec<HopProps> {
+/// Map the proven path's hops into the chain-diagram props, marking structural (substrate) hops
+/// muted and the cut point. `cut` is the cut signature (`from -[relation]-> to`); a hop matching
+/// it is marked. `foothold` makes the very first node (the entry) read as the internet front door
+/// (🌐) rather than its bare kind. Each node carries its kind glyph so the chain reads
+/// structurally (brief §3).
+fn path_props(path: &[PathStep], cut: Option<&str>, foothold: bool) -> Vec<HopProps> {
     path.iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(i, h)| {
             let signature = format!("{} -[{}]-> {}", h.from, h.relation, h.to);
+            // The first hop's `from` is the entry: a foothold entry is the internet front door.
+            let from_glyph = if i == 0 && foothold {
+                "\u{1F310}".to_string() // 🌐
+            } else {
+                node_kind_glyph(&h.from).to_string()
+            };
             HopProps {
                 from: NodeKey::short_of(&h.from).to_string(),
+                from_glyph,
                 relation: h.relation.clone(),
                 to: NodeKey::short_of(&h.to).to_string(),
+                to_glyph: node_kind_glyph(&h.to).to_string(),
                 structural: is_structural_relation(&h.relation),
                 is_cut: cut == Some(signature.as_str()),
             }
@@ -168,7 +186,7 @@ pub(super) fn finding_props(f: &Finding, judgements: &[Judgement]) -> FindingPro
         evidence_summary: evidence_summary(&f.evidence),
         disposition: f.disposition.clone(),
         verdict_summary: f.verdict.as_ref().map(|v| v.summary()),
-        path: path_props(&f.path, f.cut.as_deref()),
+        path: path_props(&f.path, f.cut.as_deref(), f.foothold),
         cut: f.cut.clone(),
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),

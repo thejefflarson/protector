@@ -1,7 +1,8 @@
 //! The expand-in-place "why" panel for a finding (brief §5): the verbatim verdict → the proven
-//! path as a text hop-list (structural hops muted, the cut point marked) → the evidence tables
-//! → the proposed/applied cut + its self-revert condition → the "show model prompt" disclosure
-//! to the raw judgement. Pure component; no domain types; all free-text auto-escaped.
+//! path as a vertical chain diagram (structural hops muted, the severable edge marked ✂) → the
+//! evidence tables → the proposed/applied cut + its self-revert condition → the "show model
+//! prompt" disclosure to the raw judgement. Pure component; no domain types; all free-text
+//! auto-escaped.
 
 use maud::{Markup, html};
 
@@ -35,8 +36,11 @@ fn verdict_block(f: &FindingProps) -> Markup {
     }
 }
 
-/// The proven path as a text hop-list: `entry ─relation→ … → objective`. Structural hops are
-/// muted; the cut point is marked.
+/// The proven path as a **vertical chain diagram** (brief §3): the internet/entry node at the
+/// top, each hop flowing down a connector spine to the objective node at the bottom. Each node
+/// carries its node-kind glyph + label; the relation is the labelled connector between nodes; the
+/// severable edge is marked with a prominent ✂ "cut here". Structural hops are muted; the
+/// objective node is emphasized. Honest when no path is recorded.
 fn path_block(path: &[HopProps]) -> Markup {
     html! {
         section.detail-section.path-block {
@@ -44,9 +48,19 @@ fn path_block(path: &[HopProps]) -> Markup {
             @if path.is_empty() {
                 p.muted { "no path recorded" }
             } @else {
-                ol.hop-list {
-                    @for hop in path {
-                        (hop_item(hop))
+                ol.chain aria-label="proven attack path, entry to objective" {
+                    // The entry node (top of the chain) — the very first hop's `from`.
+                    (chain_node(&path[0].from_glyph, &path[0].from, true, false))
+                    // Then, for each hop, the labelled connector edge and its `to` node. The last
+                    // hop's `to` is the objective node, emphasized.
+                    @for (i, hop) in path.iter().enumerate() {
+                        (chain_edge(hop))
+                        (chain_node(
+                            &hop.to_glyph,
+                            &hop.to,
+                            false,
+                            i == path.len() - 1, // the final node is the objective
+                        ))
                     }
                 }
             }
@@ -54,20 +68,50 @@ fn path_block(path: &[HopProps]) -> Markup {
     }
 }
 
-/// One hop in the list. A structural (substrate) hop is muted; the cut hop carries the scissors.
-fn hop_item(hop: &HopProps) -> Markup {
-    let cls = if hop.structural {
-        "hop hop-structural"
+/// One node in the vertical chain: its node-kind glyph + label on its own line, threaded onto the
+/// connector spine. The entry node and the objective node are emphasized; intermediate nodes are
+/// plain (structural muting rides on the *edge*, not the node).
+fn chain_node(glyph: &str, label: &str, is_entry: bool, is_objective: bool) -> Markup {
+    let role = if is_entry {
+        "chain-node chain-entry"
+    } else if is_objective {
+        "chain-node chain-objective"
     } else {
-        "hop"
+        "chain-node"
+    };
+    html! {
+        li class=(role) {
+            span.chain-dot aria-hidden="true" {}
+            span.chain-glyph { (glyph) }
+            span.chain-label { (label) }
+            @if is_objective {
+                span.chain-tag { "objective" }
+            } @else if is_entry {
+                span.chain-tag { "entry" }
+            }
+        }
+    }
+}
+
+/// The labelled connector edge between two nodes: the relation, riding the spine. A structural
+/// (substrate) edge is muted; the severable edge carries the prominent ✂ "cut here" marker in the
+/// breach colour — the actionable heart of the diagram (brief §3).
+fn chain_edge(hop: &HopProps) -> Markup {
+    let cls = if hop.is_cut {
+        "chain-edge chain-edge-cut"
+    } else if hop.structural {
+        "chain-edge chain-edge-structural"
+    } else {
+        "chain-edge"
     };
     html! {
         li class=(cls) {
-            span.hop-from { (hop.from) }
-            span.hop-rel { " \u{2500}[" (hop.relation) "]\u{2192} " }
-            span.hop-to { (hop.to) }
+            span.chain-rel { span.chain-rel-line aria-hidden="true" { "\u{2500}[" } (hop.relation) span.chain-rel-line aria-hidden="true" { "]\u{2192}" } }
             @if hop.is_cut {
-                span.hop-cut title="minimal cut severs here" { " \u{2702} cut" }
+                span.chain-cut title="minimal cut severs this edge" {
+                    span.chain-cut-glyph { "\u{2702}" }
+                    span.chain-cut-label { "cut here" }
+                }
             }
         }
     }

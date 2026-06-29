@@ -36,7 +36,6 @@ fn findings_table(v: &FindingsViewProps) -> Markup {
                     th.col-path scope="col" { "PATH" }
                     th.col-evidence scope="col" { "EVIDENCE" }
                     th.col-disposition scope="col" { "DISPOSITION" }
-                    th.col-live scope="col" { "LIVE?" }
                 }
             }
             tbody {

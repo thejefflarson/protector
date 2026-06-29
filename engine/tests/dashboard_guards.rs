@@ -145,6 +145,88 @@ fn page_composition_emits_no_inline_style() {
     );
 }
 
+/// Replace the contents of every `/* … */` block comment with spaces, preserving newlines (so
+/// line numbers are unchanged). CSS has only block comments, so this is sufficient.
+fn strip_block_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_comment = false;
+    while i < bytes.len() {
+        if !in_comment && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_comment = true;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+        } else if in_comment && i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            in_comment = false;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+        } else {
+            let c = bytes[i] as char;
+            out.push(if in_comment && c != '\n' { ' ' } else { c });
+            i += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn stylesheet_uses_tokens_not_stray_raw_px() {
+    // JEF-256: sizing/spacing must come from tokens (--space-*, --fs/--lh-*, geometry), not
+    // ad-hoc raw px values scattered through the rules. Mirrors the no-raw-hex spirit: raw `px`
+    // is allowed ONLY inside the `:root { … }` token-definition block (where the tokens are
+    // declared); anywhere else it is a stray one-off and fails the build.
+    let css = repo_root().join("engine/web/dist/dashboard.css");
+    let raw = std::fs::read_to_string(&css).unwrap_or_else(|e| panic!("reading {css:?}: {e}"));
+    // Blank out `/* … */` comments (CSS comments are always block form), preserving newlines so
+    // line numbers stay accurate — a comment that mentions "4px" must not trip the guard.
+    let src = strip_block_comments(&raw);
+
+    // Find the `:root { … }` token block span so we can exempt it.
+    let root_open = src
+        .find(":root")
+        .and_then(|i| src[i..].find('{').map(|j| i + j));
+    let (root_start, root_end) = match root_open {
+        Some(open) => {
+            let close = src[open..]
+                .find('}')
+                .map(|j| open + j)
+                .expect(":root block is closed");
+            (open, close)
+        }
+        None => (0, 0),
+    };
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut offset = 0usize;
+    for (n, line) in src.lines().enumerate() {
+        let line_start = offset;
+        offset += line.len() + 1; // +1 for the stripped '\n'
+        // Skip lines that fall inside the :root token block.
+        if line_start >= root_start && line_start <= root_end {
+            continue;
+        }
+        // A stray raw px is a digit immediately followed by `px` (e.g. `12px`). Token references
+        // (`var(--space-2)`) and unitless / rem / % / ch values are fine. Comments are already
+        // blanked out above.
+        let bytes = line.as_bytes();
+        for (k, w) in bytes.windows(2).enumerate() {
+            if w == b"px" && k > 0 && bytes[k - 1].is_ascii_digit() {
+                offenders.push(format!("{}:{}  {}", css.display(), n + 1, line.trim()));
+                break;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the stylesheet must size everything from tokens — no stray raw px outside :root \
+         (JEF-256):\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn served_assets_exist_and_are_same_origin() {
     // The CSS/JS are served via include_str! from web/dist — they must exist and carry no
