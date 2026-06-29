@@ -5,8 +5,12 @@
 
 use maud::{DOCTYPE, Markup, html};
 
-use super::components::{findings_view, nav_bar, status_strip, stub_view};
-use super::view_model::props::{FindingsViewProps, StatusStripProps, Tab};
+use super::components::{
+    activity_view, findings_view, nav_bar, readiness_view, status_strip, trust_view,
+};
+use super::view_model::props::{
+    ActivityViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps, Tab, TrustViewProps,
+};
 
 /// The live-region id the JS polls and swaps. The status strip + active view live inside it so
 /// a poll re-pulls readiness (a model that just went down flips the banner) and the findings.
@@ -17,10 +21,20 @@ pub fn findings_page(v: &FindingsViewProps) -> Markup {
     document(&v.strip, Tab::Findings, findings_view(v))
 }
 
-/// A full phase-2 stub page (Trust / Readiness / Activity): the persistent strip + nav + the
-/// labelled placeholder, so the nav is navigable in phase 1.
-pub fn stub_page(strip: &StatusStripProps, tab: Tab, blurb: &str) -> Markup {
-    document(strip, tab, stub_view(tab, blurb))
+/// The full Trust (would-have-acted) page: the persistent strip + nav + the would-cut/left-alone
+/// diff.
+pub fn trust_page(v: &TrustViewProps) -> Markup {
+    document(&v.strip, Tab::Trust, trust_view(v))
+}
+
+/// The full Readiness (coverage) page: the persistent strip + nav + the per-input coverage rows.
+pub fn readiness_page(v: &ReadinessViewProps) -> Markup {
+    document(&v.strip, Tab::Readiness, readiness_view(v))
+}
+
+/// The full Activity (audit) page: the persistent strip + nav + the reversion log + judgement ring.
+pub fn activity_page(v: &ActivityViewProps) -> Markup {
+    document(&v.strip, Tab::Activity, activity_view(v))
 }
 
 /// The `/fragment` body for the Findings tab — only the live region's INNER content, for the
@@ -29,9 +43,19 @@ pub fn findings_fragment(v: &FindingsViewProps) -> Markup {
     live_region_inner(&v.strip, Tab::Findings, findings_view(v))
 }
 
-/// The `/fragment` body for a stub tab.
-pub fn stub_fragment(strip: &StatusStripProps, tab: Tab, blurb: &str) -> Markup {
-    live_region_inner(strip, tab, stub_view(tab, blurb))
+/// The `/fragment` body for the Trust tab.
+pub fn trust_fragment(v: &TrustViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Trust, trust_view(v))
+}
+
+/// The `/fragment` body for the Readiness tab.
+pub fn readiness_fragment(v: &ReadinessViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Readiness, readiness_view(v))
+}
+
+/// The `/fragment` body for the Activity tab.
+pub fn activity_fragment(v: &ActivityViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Activity, activity_view(v))
 }
 
 /// The document shell: head with same-origin assets (no third-party CSS/JS), then the live

@@ -38,6 +38,7 @@ use axum::routing::get;
 
 use protector::engine::dashboard::view_model::props::Tab;
 use protector::engine::dashboard::{DashboardState, page, view_model};
+use protector::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage};
 use protector::engine::reason::adjudicate::Verdict;
 use protector::engine::state::{
     BakeStats, CveEvidence, EntryEvidence, Finding, Findings, Judgement, JudgementLog, ModelHealth,
@@ -175,13 +176,96 @@ impl Scenario {
 }
 
 /// Fresh shared handles for one scenario render. Cheap; rebuilt per request so each scenario
-/// renders from clean state.
-fn fresh_handles() -> (Arc<Findings>, Arc<JudgementLog>, Arc<ReversionLog>) {
+/// renders from clean state. The decision journal is disabled by default (empty Trust report);
+/// scenarios that want a populated would-have-acted diff swap in a [`sample_journal`].
+fn fresh_handles() -> (
+    Arc<Findings>,
+    Arc<JudgementLog>,
+    Arc<ReversionLog>,
+    Arc<DecisionJournal>,
+) {
     (
         Arc::new(Findings::new()),
         Arc::new(JudgementLog::new()),
         Arc::new(ReversionLog::new()),
+        Arc::new(DecisionJournal::disabled()),
     )
+}
+
+/// A file-backed decision journal seeded with a representative would-have-acted mix, so the Trust
+/// tab shows real would-cut + left-alone rows in the covered scenarios. Records (most recent
+/// "now"): an OPEN would-act (still standing), a SHORT-LIVED would-act (opened then cleared), a
+/// COVERAGE-GAP would-act (affirmed with no CVE/behavioral backing), and two LEFT-ALONE clears.
+/// Written under a unique temp path per build so a `?scenario=` switch never collides.
+fn sample_journal() -> Arc<DecisionJournal> {
+    let path = std::env::temp_dir().join(format!(
+        "protector-preview-journal-{}.jsonl",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    // Start clean so a re-render doesn't accumulate episodes.
+    let _ = std::fs::remove_file(&path);
+    let journal = DecisionJournal::open(&path);
+
+    let backed = || {
+        Some(EnrichmentCoverage {
+            cves: vec!["CVE-2024-3094".into()],
+            behavioral: true,
+        })
+    };
+    let unbacked = || {
+        Some(EnrichmentCoverage {
+            cves: vec![],
+            behavioral: false,
+        })
+    };
+
+    // OPEN would-act — still the latest verdict, so the cut would still be standing now.
+    journal.record(Decision::Breach {
+        entry: "deployment/edge/api-gateway".into(),
+        objectives: 1,
+        verdict: "exploitable — KEV-listed RCE loaded at runtime; reaches the live payments key"
+            .into(),
+        coverage: backed(),
+    });
+    // SHORT-LIVED would-act — opened then immediately cleared (the likely-FP signature).
+    journal.record(Decision::Breach {
+        entry: "deployment/web/storefront".into(),
+        objectives: 1,
+        verdict: "exploitable — transient: session key briefly reachable during a rollout".into(),
+        coverage: backed(),
+    });
+    journal.record(Decision::Breach {
+        entry: "deployment/web/storefront".into(),
+        objectives: 1,
+        verdict: "not exploitable — rollout completed; the edge is mTLS-gated again".into(),
+        coverage: backed(),
+    });
+    // COVERAGE-GAP would-act — affirmed with NO CVE/behavioral backing (scrutinise first).
+    journal.record(Decision::Breach {
+        entry: "deployment/cd/argocd-server".into(),
+        objectives: 7,
+        verdict: "exploitable — broad reach to repo-cred secrets (no CVE/runtime backing)".into(),
+        coverage: unbacked(),
+    });
+    // LEFT-ALONE clears — proven paths the model deliberately cleared (the trust half).
+    journal.record(Decision::Breach {
+        entry: "deployment/web/marketing-site".into(),
+        objectives: 1,
+        verdict: "not exploitable — no reachable secret objective; only a public CDN origin".into(),
+        coverage: backed(),
+    });
+    journal.record(Decision::Breach {
+        entry: "daemonset/obs/node-exporter".into(),
+        objectives: 1,
+        verdict: "not exploitable — scrape token is read-only metrics scope; no lateral path"
+            .into(),
+        coverage: backed(),
+    });
+
+    Arc::new(journal)
 }
 
 /// A representative bake/coverage summary used by the covered scenarios.
@@ -211,7 +295,7 @@ fn covered_config(model_attached: bool) -> ReadinessConfig {
 
 /// `clear` — all findings Refuted, model judging, fully covered → the green all-clear.
 fn build_clear() -> DashboardState {
-    let (findings, judgements, reversions) = fresh_handles();
+    let (findings, judgements, reversions, _journal) = fresh_handles();
     let now = Instant::now();
     let verdicts = findings.verdicts();
 
@@ -288,13 +372,15 @@ fn build_clear() -> DashboardState {
         findings,
         judgements,
         reversions,
+        // The clear scenario still has would-have-acted history to calibrate trust against.
+        decision_journal: sample_journal(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
     }
 }
 
 /// `watching` — no breach, but ≥1 awaiting + a degraded feed → the elevated ochre "watching".
 fn build_watching() -> DashboardState {
-    let (findings, judgements, reversions) = fresh_handles();
+    let (findings, judgements, reversions, _journal) = fresh_handles();
     let now = Instant::now();
     let verdicts = findings.verdicts();
 
@@ -359,6 +445,7 @@ fn build_watching() -> DashboardState {
         findings,
         judgements,
         reversions,
+        decision_journal: sample_journal(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
     }
 }
@@ -366,7 +453,7 @@ fn build_watching() -> DashboardState {
 /// `breach` — the rich breach sample (the default): a breach with CVE/KEV/path/cut/judgement,
 /// plus awaiting/uncertain/cleared rows and an argocd fan-out.
 fn build_breach() -> DashboardState {
-    let (findings, judgements, reversions) = fresh_handles();
+    let (findings, judgements, reversions, _journal) = fresh_handles();
     let now = Instant::now();
     let verdicts = findings.verdicts();
 
@@ -482,6 +569,7 @@ fn build_breach() -> DashboardState {
         findings,
         judgements,
         reversions,
+        decision_journal: sample_journal(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
     }
 }
@@ -489,7 +577,9 @@ fn build_breach() -> DashboardState {
 /// `blind` — model down / warming → the blind/warming banner. Findings exist but no model is
 /// answering, so nothing can be judged.
 fn build_blind() -> DashboardState {
-    let (findings, judgements, reversions) = fresh_handles();
+    // The blind scenario keeps the journal DISABLED so the Trust tab shows its honest
+    // "no decisions journaled yet" empty state (the empty case the brief asks for).
+    let (findings, judgements, reversions, journal) = fresh_handles();
     let now = Instant::now();
     let verdicts = findings.verdicts();
 
@@ -530,6 +620,7 @@ fn build_blind() -> DashboardState {
         findings,
         judgements,
         reversions,
+        decision_journal: journal,
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
     }
 }
@@ -584,74 +675,68 @@ fn resolve_tab(tab: Option<&str>) -> Tab {
     }
 }
 
-/// The stub-tab blurbs (mirrors the shipped wording so the stub tabs read identically).
-fn stub_blurb(tab: Tab) -> &'static str {
-    match tab {
-        Tab::Trust => {
-            "Would-have-acted: the arm/don't-arm evidence — would-cut (sustained-first, \
-             short-lived = likely FP, coverage-gap = scrutinise) vs left-alone (the trust half)."
-        }
-        Tab::Readiness => {
-            "Coverage detail: one row per decision input (model / KEV / EPSS / \
-             Falco / eBPF / journal / arm-state) with state, why it matters, and the env var to \
-             enable it."
-        }
-        Tab::Activity => {
-            "Audit: the self-reverted cuts (the safety story) plus the judgement \
-             ring (prompt/reply per judgement, for debugging the model)."
-        }
-        Tab::Findings => "",
-    }
+/// Build the persistent status strip the same way production does — from the live findings +
+/// judgement snapshots, so its honesty reading reflects the real cluster posture on every tab.
+fn preview_strip(state: &DashboardState) -> view_model::props::StatusStripProps {
+    view_model::build_status_strip(
+        state.cluster.clone(),
+        &state.findings.snapshot(),
+        &state.judgements.snapshot(),
+        &state.readiness(),
+        state.findings.last_pass(),
+    )
 }
 
-/// Render the full findings/stub page through the dashboard's PUBLIC render path.
+/// Build the Findings view props through the public render path.
+fn preview_findings(state: &DashboardState) -> view_model::props::FindingsViewProps {
+    view_model::build_findings_view(
+        state.cluster.clone(),
+        &state.findings.snapshot(),
+        &state.judgements.snapshot(),
+        &state.readiness(),
+        state.findings.last_pass(),
+    )
+}
+
+/// Build the Trust view props through the public render path.
+fn preview_trust(state: &DashboardState) -> view_model::props::TrustViewProps {
+    use protector::engine::state::default_window_report;
+    let report = default_window_report(&state.decision_journal);
+    view_model::build_trust_view(preview_strip(state), &report)
+}
+
+/// Build the Readiness view props through the public render path.
+fn preview_readiness(state: &DashboardState) -> view_model::props::ReadinessViewProps {
+    view_model::build_readiness_view(preview_strip(state), &state.readiness())
+}
+
+/// Build the Activity view props through the public render path.
+fn preview_activity(state: &DashboardState) -> view_model::props::ActivityViewProps {
+    view_model::build_activity_view(
+        preview_strip(state),
+        &state.reversions.snapshot(),
+        &state.judgements.snapshot(),
+    )
+}
+
+/// Render the full page for a tab through the dashboard's PUBLIC render path (all four real).
 fn render_page(state: &DashboardState, tab: Tab) -> String {
-    let readiness = state.readiness();
-    let last_pass = state.findings.last_pass();
     let markup = match tab {
-        Tab::Findings => {
-            let findings = state.findings.snapshot();
-            let judgements = state.judgements.snapshot();
-            let props = view_model::build_findings_view(
-                state.cluster.clone(),
-                &findings,
-                &judgements,
-                &readiness,
-                last_pass,
-            );
-            page::findings_page(&props)
-        }
-        other => {
-            let strip =
-                view_model::build_status_strip(state.cluster.clone(), &readiness, last_pass);
-            page::stub_page(&strip, other, stub_blurb(other))
-        }
+        Tab::Findings => page::findings_page(&preview_findings(state)),
+        Tab::Trust => page::trust_page(&preview_trust(state)),
+        Tab::Readiness => page::readiness_page(&preview_readiness(state)),
+        Tab::Activity => page::activity_page(&preview_activity(state)),
     };
     markup.into_string()
 }
 
 /// Render the `/fragment` live-region inner content through the public render path.
 fn render_fragment(state: &DashboardState, tab: Tab) -> String {
-    let readiness = state.readiness();
-    let last_pass = state.findings.last_pass();
     let markup = match tab {
-        Tab::Findings => {
-            let findings = state.findings.snapshot();
-            let judgements = state.judgements.snapshot();
-            let props = view_model::build_findings_view(
-                state.cluster.clone(),
-                &findings,
-                &judgements,
-                &readiness,
-                last_pass,
-            );
-            page::findings_fragment(&props)
-        }
-        other => {
-            let strip =
-                view_model::build_status_strip(state.cluster.clone(), &readiness, last_pass);
-            page::stub_fragment(&strip, other, stub_blurb(other))
-        }
+        Tab::Findings => page::findings_fragment(&preview_findings(state)),
+        Tab::Trust => page::trust_fragment(&preview_trust(state)),
+        Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),
+        Tab::Activity => page::activity_fragment(&preview_activity(state)),
     };
     markup.into_string()
 }

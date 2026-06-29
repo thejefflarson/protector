@@ -26,11 +26,14 @@ use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
+use super::journal::DecisionJournal;
 use super::state::{
     BakeStats, Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
-    derive_readiness,
+    default_window_report, derive_readiness,
 };
-use view_model::props::{StatusStripProps, Tab};
+use view_model::props::{
+    ActivityViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps, Tab, TrustViewProps,
+};
 
 /// The light-theme stylesheet, generated from the `docs/STYLEGUIDE.md` tokens. Served
 /// same-origin via `include_str!` — no third-party CSS (the zero-egress / no-CDN rule).
@@ -40,14 +43,6 @@ const DASHBOARD_CSS: &str = include_str!("../../../web/dist/dashboard.css");
 /// that preserves scroll/expansion. Served same-origin.
 const DASHBOARD_JS: &str = include_str!("../../../web/dist/dashboard.js");
 
-/// The blurb shown on each phase-2 stub tab, so the nav is honest about what is coming.
-const TRUST_BLURB: &str = "Would-have-acted: the arm/don't-arm evidence \u{2014} would-cut (sustained-first, short-lived \
-     = likely FP, coverage-gap = scrutinise) vs left-alone (the trust half).";
-const READINESS_BLURB: &str = "Coverage detail: one row per decision input (model / KEV / EPSS / Falco / eBPF / journal / \
-     arm-state) with state, why it matters, and the env var to enable it.";
-const ACTIVITY_BLURB: &str = "Audit: the self-reverted cuts (the safety story) plus the judgement ring (prompt/reply per \
-     judgement, for debugging the model).";
-
 /// The shared, read-only state the dashboard renders from — the SAME `Arc` handles the engine
 /// writes each pass. The dashboard never mutates them; it only snapshots. Cheaply cloneable.
 #[derive(Clone)]
@@ -56,11 +51,14 @@ pub struct DashboardState {
     /// freshness / bake / readiness-config / model-health the engine stamps.
     pub findings: Arc<Findings>,
     /// The bounded judgement ring (prompt + reply per judgement) for the verbatim "show model
-    /// prompt" disclosure.
+    /// prompt" disclosure (Findings drill-in + the Activity judgement ring).
     pub judgements: Arc<JudgementLog>,
-    /// The self-reverted-cuts ring (the audit/safety story) — read by the phase-2 Activity tab.
-    #[allow(dead_code)]
+    /// The self-reverted-cuts ring (the audit/safety story) — read by the Activity tab.
     pub reversions: Arc<ReversionLog>,
+    /// The durable decision journal — replayed read-only to build the Trust (would-have-acted)
+    /// report. Named `decision_journal` (not `journal`) so it never collides with the
+    /// `JudgementLog` the run-loop binds as `journal`.
+    pub decision_journal: Arc<DecisionJournal>,
     /// The cluster label shown in the strip.
     pub cluster: String,
 }
@@ -80,8 +78,25 @@ impl DashboardState {
         derive_readiness(&config, health, &bake, last_pass)
     }
 
+    /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The
+    /// strip is shown on EVERY tab, so its honesty reading reflects the real cluster posture even
+    /// on a secondary view — a breach in Findings keeps the strip non-green on Trust/Readiness/
+    /// Activity too. Pure read of the live handles.
+    fn status_strip(&self) -> StatusStripProps {
+        let findings = self.findings.snapshot();
+        let judgements = self.judgements.snapshot();
+        let readiness = self.readiness();
+        view_model::build_status_strip(
+            self.cluster.clone(),
+            &findings,
+            &judgements,
+            &readiness,
+            self.findings.last_pass(),
+        )
+    }
+
     /// Build the whole Findings view props from the live state.
-    fn findings_view(&self) -> view_model::props::FindingsViewProps {
+    fn findings_view(&self) -> FindingsViewProps {
         let findings = self.findings.snapshot();
         let judgements = self.judgements.snapshot();
         let readiness = self.readiness();
@@ -94,10 +109,26 @@ impl DashboardState {
         )
     }
 
-    /// Build the persistent status strip alone (for the phase-2 stub tabs).
-    fn status_strip(&self) -> StatusStripProps {
+    /// Build the Trust (would-have-acted) view props: the persistent strip + the would-cut /
+    /// left-alone diff, aggregated read-only over the default window from the decision journal.
+    fn trust_view(&self) -> TrustViewProps {
+        let report = default_window_report(&self.decision_journal);
+        view_model::build_trust_view(self.status_strip(), &report)
+    }
+
+    /// Build the Readiness (coverage) view props: the persistent strip + one row per decision
+    /// input, weakening-when-absent inputs first.
+    fn readiness_view(&self) -> ReadinessViewProps {
         let readiness = self.readiness();
-        view_model::build_status_strip(self.cluster.clone(), &readiness, self.findings.last_pass())
+        view_model::build_readiness_view(self.status_strip(), &readiness)
+    }
+
+    /// Build the Activity (audit) view props: the persistent strip + the self-reverted-cuts log +
+    /// the judgement ring (both newest-first).
+    fn activity_view(&self) -> ActivityViewProps {
+        let reversions = self.reversions.snapshot();
+        let judgements = self.judgements.snapshot();
+        view_model::build_activity_view(self.status_strip(), &reversions, &judgements)
     }
 }
 
@@ -118,22 +149,13 @@ impl TabQuery {
     }
 }
 
-/// The blurb for a stub tab.
-fn stub_blurb(tab: Tab) -> &'static str {
-    match tab {
-        Tab::Trust => TRUST_BLURB,
-        Tab::Readiness => READINESS_BLURB,
-        Tab::Activity => ACTIVITY_BLURB,
-        Tab::Findings => "",
-    }
-}
-
 /// `GET /` — the full page for the requested tab (default Findings).
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
-    let tab = q.resolve();
-    let markup = match tab {
+    let markup = match q.resolve() {
         Tab::Findings => page::findings_page(&state.findings_view()),
-        other => page::stub_page(&state.status_strip(), other, stub_blurb(other)),
+        Tab::Trust => page::trust_page(&state.trust_view()),
+        Tab::Readiness => page::readiness_page(&state.readiness_view()),
+        Tab::Activity => page::activity_page(&state.activity_view()),
     };
     Html(markup.into_string())
 }
@@ -142,10 +164,11 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 /// (preserving scroll/expansion). Re-pulls readiness so a model that just went down flips the
 /// banner immediately (brief §7).
 async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
-    let tab = q.resolve();
-    let markup = match tab {
+    let markup = match q.resolve() {
         Tab::Findings => page::findings_fragment(&state.findings_view()),
-        other => page::stub_fragment(&state.status_strip(), other, stub_blurb(other)),
+        Tab::Trust => page::trust_fragment(&state.trust_view()),
+        Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
+        Tab::Activity => page::activity_fragment(&state.activity_view()),
     };
     Html(markup.into_string())
 }
