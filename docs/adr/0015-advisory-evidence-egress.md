@@ -2,7 +2,7 @@
 
 - Status: Superseded in part by the JEF-242 amendment below — the advisory feed is RETIRED; only the KEV feed remains. The zero-egress + injection-safety rules this ADR established still govern every mounted feed (KEV today).
 - Date: 2026-06-22 (amended 2026-06-28: advisory feed retired, JEF-242)
-- Relates to: [0013](0013-proof-winnows-model-decides.md) (the model is promote-capable, so its inputs are a security boundary), [0014](0014-behavioral-telemetry-ebpf.md) (same "in-cluster, no egress of cluster data" posture), [0016](0016-severity-vs-urgency.md) (KEV's `exploited_in_wild` is a distinct exploitation signal kept by this amendment)
+- Relates to: [0013](0013-proof-winnows-model-decides.md) (the model is promote-capable, so its inputs are a security boundary), [0014](0014-behavioral-telemetry-ebpf.md) (same "in-cluster, no egress of cluster data" posture), [0016](0016-severity-vs-urgency.md) (KEV's `exploited_in_wild` is a distinct exploitation signal kept by this amendment), [0020](0020-signature-continuity.md) (the ADR-0020 amendment below carves out Rekor transparency-log reads as a sanctioned outbound lane for signature continuity)
 
 ## Context
 
@@ -168,6 +168,37 @@ because the only untrusted free-text reaching the promote-capable model is Trivy
 which is still capped → sanitized → fenced and charged to the per-entry aggregate budget
 (JEF-106). The advisory-only caps (`summary`/`fix_ref`/CWE) are removed with the field they
 guarded; the caps that also guard `title` stay.
+
+## Amendment (ADR-0020): Rekor transparency-log reads are a sanctioned outbound lane for signature continuity
+
+[ADR-0020](0020-signature-continuity.md) (signature continuity) introduces a **deliberate,
+operator-accepted exception** to this ADR's zero-egress posture: the engine may read the
+public **Rekor transparency log** to verify image-signature inclusion, to bootstrap a repo's
+signing baseline from the public signing history, and to detect registry↔log divergence.
+
+This must be read against this ADR's own core rejection (§Context.1, §Alternatives): a
+*per-CVE* OSV/NVD lookup was rejected precisely because it leaks the cluster's vulnerability
+profile to a third party on every pass. A Rekor query keyed on an image digest/identity has
+the *same shape* — it leaks **which images the cluster runs** to the public log operator — so
+honesty demands naming the tension rather than hiding it. We accept it, with these bounds:
+
+- **The leaked datum is weaker.** Image identifiers are already public (pulled from public
+  registries); a digest is not a secret. This is a materially milder leak than the cluster's
+  *vulnerability* profile (which reveals exploitable weaknesses) — the distinction this ADR
+  already draws between "the same KEV catalogue for everyone" (fine) and "a per-CVE lookup"
+  (rejected). The security graph and evidence still **never** leave the cluster.
+- **It is partly already happening.** Cosign keyless verification *already* consults Rekor
+  for the inclusion proof — a signer identity does not resolve without it. This amendment
+  formalizes that and extends it to history/divergence queries.
+- **The value is the cold-start fix.** Reading the public signing history defeats the
+  weakest part of the continuity model (TOFU trust-on-first-*local*-use); see ADR-0020 §4.
+- **Air-gapped escape hatch preserved (verbatim with §1's posture).** A self-hosted Rekor
+  mirror — or disabling the transparency-log lane — returns the engine to full zero-egress;
+  signature *inventory* (signed/invalid/not-signed) still works offline, only the public
+  *history* bootstrap and divergence check go dark.
+
+The KEV/advisory mounted-feed rules above are unchanged; this carve-out is scoped to the
+Rekor reads that signature continuity needs.
 
 ## Consequences
 

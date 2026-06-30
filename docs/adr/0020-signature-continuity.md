@@ -58,9 +58,10 @@ pre-declared.
 ## Decision
 
 **Supply-chain trust is modeled as signature continuity, observed for every image and
-learned per source — not as a prefix-gated check against one identity.** Three layers,
-each a strict superset of what the old gate did, rolled out audit-first to honor the
-shadow invariant (ADR-0016: the engine proposes, it never acts by surprise).
+learned per source — not as a prefix-gated check against one identity.** Three layers
+(plus a cross-cutting transparency-log check, point 4), each a strict superset of what
+the old gate did, rolled out audit-first to honor the shadow invariant (ADR-0016: the
+engine proposes, it never acts by surprise).
 
 1. **Observe every image (no trust config required).** For each image admitted *and*
    already running (the engine watches Pods; existing workloads are swept through the
@@ -83,6 +84,25 @@ shadow invariant (ADR-0016: the engine proposes, it never acts by surprise).
    finding and, in enforced scope, blocked. Known-benign exceptions (a publisher that
    legitimately stopped signing, a deliberate signer rotation) are managed by an
    explicit pin/acknowledgement, not by disabling the signal.
+
+4. **Verify against the public transparency log (Rekor) — sanctioned egress.** Cosign's
+   keyless verification *already* checks Rekor: an image's signer identity only resolves
+   if the signature's inclusion proof verifies against the public transparency log, so
+   layer 1's observation inherently consults Rekor. We go further and use Rekor as an
+   authoritative **history** source, in two ways that materially strengthen the model:
+   (a) **bootstrap the baseline** for a repo from Rekor's append-only signing history —
+   so a repo arrives with real provenance going back to day one, instead of TOFU's "trust
+   whatever we first locally saw" (this is the direct fix for the cold-start weakness in
+   the Consequences below); and (b) **detect registry↔log divergence** — a signature
+   present in Rekor while the registry serves an unsigned/different image (or the reverse)
+   is tampering that neither source reveals alone. This is a **deliberate, operator-
+   accepted exception to the zero-egress posture (ADR-0015), recorded in that ADR's
+   amendment.** It is the *milder* leak ADR-0015 distinguishes: a Rekor lookup keyed on an
+   image digest/identity leaks *which images the cluster runs* to the public log operator —
+   image identifiers that are already public (pulled from public registries) — **not** the
+   cluster's vulnerability profile (the per-CVE leak ADR-0015 rejected) and **not** the
+   security graph or evidence (which still never leave). A self-hosted Rekor mirror erases
+   even the identifier leak for operators who want full zero-egress.
 
 The old prefix-gated single-identity gate becomes **one pinned special case** of layer
 3: "repo prefix `ghcr.io/<org>` must always be signed by identity `X`" is a manually
@@ -118,11 +138,16 @@ What becomes harder / the downsides we accept:
 - **More verification work.** Inspecting every distinct image's signature is more
   outbound verification than gating a prefix. Bounded by the verification cache + the
   `MAX_IMAGES` cap, but it scales with the number of distinct images, not with our org.
-- **TOFU cold-start is trust-on-*first*-use.** An image that was malicious *before*
-  protector first observed it looks clean — the baseline is "what we first saw," not
-  ground truth. The model catches *changes from* the baseline, not a poisoned origin;
-  a pin is the only way to assert ground truth up front. This is an honest limitation,
-  surfaced as such (a freshly-learned baseline is weaker evidence than an aged one).
+- **TOFU cold-start is trust-on-*first*-use — but Rekor narrows it.** Absent the
+  transparency-log bootstrap, an image malicious *before* protector first observed it
+  looks clean: the baseline is "what we first saw," not ground truth. The Rekor history
+  bootstrap (Decision §4) closes most of this gap — a repo's signing provenance is read
+  from the public log going back to day one, not just our local observation window — so
+  a freshly-deployed protector inherits real history instead of starting blind. What
+  remains is the genuinely irreducible case: a repo with *no* public signing history at
+  all (never signed anywhere), where first-local-observation is still the only baseline
+  and only a pin asserts ground truth. A freshly-learned, Rekor-unbacked baseline is
+  surfaced as weaker evidence than an aged or log-corroborated one.
 - **False positives on legitimate change.** A publisher that stops signing, or rotates
   signing identity, trips the regression signal. We accept this and manage it with an
   explicit pin/ack, deliberately *not* a global off-switch — silencing the channel must

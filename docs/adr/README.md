@@ -22,7 +22,7 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0012](0012-exposure-observed-or-declared.md) | Exposure is observed where possible, declared (annotation) where it can't be — tunnels | Accepted |
 | [0013](0013-proof-winnows-model-decides.md) | Proof winnows the search space; the model makes the exploitability call (positive gate + breach-relevance) | Accepted (amended by 0016) |
 | [0014](0014-behavioral-telemetry-ebpf.md) | First-party behavioral telemetry via eBPF, behind a tool-agnostic port (potential vs actual) | Accepted |
-| [0015](0015-advisory-evidence-egress.md) | Advisory evidence is mounted-snapshot-only (zero egress); structurally extracted + capped for injection safety | Accepted |
+| [0015](0015-advisory-evidence-egress.md) | Advisory evidence is mounted-snapshot-only (zero egress); structurally extracted + capped for injection safety | Accepted (advisory feed retired per JEF-242; Rekor egress carve-out amended by 0020) |
 | [0016](0016-severity-vs-urgency.md) | The breach model: prove chains, enrich them, the model decides and isolates until clear | Accepted (amended by 0017) |
 | [0017](0017-isolation-persists-on-the-breach-condition.md) | Isolation persists on the breach condition: chain ∧ enrichment fingerprint (revert keys on `entry_fingerprint`) | Accepted |
 | [0018](0018-operator-configured-redacted-breach-notifier.md) | The breach notifier is the one sanctioned outbound path: operator-configured, off by default, redacted by default | Accepted |
