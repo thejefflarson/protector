@@ -954,5 +954,10 @@ impl Engine {
 mod run_loop;
 pub use run_loop::run_watch;
 
+// The per-pass signing-posture sweep (ADR-0020 Stage 1, JEF-261): observes the
+// already-running pods' images and records their posture into the shared admission-decision
+// log, complementing the webhook's admit-time observation.
+pub mod signing_sweep;
+
 #[cfg(test)]
 mod tests;
