@@ -3,6 +3,7 @@ use petgraph::visit::EdgeRef;
 use super::*;
 use crate::engine::graph::{Behavior, Reachability};
 use crate::engine::observe::Attribution;
+use crate::engine::observe::ip_index::IpIndex;
 
 /// Annotates Image nodes with vulnerability findings (Vulnerability port). Like
 /// [`ExposureAdapter`], it enriches existing Image nodes, so it runs after the
@@ -45,6 +46,16 @@ impl Adapter for RuntimeAdapter {
         if snapshot.runtime_events.is_empty() {
             return;
         }
+        // IP → cluster-object index, built once per pass from the SAME Pod/Service
+        // objects the reflector stores already hold (JEF: resolve-connection-peers). It
+        // turns a raw `IP:port` connection peer into the workload/service it belongs to
+        // (`analytics/influxdb:8086 (10.42.1.159)`) so the dashboard AND the adjudicator
+        // prompt — which both render `Behavior::summary()` — show *what* a pod connects
+        // to, not a bare IP, with NO change to either rendering site. A pure in-memory
+        // lookup: zero outbound calls, so the zero-egress invariant holds (we explicitly
+        // do NOT do reverse DNS; cluster pod IPs aren't in external DNS and a PTR lookup
+        // would leave the cluster).
+        let ip_index = IpIndex::from_snapshot(snapshot);
         // UID → the Pod from the watch, so events a sensor attributed by cgroup UID (the
         // eBPF agent) resolve to a workload without the agent ever touching the cluster
         // API (ADR-0014). The full Pod (not just ns/name) is needed to refine a raw
@@ -107,6 +118,16 @@ impl Adapter for RuntimeAdapter {
                         filtered += 1;
                         continue;
                     }
+                },
+                // Resolve a connection peer's cluster IP to the workload/service it
+                // belongs to (JEF: resolve-connection-peers). `resolve_peer` keeps an
+                // internet/unknown/unresolvable peer exactly as the raw `IP:port`, so
+                // this only ever *enriches* a same-cluster pod/service peer; the resolved
+                // name then flows through `Behavior::summary()` to both the prompt and the
+                // dashboard unchanged.
+                Behavior::NetworkConnection { peer, internet } => Behavior::NetworkConnection {
+                    peer: ip_index.resolve_peer(peer, *internet),
+                    internet: *internet,
                 },
                 other => other.clone(),
             };
@@ -825,6 +846,87 @@ mod tests {
         assert_eq!(
             reachability_for("openssl", Some("libc.so.6")),
             Reachability::NotObserved
+        );
+    }
+
+    /// The `NetworkConnection` behaviors attached to the (single) workload after the
+    /// full adapter pipeline — i.e. the peer strings as `Behavior::summary()` (the
+    /// prompt + dashboard) will render them.
+    fn connection_peers(snap: Snapshot) -> Vec<(String, bool)> {
+        let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+        graph
+            .inner()
+            .node_weights()
+            .find_map(|n| match n {
+                Node::Workload(w) => Some(
+                    w.runtime
+                        .iter()
+                        .filter_map(|o| match &o.behavior {
+                            Behavior::NetworkConnection { peer, internet } => {
+                                Some((peer.clone(), *internet))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("workload node exists")
+    }
+
+    #[test]
+    fn runtime_adapter_resolves_cluster_connection_peers_to_names() {
+        // app/web connects to a cluster pod (analytics/influxdb-0), a cluster service
+        // (analytics/influxdb), an unknown cluster IP, and the internet. After the
+        // pipeline the pod/service peers are resolved to ns/name:port (raw-ip); the
+        // unknown IP stays raw; the internet peer stays raw (egress, not resolved).
+        let web = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+            "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+        }));
+        let influx_pod = pod(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "influxdb-0", "namespace": "analytics"},
+            "spec": {"containers": [{"name": "influxdb", "image": "influxdb:2"}]},
+            "status": {"podIP": "10.42.1.159"}
+        }));
+        let influx_svc: k8s_openapi::api::core::v1::Service = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "influxdb", "namespace": "analytics"},
+            "spec": {"clusterIP": "10.43.0.10"}
+        }))
+        .expect("valid Service");
+        let conn = |peer: &str, internet: bool| RuntimeObservation {
+            attribution: Attribution::by_namespaced_name("app", "web"),
+            source: None,
+            observed_at_ms: None,
+            behavior: Behavior::NetworkConnection {
+                peer: peer.into(),
+                internet,
+            },
+        };
+        let snap = Snapshot {
+            pods: vec![web, influx_pod],
+            services: vec![influx_svc],
+            runtime_events: vec![
+                conn("10.42.1.159:8086", false), // a cluster pod
+                conn("10.43.0.10:8086", false),  // a cluster service ClusterIP
+                conn("10.99.0.1:443", false),    // an unresolvable cluster IP
+                conn("1.2.3.4:443", true),       // internet egress
+            ],
+            ..Default::default()
+        };
+        let mut peers = connection_peers(snap);
+        peers.sort();
+        assert_eq!(
+            peers,
+            vec![
+                ("1.2.3.4:443".to_string(), true),
+                ("10.99.0.1:443".to_string(), false),
+                ("analytics/influxdb-0:8086 (10.42.1.159)".to_string(), false),
+                ("analytics/influxdb:8086 (10.43.0.10)".to_string(), false),
+            ]
         );
     }
 
