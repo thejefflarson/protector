@@ -547,6 +547,14 @@ fn build_breach() -> DashboardState {
         simple_finding("daemonset/obs/node-exporter", "secret/obs/scrape-token"),
         simple_finding("deployment/internal/wiki", "secret/internal/wiki-db"),
     ];
+    // COLLAPSED REPLICAS — three StatefulSet pod replicas of one workload (item 5). They fold to a
+    // single `×3` row labeled with the workload, carrying the worst posture among the replicas.
+    for ordinal in 0..3 {
+        rows.push(simple_finding(
+            &format!("workload/analytics/Pod/murmurify-aggregator-{ordinal}"),
+            "secret/analytics/warehouse-creds",
+        ));
+    }
     // CLEARED fan-out — one argocd entry reaching MANY objectives collapses to a `→ ×N` row.
     for i in 0..18 {
         rows.push(simple_finding(
@@ -568,6 +576,29 @@ fn build_breach() -> DashboardState {
 
     // AWAITING: deliberately leave NO verdict so the row renders the ochre awaiting treatment.
     verdicts.record_recency("deployment/edge/auth-proxy", StoredPosture::Awaiting, now);
+
+    // COLLAPSED REPLICAS: one replica is a live breach (the worst posture), the rest cleared —
+    // the merged `×3` row must carry the breach posture (item 5).
+    verdicts.set_display(
+        "workload/analytics/Pod/murmurify-aggregator-1",
+        Verdict::Confirmed,
+    );
+    verdicts.record_recency(
+        "workload/analytics/Pod/murmurify-aggregator-1",
+        StoredPosture::Breach,
+        now,
+    );
+    for ordinal in [0, 2] {
+        verdicts.set_display(
+            &format!("workload/analytics/Pod/murmurify-aggregator-{ordinal}"),
+            Verdict::Refuted("replica reaches the same warehouse creds; not exploitable".into()),
+        );
+        verdicts.record_recency(
+            &format!("workload/analytics/Pod/murmurify-aggregator-{ordinal}"),
+            StoredPosture::Safe,
+            now,
+        );
+    }
 
     // UNCERTAIN: a model-timeout verdict.
     let uncertain = "deployment/web/storefront";

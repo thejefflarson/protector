@@ -208,3 +208,158 @@ fn verdict_summary_is_the_models_verbatim_words() {
         Some("exploitable — CVE reachable")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Item 2 — finding_id is collision-free: distinct entry keys that slugify to the
+// SAME string must get DISTINCT row ids (so the whole-row toggle opens its own
+// detail row, not a different one).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn distinct_entries_that_slugify_alike_get_distinct_ids() {
+    // `secret/app/db` and `secret-app-db` both slugify to `secret-app-db` under the old
+    // non-alphanumeric → `-` rule, so the old finding_id collided. The hash suffix separates them.
+    let a = finding("secret/app/db", "secret/x", Some(Verdict::Confirmed));
+    let b = finding("secret-app-db", "secret/x", Some(Verdict::Confirmed));
+    let rows = map_findings(&[a, b], &[]);
+    assert_eq!(rows.len(), 2, "two distinct entries stay two rows");
+    assert_ne!(
+        rows[0].id, rows[1].id,
+        "distinct entries that slugify alike must NOT share a DOM id (item 2)"
+    );
+}
+
+#[test]
+fn finding_id_is_stable_across_renders() {
+    // The id must be deterministic so the JS's persisted open-state keying survives a poll swap.
+    let f1 = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
+    let f2 = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
+    let r1 = map_findings(&[f1], &[]);
+    let r2 = map_findings(&[f2], &[]);
+    assert_eq!(
+        r1[0].id, r2[0].id,
+        "the same entry always yields the same id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Item 5 — pod replicas of one owning workload collapse to a single `×N` row
+// carrying the worst posture; unrelated pods and standalone pods never merge.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn statefulset_replicas_collapse_to_one_row_with_worst_posture() {
+    // Three StatefulSet replicas (`name-<ordinal>`) of one workload — one Confirmed (worst), two
+    // cleared. They must fold to ONE ×3 row carrying the BREACH posture.
+    let r0 = finding(
+        "workload/analytics/Pod/murmurify-aggregator-0",
+        "secret/analytics/db",
+        Some(Verdict::Refuted("internal".into())),
+    );
+    let r1 = finding(
+        "workload/analytics/Pod/murmurify-aggregator-1",
+        "secret/analytics/db",
+        Some(Verdict::Confirmed), // the worst posture in the group
+    );
+    let r2 = finding(
+        "workload/analytics/Pod/murmurify-aggregator-2",
+        "secret/analytics/db",
+        Some(Verdict::Refuted("internal".into())),
+    );
+    let rows = map_findings(&[r0, r1, r2], &[]);
+    assert_eq!(rows.len(), 1, "three replicas collapse to one row");
+    assert_eq!(rows[0].replicas, Some(3), "the row carries the ×3 count");
+    assert_eq!(
+        rows[0].posture,
+        Posture::Breach,
+        "the merged row carries the worst/most-urgent posture among the group"
+    );
+    assert_eq!(
+        rows[0].entry, "analytics/murmurify-aggregator",
+        "the row is relabeled with the owning workload, not a single pod"
+    );
+}
+
+#[test]
+fn deployment_replicas_collapse_by_owning_workload() {
+    // Deployment pods: `name-<rs-hash>-<pod-hash>`. Two replicas of one Deployment fold to one row.
+    let a = finding(
+        "workload/web/Pod/storefront-7d9f8c6b5d-x9k2p",
+        "secret/web/session",
+        Some(Verdict::Refuted("internal".into())),
+    );
+    let b = finding(
+        "workload/web/Pod/storefront-7d9f8c6b5d-7m4qz",
+        "secret/web/session",
+        Some(Verdict::Refuted("internal".into())),
+    );
+    let rows = map_findings(&[a, b], &[]);
+    assert_eq!(rows.len(), 1, "two deployment replicas collapse to one row");
+    assert_eq!(rows[0].replicas, Some(2));
+    assert_eq!(rows[0].entry, "web/storefront");
+}
+
+#[test]
+fn unrelated_pods_do_not_merge() {
+    // Two pods in different workloads (different names) must STAY two rows — never merge unrelated.
+    let a = finding(
+        "workload/web/Pod/storefront-7d9f8c6b5d-x9k2p",
+        "secret/web/session",
+        Some(Verdict::Confirmed),
+    );
+    let b = finding(
+        "workload/web/Pod/checkout-5c4b3a2f1e-q7w2e",
+        "secret/web/cart",
+        Some(Verdict::Confirmed),
+    );
+    let rows = map_findings(&[a, b], &[]);
+    assert_eq!(rows.len(), 2, "unrelated pods are never merged");
+    assert!(rows.iter().all(|r| r.replicas.is_none()));
+}
+
+#[test]
+fn standalone_pod_stays_a_single_row() {
+    // A bare pod with no controller replica suffix is left individual (conservative).
+    let f = finding(
+        "workload/ops/Pod/debug-shell",
+        "secret/ops/kubeconfig",
+        Some(Verdict::Confirmed),
+    );
+    let rows = map_findings(&[f], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].replicas, None,
+        "a standalone pod carries no ×N count"
+    );
+    assert_eq!(rows[0].entry, "ops/Pod/debug-shell", "and is not relabeled");
+}
+
+#[test]
+fn a_single_replica_named_pod_is_not_collapsed() {
+    // Only ONE pod matching a controller pattern (no sibling) must not collapse — it's not a set.
+    let f = finding(
+        "workload/web/Pod/lonely-7d9f8c6b5d-x9k2p",
+        "secret/web/x",
+        Some(Verdict::Confirmed),
+    );
+    let rows = map_findings(&[f], &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].replicas, None, "a lone pod is not a replica set");
+}
+
+#[test]
+fn finding_id_unit_helpers() {
+    // The workload-group derivation is conservative: it only fires on a clear controller pattern.
+    assert_eq!(
+        workload_group_key("analytics/Pod/murmurify-aggregator-0").as_deref(),
+        Some("analytics/Pod/murmurify-aggregator")
+    );
+    assert_eq!(
+        workload_group_key("web/Pod/storefront-7d9f8c6b5d-x9k2p").as_deref(),
+        Some("web/Pod/storefront")
+    );
+    // A bare pod, a non-Pod kind, and a malformed label all decline to group.
+    assert_eq!(workload_group_key("ops/Pod/debug-shell"), None);
+    assert_eq!(workload_group_key("web/Deployment/storefront-x"), None);
+    assert_eq!(workload_group_key("endpoint/internet"), None);
+}

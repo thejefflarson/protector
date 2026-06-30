@@ -145,14 +145,38 @@ fn is_structural_relation(relation: &str) -> bool {
     matches!(relation, "runs-as" | "runs-image" | "scheduled-on")
 }
 
-/// A stable DOM/fragment id for a finding, derived from its entry key. Non-alphanumerics
-/// collapse to `-` so it is a safe `id`/anchor.
+/// A stable DOM/fragment id for a finding, derived from its entry key. A readable slug
+/// (non-alphanumerics collapse to `-`, so it is a safe `id`/anchor) is paired with a short
+/// hash of the FULL entry key. The hash is what makes the id **collision-free**: the slug alone
+/// is lossy — distinct keys like `secret/app/db` and `secret-app-db` (or `endpoint/a` and
+/// `endpoint-a`) both slugify to the same string, so two different rows would otherwise share
+/// one `id`/`data-finding`/`aria-controls="detail-<id>"`, and the whole-row toggle would open
+/// the wrong adjacent `.row-detail` (`expanded.has(id)` and `getElementById` would match the
+/// wrong node). Appending the full-key hash guarantees every distinct entry gets a distinct row
+/// + detail id (brief item 2).
 fn finding_id(entry: &str) -> String {
     let slug: String = entry
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    format!("f-{slug}")
+    format!("f-{slug}-{}", short_hash(entry))
+}
+
+/// A short, stable hex hash of a key — the collision-breaking suffix for [`finding_id`]. Uses
+/// the FNV-1a 64-bit hash (no dependency, deterministic across runs — unlike `DefaultHasher`'s
+/// process-seeded output, which would make the same finding's id change between renders and
+/// break the JS's persisted-open-state keying) so two distinct entry keys never share an id.
+/// Rendered as 8 hex chars — ample to separate the handful of findings on a page while staying
+/// compact.
+fn short_hash(s: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in s.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:08x}", hash & 0xffff_ffff)
 }
 
 /// The verbatim model judgement props for an entry, if one was captured in the log. Matches by
@@ -183,6 +207,7 @@ pub(super) fn finding_props(f: &Finding, judgements: &[Judgement]) -> FindingPro
         foothold: f.foothold,
         objective: NodeKey::short_of(&f.objective).to_string(),
         fanout: None, // single-objective rows; fan-out is computed in the collapse pass below.
+        replicas: None, // single-pod rows; replica collapse runs in the pass below.
         evidence_summary: evidence_summary(&f.evidence),
         disposition: f.disposition.clone(),
         verdict_summary: f.verdict.as_ref().map(|v| v.summary()),
@@ -242,15 +267,183 @@ fn collapse_fanout(mut rows: Vec<FindingProps>) -> Vec<FindingProps> {
     rows
 }
 
+/// Derive the owning-workload group key for a POD entry's short label, or `None` when the label
+/// does not CLEARLY name a controller-managed pod (be conservative — never merge unrelated pods,
+/// brief item 5). The short label is the `workload/`-stripped key: `<ns>/Pod/<name>`. We collapse
+/// only when both (a) the kind segment is exactly `Pod` and (b) the pod name carries a controller
+/// replica suffix we recognise — a StatefulSet `name-<ordinal>` (trailing `-<digits>`), a
+/// Deployment `name-<rs-hash>-<pod-hash>` (two trailing hash segments), or a DaemonSet / bare
+/// ReplicaSet `name-<pod-hash>` (one trailing 5-char hash). The returned key is
+/// `<ns>/Pod/<workload-name>`, so replicas of the SAME controller group together while two
+/// unrelated pods (different ns or workload stem) never do; a bare/standalone pod (no recognised
+/// suffix) returns `None` and stays an individual row. See [`strip_replica_suffix`] for the shapes.
+fn workload_group_key(short_entry: &str) -> Option<String> {
+    let mut parts = short_entry.splitn(3, '/');
+    let ns = parts.next()?;
+    let kind = parts.next()?;
+    let pod_name = parts.next()?;
+    if kind != "Pod" || ns.is_empty() || pod_name.is_empty() {
+        return None;
+    }
+    let workload = strip_replica_suffix(pod_name)?;
+    Some(format!("{ns}/Pod/{workload}"))
+}
+
+/// Strip a controller-managed pod's replica suffix to recover the owning workload's name, or
+/// `None` when the name does not match a recognised controller-pod shape (so we leave it alone).
+/// Conservative by construction: a name must split into `stem` + suffix segment(s) with a
+/// non-empty stem, and the suffix segments must look like a hash/ordinal — otherwise `None`.
+fn strip_replica_suffix(pod_name: &str) -> Option<&str> {
+    // StatefulSet: `name-<ordinal>` — a trailing `-<digits>`.
+    if let Some((stem, last)) = pod_name.rsplit_once('-')
+        && !stem.is_empty()
+        && !last.is_empty()
+        && last.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Some(stem);
+    }
+    // Deployment: `name-<rs-hash>-<pod-hash>` — TWO trailing hash segments (rs hash then pod
+    // hash). Recognise the pod-hash (5 lowercase-alnum chars) AND the ReplicaSet hash (5–10
+    // lowercase-alnum) so a hyphenated workload name (`my-app-...`) keeps its stem.
+    let mut segs = pod_name.rsplitn(3, '-');
+    let pod_hash = segs.next()?;
+    let rs_hash = segs.next()?;
+    let stem = segs.next()?;
+    if !stem.is_empty() && is_pod_hash(pod_hash) && is_replicaset_hash(rs_hash) {
+        // The stem is everything before the two trailing hash segments.
+        let cut = pod_name.len() - pod_hash.len() - rs_hash.len() - 2; // two '-' separators
+        return Some(&pod_name[..cut]);
+    }
+    // DaemonSet / bare ReplicaSet: `name-<pod-hash>` — ONE trailing 5-char hash segment.
+    if let Some((stem, last)) = pod_name.rsplit_once('-')
+        && !stem.is_empty()
+        && is_pod_hash(last)
+    {
+        return Some(stem);
+    }
+    None
+}
+
+/// A Kubernetes pod-template hash segment: exactly 5 lowercase-alphanumeric chars (the
+/// `pod-template-hash` suffix Deployments/ReplicaSets/DaemonSets append) that MIXES at least one
+/// letter AND one digit. The mixed-class requirement is the conservative guard: a 5-char tail
+/// that is all letters (`shell`, `mysql`) is almost certainly part of the workload NAME, not a
+/// hash — treating it as a hash would wrongly merge `debug-shell` with `debug-mysql`. Real
+/// `pod-template-hash`es are base-36-random and virtually always carry a digit, so this admits
+/// genuine replica hashes while leaving dictionary-word-tailed names un-merged (brief item 5:
+/// "if uncertain, leave rows individual").
+fn is_pod_hash(seg: &str) -> bool {
+    is_mixed_hash(seg, 5, 5)
+}
+
+/// A ReplicaSet hash segment: 5–10 chars, same mixed letter+digit rule as [`is_pod_hash`]. The
+/// middle segment of a Deployment pod name (`name-<rs-hash>-<pod-hash>`).
+fn is_replicaset_hash(seg: &str) -> bool {
+    is_mixed_hash(seg, 5, 10)
+}
+
+/// Whether `seg` looks like a controller-generated hash: length within `[min, max]`, all
+/// lowercase-alphanumeric, and MIXING at least one ASCII letter with at least one ASCII digit.
+fn is_mixed_hash(seg: &str, min: usize, max: usize) -> bool {
+    if !(min..=max).contains(&seg.len()) {
+        return false;
+    }
+    let mut has_alpha = false;
+    let mut has_digit = false;
+    for b in seg.bytes() {
+        if b.is_ascii_lowercase() {
+            has_alpha = true;
+        } else if b.is_ascii_digit() {
+            has_digit = true;
+        } else {
+            return false; // not lowercase-alphanumeric
+        }
+    }
+    has_alpha && has_digit
+}
+
+/// Collapse pod REPLICAS of the same owning workload into a single representative row (brief item
+/// 5). Replicas run the same image, so one merged posture — the WORST/most-urgent among the group
+/// (reused [`urgency_rank`]) — is sound. The representative row is relabeled with the workload
+/// (`<ns>/<workload-name>`) and carries the replica count (`×N`). Only pods whose name clearly
+/// matches a controller replica pattern collapse ([`workload_group_key`] returns `None` otherwise),
+/// so unrelated pods and standalone pods are NEVER merged. Mirrors [`collapse_fanout`]'s shape.
+fn collapse_pod_replicas(mut rows: Vec<FindingProps>) -> Vec<FindingProps> {
+    use std::collections::HashMap;
+    // Tally how many rows fall into each workload group, and which group each row belongs to.
+    let groups: Vec<Option<String>> = rows.iter().map(|r| workload_group_key(&r.entry)).collect();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for g in groups.iter().flatten() {
+        *counts.entry(g.clone()).or_default() += 1;
+    }
+    // The representative for each multi-replica group is the WORST-posture row (lowest urgency
+    // rank); ties broken by entry for determinism so the chosen representative is stable.
+    let mut best_idx: HashMap<String, usize> = HashMap::new();
+    for (i, g) in groups.iter().enumerate() {
+        let Some(key) = g else { continue };
+        if counts.get(key).copied().unwrap_or(0) < 2 {
+            continue; // a lone pod in its group is not a replica set — leave it individual.
+        }
+        match best_idx.get(key) {
+            Some(&cur) => {
+                let better = urgency_rank(&rows[i]) < urgency_rank(&rows[cur])
+                    || (urgency_rank(&rows[i]) == urgency_rank(&rows[cur])
+                        && rows[i].entry < rows[cur].entry);
+                if better {
+                    best_idx.insert(key.clone(), i);
+                }
+            }
+            None => {
+                best_idx.insert(key.clone(), i);
+            }
+        }
+    }
+    // Keep each row UNLESS it belongs to a collapsed group and is not that group's representative.
+    let mut keep = Vec::with_capacity(rows.len());
+    for (i, g) in groups.iter().enumerate() {
+        match g {
+            Some(key) if counts.get(key).copied().unwrap_or(0) >= 2 => {
+                keep.push(best_idx.get(key) == Some(&i));
+            }
+            _ => keep.push(true),
+        }
+    }
+    // Relabel + count the surviving representatives.
+    let mut idx = 0usize;
+    rows.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
+    for r in &mut rows {
+        if let Some(key) = workload_group_key(&r.entry) {
+            let n = counts.get(&key).copied().unwrap_or(0);
+            if n >= 2 {
+                r.replicas = Some(n);
+                // Relabel to the workload (`<ns>/<workload-name>`), dropping the `Pod/<replica>`
+                // tail — the merged row represents the controller, not one pod.
+                if let Some((ns, rest)) = key.split_once('/')
+                    && let Some(workload) = rest.strip_prefix("Pod/")
+                {
+                    r.entry = format!("{ns}/{workload}");
+                }
+            }
+        }
+    }
+    rows
+}
+
 /// Map and URGENCY-sort a snapshot of findings into props (brief §5). Only breach-relevant
-/// findings are surfaced — the caller passes the breach-relevant set. Fan-out collapse runs
-/// first, then the urgency sort (stable within a rank, by entry for determinism).
+/// findings are surfaced — the caller passes the breach-relevant set. Pod-replica collapse and
+/// fan-out collapse run first, then the urgency sort (stable within a rank, by entry for
+/// determinism).
 pub(super) fn map_findings(findings: &[Finding], judgements: &[Judgement]) -> Vec<FindingProps> {
     let mut rows: Vec<FindingProps> = findings
         .iter()
         .filter(|f| f.breach_relevant)
         .map(|f| finding_props(f, judgements))
         .collect();
+    rows = collapse_pod_replicas(rows);
     rows = collapse_fanout(rows);
     rows.sort_by(|a, b| {
         urgency_rank(a)

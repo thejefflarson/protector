@@ -89,6 +89,13 @@ fn entry_objective(f: &FindingProps) -> Markup {
             span.entry {
                 span.kind-glyph { (f.entry_glyph) }
                 span.entry-label { (f.entry) }
+                // Collapsed pod replicas of one workload fold to a single row carrying a `×N`
+                // count (brief item 5) — the count rides on the workload entry, not the objective.
+                @if let Some(n) = f.replicas {
+                    span.replica-count title="pod replicas of this workload, collapsed" {
+                        " \u{00D7}" (n)
+                    }
+                }
             }
             span.arrow { " \u{2192} " }
             @match f.fanout {
