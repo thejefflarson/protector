@@ -88,6 +88,21 @@
   // The active tab's fragment URL, preserving the current query (tab/filter) — back-button correct.
   const fragmentUrl = () => `/fragment${window.location.search || ""}`;
 
+  // Whether the operator currently has an ACTIVE, non-collapsed text selection anchored inside the
+  // live region. Swapping innerHTML mid-selection rips away the text the operator is selecting (so
+  // the model judgement vanishes mid-drag and can't be copied) and can jump the scroll. When this
+  // is true we DEFER the swap to the next poll tick — the selection clears, then the swap lands.
+  const hasLiveSelection = (live) => {
+    const sel = window.getSelection?.();
+    // No selection API, nothing selected, or a collapsed caret (zero-width) ⇒ safe to swap.
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0);
+    if (range.collapsed) return false;
+    // Only defer when the selection is actually anchored within the live region we're about to
+    // replace — a selection elsewhere on the page must not stall the live refresh.
+    return live.contains(range.commonAncestorContainer);
+  };
+
   // Poll /fragment and swap the live region in place, preserving scroll + open state.
   const poll = async () => {
     try {
@@ -96,6 +111,9 @@
       const html = await res.text();
       const live = document.getElementById(LIVE_ID);
       if (!live) return;
+      // Defer this cycle if the operator is mid-selection inside the live region — a poll must
+      // never rip away text they're selecting/reading. The next tick swaps once it clears.
+      if (hasLiveSelection(live)) return;
       const { scrollY } = window;
       live.innerHTML = html;
       bindLive(live);

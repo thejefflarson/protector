@@ -258,6 +258,11 @@ pub struct FindingProps {
     pub objective: String,
     /// The fan-out count when the entry reaches many secrets/objectives (`→ ×N`), else `None`.
     pub fanout: Option<usize>,
+    /// The replica count when this row REPRESENTS a collapsed workload (N pod replicas of the
+    /// same owning controller folded into one row, `×N`), else `None`. Distinct from `fanout`:
+    /// fan-out is one entry reaching many objectives; replicas is many pod entries of one
+    /// workload folded to one (brief item 5).
+    pub replicas: Option<usize>,
     pub evidence_summary: EvidenceSummary,
     /// The mechanical disposition (auto-eligible / propose / durable-fix PR / …).
     pub disposition: String,

@@ -281,3 +281,93 @@ fn served_assets_exist_and_are_same_origin() {
         "the client script polls the same-origin /fragment"
     );
 }
+
+#[test]
+fn poll_defers_the_swap_while_a_live_text_selection_is_active() {
+    // Item 1: a poll must not rip away text the operator is selecting/reading. The client checks
+    // window.getSelection() and skips the innerHTML swap while a non-collapsed selection is
+    // anchored inside the live region (deferring to the next tick), and still restores scroll.
+    let js = repo_root().join("engine/web/dist/dashboard.js");
+    let js_src = std::fs::read_to_string(&js).unwrap_or_else(|e| panic!("reading {js:?}: {e}"));
+    assert!(
+        js_src.contains("getSelection"),
+        "the client inspects the active text selection before swapping"
+    );
+    assert!(
+        js_src.contains("isCollapsed") || js_src.contains("collapsed"),
+        "it ignores a collapsed caret (only a real, non-empty selection defers the swap)"
+    );
+    assert!(
+        js_src.contains("contains(range") || js_src.contains(".contains("),
+        "it only defers when the selection is anchored INSIDE the live region"
+    );
+    // The scroll-restore stays (the swap, when it lands, keeps the operator's position).
+    assert!(
+        js_src.contains("scrollTo"),
+        "the existing scroll-restore is preserved"
+    );
+}
+
+#[test]
+fn active_tab_has_a_raised_filled_highlight_not_colour_alone() {
+    // Item 3: the active tab is clearly highlighted — a raised surface fill + a stronger accent
+    // rail + bold weight, so it reads in greyscale too (meaning not by colour alone). Tokens only.
+    let css = repo_root().join("engine/web/dist/dashboard.css");
+    let raw = std::fs::read_to_string(&css).unwrap_or_else(|e| panic!("reading {css:?}: {e}"));
+    let src = strip_block_comments(&raw);
+    let active = src
+        .find(".tab-active {")
+        .map(|i| {
+            let rest = &src[i..];
+            &rest[..rest.find('}').unwrap()]
+        })
+        .expect(".tab-active block exists");
+    assert!(
+        active.contains("background: var(--surface-raised)"),
+        "the active tab carries a raised/filled surface (item 3)"
+    );
+    assert!(
+        active.contains("font-weight: var(--fw-bold)"),
+        "weight stays — meaning not by colour alone"
+    );
+    assert!(
+        active.contains("var(--mode-enforce)"),
+        "the accent rail stays"
+    );
+}
+
+#[test]
+fn brand_and_nav_align_to_the_table_expander_glyph() {
+    // Item 4: the strip brand and the nav-tab row left-align with the table's `+` expander glyph
+    // (NOT the page edge). A shared --brand-indent token reproduces the `+`'s x (the view gutter +
+    // the .cell-expand left pad + the .expander pad) and is applied to BOTH .strip and .tabs.
+    let css = repo_root().join("engine/web/dist/dashboard.css");
+    let raw = std::fs::read_to_string(&css).unwrap_or_else(|e| panic!("reading {css:?}: {e}"));
+    let src = strip_block_comments(&raw);
+    assert!(
+        src.contains("--brand-indent:"),
+        "the shared brand-indent token is defined"
+    );
+    let strip = src
+        .find(".strip {")
+        .map(|i| {
+            let rest = &src[i..];
+            &rest[..rest.find('}').unwrap()]
+        })
+        .expect(".strip block exists");
+    assert!(
+        strip.contains("var(--brand-indent)"),
+        "the strip's left pad uses the brand indent (item 4)"
+    );
+    let tabs = src
+        .find(".tabs {")
+        .map(|i| {
+            let rest = &src[i..];
+            &rest[..rest.find('}').unwrap()]
+        })
+        .expect(".tabs block exists");
+    assert!(
+        tabs.contains("var(--brand-indent)"),
+        "the tab row's left pad uses the brand indent (item 4)"
+    );
+}

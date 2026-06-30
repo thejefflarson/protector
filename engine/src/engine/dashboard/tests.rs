@@ -524,6 +524,75 @@ fn shadow_mode_renders_the_warning_pill() {
 }
 
 // ---------------------------------------------------------------------------
+// Item 2 — every finding row + its detail row carry UNIQUE ids, so the whole-row
+// toggle opens only its own adjacent .row-detail (no cross-row collision).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn finding_rows_carry_unique_detail_ids() {
+    // Two breach findings whose entry keys would slugify to the SAME string under the old rule.
+    let a = breach_finding("secret/app/db", Verdict::Confirmed);
+    let b = breach_finding("secret-app-db", Verdict::Confirmed);
+    let view = build_findings_view(
+        "prod".into(),
+        &[a, b],
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // Collect every detail-row id; they must all be distinct (no duplicate aria-controls target).
+    let ids: Vec<&str> = html
+        .match_indices("id=\"detail-")
+        .map(|(i, _)| {
+            let rest = &html[i + "id=\"".len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "two rows ⇒ two detail rows");
+    assert_ne!(ids[0], ids[1], "the two detail ids are distinct (item 2)");
+}
+
+// ---------------------------------------------------------------------------
+// Item 5 — pod replicas of one workload collapse to one row carrying a ×N count.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pod_replicas_render_as_one_workload_row_with_replica_count() {
+    let mut rows = Vec::new();
+    for ordinal in 0..3 {
+        let mut f = breach_finding(
+            &format!("workload/analytics/Pod/murmurify-aggregator-{ordinal}"),
+            Verdict::Refuted("internal".into()),
+        );
+        f.foothold = false;
+        rows.push(f);
+    }
+    let view = build_findings_view(
+        "prod".into(),
+        &rows,
+        &[],
+        &judging_readiness(),
+        Some(SystemTime::now()),
+    );
+    let html = page::findings_page(&view).into_string();
+    // One representative row labeled with the workload + the ×3 replica count.
+    assert!(
+        html.contains("replica-count"),
+        "the collapsed row carries the replica-count badge"
+    );
+    assert!(html.contains("\u{00D7}3"), "with the ×3 count");
+    assert!(
+        html.contains("analytics/murmurify-aggregator"),
+        "labeled with the owning workload, not a single pod ordinal"
+    );
+    assert!(
+        !html.contains("murmurify-aggregator-1"),
+        "the individual replica rows are folded away"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Invariant #6 — untrusted free-text is escaped at render.
 // ---------------------------------------------------------------------------
 

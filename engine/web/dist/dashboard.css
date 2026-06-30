@@ -85,11 +85,17 @@
   --focus-ring: 2px solid #1570EF;
   --focus-offset: 1px;
 
-  /* layout rhythm (JEF-256) — ONE page gutter and ONE section gap, used identically by the
-     status strip, the tab nav, and every view's content so the left edges line up exactly and
-     the vertical rhythm between sections is uniform across all four views. */
+  /* layout rhythm (JEF-256) — ONE page gutter and ONE section gap. The page gutter is the left
+     edge of the view CONTENT (the findings table). */
   --page-gutter: var(--space-4);
   --section-gap: var(--space-6);
+
+  /* Brand/nav indent — the strip brand text and the nav-tab row left-align with the table's
+     first-column `+` expander glyph, NOT the page edge (reverses the earlier shared-gutter
+     decision). The `+` sits at: --page-gutter (the .view left pad, where the table starts) +
+     .cell-expand padding-left (--space-2) + .expander padding (--space-1). This token reproduces
+     that x so the brand 'p', the active tab's first letter, and the `+` form one vertical line. */
+  --brand-indent: calc(var(--page-gutter) + var(--space-2) + var(--space-1));
 }
 
 * { box-sizing: border-box; }
@@ -149,7 +155,8 @@ summary:focus-visible,
 .strip {
   background: var(--surface-raised);
   border-bottom: var(--hairline) solid var(--border);
-  padding: var(--space-3) var(--page-gutter);
+  /* Left pad aligns the brand 'p' with the table's `+` glyph (item 4); right keeps the gutter. */
+  padding: var(--space-3) var(--page-gutter) var(--space-3) var(--brand-indent);
 }
 .strip-top {
   display: flex;
@@ -257,12 +264,14 @@ summary:focus-visible,
 /* ============================ tab nav ============================ */
 .tabs {
   display: flex; gap: var(--space-1);
-  padding: 0 var(--page-gutter);
+  /* Indent the row so the first tab's first letter sits under the table's `+` glyph and the strip
+     brand 'p' (item 4); the right edge keeps the page gutter. */
+  padding: 0 var(--page-gutter) 0 var(--brand-indent);
   background: var(--surface);
   border-bottom: var(--hairline) solid var(--border);
 }
-/* The first tab's own padding would push its label in past the page gutter; pull it flush so the
-   nav's left text edge lines up under the strip brand and the view content (JEF-256). */
+/* The first tab's own padding would push its label in past the brand indent; pull it flush so the
+   nav's left text edge lines up under the strip brand and the table's `+` expander glyph (item 4). */
 .tabs .tab:first-child { padding-left: 0; }
 .tab {
   display: inline-flex; align-items: center; gap: var(--space-2);
@@ -274,7 +283,17 @@ summary:focus-visible,
   line-height: var(--lh-body);
 }
 .tab:hover { background: var(--surface-hover); }
-.tab-active { color: var(--ink-1); font-weight: var(--fw-bold); border-bottom-color: var(--mode-enforce); }
+/* The active tab is clearly highlighted: a raised surface fill + a stronger (3px) accent rail +
+   bold ink. Meaning is not by colour alone — the raised fill + the weight + the accent all read
+   in greyscale (item 3). The raised top corners lift it off the nav row like a real tab. */
+.tab-active {
+  color: var(--ink-1);
+  font-weight: var(--fw-bold);
+  background: var(--surface-raised);
+  border-bottom: var(--rail-strong) solid var(--mode-enforce);
+  border-radius: var(--radius-chip) var(--radius-chip) 0 0;
+}
+.tab-active:hover { background: var(--surface-raised); }
 .tab-phase {
   font-size: var(--fs-micro); line-height: var(--lh-micro); color: var(--ink-3);
   border: var(--hairline) solid var(--border); border-radius: var(--radius-chip);
@@ -379,6 +398,12 @@ summary:focus-visible,
 .entry { display: inline-flex; align-items: center; gap: var(--space-1); }
 .kind-glyph { font-size: var(--fs-data); }
 .entry-label { font-weight: var(--fw-bold); }
+/* `×N` replica count on a collapsed-workload row (item 5) — muted/tabular, subordinate to the
+   workload label so it reads as a count, not an alarm. */
+.replica-count {
+  color: var(--ink-3); font-family: var(--font-data);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
 .arrow, .hop-arrow { color: var(--ink-3); }
 .objective {
   color: var(--ink-2); font-family: var(--font-data);
