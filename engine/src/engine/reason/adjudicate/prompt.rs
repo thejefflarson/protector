@@ -133,8 +133,8 @@ A deterministic analysis already PROVED this workload can reach every objective 
 
 A breach is a reached objective that carries EXPLOITATION EVIDENCE — and only that:
   - a critical / known-exploited CVE from the CVE list that is actually running here (vulnerable code on the path), OR
-  - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now), OR
-  - an EXPOSED SECRET baked into this image (a usable credential — an API key, token, or private key — committed into the image): a real, immediately-usable breach primitive on the path.
+  - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now) — a workload's OWN normal activity (outbound network connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal, only an ALERT or hands-on-keyboard action counts, OR
+  - an EXPOSED SECRET baked into this image (a usable credential — an API key, token, or private key — committed into the image): a real, immediately-usable breach primitive on the path. Reaching a `secret/…` objective (a Credential-Access OUTCOME in the reachable-objectives list) is NOT an exposed secret — only a credential listed in the "Exposed secrets baked into this image" field below is exploitation evidence.
 Judge whether the evidence genuinely makes a reached objective exploitable. With NO such CVE, NO live signal, and NO exposed secret, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
 Each objective is tagged with HOW it is reached — CONTEXT for how severe a finding would be, NOT a breach signal on its own:

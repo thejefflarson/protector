@@ -6,7 +6,7 @@
 //! is what the cross-pass verdict cache keys on.
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{NodeKey, Relation, SecurityGraph};
+use crate::engine::graph::{Behavior, NodeKey, Relation, SecurityGraph};
 
 use super::Verdict;
 use super::evidence::entry_evidence;
@@ -103,6 +103,57 @@ pub(crate) fn guard_fabricated_cve(
                 "model cited CVE(s) not in the evidence (possible hallucination): {}",
                 fabricated.join(", ")
             ))
+        })
+    })
+}
+
+/// Whether a runtime behavior CORROBORATES an exploit — the engine's existing definition,
+/// reused verbatim, NOT a new one: a critical Falco alert ([`Behavior::is_alert`]) OR a
+/// notable shell/package-manager exec ([`crate::engine::observe::exec_class::notable_exec`],
+/// JEF-117). Benign `NetworkConnection`/`FileRead`/`LibraryLoaded`/`SecretRead` — a
+/// workload's own observed activity — are NOT corroborating and so must never anchor an
+/// `exploitable` (the watcher-server false breach: three benign connections to its own
+/// DB/metrics were read as a live signal).
+fn corroborating_behavior(behavior: &Behavior) -> bool {
+    behavior.is_alert() || crate::engine::observe::exec_class::notable_exec(behavior).is_some()
+}
+
+/// Zero-anchor safety net (the symmetric backstop to [`guard_fabricated_cve`]): a 1B judge
+/// fabricated an `Exploitable` verdict for the internet-facing `watcher-server` with NO
+/// exploitation evidence at all — no CVE was shown, no exposed secret was baked in, and the
+/// only runtime behavior was three benign `NetworkConnection`s to its own DB/metrics. It got
+/// there by (a) treating benign network connections as a live signal and (b) conflating
+/// reaching a `secret/…` objective with an exposed secret in the image. The correct verdict
+/// is `refuted`: reachability is not a breach.
+///
+/// This guard DOWNGRADES an `Exploitable` verdict to `Refuted` ONLY when ALL THREE
+/// exploitation anchors are absent:
+/// - the CVE evidence list is empty (no CVE was shown to the model), AND
+/// - there is no exposed-secret finding for the entry (`has_exposed_secret == false`), AND
+/// - no observed behavior is [`corroborating_behavior`] (no alert, no notable exec).
+///
+/// Be conservative: if ANY anchor is present — a CVE in the list (even
+/// reachability:not-observed), an exposed secret, or a corroborating behavior — the model's
+/// (debatable) call stands untouched. Those are the model's calls to make, not this guard's
+/// to override; this is purely the zero-anchor net. Like the fabrication guard it only ever
+/// acts on `Exploitable`, leaving every other verdict alone, and the entry is re-judged next
+/// pass.
+pub(crate) fn guard_unsupported_exploitable(
+    verdict: Verdict,
+    cves: &[String],
+    behaviors: &[Behavior],
+    has_exposed_secret: bool,
+) -> Verdict {
+    guard_exploitable(verdict, |_reason| {
+        let has_cve = !cves.is_empty();
+        let has_corroborating = behaviors.iter().any(corroborating_behavior);
+        let any_anchor = has_cve || has_exposed_secret || has_corroborating;
+        (!any_anchor).then(|| {
+            Verdict::Refuted(
+                "no exploitation evidence present (no CVE, no exposed secret, no runtime alert) \
+                 — reachability is not a breach"
+                    .to_string(),
+            )
         })
     })
 }

@@ -7,8 +7,8 @@
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 
-use super::evidence::{cve_ids_of, entry_evidence};
-use super::guards::guard_fabricated_cve;
+use super::evidence::{cve_ids_of, entry_evidence, entry_findings};
+use super::guards::{guard_fabricated_cve, guard_unsupported_exploitable};
 use super::prompt::{build_judgment_prompt_with, parse_verdict};
 use super::{Adjudicator, Verdict};
 
@@ -86,6 +86,12 @@ impl Adjudicator for ModelAdjudicator {
         // model's, not the engine's. The ONE remaining backstop is anti-fabrication
         // (guard_fabricated_cve), not a decision gate.
         let (cves, behaviors) = entry_evidence(graph, entry);
+        // Exposed-secret presence for the zero-anchor backstop, read from the SAME source the
+        // prompt uses (`entry_findings` → `(secret_lines, posture_lines)`): a non-empty
+        // `secret_lines` means a usable credential is baked into the image. Posture (misconfig
+        // / RBAC) is NOT an exploitation anchor, so it is ignored here.
+        let (secret_lines, _posture_lines) = entry_findings(graph, entry);
+        let has_exposed_secret = !secret_lines.is_empty();
 
         let prompt = build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors);
         let (reply, verdict) =
@@ -98,7 +104,20 @@ impl Adjudicator for ModelAdjudicator {
                 // from the real evidence. A genuine `Exploitable` (a real CVE, or a non-CVE
                 // step that cites no CVE) passes through untouched.
                 Some(reply) => {
+                    // Two deterministic backstops, chained, both only ever acting on an
+                    // `Exploitable` verdict: anti-fabrication first (a cited CVE absent from the
+                    // evidence → skeptic), then the symmetric zero-anchor net (an `Exploitable`
+                    // with NO CVE, NO exposed secret, and NO corroborating runtime behavior →
+                    // `Refuted`, since reachability is not a breach — the watcher-server false
+                    // breach). Order is harmless: the fabrication guard only fires when a CVE is
+                    // cited, the unsupported guard only when no anchor exists.
                     let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
+                    let verdict = guard_unsupported_exploitable(
+                        verdict,
+                        &cves,
+                        &behaviors,
+                        has_exposed_secret,
+                    );
                     (Some(reply), verdict)
                 }
                 // Model unavailable → skeptic: do not let an auto-action proceed.
