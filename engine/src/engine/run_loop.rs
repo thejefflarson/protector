@@ -64,6 +64,68 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
     }
 }
 
+/// Build the signing-posture observer (ADR-0020 Stage 1, JEF-261) the per-pass running-Pod
+/// sweep uses. It reuses the SAME cosign verifier the webhook gates with, but for pure
+/// observation — so it needs no trusted-identity config (the Fulcio/Rekor chain is the trust
+/// anchor). The identity regex is irrelevant to `observe`, so any value compiles; we pass a
+/// match-nothing pattern. Bounded by the same `PROTECTOR_MAX_IMAGES` + `PROTECTOR_CACHE_TTL`
+/// the webhook honors, so observing every running image stays inside the already-sanctioned
+/// outbound envelope (ADR-0015 carve-out). `None` (a no-op sweep — zero outbound calls) if the
+/// TUF cache dir can't be created, so a misconfigured volume degrades to today's behavior
+/// rather than crashing the engine loop.
+fn build_signing_observer() -> Option<crate::policies::signature::SigningObserver> {
+    use crate::policies::signature::{CosignChecker, SigningObserver};
+
+    let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
+        .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
+    let tuf_cache = std::path::PathBuf::from(
+        std::env::var("PROTECTOR_TUF_CACHE").unwrap_or_else(|_| "/tmp/sigstore".to_string()),
+    );
+    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 5));
+    let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
+    let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
+    // The engine's own registry auth mirrors the webhook's; anonymous is the safe default. An
+    // unauthorized private image simply observes as `checking`/`not-signed`, never a
+    // fabricated clean.
+    let auth = registry_auth();
+
+    // `observe` ignores the identity regex entirely; a match-nothing pattern keeps the gated
+    // constructor happy without asserting any trusted signer.
+    match CosignChecker::new("$^", oidc_issuer, auth, tuf_cache, verify_timeout) {
+        Ok(checker) => Some(SigningObserver::new(
+            std::sync::Arc::new(checker),
+            max_images,
+            cache_ttl,
+        )),
+        Err(error) => {
+            tracing::warn!(%error, "signing-posture observer unavailable (TUF cache dir?); running-pod sweep disabled");
+            None
+        }
+    }
+}
+
+/// Registry auth for fetching signatures of private images during the running-Pod posture
+/// sweep — reuses the `PROTECTOR_REGISTRY_*` credentials, mirroring the webhook's
+/// `registry_auth`. Anonymous unless explicit credentials are supplied.
+fn registry_auth() -> sigstore::registry::Auth {
+    use sigstore::registry::Auth;
+    if let (Ok(user), Ok(pass)) = (
+        std::env::var("PROTECTOR_REGISTRY_USERNAME"),
+        std::env::var("PROTECTOR_REGISTRY_PASSWORD"),
+    ) {
+        return Auth::Basic(user, pass);
+    }
+    Auth::Anonymous
+}
+
+/// Parse a numeric env var, falling back to `default` if unset or unparseable.
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Choose the hypothesis source: a model-backed one when a model is configured AND
 /// `PROTECTOR_ENGINE_HYPOTHESIS=model` opts it in, else the null source. Local-first:
 /// point it at an in-cluster model so the graph never leaves.
@@ -225,6 +287,13 @@ pub async fn run_watch(
     // exit so it can't outlive the engine.
     let keep_warm = model::spawn_keep_warm();
 
+    // The signing-posture observer (ADR-0020 Stage 1, JEF-261): built ONCE so its TTL + image
+    // cache persists across passes — a steady cluster re-sweeps for free. Each pass runs every
+    // running-Pod image through it and records the posture (signed / invalid-signature /
+    // not-signed / checking) into the shared admission-decision log, covering workloads that
+    // were already running when protector started (no admission event ever replays them).
+    let signing_observer = build_signing_observer();
+
     // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
     // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
     // the loop so a "happening now" signal is acted on immediately (it flips a
@@ -360,6 +429,12 @@ pub async fn run_watch(
             linkerd_authz_policies: linkerd_policies_now,
             linkerd_mtls_auths: linkerd_mtls_now,
         };
+        // Observe the signing posture of every already-running image and record it into the
+        // shared admission-decision log (JEF-261). Bounded by the observer's cache + MAX_IMAGES;
+        // a no-op when no observer is configured. Run before `process` so the inventory reflects
+        // the same snapshot the engine just reasoned over.
+        super::signing_sweep::sweep(signing_observer.as_ref(), &snapshot, &policy_log).await;
+
         engine.process(&snapshot).await;
     }
 
