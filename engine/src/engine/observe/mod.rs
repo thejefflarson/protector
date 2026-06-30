@@ -12,6 +12,7 @@ pub mod exec_class;
 pub mod exploit_intel;
 pub mod health;
 pub mod ingest_guard;
+pub mod ip_index;
 pub mod linkerd;
 pub mod runtime;
 pub mod trivy;
