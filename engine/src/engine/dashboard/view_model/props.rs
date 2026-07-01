@@ -729,9 +729,8 @@ pub struct DecisionRowProps {
     pub image: String,
     /// The request's namespace, untrusted. Empty for a cluster-scoped object.
     pub namespace: String,
-    /// The signature gate's shadow status.
-    pub signature: GateStatus,
-    /// The mesh gate's shadow status.
+    /// The mesh gate's shadow status. (The signature posture now lives in the dedicated signing
+    /// inventory — JEF-262 — so the decision log no longer carries a signature *gate* column.)
     pub mesh: GateStatus,
     /// The "if enforced" net counterfactual (JEF-246): would this be admitted if every gate were
     /// enforced? Display-only — the honest API verdict is [`decision`](Self::decision).
@@ -755,6 +754,139 @@ pub struct AdmissionViewProps {
     pub denied: u64,
     /// Total decisions across all outcomes — drives the honest-empty state when zero.
     pub total: u64,
+    /// The per-image signing inventory (JEF-262 / ADR-0020), grouped under its repo — the
+    /// observed signing posture of every image, sitting between the tallies header and the
+    /// decision log. Empty renders an honest "no images observed yet" (never an all-clear).
+    pub signing: Vec<SigningRepoProps>,
     /// The deduped decision rows, newest-first.
     pub rows: Vec<DecisionRowProps>,
+}
+
+// ---------------------------------------------------------------------------
+// Signing inventory (JEF-262 / ADR-0020 Stage 1 render) — the observed signing
+// posture of EVERY image, as a dedicated inventory section. Two hard operator
+// rules: the posture is ALWAYS signed / invalid signature / not signed (or the
+// transient checking) — never n/a; and the "if enforced" column is ALWAYS the
+// binary would-admit / would-block — never n/a.
+// ---------------------------------------------------------------------------
+
+/// An image's observed signing posture — the presentation mirror of the domain
+/// `signature::posture::SigningPosture` (mapped at the view_model boundary so components never
+/// import the domain type). NEVER n/a: observation always reaches a posture, and a registry blip
+/// is the explicit transient [`Checking`](Self::Checking), not a fabricated clean. Carried as
+/// colour + glyph + word so meaning never rides on colour alone. [`Invalid`](Self::Invalid) is the
+/// LOUD channel — visually and lexically distinct from a calm [`NotSigned`](Self::NotSigned).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningPosture {
+    /// A signature is present and verifies (the signer rides [`SigningRowProps::signer`]).
+    Signed,
+    /// A signature artifact is present but does NOT verify — the loud, alarming case. Distinct
+    /// from (and more alarming than) [`NotSigned`](Self::NotSigned).
+    Invalid,
+    /// No signature at all — calm (no baseline yet), never loud, but never a green pass either.
+    NotSigned,
+    /// Transient: the registry / transparency log was unreachable, so the posture is not yet
+    /// known. Never read as clean; resolves into a resting posture on a later pass.
+    Checking,
+}
+
+impl SigningPosture {
+    /// Parse the engine's low-cardinality status word (`SigningPosture::status()`) into the
+    /// presentation enum. An unknown / empty word reads as the transient
+    /// [`Checking`](Self::Checking) rather than a fabricated resting posture — never a false clean.
+    pub fn parse(word: &str) -> SigningPosture {
+        match word {
+            "signed" => SigningPosture::Signed,
+            "invalid-signature" => SigningPosture::Invalid,
+            "not-signed" => SigningPosture::NotSigned,
+            _ => SigningPosture::Checking,
+        }
+    }
+
+    /// The CSS token suffix (`--sign-{kind}`) for this posture.
+    pub fn token(self) -> &'static str {
+        match self {
+            SigningPosture::Signed => "signed",
+            SigningPosture::Invalid => "invalid",
+            SigningPosture::NotSigned => "notsigned",
+            SigningPosture::Checking => "checking",
+        }
+    }
+
+    /// The glyph carrying the posture without colour — each distinct so `invalid` reads apart from
+    /// `not signed` and `signed` even in greyscale.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SigningPosture::Signed => "\u{2713}",    // ✓ present + verified
+            SigningPosture::Invalid => "\u{2715}",   // ✕ present but broken — the loud channel
+            SigningPosture::NotSigned => "\u{25CB}", // ○ open — nothing there, calm
+            SigningPosture::Checking => "\u{25CC}",  // ◌ dotted — transient
+        }
+    }
+
+    /// The word — always present alongside colour + glyph, and lexically distinct per state.
+    pub fn word(self) -> &'static str {
+        match self {
+            SigningPosture::Signed => "signed",
+            SigningPosture::Invalid => "invalid signature",
+            SigningPosture::NotSigned => "not signed",
+            SigningPosture::Checking => "checking\u{2026}",
+        }
+    }
+
+    /// The binary "if enforced" counterfactual: only a verifying [`Signed`](Self::Signed) image
+    /// would be admitted by a signature gate; every other posture (invalid / not signed / the
+    /// unverifiable transient) would be blocked. Fail-closed — never n/a (operator rule #2).
+    pub fn would_admit(self) -> bool {
+        matches!(self, SigningPosture::Signed)
+    }
+}
+
+/// The signer learned from a verified Fulcio cert (only present when [`SigningPosture::Signed`]).
+/// Both the identity and issuer are UNTRUSTED third-party free-text (an attacker-influenceable cert
+/// subject) — the component escapes them at render (maud auto-escape; NEVER `PreEscaped`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerProps {
+    /// A short, scannable label derived from the Fulcio SAN (a GitHub Actions workflow URI →
+    /// `org/repo`; an email kept as-is; otherwise the raw identity, truncated in-row by CSS). Shown
+    /// in the row.
+    pub identity_short: String,
+    /// The full Fulcio SAN — shown in the expand panel and the `title=`, so the truncated in-row
+    /// label never hides the real signer.
+    pub identity_full: String,
+    /// A short issuer badge derived from the OIDC issuer (`github actions` / `google` / `sigstore`
+    /// / the host), or empty when the cert carried no issuer.
+    pub issuer_badge: String,
+    /// The full OIDC issuer URL for the expand panel, or `None` when the cert carried none.
+    pub issuer_full: Option<String>,
+}
+
+/// One image row in the signing inventory (JEF-262). Plain presentation data only — mapped from the
+/// engine `PolicyDecisionRecord` at the view_model boundary. Every string is UNTRUSTED at render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigningRowProps {
+    /// The full image ref (registry/repo + digest/tag), untrusted — shown in the expand panel and
+    /// the `title=`.
+    pub image: String,
+    /// The in-row image label: the digest/tag remainder under the repo group (falls back to the
+    /// full ref when the image carries no tag/digest), untrusted.
+    pub label: String,
+    pub posture: SigningPosture,
+    /// The signer, present only when [`posture`](Self::posture) is [`SigningPosture::Signed`].
+    pub signer: Option<SignerProps>,
+    /// The human-facing posture prose for the expand panel (why invalid / still checking); empty
+    /// for a plain not-signed, which needs no prose. Untrusted.
+    pub detail: String,
+    /// How many times this exact image was observed (the dedup count).
+    pub count: u64,
+}
+
+/// A repo group in the signing inventory: one registry/repo header with the images observed under
+/// it (JEF-262 — the inventory unit is the image, grouped under its repo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigningRepoProps {
+    /// The registry/repo the images share (the group header), untrusted.
+    pub repo: String,
+    /// The images observed under this repo.
+    pub images: Vec<SigningRowProps>,
 }

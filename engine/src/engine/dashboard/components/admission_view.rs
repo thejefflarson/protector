@@ -1,22 +1,26 @@
 //! The Admission/policy view body (brief §6 — the webhook floor): the decision-tallies header
 //! (admitted / audited / denied, so a healthy cluster is never a blank screen — counts honest even
-//! at zero) + the deduped decision rows (subject/image · namespace · signature status · mesh status
-//! · the decision · the "if enforced" what-if). Light-theme, calm by default; meaning never by
-//! colour alone (colour + glyph + word). Honest empty state when no decisions are recorded. Pure
-//! component; no domain types; all free-text auto-escaped.
+//! at zero) + the per-image signing inventory (JEF-262 / ADR-0020) + the deduped decision rows
+//! (subject/image · namespace · mesh status · the decision · the "if enforced" what-if). The
+//! signature posture now lives in the signing inventory, so the decision log no longer carries a
+//! signature gate column. Light-theme, calm by default; meaning never by colour alone (colour +
+//! glyph + word). Honest empty states throughout. Pure component; no domain types; all free-text
+//! auto-escaped.
 
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    AdmissionViewProps, DecisionRowProps, GateStatus,
+    AdmissionViewProps, DecisionRowProps, GateStatus, SigningPosture, SigningRepoProps,
+    SigningRowProps,
 };
 
-/// Render the Admission view: the tallies header, then the deduped decision rows, with an honest
-/// empty state when no decisions have been recorded.
+/// Render the Admission view: the tallies header, then the per-image signing inventory, then the
+/// deduped decision rows — each with its own honest empty state.
 pub fn admission_view(v: &AdmissionViewProps) -> Markup {
     html! {
         main.view.view-admission {
             (tallies_header(v))
+            (signing_inventory(v))
             @if v.rows.is_empty() {
                 (empty_state())
             } @else {
@@ -57,8 +61,161 @@ fn tallies_header(v: &AdmissionViewProps) -> Markup {
     }
 }
 
+/// The per-image signing inventory (JEF-262 / ADR-0020): the observed signing posture of EVERY
+/// image, grouped under its repo, sitting between the tallies header and the decision log. Two hard
+/// rules the operator set: the posture is always signed / invalid signature / not signed (or the
+/// transient checking) — never n/a; and the "if enforced" cell is always the binary would-admit /
+/// would-block. Honest empty ("no images observed yet") — explicitly NOT an all-clear.
+fn signing_inventory(v: &AdmissionViewProps) -> Markup {
+    html! {
+        section.signing-inventory aria-label="signing inventory" {
+            h3.col-h.t-h2 { "signing inventory" }
+            p.section-sub.t-body.muted {
+                "the observed signing posture of every image \u{2014} signed, invalid signature, or \
+                 not signed (or a transient check while a registry is unreachable). This is \
+                 observation, not a gate; the 'if enforced' column is the binary what-if a \
+                 signature gate would apply (only a verifying signature would admit)."
+            }
+            @if v.signing.is_empty() {
+                (signing_empty())
+            } @else {
+                @for repo in &v.signing {
+                    (signing_repo(repo))
+                }
+            }
+        }
+    }
+}
+
+/// One repo group: the registry/repo header + a real `<table>` of the images observed under it (so
+/// the machine columns align — the keyboard/semantics gate).
+fn signing_repo(g: &SigningRepoProps) -> Markup {
+    html! {
+        div.signing-repo {
+            h4.signing-repo-h.t-data-strong { (g.repo) }
+            table.signing {
+                thead {
+                    tr {
+                        th.t-micro { "image" }
+                        th.t-micro { "signature" }
+                        th.t-micro { "if enforced" }
+                    }
+                }
+                tbody {
+                    @for img in &g.images {
+                        (signing_row(img))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One image row: the ref (expand-in-place for the full ref + signer/issuer detail) · the signing
+/// posture chip · the binary "if enforced". An invalid signature is the loud attention case (a
+/// breach keyline). The signer identity (untrusted Fulcio SAN) truncates in-row and is auto-escaped;
+/// its full value lives in the expand panel + `title=`.
+fn signing_row(r: &SigningRowProps) -> Markup {
+    let attention = r.posture == SigningPosture::Invalid;
+    let tr_class = if attention {
+        "signing-row signing-row-attention"
+    } else {
+        "signing-row"
+    };
+    html! {
+        tr class=(tr_class) data-posture=(r.posture.token()) {
+            td.cell-image {
+                details.signing-detail {
+                    summary.why-toggle role="button" aria-expanded="false" {
+                        span.signing-ref.t-data-strong title=(r.image) { (r.label) }
+                        @if r.count > 1 {
+                            span.signing-count.t-micro.muted title="distinct image observed this many times" {
+                                "\u{00D7}" (r.count)
+                            }
+                        }
+                        @if let Some(signer) = &r.signer {
+                            span.signing-by.t-micro.muted title=(signer.identity_full) {
+                                "signed by " (signer.identity_short)
+                                @if !signer.issuer_badge.is_empty() {
+                                    " \u{00B7} " span.issuer-badge { (signer.issuer_badge) }
+                                }
+                            }
+                        }
+                    }
+                    div.signing-detail-body {
+                        p.t-data { "image: " span.mono { (r.image) } }
+                        @match &r.signer {
+                            Some(signer) => {
+                                p.t-data { "identity: " span.mono { (signer.identity_full) } }
+                                @match &signer.issuer_full {
+                                    Some(issuer) => p.t-data { "issuer: " span.mono { (issuer) } }
+                                    None => p.t-data.muted { "issuer: none recorded" }
+                                }
+                            }
+                            None => {
+                                @if r.detail.is_empty() {
+                                    p.t-data.muted { "no signature artifact present for this image" }
+                                } @else {
+                                    p.t-data { (r.detail) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            td.cell-gate { (signing_chip(r.posture)) }
+            td.cell-enforced { (if_enforced_signing(r.posture.would_admit())) }
+        }
+    }
+}
+
+/// A signing-posture chip: colour + glyph + word, never colour alone. Reuses the `gate-chip`
+/// vocabulary with the `sign-*` colour tokens; `invalid` is the loud channel, `not signed` calm.
+fn signing_chip(p: SigningPosture) -> Markup {
+    html! {
+        span class={ "gate-chip sign-" (p.token()) } {
+            span.glyph aria-hidden="true" { (p.glyph()) }
+            span.gate-word { (p.word()) }
+        }
+    }
+}
+
+/// The binary "if enforced" for a signing posture: would admit / would block (never n/a). Colour +
+/// glyph + word; a would-block is the loud channel (a signature gate would reject the image).
+fn if_enforced_signing(would_admit: bool) -> Markup {
+    html! {
+        @if would_admit {
+            span.enforced-chip.enforced-admit {
+                span.glyph aria-hidden="true" { "\u{2713}" }
+                span.enforced-word { "would admit" }
+            }
+        } @else {
+            span.enforced-chip.enforced-block {
+                span.glyph aria-hidden="true" { "\u{2715}" }
+                span.enforced-word { "would block" }
+            }
+        }
+    }
+}
+
+/// The honest empty inventory: no images observed yet — explicitly NOT an all-clear (nothing has
+/// been inspected, not "everything is signed").
+fn signing_empty() -> Markup {
+    html! {
+        div.empty.signing-empty {
+            p.empty-head.t-h2 { "no images observed yet" }
+            p.empty-sub.t-body.muted {
+                "the signing sweep has not recorded any image postures in this window. This is not \
+                 an all-clear \u{2014} it means nothing has been inspected yet, not that every \
+                 image is signed."
+            }
+        }
+    }
+}
+
 /// The deduped decision rows as a real table (keyboard/semantics gate: machine data in a `<table>`
-/// so columns align). One row per distinct `(subject, image, decision)`.
+/// so columns align). One row per distinct `(subject, image, decision)`. The signature posture
+/// lives in the signing inventory above, so this table carries only the mesh gate.
 fn decision_rows(v: &AdmissionViewProps) -> Markup {
     html! {
         section.admission-rows aria-label="admission decisions" {
@@ -68,7 +225,6 @@ fn decision_rows(v: &AdmissionViewProps) -> Markup {
                     tr {
                         th.t-micro { "decision" }
                         th.t-micro { "workload" }
-                        th.t-micro { "signature" }
                         th.t-micro { "mesh" }
                         th.t-micro { "if enforced" }
                     }
@@ -83,9 +239,9 @@ fn decision_rows(v: &AdmissionViewProps) -> Markup {
     }
 }
 
-/// One decision row: the decision chip · the subject/image/namespace · the signature + mesh shadow
-/// status · the "if enforced" what-if. A `would-fail` gate or a `would-deny` what-if is the
-/// attention case (a denied keyline). All free-text (subject/image/namespace/reason) auto-escaped.
+/// One decision row: the decision chip · the subject/image/namespace · the mesh shadow status · the
+/// "if enforced" what-if. A `would-fail` gate or a `would-deny` what-if is the attention case (a
+/// denied keyline). All free-text (subject/image/namespace/reason) auto-escaped.
 fn decision_row(r: &DecisionRowProps) -> Markup {
     // A row the engine would have rejected if enforced is the attention case — keyline it.
     let attention = !r.would_admit;
@@ -123,7 +279,6 @@ fn decision_row(r: &DecisionRowProps) -> Markup {
                     p.decision-reason.t-data { (r.reason) }
                 }
             }
-            td.cell-gate { (gate_chip(r.signature)) }
             td.cell-gate { (gate_chip(r.mesh)) }
             td.cell-enforced { (if_enforced(r.would_admit)) }
         }
