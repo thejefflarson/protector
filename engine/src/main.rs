@@ -248,6 +248,13 @@ async fn main() -> Result<()> {
         let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
+        // The k8s audit-log ingest endpoint (JEF-269): the apiserver's audit webhook POSTs
+        // secret GET/LIST/WATCH events here for the RBAC-granted "corroborated-now" signal.
+        // Unset = no audit feed. The apiserver's audit-policy + webhook config is a
+        // deploy-repo concern (see the JEF-269 PR); this is the in-cluster ingest.
+        let audit_addr = env::var("PROTECTOR_AUDIT_ADDR")
+            .ok()
+            .and_then(|v| v.parse::<SocketAddr>().ok());
         // KEV catalogue (a synced ConfigMap of actively-exploited CVEs) for the
         // ExploitIntel "exploited-in-wild" signal. Unset = no exploit intel.
         let kev = match env::var("PROTECTOR_KEV_FILE") {
@@ -273,6 +280,7 @@ async fn main() -> Result<()> {
                         active,
                         scope,
                         falco_addr,
+                        audit_addr,
                         kev,
                         epss,
                         engine_policy_log,

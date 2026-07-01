@@ -7,6 +7,7 @@
 //! source of truth, so it is the honest v0.
 
 pub mod adapter;
+pub mod audit;
 pub mod epss;
 pub mod exec_class;
 pub mod exploit_intel;
@@ -213,6 +214,11 @@ pub(crate) fn report_resource(object: &DynamicObject) -> Option<WorkloadRef> {
 /// observation is attributed to a workload) is re-exported alongside it for the same reason.
 pub use protector_behavior::{Attribution, RuntimeObservation};
 
+/// The normalized API secret-read lifted from the apiserver audit log (JEF-269) — the
+/// corroborating runtime signal the eBPF agent can't observe. Re-exported here because the
+/// Observer and the audit adapter refer to it as `observe::AuditSecretRead`.
+pub use self::audit::AuditSecretRead;
+
 /// A point-in-time view of the cluster objects this slice's adapters consume.
 #[derive(Debug, Default, Clone)]
 pub struct Snapshot {
@@ -239,6 +245,10 @@ pub struct Snapshot {
     /// Live runtime events per workload (RuntimeEvidence port). Populated from a
     /// runtime sensor; see `observe`'s note on the live source.
     pub runtime_events: Vec<RuntimeObservation>,
+    /// Live API secret-reads from the apiserver audit log (JEF-269) — the corroborating
+    /// runtime signal for RBAC-granted secret access that eBPF can't see. Populated from
+    /// the audit-webhook ingest ([`self::audit`]); empty when that feed isn't wired.
+    pub audit_secret_reads: Vec<AuditSecretRead>,
     /// Linkerd authorization-policy inputs — the mesh-native reachability source
     /// (`Server` + `AuthorizationPolicy` + `MeshTLSAuthentication`). Empty when the
     /// policy CRDs aren't present. See [`self::linkerd`].
@@ -351,6 +361,11 @@ impl Snapshot {
         // RuntimeAdapter contributes nothing. The adapter and the action-bar
         // corroboration it drives are unit-tested against `RuntimeObservation`.
         let runtime_events = Vec::new();
+        // API secret-reads come from the apiserver's audit webhook (JEF-269), a stream like
+        // the runtime feed — never a list. Wired via the audit ingest in the run loop; this
+        // full-list observe path leaves it empty and the AuditSecretReadAdapter contributes
+        // nothing.
+        let audit_secret_reads = Vec::new();
 
         Ok(Self {
             pods,
@@ -366,6 +381,7 @@ impl Snapshot {
             config_audits,
             rbac_assessments,
             runtime_events,
+            audit_secret_reads,
             linkerd_servers,
             linkerd_authz_policies,
             linkerd_mtls_auths,

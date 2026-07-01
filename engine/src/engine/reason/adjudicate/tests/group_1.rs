@@ -370,6 +370,7 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
         },
         Behavior::SecretRead {
             secret: "app/own-creds".into(),
+            source: crate::engine::graph::SecretReadSource::Mounted,
         },
     ];
     assert!(matches!(

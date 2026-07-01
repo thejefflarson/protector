@@ -37,6 +37,7 @@ use crate::engine::graph::{
     canonical_image,
 };
 
+mod audit_secret;
 mod egress;
 mod enrich;
 mod escape;
@@ -48,6 +49,7 @@ mod rbac;
 mod secret_mount;
 mod workload;
 
+pub use self::audit_secret::AuditSecretReadAdapter;
 pub use self::egress::EgressAdapter;
 pub use self::enrich::{CveReachabilityAdapter, RuntimeAdapter, VulnerabilityAdapter};
 pub use self::escape::HostEscapeAdapter;
@@ -181,6 +183,11 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(ConfigAuditAdapter),
         Box::new(RbacAssessmentAdapter),
         Box::new(RuntimeAdapter),
+        // API secret-reads from the apiserver audit log (JEF-269): attaches a
+        // SecretRead{Api} corroboration signal to the workloads whose ServiceAccount made
+        // the read. Runs after WorkloadAdapter (needs the RunsAs edges) alongside the
+        // other runtime enrichment.
+        Box::new(AuditSecretReadAdapter),
         // CVE↔runtime-load correlation (JEF-51): reads the CVEs the VulnerabilityAdapter
         // put on Images and the loads the RuntimeAdapter put on Workloads, so it runs
         // after both.

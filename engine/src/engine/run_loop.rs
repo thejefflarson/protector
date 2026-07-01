@@ -188,6 +188,10 @@ pub async fn run_watch(
     active: EnabledActions,
     scope: ActuationScope,
     runtime_addr: Option<std::net::SocketAddr>,
+    // The k8s audit-log ingest endpoint (JEF-269): the apiserver's audit webhook POSTs
+    // secret GET/LIST/WATCH events here for the RBAC-granted "corroborated-now" signal.
+    // Unset = no audit feed.
+    audit_addr: Option<std::net::SocketAddr>,
     kev: observe::exploit_intel::KevCatalog,
     epss: observe::epss::EpssStore,
     // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
@@ -329,6 +333,23 @@ pub async fn run_watch(
         });
     }
 
+    // API secret-reads from the apiserver audit log (JEF-269): the corroborating signal for
+    // an RBAC-granted secret GET the eBPF agent can't see. Held in a TTL'd store on the same
+    // freshness window as the runtime feed and woken the same way — only a *new* read wakes
+    // the loop, so a workload re-reading the same secret every reconcile doesn't churn a pass.
+    let audit_events = std::sync::Arc::new(observe::audit::AuditEvents::new(
+        std::time::Duration::from_secs(300),
+    ));
+    let (audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<()>(64);
+    if let Some(addr) = audit_addr {
+        let events = audit_events.clone();
+        tokio::spawn(async move {
+            if let Err(error) = observe::audit::serve_audit(addr, events, audit_tx).await {
+                tracing::error!(%error, "k8s audit-log ingest stopped");
+            }
+        });
+    }
+
     // A reflector per watched type: it owns a Store kept current as its stream is
     // polled, and yields a tick on every change. Merging the tick streams gives a
     // single "something changed" signal.
@@ -404,11 +425,13 @@ pub async fn run_watch(
         tokio::select! {
             next = change_rx.recv() => if next.is_none() { break },
             _ = runtime_rx.recv() => {},
+            _ = audit_rx.recv() => {},
         }
         // Coalesce an already-queued burst (a Deployment rollout, or several material
         // reports) into one pass.
         while change_rx.try_recv().is_ok() {}
         while runtime_rx.try_recv().is_ok() {}
+        while audit_rx.try_recv().is_ok() {}
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;
@@ -456,6 +479,8 @@ pub async fn run_watch(
             config_audits: config_audits_now,
             rbac_assessments: rbac_assessments_now,
             runtime_events: runtime_events.current(),
+            // API secret-reads from the audit log (JEF-269), TTL'd like the runtime feed.
+            audit_secret_reads: audit_events.current(),
             // Linkerd authz CRDs, listed best-effort each pass (the mesh-native
             // reachability source — see LinkerdReachabilityAdapter).
             linkerd_servers: linkerd_servers_now,

@@ -172,6 +172,7 @@ mod tests {
             },
             Behavior::SecretRead {
                 secret: "apt".into(),
+                source: crate::engine::graph::SecretReadSource::Mounted,
             },
             Behavior::FileRead {
                 path: "/bin/bash".into(),
@@ -204,6 +205,7 @@ mod tests {
         };
         let secret = Behavior::SecretRead {
             secret: "app/session-key".into(),
+            source: crate::engine::graph::SecretReadSource::Mounted,
         };
         assert_eq!(
             annotated_summary(&shell),
