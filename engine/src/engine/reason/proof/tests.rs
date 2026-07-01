@@ -493,8 +493,18 @@ fn network_internet_corroborates_exfiltration() {
 fn secret_read_corroborates_credential_access() {
     let behavior = Behavior::SecretRead {
         secret: "db-creds".into(),
+        source: crate::engine::graph::SecretReadSource::Mounted,
     };
     assert!(corroborates(&behavior, &CREDENTIAL_ACCESS));
+    // An API secret read (JEF-269) corroborates the same objective — the tactic, not the
+    // read mechanism, is what corroborates a credential-access chain.
+    assert!(corroborates(
+        &Behavior::SecretRead {
+            secret: "db-creds".into(),
+            source: crate::engine::graph::SecretReadSource::Api,
+        },
+        &CREDENTIAL_ACCESS,
+    ));
 }
 
 /// A library load corroborates a FOOTHOLD (Initial Access / T1190): post-JEF-75 the
@@ -524,6 +534,7 @@ fn behavior_does_not_corroborate_unrelated_objective() {
     assert!(!corroborates(
         &Behavior::SecretRead {
             secret: "db-creds".into(),
+            source: crate::engine::graph::SecretReadSource::Mounted,
         },
         &ESCAPE_TO_HOST,
     ));
@@ -665,6 +676,7 @@ fn secret_read_signal_corroborates_credential_chain_end_to_end() {
             observed_at_ms: None,
             behavior: Behavior::SecretRead {
                 secret: "session-key".into(),
+                source: crate::engine::graph::SecretReadSource::Mounted,
             },
         }],
         ..Default::default()

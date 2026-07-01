@@ -450,7 +450,7 @@ impl Severity {
 /// the engine and the first-party agent can't drift (ADR-0003/0014). Re-exported here
 /// because the graph reasons in terms of `Behavior` and the rest of the engine refers to
 /// it as `graph::Behavior`.
-pub use protector_behavior::Behavior;
+pub use protector_behavior::{Behavior, SecretReadSource};
 
 /// A live runtime signal corroborating that activity is happening now
 /// (RuntimeEvidence port) — the difference between "theoretically vulnerable" and

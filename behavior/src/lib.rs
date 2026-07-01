@@ -23,8 +23,17 @@ pub enum Behavior {
     Alert { rule: String },
     /// An outbound connection the workload made; `internet` if it left the cluster.
     NetworkConnection { peer: String, internet: bool },
-    /// A read of a mounted secret's contents.
-    SecretRead { secret: String },
+    /// A read of a secret. `source` distinguishes *how* it was read: a mounted-file read
+    /// (the eBPF agent's on-disk path) or a Kubernetes API GET/LIST/WATCH via the
+    /// workload's ServiceAccount RBAC (observed engine-side from the apiserver audit log,
+    /// JEF-269) — two genuinely different runtime facts that both reach the same secret.
+    /// Older sensors omit `source`, which defaults to [`SecretReadSource::Mounted`] (the
+    /// only kind eBPF can see), preserving the pre-existing wire shape.
+    SecretRead {
+        secret: String,
+        #[serde(default, skip_serializing_if = "SecretReadSource::is_mounted")]
+        source: SecretReadSource,
+    },
     /// A load of a shared library / dependency artifact.
     LibraryLoaded { name: String },
     /// A **transport-stage** signal: a file open the sensor couldn't classify on its own.
@@ -46,6 +55,32 @@ pub enum Behavior {
     /// kernel saw it (`linux_binprm->filename`). Evidence for the model only today;
     /// wiring exec → corroboration is JEF-49.
     ProcessExec { path: String },
+}
+
+/// How a [`Behavior::SecretRead`] was observed — a type distinction, not a string
+/// convention. The wire type stays cluster-agnostic (ADR-0003): a sensor names only the
+/// *kind* of read it saw; the engine, not the agent, resolves the ServiceAccount→edge
+/// attribution for an API read (JEF-269).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretReadSource {
+    /// The secret's on-disk contents were read from a mounted volume — the eBPF agent's
+    /// file-read path (the only secret read a node-local sensor can see). The default so
+    /// older agents' `{"kind":"secret_read","secret":"..."}` keeps its meaning.
+    #[default]
+    Mounted,
+    /// The secret was fetched through the Kubernetes API (a `get`/`list`/`watch` on
+    /// `secrets`) via the workload's ServiceAccount RBAC — a TLS call to the apiserver
+    /// eBPF cannot attribute as a secret read. Observed engine-side from the audit log.
+    Api,
+}
+
+impl SecretReadSource {
+    /// Whether this is the default (mounted) source. Used to omit `source` from the wire
+    /// for the common mounted read, keeping the eBPF agent's contract byte-for-byte stable.
+    fn is_mounted(&self) -> bool {
+        matches!(self, SecretReadSource::Mounted)
+    }
 }
 
 /// The basename of a binary path as the kernel saw it (`/usr/bin/apt` -> `apt`) — the
@@ -100,7 +135,10 @@ impl Behavior {
                 "connects to {peer}{}",
                 if *internet { " (INTERNET egress)" } else { "" }
             ),
-            Behavior::SecretRead { secret } => format!("reads secret {secret}"),
+            Behavior::SecretRead { secret, source } => match source {
+                SecretReadSource::Mounted => format!("reads secret {secret}"),
+                SecretReadSource::Api => format!("reads secret {secret} (via Kubernetes API)"),
+            },
             Behavior::LibraryLoaded { name } => format!("loaded library {name}"),
             Behavior::FileRead { path } => format!("opened file {path}"),
             Behavior::PrivilegeChange { from_uid, to_uid } => {
@@ -125,7 +163,17 @@ impl Behavior {
             Behavior::NetworkConnection {
                 internet: false, ..
             } => "egress:cluster".to_string(),
-            Behavior::SecretRead { secret } => format!("read:{secret}"),
+            // Keep the source in the key so a mounted read and an API read of the same
+            // secret are distinct facts (they corroborate the same tactic, but they are
+            // genuinely different observations). Mounted keeps its historical `read:` key.
+            Behavior::SecretRead {
+                secret,
+                source: SecretReadSource::Mounted,
+            } => format!("read:{secret}"),
+            Behavior::SecretRead {
+                secret,
+                source: SecretReadSource::Api,
+            } => format!("read-api:{secret}"),
             Behavior::LibraryLoaded { name } => format!("lib:{name}"),
             Behavior::FileRead { path } => format!("file:{path}"),
             // Keyed on the gained UID only (always 0 today, but stable if the escalation
@@ -259,6 +307,7 @@ mod tests {
             observed_at_ms: Some(1_710_000_000_000),
             behavior: Behavior::SecretRead {
                 secret: "app/session-key".into(),
+                source: SecretReadSource::Mounted,
             },
         };
         let v = serde_json::to_value(&obs).unwrap();
@@ -275,6 +324,46 @@ mod tests {
             serde_json::from_value::<RuntimeObservation>(v).unwrap(),
             obs
         );
+    }
+
+    #[test]
+    fn secret_read_source_distinguishes_mounted_from_api() {
+        // Mounted is the default and is OMITTED on the wire, so the eBPF agent's existing
+        // `{"kind":"secret_read","secret":"..."}` contract is byte-for-byte unchanged.
+        let mounted = Behavior::SecretRead {
+            secret: "app/db".into(),
+            source: SecretReadSource::Mounted,
+        };
+        assert_eq!(
+            serde_json::to_value(&mounted).unwrap(),
+            serde_json::json!({"kind": "secret_read", "secret": "app/db"})
+        );
+        // An absent `source` deserializes back to Mounted (older sensors).
+        let from_legacy: Behavior =
+            serde_json::from_value(serde_json::json!({"kind": "secret_read", "secret": "app/db"}))
+                .unwrap();
+        assert_eq!(from_legacy, mounted);
+
+        // An API read serializes its source explicitly and round-trips.
+        let api = Behavior::SecretRead {
+            secret: "app/db".into(),
+            source: SecretReadSource::Api,
+        };
+        let v = serde_json::to_value(&api).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind": "secret_read", "secret": "app/db", "source": "api"})
+        );
+        assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), api);
+
+        // The two are distinguishable everywhere it matters: summary prose and the
+        // verdict-cache fingerprint. The metric label stays the coarse shared token.
+        assert_eq!(mounted.summary(), "reads secret app/db");
+        assert_eq!(api.summary(), "reads secret app/db (via Kubernetes API)");
+        assert_eq!(mounted.fingerprint_key(), "read:app/db");
+        assert_eq!(api.fingerprint_key(), "read-api:app/db");
+        assert_ne!(mounted.fingerprint_key(), api.fingerprint_key());
+        assert_eq!(mounted.variant_label(), api.variant_label());
     }
 
     #[test]
@@ -340,7 +429,13 @@ mod tests {
                 },
                 "connection",
             ),
-            (Behavior::SecretRead { secret: "s".into() }, "secret-read"),
+            (
+                Behavior::SecretRead {
+                    secret: "s".into(),
+                    source: SecretReadSource::Mounted,
+                },
+                "secret-read",
+            ),
             (Behavior::LibraryLoaded { name: "l".into() }, "library-load"),
             (Behavior::FileRead { path: "/p".into() }, "file-read"),
             (

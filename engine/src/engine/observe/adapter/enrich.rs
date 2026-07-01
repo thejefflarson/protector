@@ -112,7 +112,13 @@ impl Adapter for RuntimeAdapter {
                         // Real secret reads are sparse — log each at info (operability +
                         // confirms the secret-read probe end-to-end on the nodes).
                         tracing::info!(%secret, namespace = %ns, pod = %name, "secret read");
-                        Behavior::SecretRead { secret }
+                        // A refined FileRead is always a mounted-file read — the only kind
+                        // eBPF observes. The API secret-read path is the audit adapter's
+                        // (JEF-269), never this one.
+                        Behavior::SecretRead {
+                            secret,
+                            source: crate::engine::graph::SecretReadSource::Mounted,
+                        }
                     }
                     None => {
                         filtered += 1;
