@@ -74,6 +74,11 @@ pub(super) fn status_strip(
         uncertain_count,
         cleared_count,
         escalated_count,
+        // Signing-regression counts (JEF-264) are wired in by the caller that holds the
+        // admission-decision log (`DashboardState::with_signing_regressions`); the findings-derived
+        // strip carries none of its own.
+        signing_regression_breach: 0,
+        signing_regression_uncertain: 0,
     }
 }
 
@@ -147,6 +152,43 @@ mod tests {
         assert!(!strip.all_clear());
         assert!(strip.warming_up);
         assert!(strip.last_pass.is_none());
+    }
+
+    /// JEF-264: an ESTABLISHED-baseline signing regression counts toward breach — it forbids the
+    /// green all-clear AND the calm "watching" reading (it is louder than watching).
+    #[test]
+    fn established_signing_regression_forbids_green_and_watching() {
+        let mut bake = BakeStats::default();
+        bake.signals_by_variant.insert("alert".into(), 1);
+        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        // Everything else is clear (would be all-clear) — but one established regression stands.
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
+            .with_signing_regressions(1, 0);
+        assert!(strip.has_signing_regression());
+        assert!(
+            !strip.all_clear(),
+            "a standing regression can never read as green"
+        );
+        assert!(
+            !strip.watching(),
+            "an established regression is louder than the calm watching register"
+        );
+    }
+
+    /// JEF-264: a COLD-baseline signing regression maps to uncertain — it forbids green, but reads
+    /// as the calmer, non-green "watching" register (a weak lead, not a breach).
+    #[test]
+    fn cold_signing_regression_is_watching_not_green() {
+        let mut bake = BakeStats::default();
+        bake.signals_by_variant.insert("alert".into(), 1);
+        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
+            .with_signing_regressions(0, 1);
+        assert!(!strip.all_clear(), "a cold regression still forbids green");
+        assert!(
+            strip.watching(),
+            "a cold regression reads as the calm watching register"
+        );
     }
 
     /// Judging + covered but an entry is still awaiting/uncertain ⇒ NOT all-clear; the elevated

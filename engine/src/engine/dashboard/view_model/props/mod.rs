@@ -303,9 +303,35 @@ pub struct StatusStripProps {
     pub cleared_count: usize,
     /// Newly-escalated since last pass (the Δ headline).
     pub escalated_count: usize,
+    /// Standing signing regressions against an ESTABLISHED repo baseline (JEF-264) — a strong
+    /// supply-chain signal. Counts toward BREACH for the honesty gate: blocks the green all-clear
+    /// AND the calm "watching" reading. Audit-only (never denies); kept SEPARATE from the
+    /// reachability [`breach_count`](Self::breach_count) — a signing regression is not a
+    /// reachability breach the model can isolate.
+    pub signing_regression_breach: usize,
+    /// Standing signing regressions against a COLD / freshly-learned baseline (JEF-264) — a weak
+    /// lead (the baseline itself is weak evidence). Maps to UNCERTAIN: blocks the green all-clear
+    /// but reads as the calmer "watching" register, not a breach.
+    pub signing_regression_uncertain: usize,
 }
 
 impl StatusStripProps {
+    /// Attach the standing signing-regression counts (JEF-264) — an established-baseline regression
+    /// (breach) and a cold-baseline one (uncertain). Builder-style so the strip builders keep their
+    /// minimal signatures and the caller with the admission-decision log (`DashboardState`) wires
+    /// the counts in. Both feed the honesty gate — a standing regression can never read as green.
+    pub fn with_signing_regressions(mut self, breach: usize, uncertain: usize) -> Self {
+        self.signing_regression_breach = breach;
+        self.signing_regression_uncertain = uncertain;
+        self
+    }
+
+    /// Whether any signing regression stands (established or cold) — the honesty side: a standing
+    /// regression forbids the green all-clear (JEF-264 acceptance criterion).
+    pub fn has_signing_regression(&self) -> bool {
+        self.signing_regression_breach > 0 || self.signing_regression_uncertain > 0
+    }
+
     /// Whether the model is up and answering (not warming/blind). This is the floor for a
     /// non-blind render — but it is NOT enough for a green all-clear (see [`Self::all_clear`]).
     pub fn model_is_up(&self) -> bool {
@@ -324,19 +350,30 @@ impl StatusStripProps {
     /// EVERYTHING it is looking at — judging, not warming, fully covered, and zero breaches AND
     /// zero entries still awaiting AND zero uncertain (the tightened honesty gate, invariant #1).
     /// "Quiet because the model affirmatively cleared it" is the ONLY thing that may go green.
+    ///
+    /// A standing signing regression (JEF-264) — established OR cold — also forbids green: an
+    /// un-accepted regression is an open supply-chain question the model has not cleared.
     pub fn all_clear(&self) -> bool {
         self.fully_covered()
             && self.breach_count == 0
             && self.awaiting_count == 0
             && self.uncertain_count == 0
+            && !self.has_signing_regression()
     }
 
     /// Whether the strip should show the elevated **"watching"** state: the model is up but has
     /// NOT yet affirmatively cleared everything — something is still awaiting or uncertain (or a
     /// feed is missing). Calm, but **not** green — the model isn't sure yet. Distinct from a
     /// breach (which is loud) and from blind/warming (model down).
+    ///
+    /// An ESTABLISHED-baseline signing regression (JEF-264) is louder than watching — it counts
+    /// toward breach — so it is excluded here (it falls through to the elevated/loud reading). A
+    /// COLD-baseline regression is a weak lead and reads as this calm, non-green watching register.
     pub fn watching(&self) -> bool {
-        self.model_is_up() && self.breach_count == 0 && !self.all_clear()
+        self.model_is_up()
+            && self.breach_count == 0
+            && self.signing_regression_breach == 0
+            && !self.all_clear()
     }
 }
 
@@ -762,131 +799,12 @@ pub struct AdmissionViewProps {
     pub rows: Vec<DecisionRowProps>,
 }
 
-// ---------------------------------------------------------------------------
-// Signing inventory (JEF-262 / ADR-0020 Stage 1 render) — the observed signing
-// posture of EVERY image, as a dedicated inventory section. Two hard operator
-// rules: the posture is ALWAYS signed / invalid signature / not signed (or the
-// transient checking) — never n/a; and the "if enforced" column is ALWAYS the
-// binary would-admit / would-block — never n/a.
-// ---------------------------------------------------------------------------
-
-/// An image's observed signing posture — the presentation mirror of the domain
-/// `signature::posture::SigningPosture` (mapped at the view_model boundary so components never
-/// import the domain type). NEVER n/a: observation always reaches a posture, and a registry blip
-/// is the explicit transient [`Checking`](Self::Checking), not a fabricated clean. Carried as
-/// colour + glyph + word so meaning never rides on colour alone. [`Invalid`](Self::Invalid) is the
-/// LOUD channel — visually and lexically distinct from a calm [`NotSigned`](Self::NotSigned).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SigningPosture {
-    /// A signature is present and verifies (the signer rides [`SigningRowProps::signer`]).
-    Signed,
-    /// A signature artifact is present but does NOT verify — the loud, alarming case. Distinct
-    /// from (and more alarming than) [`NotSigned`](Self::NotSigned).
-    Invalid,
-    /// No signature at all — calm (no baseline yet), never loud, but never a green pass either.
-    NotSigned,
-    /// Transient: the registry / transparency log was unreachable, so the posture is not yet
-    /// known. Never read as clean; resolves into a resting posture on a later pass.
-    Checking,
-}
-
-impl SigningPosture {
-    /// Parse the engine's low-cardinality status word (`SigningPosture::status()`) into the
-    /// presentation enum. An unknown / empty word reads as the transient
-    /// [`Checking`](Self::Checking) rather than a fabricated resting posture — never a false clean.
-    pub fn parse(word: &str) -> SigningPosture {
-        match word {
-            "signed" => SigningPosture::Signed,
-            "invalid-signature" => SigningPosture::Invalid,
-            "not-signed" => SigningPosture::NotSigned,
-            _ => SigningPosture::Checking,
-        }
-    }
-
-    /// The CSS token suffix (`--sign-{kind}`) for this posture.
-    pub fn token(self) -> &'static str {
-        match self {
-            SigningPosture::Signed => "signed",
-            SigningPosture::Invalid => "invalid",
-            SigningPosture::NotSigned => "notsigned",
-            SigningPosture::Checking => "checking",
-        }
-    }
-
-    /// The glyph carrying the posture without colour — each distinct so `invalid` reads apart from
-    /// `not signed` and `signed` even in greyscale.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            SigningPosture::Signed => "\u{2713}",    // ✓ present + verified
-            SigningPosture::Invalid => "\u{2715}",   // ✕ present but broken — the loud channel
-            SigningPosture::NotSigned => "\u{25CB}", // ○ open — nothing there, calm
-            SigningPosture::Checking => "\u{25CC}",  // ◌ dotted — transient
-        }
-    }
-
-    /// The word — always present alongside colour + glyph, and lexically distinct per state.
-    pub fn word(self) -> &'static str {
-        match self {
-            SigningPosture::Signed => "signed",
-            SigningPosture::Invalid => "invalid signature",
-            SigningPosture::NotSigned => "not signed",
-            SigningPosture::Checking => "checking\u{2026}",
-        }
-    }
-
-    /// The binary "if enforced" counterfactual: only a verifying [`Signed`](Self::Signed) image
-    /// would be admitted by a signature gate; every other posture (invalid / not signed / the
-    /// unverifiable transient) would be blocked. Fail-closed — never n/a (operator rule #2).
-    pub fn would_admit(self) -> bool {
-        matches!(self, SigningPosture::Signed)
-    }
-}
-
-/// The signer learned from a verified Fulcio cert (only present when [`SigningPosture::Signed`]).
-/// Both the identity and issuer are UNTRUSTED third-party free-text (an attacker-influenceable cert
-/// subject) — the component escapes them at render (maud auto-escape; NEVER `PreEscaped`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignerProps {
-    /// A short, scannable label derived from the Fulcio SAN (a GitHub Actions workflow URI →
-    /// `org/repo`; an email kept as-is; otherwise the raw identity, truncated in-row by CSS). Shown
-    /// in the row.
-    pub identity_short: String,
-    /// The full Fulcio SAN — shown in the expand panel and the `title=`, so the truncated in-row
-    /// label never hides the real signer.
-    pub identity_full: String,
-    /// A short issuer badge derived from the OIDC issuer (`github actions` / `google` / `sigstore`
-    /// / the host), or empty when the cert carried no issuer.
-    pub issuer_badge: String,
-    /// The full OIDC issuer URL for the expand panel, or `None` when the cert carried none.
-    pub issuer_full: Option<String>,
-}
-
-/// One image row in the signing inventory (JEF-262). Plain presentation data only — mapped from the
-/// engine `PolicyDecisionRecord` at the view_model boundary. Every string is UNTRUSTED at render.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SigningRowProps {
-    /// The full image ref (registry/repo + digest/tag), untrusted — shown in the expand panel and
-    /// the `title=`.
-    pub image: String,
-    /// The in-row image label: the digest/tag remainder under the repo group (falls back to the
-    /// full ref when the image carries no tag/digest), untrusted.
-    pub label: String,
-    pub posture: SigningPosture,
-    /// The signer, present only when [`posture`](Self::posture) is [`SigningPosture::Signed`].
-    pub signer: Option<SignerProps>,
-    /// The human-facing posture prose for the expand panel (why invalid / still checking); empty
-    /// for a plain not-signed, which needs no prose. Untrusted.
-    pub detail: String,
-    /// How many times this exact image was observed (the dedup count).
-    pub count: u64,
-}
-
-/// A repo group in the signing inventory: one registry/repo header with the images observed under
-/// it (JEF-262 — the inventory unit is the image, grouped under its repo).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SigningRepoProps {
-    /// The registry/repo the images share (the group header), untrusted.
-    pub repo: String,
-    /// The images observed under this repo.
-    pub images: Vec<SigningRowProps>,
-}
+// The per-image signing inventory presentation types (JEF-262 / ADR-0020 Stage 1 render) + the
+// signing-regression banner (JEF-264), split into a focused submodule to keep this file under the
+// repo's 1,000-line cap (CLAUDE.md). Re-exported flat so `props::SigningPosture` etc. resolve
+// unchanged for every consumer.
+mod signing;
+pub use signing::{
+    RegressionKind, SignerProps, SigningPosture, SigningRegressionProps, SigningRepoProps,
+    SigningRowProps,
+};
