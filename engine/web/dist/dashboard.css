@@ -811,14 +811,15 @@ summary:focus-visible,
 .tally-denied { color: var(--posture-breach); }
 .tally-total { color: var(--ink-3); }
 
-/* the deduped decision rows, a real table so the machine columns align (keyboard/semantics gate). */
-.decisions {
+/* the deduped decision rows + the signing inventory, real tables so the machine columns align
+   (keyboard/semantics gate). */
+.decisions, .signing {
   width: 100%;
   border-collapse: collapse;
   background: var(--surface);
   border: var(--hairline) solid var(--border);
 }
-.decisions thead th {
+.decisions thead th, .signing thead th {
   text-align: left;
   font-size: var(--fs-micro); line-height: var(--lh-micro);
   font-weight: var(--fw-micro); letter-spacing: var(--track-micro);
@@ -828,7 +829,7 @@ summary:focus-visible,
   border-bottom: var(--hairline) solid var(--border);
   white-space: nowrap;
 }
-.decisions tbody td {
+.decisions tbody td, .signing tbody td {
   padding: var(--space-2) var(--space-3);
   border-bottom: var(--hairline) solid var(--border);
   vertical-align: top;
@@ -875,3 +876,46 @@ summary:focus-visible,
 .gate-na { color: var(--ink-3); }
 .enforced-admit { color: var(--cov-present); }
 .enforced-deny { color: var(--posture-breach); }
+.enforced-block { color: var(--posture-breach); }
+
+/* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture, grouped
+   under its repo, sitting between the tallies header and the decision log. Posture is always
+   signed / invalid signature / not signed (or the transient checking) — never n/a; the "if
+   enforced" cell is always the binary would-admit / would-block. ---- */
+.view > .signing-inventory { margin-bottom: var(--section-gap); }
+.signing-repo { margin-top: var(--space-4); }
+.signing-repo-h {
+  color: var(--ink-1); font-family: var(--font-data);
+  margin: 0 0 var(--space-1);
+}
+.signing-row:hover { background: var(--surface-hover); }
+/* an invalid signature is the loud attention case — a breach keyline (calm not-signed gets none). */
+.signing-row-attention td.cell-image {
+  border-left: var(--rail-strong) solid var(--posture-breach);
+}
+.cell-image { min-width: 0; }
+/* the ref + signer line truncate to a single line with an ellipsis (never word-break) so the table
+   stays scannable; the full ref/identity lives in the expand panel + title=. */
+.signing-ref {
+  display: inline-block; max-width: 48ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--ink-1); font-family: var(--font-data);
+}
+.signing-by {
+  display: block; max-width: 60ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.issuer-badge { color: var(--ink-2); }
+.signing-count { margin-left: var(--space-1); }
+.signing-detail[open] > .why-toggle::before { content: "\25BE "; }
+.signing-detail-body { padding: var(--space-2) 0; }
+.signing-detail-body p { margin: var(--space-1) 0; color: var(--ink-2); }
+
+/* the signing-posture chip colours: signed is the calm cleared green; invalid is the loud breach
+   channel; not signed is calm/muted (no baseline); checking is the transient ochre. Each pairs with
+   a distinct glyph + word (meaning never by colour alone). */
+.sign-signed { color: var(--cov-present); }
+.sign-invalid { color: var(--posture-breach); }
+.sign-notsigned { color: var(--ink-3); }
+.sign-checking { color: var(--posture-awaiting); }

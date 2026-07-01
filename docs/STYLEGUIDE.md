@@ -68,6 +68,18 @@ rails make "not decided" texturally distinct even in greyscale.
 | `--delta-restored` | `#6B7280` | | `--mode-shadow` | `#667085` |
 | | | | `--mode-enforce` | `#1570EF` |
 
+### Colour — signing posture (ADR-0020; the Admission signing inventory)
+Every image's observed signing posture, always one of these — **never n/a** — each carrying
+colour **+ glyph + word** (meaning never by colour alone). `invalid signature` is the loud channel;
+plain `not signed` is calm (no baseline yet), never green. The "if enforced" cell is always the
+binary would-admit / would-block.
+| Token | Value | Glyph | Word |
+|---|---|---|---|
+| `--sign-signed` (`--cov-present`) | `#067647` | ✓ | signed |
+| `--sign-invalid` (`--posture-breach`) | `#D92D20` | ✕ | invalid signature |
+| `--sign-notsigned` (`--ink-3`) | `#6B7280` | ○ open | not signed |
+| `--sign-checking` (`--posture-awaiting`) | `#9A6B2E` | ◌ dotted | checking… |
+
 ### Space (4px base)
 `--space-1:4 · --space-2:8 · --space-3:12 · --space-4:16 · --space-6:24 · --space-8:32`
 
@@ -97,12 +109,15 @@ Two weights only (400/600). Emphasis via weight + ink value, not a third weight.
 | CVE table | `--font-data` `--text-micro`, right-aligned numerics |
 | Coverage row | `--cov-*` dot + glyph + label; `weakens_decisions` + absent → amber keyline |
 | Reversion log | `--posture-cleared` toned (a self-revert is the system working) |
+| Signing inventory | `--sign-*` chip (glyph + word); `invalid` → `--posture-breach` keyline (loud), `not signed` calm; ref/signer single-line ellipsis (never `break-all`), full value in the `<details>` panel + `title=`; "if enforced" → `--cov-present` would-admit / `--posture-breach` would-block |
 | Empty states | `--ink-2`; posture-coloured only when honestly earned (model judging) |
 
 ## Accessibility gate (test-enforced)
 1. **Contrast:** body/status text ≥ **4.5:1** on its surface; chips/rails/glyphs ≥ **3:1**.
-2. **Meaning not by colour alone:** every posture / severity / Δ / coverage state renders a
-   non-empty **glyph + text label** in addition to colour. (Assert each enum→(glyph,label).)
+2. **Meaning not by colour alone:** every posture / severity / Δ / coverage / **signing posture**
+   state renders a non-empty **glyph + text label** in addition to colour. (Assert each
+   enum→(glyph,label).) The signing posture is always one of signed / invalid signature / not
+   signed / checking — **never n/a** — and its "if enforced" cell is always would-admit / would-block.
 3. **Honest-calm invariant:** the overall green/all-clear resolves to `--posture-cleared`/green
    ONLY when the model has affirmatively cleared everything — `model_judging == true` AND not
    `warming_up` AND **covered** AND **zero breaches AND zero awaiting AND zero uncertain**. If

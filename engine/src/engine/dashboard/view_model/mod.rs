@@ -14,11 +14,12 @@ mod admission;
 mod findings;
 mod posture;
 mod readiness;
+mod signing_inventory;
 mod strip;
 
 use std::time::SystemTime;
 
-use crate::engine::policy_log::{DecisionTallies, PolicyDecisionRecord};
+use crate::engine::policy_log::PolicyDecisionRecord;
 use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
@@ -112,12 +113,14 @@ pub fn build_action_view(
 }
 
 /// Build the whole Admission/policy (webhook floor) view's props (brief §6): the persistent strip +
-/// the decision tallies header (so a healthy view is never blank) + the deduped decision rows.
-/// Pure given its inputs.
+/// the decision tallies header (so a healthy view is never blank) + the per-image signing inventory
+/// (JEF-262) + the deduped decision rows. The tallies are derived from the webhook DECISION rows
+/// alone — the signing sweep's observation rows (`Image/<ref>`) feed the inventory, never the
+/// admitted/audited/denied counts — so pure observation can't inflate the decision totals. Pure
+/// given its inputs.
 pub fn build_admission_view(
     strip: StatusStripProps,
-    tallies: DecisionTallies,
     rows: &[PolicyDecisionRecord],
 ) -> AdmissionViewProps {
-    admission::build(strip, tallies, rows)
+    admission::build(strip, rows)
 }

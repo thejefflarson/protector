@@ -334,7 +334,50 @@ fn sample_policy_log() -> Arc<PolicyDecisionLog> {
         )
         .with_would_admit(false),
     );
+    record_signing_inventory(&log);
     Arc::new(log)
+}
+
+/// Seed the signing sweep's per-image observation rows (JEF-261 shape) so the Admission tab's
+/// signing inventory (JEF-262) renders every posture: a GitHub Actions keyless signature, a
+/// human/Google-issued signature, an invalid signature (loud), a plain not-signed (calm), and a
+/// transient checking. Keyed `Image/<ref>` with the posture in the `signature` word + `reason`
+/// prose, exactly as `engine::signing_sweep` records them.
+fn record_signing_inventory(log: &PolicyDecisionLog) {
+    let sweep = |image: &str, status: &str, reason: &str| {
+        log.record(PolicyDecisionRecord::now(
+            "image-signature",
+            "allow",
+            format!("Image/{image}"),
+            image,
+            status,
+            "",
+            "",
+            reason,
+        ));
+    };
+    sweep(
+        "ghcr.io/acme/api-gateway@sha256:1a2b3c4d5e6f70819293a4b5c6d7e8f90112233445566778899aabbccddeeff0",
+        "signed",
+        "signed by https://github.com/acme/api-gateway/.github/workflows/release.yaml@refs/tags/v1.8.2 \
+         via https://token.actions.githubusercontent.com",
+    );
+    sweep(
+        "ghcr.io/acme/export:3.0.0",
+        "signed",
+        "signed by releng@acme.example via https://accounts.google.com",
+    );
+    sweep(
+        "docker.io/library/storefront:latest",
+        "invalid-signature",
+        "signature present but does not verify (untrusted/tampered chain)",
+    );
+    sweep("docker.io/library/postgres:16", "not-signed", "");
+    sweep(
+        "registry.k8s.io/pause:3.9",
+        "checking",
+        "signing posture not yet known (registry/log unreachable)",
+    );
 }
 
 /// A representative bake/coverage summary used by the covered scenarios.
@@ -826,11 +869,7 @@ fn preview_readiness(state: &DashboardState) -> view_model::props::ReadinessView
 
 /// Build the Admission view props through the public render path.
 fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionViewProps {
-    view_model::build_admission_view(
-        preview_strip(state),
-        state.policy_log.tallies(),
-        &state.policy_log.snapshot(),
-    )
+    view_model::build_admission_view(preview_strip(state), &state.policy_log.snapshot())
 }
 
 /// Render the full page for a tab through the dashboard's PUBLIC render path (all four real).

@@ -1,12 +1,13 @@
 //! Render-level tests for the Admission/policy view (the webhook floor, brief §6): the tallies
-//! header (never blank, honest at zero), the deduped decision rows + the "if enforced" what-if, the
-//! honest-empty case, the real fourth nav tab, and escaping of the untrusted image/subject/reason
-//! text. These drive the view_model + component directly (no HTTP, no engine), so they are fast and
-//! pure. Kept in their own file so `tests.rs` stays under the 1,000-line cap (CLAUDE.md).
+//! header (never blank, honest at zero), the per-image signing inventory (JEF-262 — every posture,
+//! the binary if-enforced, honest empty), the deduped decision rows + the "if enforced" what-if, the
+//! real fourth nav tab, and escaping of the untrusted image/subject/reason/identity text. These
+//! drive the view_model + component directly (no HTTP, no engine), so they are fast and pure. Kept
+//! in their own file so `tests.rs` stays under the 1,000-line cap (CLAUDE.md).
 
 use std::time::SystemTime;
 
-use crate::engine::policy_log::{DecisionTallies, PolicyDecisionRecord};
+use crate::engine::policy_log::PolicyDecisionRecord;
 use crate::engine::state::{BakeStats, Finding, ModelHealth, ReadinessConfig, derive_readiness};
 
 use super::page;
@@ -61,12 +62,29 @@ fn admission_rec(
     .with_would_admit(would_admit)
 }
 
+/// A signing-sweep observation row (JEF-261 shape): `Image/<ref>` subject, posture in `signature`.
+fn signing_rec(image: &str, status: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "image-signature",
+        "allow",
+        format!("Image/{image}"),
+        image,
+        status,
+        "",
+        "",
+        reason,
+    )
+}
+
+fn render(rows: &[PolicyDecisionRecord]) -> String {
+    page::admission_page(&build_admission_view(strip_from(&[]), rows)).into_string()
+}
+
 #[test]
 fn admission_nav_tab_is_a_real_fourth_surface() {
     // The four tabs are all reachable; the Admission tab links to its real route. The merged
     // Action tab replaces the former Trust + Activity pair.
-    let v = build_admission_view(strip_from(&[]), DecisionTallies::default(), &[]);
-    let html = page::admission_page(&v).into_string();
+    let html = render(&[]);
     for tab in ["Findings", "Action", "Readiness", "Admission"] {
         assert!(html.contains(tab), "the nav offers the {tab} tab");
     }
@@ -85,64 +103,69 @@ fn admission_nav_tab_is_a_real_fourth_surface() {
 #[test]
 fn admission_tallies_header_is_never_blank_even_at_zero() {
     // The webhook floor's headline: counts honest at zero, so a healthy cluster is never blank.
-    let v = build_admission_view(strip_from(&[]), DecisionTallies::default(), &[]);
-    let html = page::admission_page(&v).into_string();
+    let html = render(&[]);
     assert!(html.contains("admitted"), "the admitted tally is rendered");
     assert!(html.contains("audited"), "the audited tally is rendered");
     assert!(html.contains("denied"), "the denied tally is rendered");
-    // And the honest-empty body, never read as all-clear.
+    // And the honest-empty bodies, never read as all-clear.
     assert!(
         html.contains("no admission decisions recorded yet"),
         "an empty log reads as no-decisions, not all-clear"
+    );
+    assert!(
+        html.contains("no images observed yet"),
+        "an empty inventory reads as nothing-inspected, not all-clear"
     );
     assert!(html.contains("not an all-clear"));
 }
 
 #[test]
 fn admission_renders_deduped_rows_with_the_if_enforced_what_if() {
-    let tallies = DecisionTallies {
-        admitted: 42,
-        audited: 2,
-        denied: 1,
-    };
+    let mut clean = admission_rec(
+        "allow",
+        "Deployment/web",
+        "ghcr.io/org/web:1",
+        "verified",
+        "verified",
+        "default",
+        "",
+        true,
+    );
+    clean.count = 42;
     let rows = vec![
-        // A clean admit — verified on both gates, would admit.
-        admission_rec(
-            "allow",
-            "Deployment/web",
-            "ghcr.io/org/web:1",
-            "verified",
-            "verified",
-            "default",
-            "",
-            true,
-        ),
-        // A would-fail signature gate → the "if enforced" what-if is would-deny.
+        clean,
+        // A would-fail MESH gate → the "if enforced" what-if is would-deny.
         admission_rec(
             "audit",
             "Deployment/legacy",
             "docker.io/legacy:old",
+            "verified",
             "would-fail",
-            "would-pass",
             "payments",
-            "unsigned or untrusted image",
+            "not mesh-injected",
             false,
         ),
     ];
-    let html =
-        page::admission_page(&build_admission_view(strip_from(&[]), tallies, &rows)).into_string();
-    // The counts surface.
+    let html = render(&rows);
+    // The derived admitted count surfaces.
     assert!(html.contains("42"), "the admitted count");
-    // The per-gate shadow status words ride alongside their glyphs (meaning never by colour alone).
+    // The mesh shadow status words ride alongside their glyphs (meaning never by colour alone).
     assert!(html.contains("verified"), "a verified gate");
     assert!(html.contains("would-fail"), "a would-fail gate");
-    assert!(html.contains("would-pass"), "a would-pass gate");
     // The "if enforced" what-if for both directions.
     assert!(html.contains("would admit"), "the admit what-if");
     assert!(html.contains("would deny"), "the would-deny what-if");
     // The subject + image surface (untrusted, escaped by maud).
     assert!(html.contains("Deployment/web"));
     assert!(html.contains("ghcr.io/org/web:1"));
+    // The decision log no longer carries a signature gate column — its thead is decision / workload
+    // / mesh / if enforced (posture now lives in the inventory).
+    let decisions = &html[html.find("admission-rows").unwrap()..];
+    assert!(
+        !decisions.contains(">signature<"),
+        "no signature column header in the decision log"
+    );
+    assert!(decisions.contains(">mesh<"), "the mesh column remains");
 }
 
 #[test]
@@ -151,12 +174,7 @@ fn admission_dedup_count_shows_when_above_one() {
         "allow", "Pod/web", "img:1", "verified", "verified", "ns", "", true,
     );
     r.count = 50;
-    let html = page::admission_page(&build_admission_view(
-        strip_from(&[]),
-        DecisionTallies::default(),
-        &[r],
-    ))
-    .into_string();
+    let html = render(&[r]);
     assert!(
         html.contains("\u{00D7}50"),
         "the replica-churn dedup count (×50) is shown"
@@ -170,18 +188,13 @@ fn admission_untrusted_image_and_reason_are_escaped() {
         "deny",
         format!("Pod/{evil}").as_str(),
         format!("img/{evil}").as_str(),
-        "would-fail",
         "verified",
+        "would-fail",
         evil,
         format!("unsigned {evil}").as_str(),
         false,
     )];
-    let html = page::admission_page(&build_admission_view(
-        strip_from(&[]),
-        DecisionTallies::default(),
-        &rows,
-    ))
-    .into_string();
+    let html = render(&rows);
     assert!(
         !html.contains("<script>alert"),
         "raw script must not reach output"
@@ -191,10 +204,116 @@ fn admission_untrusted_image_and_reason_are_escaped() {
 
 #[test]
 fn admission_fragment_has_no_document_shell() {
-    let v = build_admission_view(strip_from(&[]), DecisionTallies::default(), &[]);
+    let v = build_admission_view(strip_from(&[]), &[]);
     let frag = page::admission_fragment(&v).into_string();
     assert!(!frag.contains("<!DOCTYPE"), "a fragment carries no doctype");
     assert!(!frag.contains("<html"), "nor a document element");
     // It carries the persistent strip (a poll refreshes coverage/freshness on this tab too).
     assert!(frag.contains("strip"));
+}
+
+// ---- signing inventory (JEF-262) render tests -----------------------------------------------
+
+#[test]
+fn signing_inventory_renders_every_posture_with_word_and_no_na() {
+    let rows = vec![
+        signing_rec(
+            "ghcr.io/acme/app@sha256:aa",
+            "signed",
+            "signed by https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1 \
+             via https://token.actions.githubusercontent.com",
+        ),
+        signing_rec(
+            "docker.io/library/storefront:latest",
+            "invalid-signature",
+            "signature present but does not verify (untrusted/tampered chain)",
+        ),
+        signing_rec("docker.io/library/postgres:16", "not-signed", ""),
+        signing_rec(
+            "registry.k8s.io/pause:3.9",
+            "checking",
+            "signing posture not yet known (registry/log unreachable)",
+        ),
+    ];
+    let html = render(&rows);
+    // Each posture renders its distinct word (never colour alone, and lexically distinct).
+    assert!(html.contains("signed"), "signed word");
+    assert!(
+        html.contains("invalid signature"),
+        "invalid word — distinct"
+    );
+    assert!(html.contains("not signed"), "not-signed word — distinct");
+    assert!(html.contains("checking"), "the transient checking word");
+    // The binary if-enforced, both directions — never n/a.
+    assert!(html.contains("would admit"), "signed would admit");
+    assert!(html.contains("would block"), "unsigned/invalid would block");
+    // Hard rule: the inventory never shows n/a. Slice the inventory section (the next section is the
+    // decision log — `admission-rows` when populated, `admission-empty` when not).
+    let rest = &html[html.find("signing-inventory").unwrap()..];
+    let end = rest
+        .find("admission-rows")
+        .or_else(|| rest.find("admission-empty"))
+        .unwrap_or(rest.len());
+    let inventory = &rest[..end];
+    assert!(
+        !inventory.contains("n/a"),
+        "the signing inventory never shows n/a"
+    );
+    // Grouped under the repo header.
+    assert!(html.contains("ghcr.io/acme/app"), "the repo group header");
+}
+
+#[test]
+fn signing_inventory_shows_the_short_signer_and_issuer_badge() {
+    let rows = vec![signing_rec(
+        "ghcr.io/acme/app@sha256:aa",
+        "signed",
+        "signed by https://github.com/acme/app/.github/workflows/release.yaml@refs/tags/v1 \
+         via https://token.actions.githubusercontent.com",
+    )];
+    let html = render(&rows);
+    assert!(html.contains("signed by "), "the in-row signer line");
+    assert!(
+        html.contains("acme/app"),
+        "the short org/repo identity label"
+    );
+    assert!(html.contains("github actions"), "the issuer badge");
+    // The full SAN is preserved (expand panel + title=), never dropped.
+    assert!(
+        html.contains("https://github.com/acme/app/.github/workflows/release.yaml@refs/tags/v1"),
+        "the full Fulcio SAN is available"
+    );
+}
+
+#[test]
+fn signing_inventory_escapes_an_attacker_chosen_identity() {
+    // The signer identity is untrusted Fulcio-cert free-text — an attacker-chosen SAN must not
+    // inject markup (maud auto-escape; never PreEscaped).
+    let evil = "<script>alert('pwn')</script>";
+    let rows = vec![signing_rec(
+        "ghcr.io/acme/app@sha256:aa",
+        "signed",
+        &format!("signed by {evil} via https://token.actions.githubusercontent.com"),
+    )];
+    let html = render(&rows);
+    assert!(
+        !html.contains("<script>alert"),
+        "raw script from the identity must not reach output"
+    );
+    assert!(html.contains("&lt;script&gt;"), "the identity is escaped");
+}
+
+#[test]
+fn signing_inventory_honest_empty_when_no_images_observed() {
+    // Decision rows present, but no signing-sweep observation rows → the inventory is honestly
+    // empty, explicitly NOT an all-clear.
+    let rows = vec![admission_rec(
+        "allow", "Pod/web", "img:1", "verified", "verified", "ns", "", true,
+    )];
+    let html = render(&rows);
+    assert!(html.contains("no images observed yet"));
+    assert!(
+        html.contains("not an all-clear"),
+        "the empty inventory disclaims being an all-clear"
+    );
 }

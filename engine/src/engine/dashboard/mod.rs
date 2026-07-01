@@ -134,11 +134,13 @@ impl DashboardState {
     }
 
     /// Build the Admission/policy (webhook floor) view props: the persistent strip + the decision
-    /// tallies header (so a healthy view is never blank) + the deduped decision rows (newest-first).
+    /// tallies header (so a healthy view is never blank) + the per-image signing inventory + the
+    /// deduped decision rows (newest-first). The tallies are derived from the decision rows (the
+    /// signing sweep's observation rows feed only the inventory), so the view_model shapes the whole
+    /// snapshot on its own.
     fn admission_view(&self) -> AdmissionViewProps {
-        let tallies = self.policy_log.tallies();
         let rows = self.policy_log.snapshot();
-        view_model::build_admission_view(self.status_strip(), tallies, &rows)
+        view_model::build_admission_view(self.status_strip(), &rows)
     }
 }
 
