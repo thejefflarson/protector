@@ -294,6 +294,22 @@ pub async fn run_watch(
     // were already running when protector started (no admission event ever replays them).
     let signing_observer = build_signing_observer();
 
+    // The durable per-repo TOFU signing baseline (JEF-263, ADR-0020): learned from the sweep's
+    // observed postures, persisted to (and, here on boot, replayed from) the SAME decision
+    // journal the engine already owns — so a repo's established signed history survives a
+    // restart instead of resetting to cold-start trust. Built once and mutated each pass;
+    // per-pass compaction inside the sweep keeps live baselines inside the journal's rotation
+    // window. A disabled journal ⇒ in-memory only (honest re-learn on restart).
+    let signing_journal = engine.journal();
+    let mut signing_baselines = state::SigningBaselineStore::new();
+    let restored_baselines = signing_baselines.restore(signing_journal.as_ref());
+    if restored_baselines > 0 {
+        tracing::info!(
+            restored_baselines,
+            "restored per-repo signing baselines from the durable journal"
+        );
+    }
+
     // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
     // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
     // the loop so a "happening now" signal is acted on immediately (it flips a
@@ -433,7 +449,14 @@ pub async fn run_watch(
         // shared admission-decision log (JEF-261). Bounded by the observer's cache + MAX_IMAGES;
         // a no-op when no observer is configured. Run before `process` so the inventory reflects
         // the same snapshot the engine just reasoned over.
-        super::signing_sweep::sweep(signing_observer.as_ref(), &snapshot, &policy_log).await;
+        super::signing_sweep::sweep(
+            signing_observer.as_ref(),
+            &snapshot,
+            &policy_log,
+            Some(&mut signing_baselines),
+            signing_journal.as_ref(),
+        )
+        .await;
 
         engine.process(&snapshot).await;
     }

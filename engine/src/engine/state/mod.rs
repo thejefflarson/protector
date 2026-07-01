@@ -18,6 +18,7 @@ mod readiness;
 mod recency;
 mod report;
 mod reversion;
+mod signing_baseline;
 mod verdict_store;
 
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
@@ -30,4 +31,5 @@ pub(crate) use readiness::derive_readiness;
 pub use recency::{Delta, RecencyInfo, StoredPosture};
 pub use report::{LeftAloneEntry, Report, WouldActEntry, default_window_report};
 pub use reversion::{ReversionLog, ReversionRecord};
+pub use signing_baseline::{DEFAULT_MAX_REPOS, SigningBaseline, SigningBaselineStore};
 pub use verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictEntry, VerdictStore};

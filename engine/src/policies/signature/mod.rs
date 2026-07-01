@@ -255,6 +255,35 @@ fn normalize_registry_host(image: &str) -> String {
     }
 }
 
+/// The canonical **repository** key for an image ref (JEF-263, ADR-0020): the registry
+/// host canonicalized exactly as the gate does (via [`normalize_registry_host`]), then the
+/// mutable `:tag` and/or `@digest` stripped so every tag/digest under one source folds to a
+/// single key. This is the TOFU baseline key — signing history is learned per *repository*
+/// (`ghcr.io/org/app`), never per tag/digest, so a new tag under an established repo is the
+/// same key (not a new baseline, not drift).
+///
+/// The tag is stripped only from the LAST path segment, so a registry `host:port`
+/// (`localhost:5000/app`) is preserved. A bare Docker Hub shorthand (`postgres:16`) has no
+/// host segment and folds to its repo (`postgres`).
+pub fn repo_key(image: &str) -> String {
+    let normalized = normalize_registry_host(image);
+    // Strip a `@sha256:…` digest first (it can itself contain a colon).
+    let without_digest = normalized
+        .split_once('@')
+        .map(|(before, _)| before)
+        .unwrap_or(&normalized);
+    // Strip the `:tag`, but only within the final path segment — a `host:port` earlier in
+    // the ref is part of the repo identity and must survive.
+    let cut = match without_digest.rfind('/') {
+        Some(slash) => match without_digest[slash + 1..].rfind(':') {
+            Some(colon) => slash + 1 + colon,
+            None => without_digest.len(),
+        },
+        None => without_digest.rfind(':').unwrap_or(without_digest.len()),
+    };
+    without_digest[..cut].to_string()
+}
+
 /// Canonicalize a single registry-host segment: lowercase, drop an explicit
 /// default port (`:443`/`:80`), and drop a FQDN trailing dot. The port is split
 /// off the end first, then the trailing dot, so `ghcr.io.:443` reduces to

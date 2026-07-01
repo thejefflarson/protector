@@ -16,11 +16,14 @@
 //! the bounded [`PolicyDecisionLog`] ring — no durable schema.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use k8s_openapi::api::core::v1::Pod;
 
+use super::journal::DecisionJournal;
 use super::observe::Snapshot;
 use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
+use super::state::SigningBaselineStore;
 use crate::policies::signature::{PostureMap, SigningObserver, SigningPosture};
 
 /// Collect every distinct container image a running Pod references — regular, init, and
@@ -96,15 +99,42 @@ fn record_postures(log: &PolicyDecisionLog, map: &PostureMap) {
     }
 }
 
+/// Fold this pass's observed postures into the durable per-repo signing baseline (JEF-263),
+/// then compact the whole store back to the journal so a live repo's baseline stays inside
+/// the rotation window (never aged out). Only `Signed` postures learn a baseline; the store
+/// itself ignores the rest. Every step is a no-op on a disabled journal / cold store, so this
+/// is safe to call unconditionally each pass.
+fn learn_baselines(store: &mut SigningBaselineStore, journal: &DecisionJournal, map: &PostureMap) {
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for (image, posture) in map.entries() {
+        store.observe(image, posture, now_ms);
+    }
+    // Full-state compaction per pass: re-append every live repo so rotation can never drop an
+    // established baseline (the durability discipline that keeps cold-start trust from
+    // silently re-arming). Bounded by the store's repo cap; a handful of small lines for a
+    // real cluster.
+    store.compact(journal);
+}
+
 /// Run one signing-posture sweep over the snapshot's running pods and record the result.
 /// A no-op (zero outbound calls, nothing recorded) when no observer is configured — so a
 /// deploy without signature config behaves exactly as before. Bounded by the observer's
 /// `max_images` cap + TTL cache, so a steady cluster re-sweeps for free and a churny one
 /// can't amplify outbound verification.
+///
+/// The observed postures also feed the durable per-repo signing baseline (JEF-263) when a
+/// `baseline` store + `journal` are wired: a signed image teaches the repo's TOFU baseline,
+/// which is persisted to (and, on boot, replayed from) the SAME decision journal. This is
+/// pure learning — never a gate (ADR-0016); drift/enforcement are later stages.
 pub async fn sweep(
     observer: Option<&SigningObserver>,
     snapshot: &Snapshot,
     log: &Arc<PolicyDecisionLog>,
+    baseline: Option<&mut SigningBaselineStore>,
+    journal: &DecisionJournal,
 ) {
     let Some(observer) = observer else {
         return;
@@ -115,6 +145,9 @@ pub async fn sweep(
     }
     let map = observer.sweep(images).await;
     record_postures(log, &map);
+    if let Some(store) = baseline {
+        learn_baselines(store, journal, &map);
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +159,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+    use crate::engine::state::SigningBaselineStore;
     use crate::policies::signature::{SignatureObserver, Signer};
 
     fn pod(images: &[&str], init: &[&str]) -> Pod {
@@ -211,7 +245,14 @@ mod tests {
             ..Default::default()
         };
         let log = Arc::new(PolicyDecisionLog::new());
-        sweep(Some(&obs), &snapshot, &log).await;
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            None,
+            &DecisionJournal::disabled(),
+        )
+        .await;
         let rows = log.snapshot();
         assert_eq!(rows.len(), 3, "one row per distinct running image");
         let by_image: HashMap<_, _> = rows.iter().map(|r| (r.image.as_str(), r)).collect();
@@ -244,7 +285,14 @@ mod tests {
             ..Default::default()
         };
         let log = Arc::new(PolicyDecisionLog::new());
-        sweep(Some(&obs), &snapshot, &log).await;
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            None,
+            &DecisionJournal::disabled(),
+        )
+        .await;
         let rows = log.snapshot();
         assert_eq!(rows[0].signature, "checking");
         assert_ne!(
@@ -261,7 +309,7 @@ mod tests {
             ..Default::default()
         };
         let log = Arc::new(PolicyDecisionLog::new());
-        sweep(None, &snapshot, &log).await;
+        sweep(None, &snapshot, &log, None, &DecisionJournal::disabled()).await;
         assert!(log.snapshot().is_empty());
     }
 
@@ -276,12 +324,83 @@ mod tests {
             ..Default::default()
         };
         let log = Arc::new(PolicyDecisionLog::new());
-        sweep(Some(&obs), &snapshot, &log).await;
-        sweep(Some(&obs), &snapshot, &log).await;
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            None,
+            &DecisionJournal::disabled(),
+        )
+        .await;
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            None,
+            &DecisionJournal::disabled(),
+        )
+        .await;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "the second sweep is served from the observer cache — zero new outbound calls"
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_teaches_the_repo_baseline_from_a_signed_image() {
+        // The JEF-263 wiring: a signed image observed by the sweep learns a per-repo baseline,
+        // keyed by registry/repo. Pure learning — the log still records `allow`.
+        let (obs, _calls) = observer(vec![(
+            "ghcr.io/org/app:1",
+            signed("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1"),
+        )]);
+        let snapshot = Snapshot {
+            pods: vec![pod(&["ghcr.io/org/app:1"], &[])],
+            ..Default::default()
+        };
+        let log = Arc::new(PolicyDecisionLog::new());
+        let mut baseline = SigningBaselineStore::new();
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            Some(&mut baseline),
+            &DecisionJournal::disabled(),
+        )
+        .await;
+        let learned = baseline
+            .get("ghcr.io/org/app")
+            .expect("the signed image taught a repo baseline");
+        assert!(
+            learned
+                .identities
+                .contains("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1")
+        );
+        assert!(
+            !learned.established,
+            "first sight is a fresh, weak baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_does_not_learn_a_baseline_for_an_unsigned_image() {
+        // A not-signed posture must never create a baseline (that's JEF-264 drift territory).
+        let (obs, _calls) = observer(vec![]); // unknown image ⇒ FakeObserver returns NotSigned
+        let snapshot = Snapshot {
+            pods: vec![pod(&["docker.io/library/postgres:16"], &[])],
+            ..Default::default()
+        };
+        let log = Arc::new(PolicyDecisionLog::new());
+        let mut baseline = SigningBaselineStore::new();
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            Some(&mut baseline),
+            &DecisionJournal::disabled(),
+        )
+        .await;
+        assert!(baseline.is_empty(), "an unsigned image learns no baseline");
     }
 }
