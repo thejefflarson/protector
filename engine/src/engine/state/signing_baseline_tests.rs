@@ -203,6 +203,43 @@ fn baseline_survives_an_engine_restart_round_trip() {
 }
 
 #[test]
+fn log_corroboration_is_set_once_and_survives_a_restart() {
+    // JEF-266: marking a repo log-corroborated flips the flag once, and the stronger baseline
+    // survives a restart (monotonic — never re-armed to local-only on replay).
+    let path = temp_path("corroborate");
+    {
+        let journal = DecisionJournal::open(&path);
+        let mut store = SigningBaselineStore::new();
+        let repo = store
+            .observe(
+                "ghcr.io/org/app:1",
+                &signed("id-a", Some("issuer-a")),
+                1_000,
+            )
+            .expect("learned");
+        assert!(
+            !store.get(&repo).unwrap().log_corroborated,
+            "fresh ⇒ local-only"
+        );
+        assert!(store.mark_corroborated(&repo), "first mark flips the flag");
+        assert!(!store.mark_corroborated(&repo), "a second mark is a no-op");
+        store.persist(&journal, &repo);
+    }
+    let reopened = DecisionJournal::open(&path);
+    let mut restored = SigningBaselineStore::new();
+    restored.restore(&reopened);
+    assert!(
+        restored.get("ghcr.io/org/app").unwrap().log_corroborated,
+        "corroboration survives a restart"
+    );
+    assert!(
+        !restored.mark_corroborated("ghcr.io/nope"),
+        "marking an untracked repo is a no-op"
+    );
+    cleanup(&path);
+}
+
+#[test]
 fn last_write_wins_on_replay_across_repeated_lines() {
     // Compaction writes a full-state line each time; replay must keep the LATEST per repo.
     let path = temp_path("lastwrite");

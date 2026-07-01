@@ -884,10 +884,19 @@ summary:focus-visible,
    enforced" cell is always the binary would-admit / would-block. ---- */
 .view > .signing-inventory { margin-bottom: var(--section-gap); }
 .signing-repo { margin-top: var(--space-4); }
-.signing-repo-h {
-  color: var(--ink-1); font-family: var(--font-data);
+.signing-repo-head {
+  display: flex; align-items: baseline; gap: var(--space-2);
   margin: 0 0 var(--space-1);
 }
+.signing-repo-h {
+  color: var(--ink-1); font-family: var(--font-data);
+  margin: 0;
+}
+/* per-repo baseline-strength badge (JEF-266): log-corroborated is the calm cleared channel (the
+   transparency log vouches for it), local-only is muted (weaker TOFU). Colour + word, never colour
+   alone. */
+.signing-strength[data-strength="corroborated"] { color: var(--cov-present); }
+.signing-strength[data-strength="local"] { color: var(--ink-3); }
 .signing-row:hover { background: var(--surface-hover); }
 /* an invalid signature is the loud attention case — a breach keyline (calm not-signed gets none). */
 .signing-row-attention td.cell-image {

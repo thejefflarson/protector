@@ -414,3 +414,98 @@ fn counts_are_per_repo_not_per_row() {
         RegressionKind::Unsigned
     );
 }
+
+// ---- JEF-266: baseline strength badge + registry↔log divergence surfacing ---------------------
+
+/// A per-repo baseline-strength row exactly as `engine::signing_baseline_strength` records it.
+fn strength(repo: &str, word: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "signing-strength",
+        "allow",
+        format!("SigningStrength/{repo}"),
+        repo,
+        word,
+        "",
+        "",
+        "first_seen:0",
+    )
+}
+
+#[test]
+fn log_corroborated_strength_surfaces_on_the_repo_group() {
+    let rows = vec![
+        observed("ghcr.io/acme/app@sha256:abc", "signed", "signed by x"),
+        strength("ghcr.io/acme/app", "log-corroborated"),
+    ];
+    let groups = build(&rows);
+    assert_eq!(groups[0].strength, RepoStrength::LogCorroborated);
+    assert_eq!(groups[0].strength.word(), "log-corroborated");
+}
+
+#[test]
+fn local_only_strength_is_the_honest_weaker_default() {
+    let rows = vec![
+        observed("ghcr.io/acme/app@sha256:abc", "signed", "signed by x"),
+        strength("ghcr.io/acme/app", "local-only"),
+    ];
+    let groups = build(&rows);
+    assert_eq!(groups[0].strength, RepoStrength::LocalOnly);
+    assert_eq!(groups[0].strength.word(), "new baseline (local only)");
+}
+
+#[test]
+fn a_repo_without_a_strength_row_has_no_badge() {
+    let rows = vec![observed(
+        "ghcr.io/acme/app@sha256:abc",
+        "signed",
+        "signed by x",
+    )];
+    assert_eq!(build(&rows)[0].strength, RepoStrength::Unknown);
+}
+
+#[test]
+fn strength_rows_are_partitioned_out_of_the_inventory_images() {
+    // A strength row must not become a phantom image row under the repo.
+    let rows = vec![
+        observed("ghcr.io/acme/app@sha256:abc", "signed", "signed by x"),
+        strength("ghcr.io/acme/app", "log-corroborated"),
+    ];
+    let groups = build(&rows);
+    assert_eq!(
+        groups[0].images.len(),
+        1,
+        "only the observed image is a row"
+    );
+}
+
+#[test]
+fn divergence_findings_render_through_the_regression_channel() {
+    // Both directions ride the SigningRegression channel with a distinct divergence kind + reason.
+    let registry_dir = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-divergence-registry-established",
+        "registry\u{2194}log divergence: the registry serves a signature the public transparency \
+         log has no entry for | before: a",
+    )];
+    let groups = build(&registry_dir);
+    assert_eq!(
+        groups[0].regression.as_ref().unwrap().kind,
+        RegressionKind::DivergenceRegistrySigned
+    );
+
+    let log_dir = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-divergence-log-cold",
+        "registry\u{2194}log divergence: the transparency log records a signature the registry now \
+         serves unsigned | before: a",
+    )];
+    let groups = build(&log_dir);
+    let reg = groups[0].regression.as_ref().unwrap();
+    assert_eq!(reg.kind, RegressionKind::DivergenceLogSigned);
+    assert!(
+        !reg.established,
+        "the cold-strength divergence is a weak lead"
+    );
+}

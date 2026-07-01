@@ -10,8 +10,8 @@
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    AdmissionViewProps, DecisionRowProps, GateStatus, SigningPosture, SigningRegressionProps,
-    SigningRepoProps, SigningRowProps,
+    AdmissionViewProps, DecisionRowProps, GateStatus, RepoStrength, SigningPosture,
+    SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
 
 /// Render the Admission view: the tallies header, then the per-image signing inventory, then the
@@ -94,7 +94,15 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
 fn signing_repo(g: &SigningRepoProps) -> Markup {
     html! {
         div.signing-repo {
-            h4.signing-repo-h.t-data-strong { (g.repo) }
+            div.signing-repo-head {
+                h4.signing-repo-h.t-data-strong { (g.repo) }
+                @if g.strength != RepoStrength::Unknown {
+                    span.signing-strength.t-micro.muted data-strength=(g.strength.token())
+                        title="whether the public transparency log corroborates this repo's signing history (JEF-266)" {
+                        (g.strength.word())
+                    }
+                }
+            }
             @if let Some(regression) = &g.regression {
                 (signing_regression(regression))
             }

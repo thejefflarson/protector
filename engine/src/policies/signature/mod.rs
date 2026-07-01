@@ -11,6 +11,7 @@
 
 mod cosign;
 pub mod posture;
+pub mod rekor;
 
 #[cfg(test)]
 mod tests;
@@ -29,6 +30,7 @@ use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
 pub use cosign::CosignChecker;
 pub use posture::{PostureMap, SignatureObserver, Signer, SigningObserver, SigningPosture};
+pub use rekor::{HttpRekorClient, RekorClient, RekorConfig, RekorHistory, RekorLane};
 
 /// Decides whether a single image reference carries a trusted signature.
 ///

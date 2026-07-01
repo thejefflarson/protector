@@ -15,8 +15,8 @@
 use crate::engine::policy_log::PolicyDecisionRecord;
 
 use super::props::{
-    RegressionKind, SignerProps, SigningPosture, SigningRegressionProps, SigningRepoProps,
-    SigningRowProps,
+    RegressionKind, RepoStrength, SignerProps, SigningPosture, SigningRegressionProps,
+    SigningRepoProps, SigningRowProps,
 };
 
 /// The subject prefix the signing sweep keys its posture rows under (`Image/<ref>`). A row whose
@@ -28,6 +28,11 @@ const IMAGE_SUBJECT_PREFIX: &str = "Image/";
 /// <repo>`, JEF-264) — one row per repo. Also a signing row (not a webhook decision), so it is
 /// partitioned out of the decision tallies and feeds the repo group's regression banner.
 const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
+
+/// The subject prefix the sweep keys a per-repo baseline-**strength** row under (`SigningStrength/
+/// <repo>`, JEF-266) — one row per repo, log-corroborated vs local-only. A signing row (not a
+/// webhook decision), partitioned out of the tallies and feeding the repo group's strength badge.
+const STRENGTH_SUBJECT_PREFIX: &str = "SigningStrength/";
 
 /// The signature-column prefix marking a regression row's drift token (`regression-<kind>-
 /// <strength>`), written by `engine::signing_sweep::regression_record`.
@@ -41,7 +46,7 @@ const BEFORE_SEP: &str = " | before: ";
 /// regression finding (`SigningRegression/<repo>`) — as opposed to a webhook workload decision.
 /// Both are partitioned out of the Admission view's decision tallies.
 pub(super) fn is_inventory_row(r: &PolicyDecisionRecord) -> bool {
-    is_observation_row(r) || is_regression_row(r)
+    is_observation_row(r) || is_regression_row(r) || is_strength_row(r)
 }
 
 /// Whether a record is a per-image posture observation row (`Image/<ref>`).
@@ -52,6 +57,11 @@ fn is_observation_row(r: &PolicyDecisionRecord) -> bool {
 /// Whether a record is a signing-regression finding row (`SigningRegression/<repo>`, JEF-264).
 fn is_regression_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(REGRESSION_SUBJECT_PREFIX)
+}
+
+/// Whether a record is a per-repo baseline-strength row (`SigningStrength/<repo>`, JEF-266).
+fn is_strength_row(r: &PolicyDecisionRecord) -> bool {
+    r.subject.starts_with(STRENGTH_SUBJECT_PREFIX)
 }
 
 /// Split an image ref into `(repo, remainder)`: the digest form `repo@sha256:…` splits at the `@`;
@@ -238,11 +248,28 @@ pub(super) fn counts(rows: &[PolicyDecisionRecord]) -> (usize, usize) {
     (established, cold)
 }
 
+/// The standing baseline strength per repo (JEF-266), newest wins — `(repo, strength)`. Only
+/// `log-corroborated` / `local-only` words map to a badge; anything else is skipped.
+fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength)> {
+    let mut out: Vec<(String, RepoStrength)> = Vec::new();
+    for record in rows.iter().filter(|r| is_strength_row(r)) {
+        let Some(repo) = record.subject.strip_prefix(STRENGTH_SUBJECT_PREFIX) else {
+            continue;
+        };
+        let strength = RepoStrength::parse(&record.signature);
+        if strength != RepoStrength::Unknown && !out.iter().any(|(existing, _)| existing == repo) {
+            out.push((repo.to_string(), strength));
+        }
+    }
+    out
+}
+
 /// Build the signing inventory from the admission-decision log rows: the observation rows (`Image/
 /// <ref>`) grouped under their repo (JEF-262), each repo carrying its standing signing-regression
-/// banner (`SigningRegression/<repo>`, JEF-264) when one stands. Repo groups preserve first-seen
-/// order (the caller passes newest-first rows), so a steady inventory renders stably. The webhook's
-/// workload decision rows are ignored — they drive the decision log, not the inventory.
+/// banner (`SigningRegression/<repo>`, JEF-264) when one stands and its baseline-strength badge
+/// (`SigningStrength/<repo>`, JEF-266). Repo groups preserve first-seen order (the caller passes
+/// newest-first rows), so a steady inventory renders stably. The webhook's workload decision rows
+/// are ignored — they drive the decision log, not the inventory.
 pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
     let mut groups: Vec<SigningRepoProps> = Vec::new();
     for record in rows.iter().filter(|r| is_observation_row(r)) {
@@ -254,6 +281,7 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
                 repo: repo.to_string(),
                 images: vec![row],
                 regression: None,
+                strength: RepoStrength::Unknown,
             }),
         }
     }
@@ -266,7 +294,14 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
                 repo,
                 images: Vec::new(),
                 regression: Some(regression),
+                strength: RepoStrength::Unknown,
             }),
+        }
+    }
+    // Attach each repo's baseline strength badge (JEF-266) to its existing group.
+    for (repo, strength) in strengths_by_repo(rows) {
+        if let Some(group) = groups.iter_mut().find(|g| g.repo == repo) {
+            group.strength = strength;
         }
     }
     groups
