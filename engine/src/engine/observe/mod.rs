@@ -281,12 +281,15 @@ impl Snapshot {
                 )
             },
             async { anyhow::Ok(Api::<Service>::all(client.clone()).list(&lp).await?.items) },
-            // Secrets are listed for their metadata only; values are dropped here and
-            // never enter the graph.
+            // Secrets are listed METADATA-ONLY (JEF-268): `list_metadata` asks the
+            // apiserver for `PartialObjectMeta<Secret>`, so `.data`/`stringData` never
+            // cross the wire. Only identity (namespace + name) is retained, exactly what
+            // `SecretMeta` and the graph's secret-objective nodes need. See the RBAC
+            // caveat at the reflector watch site in `run_loop.rs`.
             async {
                 anyhow::Ok(
                     Api::<Secret>::all(client.clone())
-                        .list(&lp)
+                        .list_metadata(&lp)
                         .await?
                         .items
                         .into_iter()
