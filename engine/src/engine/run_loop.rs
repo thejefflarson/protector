@@ -199,6 +199,7 @@ pub async fn run_watch(
     use k8s_openapi::api::networking::v1::NetworkPolicy;
     use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
     use kube::Api;
+    use kube::core::PartialObjectMeta;
     use kube::runtime::{WatchStreamExt, reflector, watcher};
 
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
@@ -334,7 +335,21 @@ pub async fn run_watch(
     let (pods, pods_w) = reflector::store::<Pod>();
     let (netpols, netpols_w) = reflector::store::<NetworkPolicy>();
     let (services, services_w) = reflector::store::<Service>();
-    let (secrets, secrets_w) = reflector::store::<Secret>();
+    // Secrets are watched METADATA-ONLY (JEF-268): the graph only ever needs a
+    // Secret's identity (namespace + name — see `SecretMeta`), never its `.data`, so
+    // we reflect `PartialObjectMeta<Secret>`. `Api::<PartialObjectMeta<Secret>>` issues
+    // metadata-only requests, so the apiserver never sends — and this in-memory store
+    // never holds — any credential bytes. (`metadata_watcher` is the deprecated spelling
+    // of the same behavior in kube 4.0.0; the `watcher(Api::<PartialObjectMeta<_>>, _)`
+    // form below is its non-deprecated equivalent.)
+    //
+    // RBAC caveat: vanilla k8s RBAC can't express "metadata-only on secrets" —
+    // `get/list/watch` on `secrets` is all-or-nothing — so protector's grant necessarily
+    // still permits reading values. This change removes the *exposure* (what protector
+    // holds in memory), a voluntary client-side restraint; it does not narrow the grant.
+    // Dropping the grant entirely (deriving secret nodes from mounts + RBAC) is a
+    // separate ticket, deliberately out of scope here.
+    let (secrets, secrets_w) = reflector::store::<PartialObjectMeta<Secret>>();
     let (roles, roles_w) = reflector::store::<Role>();
     let (rolebindings, rolebindings_w) = reflector::store::<RoleBinding>();
     let (clusterroles, clusterroles_w) = reflector::store::<ClusterRole>();
@@ -371,7 +386,9 @@ pub async fn run_watch(
     spawn_reflector!(pods_w, Pod);
     spawn_reflector!(netpols_w, NetworkPolicy);
     spawn_reflector!(services_w, Service);
-    spawn_reflector!(secrets_w, Secret);
+    // Metadata-only Secret watch (JEF-268): reflects `PartialObjectMeta<Secret>`, so the
+    // stream carries identity only — `.data` never crosses the wire or lands in the store.
+    spawn_reflector!(secrets_w, PartialObjectMeta<Secret>);
     spawn_reflector!(roles_w, Role);
     spawn_reflector!(rolebindings_w, RoleBinding);
     spawn_reflector!(clusterroles_w, ClusterRole);
@@ -467,4 +484,73 @@ pub async fn run_watch(
         task.abort();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! JEF-268: the Secret informer (reflector watch + initial list) must be
+    //! metadata-only — protector reasons about a Secret's *identity* (namespace +
+    //! name), never its contents, so no credential bytes must ever cross the wire or
+    //! sit in the in-memory store. These tests pin that guarantee to the exact type the
+    //! informer reflects, `PartialObjectMeta<Secret>`; a regression to the full `Secret`
+    //! type (which carries `.data`) fails them.
+
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::Resource;
+    use kube::core::PartialObjectMeta;
+
+    /// The reflected element type asks the apiserver for metadata only. `metadata_api()`
+    /// is what drives both `watcher(Api::<PartialObjectMeta<Secret>>, _)` and
+    /// `Api::<Secret>::list_metadata` to issue `.../secrets` requests that return
+    /// `PartialObjectMeta` (no `.data`) rather than full Secret objects.
+    #[test]
+    fn secret_informer_requests_metadata_only() {
+        assert!(
+            <PartialObjectMeta<Secret> as Resource>::metadata_api(),
+            "Secret informer must reflect a metadata-only type; a full Secret would \
+             fetch and retain credential bytes"
+        );
+    }
+
+    /// Even handed a full Secret payload (as an apiserver bug or a mistaken watch would
+    /// deliver), the reflected type structurally cannot retain `.data`/`stringData`: it
+    /// is dropped on deserialize, while the identity the graph needs survives. This is the
+    /// "no full Secret with `.data` retained" guarantee.
+    #[test]
+    fn reflected_secret_drops_data_keeps_identity() {
+        let full_secret = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "namespace": "prod", "name": "db-creds" },
+            "type": "Opaque",
+            "data": { "password": "c3VwZXItc2VjcmV0" },
+            "stringData": { "token": "super-secret" },
+        });
+
+        let reflected: PartialObjectMeta<Secret> =
+            serde_json::from_value(full_secret).expect("deserialize as metadata-only");
+
+        // Identity — exactly what `SecretMeta` / the graph's secret-objective nodes need —
+        // is preserved.
+        assert_eq!(reflected.metadata.namespace.as_deref(), Some("prod"));
+        assert_eq!(reflected.metadata.name.as_deref(), Some("db-creds"));
+
+        // Round-trip back to JSON and prove no credential bytes survived anywhere. The
+        // keys are matched quoted (`"data"`) so the `data` inside `"metadata"` doesn't
+        // give a false positive.
+        let round_trip = serde_json::to_value(&reflected).expect("serialize");
+        let text = round_trip.to_string();
+        assert!(
+            !text.contains("\"data\""),
+            "reflected Secret must not carry a `data` field"
+        );
+        assert!(
+            !text.contains("\"stringData\""),
+            "reflected Secret must not carry a `stringData` field"
+        );
+        assert!(
+            !text.contains("c3VwZXItc2VjcmV0") && !text.contains("super-secret"),
+            "no credential bytes may survive into the reflected store"
+        );
+    }
 }
