@@ -31,6 +31,7 @@ use k8s_openapi::api::core::v1::Pod;
 use super::journal::DecisionJournal;
 use super::observe::Snapshot;
 use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
+use super::signing_baseline_strength::strength_record;
 use super::signing_drift::{RegressionKind, SigningDrift, classify};
 use super::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::{PostureMap, SigningObserver, SigningPosture, repo_key};
@@ -210,6 +211,20 @@ fn learn_baselines(store: &mut SigningBaselineStore, journal: &DecisionJournal, 
     store.compact(journal);
 }
 
+/// Record each observed repo's baseline **strength** (JEF-266) as a `SigningStrength/<repo>` row —
+/// log-corroborated vs local-only. Written every pass regardless of the Rekor lane, so the
+/// inventory shows the honest local-only default when the lane is off; the Rekor reconcile pass
+/// refreshes a repo it corroborates. Only repos with a learned baseline (a `Signed` sight) get a
+/// row.
+fn record_strengths(store: &SigningBaselineStore, log: &PolicyDecisionLog, map: &PostureMap) {
+    for (image, _) in map.entries() {
+        let repo = repo_key(image);
+        if let Some(baseline) = store.get(&repo) {
+            log.record(strength_record(&repo, baseline));
+        }
+    }
+}
+
 /// Run one signing-posture sweep over the snapshot's running pods and record the result.
 /// A no-op (zero outbound calls, nothing recorded) when no observer is configured — so a
 /// deploy without signature config behaves exactly as before. Bounded by the observer's
@@ -220,19 +235,23 @@ fn learn_baselines(store: &mut SigningBaselineStore, journal: &DecisionJournal, 
 /// `baseline` store + `journal` are wired: a signed image teaches the repo's TOFU baseline,
 /// which is persisted to (and, on boot, replayed from) the SAME decision journal. This is
 /// pure learning — never a gate (ADR-0016); drift/enforcement are later stages.
+///
+/// Returns the [`PostureMap`] observed this pass so the caller can run the opt-in Rekor
+/// reconciliation pass (JEF-266) over the same observations without re-sweeping. An empty map when
+/// no observer is configured or there are no running images.
 pub async fn sweep(
     observer: Option<&SigningObserver>,
     snapshot: &Snapshot,
     log: &Arc<PolicyDecisionLog>,
     baseline: Option<&mut SigningBaselineStore>,
     journal: &DecisionJournal,
-) {
+) -> PostureMap {
     let Some(observer) = observer else {
-        return;
+        return PostureMap::new();
     };
     let images = snapshot_images(&snapshot.pods);
     if images.is_empty() {
-        return;
+        return PostureMap::new();
     }
     let map = observer.sweep(images).await;
     record_postures(log, &map);
@@ -241,7 +260,11 @@ pub async fn sweep(
         // a regression / new signer is detected before the observation folds into the baseline.
         detect_regressions(store, log, &map);
         learn_baselines(store, journal, &map);
+        // Surface each repo's baseline strength (JEF-266) — log-corroborated vs local-only. Written
+        // after learning so the row reflects the freshly-updated baseline.
+        record_strengths(store, log, &map);
     }
+    map
 }
 
 #[cfg(test)]

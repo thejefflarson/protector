@@ -17,6 +17,7 @@ fn baseline(identities: &[&str], established: bool) -> SigningBaseline {
         issuers: BTreeSet::new(),
         first_seen_ms: 0,
         established,
+        log_corroborated: false,
         last_updated_ms: 0,
     }
 }

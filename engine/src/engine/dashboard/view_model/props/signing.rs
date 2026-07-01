@@ -121,6 +121,50 @@ pub struct SigningRowProps {
     pub count: u64,
 }
 
+/// The strength of a repo's learned signing baseline (JEF-266, ADR-0020 §4): whether the public
+/// Rekor transparency log corroborates its history (real provenance) or it rests on local
+/// trust-on-first-sight alone. Surfaced as a small header badge so the operator can weigh a
+/// baseline's evidence honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoStrength {
+    /// The public transparency log vouches for this repo's signing history — a STRONGER baseline.
+    LogCorroborated,
+    /// Trust-on-first-local-sight only — the weaker default, and the only state when the Rekor lane
+    /// is off. Honestly flagged so a fresh baseline is not read as ground truth.
+    LocalOnly,
+    /// No strength row observed for this repo (no learned baseline yet) — no badge.
+    Unknown,
+}
+
+impl RepoStrength {
+    /// Parse the strength row's low-cardinality word (`log-corroborated` / `local-only`).
+    pub fn parse(word: &str) -> RepoStrength {
+        match word {
+            "log-corroborated" => RepoStrength::LogCorroborated,
+            "local-only" => RepoStrength::LocalOnly,
+            _ => RepoStrength::Unknown,
+        }
+    }
+
+    /// The CSS token suffix + `data-strength` value for this strength (fixed, never untrusted text).
+    pub fn token(self) -> &'static str {
+        match self {
+            RepoStrength::LogCorroborated => "corroborated",
+            RepoStrength::LocalOnly => "local",
+            RepoStrength::Unknown => "unknown",
+        }
+    }
+
+    /// The badge word shown in the repo header.
+    pub fn word(self) -> &'static str {
+        match self {
+            RepoStrength::LogCorroborated => "log-corroborated",
+            RepoStrength::LocalOnly => "new baseline (local only)",
+            RepoStrength::Unknown => "",
+        }
+    }
+}
+
 /// A repo group in the signing inventory: one registry/repo header with the images observed under
 /// it (JEF-262 — the inventory unit is the image, grouped under its repo), plus an optional loud
 /// signing-regression banner (JEF-264) when the repo's signed history has drifted.
@@ -133,6 +177,9 @@ pub struct SigningRepoProps {
     /// A standing signing regression against this repo's baseline (JEF-264), rendered as the LOUD
     /// channel above the image rows; `None` when the repo is continuous.
     pub regression: Option<SigningRegressionProps>,
+    /// The strength of this repo's baseline (JEF-266): log-corroborated vs local-only, rendered as
+    /// a small header badge. [`RepoStrength::Unknown`] when no baseline strength was observed.
+    pub strength: RepoStrength,
 }
 
 /// Which kind of signing regression a repo drifted into (JEF-264) — the presentation mirror of the
@@ -146,6 +193,12 @@ pub enum RegressionKind {
     Invalid,
     /// A repo is now signed by an identity never before seen under it (a new signer).
     IdentityChange,
+    /// Registry↔log divergence (JEF-266): the registry serves a signature the public transparency
+    /// log has NO entry for (a signature that never reached the append-only log).
+    DivergenceRegistrySigned,
+    /// Registry↔log divergence (JEF-266): the transparency log records a signature the registry now
+    /// serves UNSIGNED (a signature stripped at the registry while the log remembers it).
+    DivergenceLogSigned,
 }
 
 impl RegressionKind {
@@ -156,6 +209,8 @@ impl RegressionKind {
         match word {
             "invalid" => RegressionKind::Invalid,
             "identity" => RegressionKind::IdentityChange,
+            "divergence-registry" => RegressionKind::DivergenceRegistrySigned,
+            "divergence-log" => RegressionKind::DivergenceLogSigned,
             _ => RegressionKind::Unsigned,
         }
     }
@@ -166,6 +221,8 @@ impl RegressionKind {
             RegressionKind::Unsigned => "unsigned",
             RegressionKind::Invalid => "invalid",
             RegressionKind::IdentityChange => "identity",
+            RegressionKind::DivergenceRegistrySigned => "divergence-registry",
+            RegressionKind::DivergenceLogSigned => "divergence-log",
         }
     }
 
@@ -176,6 +233,9 @@ impl RegressionKind {
             RegressionKind::Unsigned => "signing regression \u{2014} now unsigned",
             RegressionKind::Invalid => "signing regression \u{2014} now invalid signature",
             RegressionKind::IdentityChange => "signing regression \u{2014} new signer",
+            RegressionKind::DivergenceRegistrySigned | RegressionKind::DivergenceLogSigned => {
+                "signing regression \u{2014} registry\u{2194}log divergence"
+            }
         }
     }
 
@@ -186,6 +246,12 @@ impl RegressionKind {
             RegressionKind::Unsigned => "no signature present",
             RegressionKind::Invalid => "signature present but does not verify",
             RegressionKind::IdentityChange => "signed by a new identity",
+            RegressionKind::DivergenceRegistrySigned => {
+                "registry serves a signature absent from the public transparency log"
+            }
+            RegressionKind::DivergenceLogSigned => {
+                "the transparency log records a signature the registry now serves unsigned"
+            }
         }
     }
 }

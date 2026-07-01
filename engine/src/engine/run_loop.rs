@@ -104,6 +104,37 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     }
 }
 
+/// Build the opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266). Returns `None` — and so
+/// makes NO outbound transparency-log call ever — unless `PROTECTOR_REKOR_ENABLE` is explicitly set
+/// (zero egress preserved by default). When enabled it queries the public log (or a self-hosted
+/// mirror via `PROTECTOR_REKOR_URL`) to corroborate repo baselines and detect registry↔log
+/// divergence, bounded by a per-query timeout + a TTL cache. A client-build failure degrades to
+/// `None` (local-only) rather than crashing the loop.
+fn build_rekor_lane() -> Option<crate::policies::signature::RekorLane> {
+    use crate::policies::signature::{HttpRekorClient, RekorConfig, RekorLane};
+
+    let config = RekorConfig::from_env();
+    if !config.enabled {
+        return None;
+    }
+    match HttpRekorClient::new(&config) {
+        Ok(client) => {
+            tracing::info!(
+                base_url = %config.base_url,
+                "rekor transparency-log lane ENABLED (opt-in egress carve-out, ADR-0020 §4)"
+            );
+            Some(RekorLane::new(
+                std::sync::Arc::new(client),
+                config.cache_ttl,
+            ))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "rekor lane unavailable; degrading to local-only (zero egress)");
+            None
+        }
+    }
+}
+
 /// Registry auth for fetching signatures of private images during the running-Pod posture
 /// sweep — reuses the `PROTECTOR_REGISTRY_*` credentials, mirroring the webhook's
 /// `registry_auth`. Anonymous unless explicit credentials are supplied.
@@ -299,6 +330,13 @@ pub async fn run_watch(
     // were already running when protector started (no admission event ever replays them).
     let signing_observer = build_signing_observer();
 
+    // The opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266): OFF unless
+    // `PROTECTOR_REKOR_ENABLE` is set, so the default posture stays fully zero-egress. Built once so
+    // its bounded query cache persists across passes. When enabled, the reconcile pass below
+    // corroborates repo baselines against the public signing history and surfaces registry↔log
+    // divergence.
+    let rekor_lane = build_rekor_lane();
+
     // The durable per-repo TOFU signing baseline (JEF-263, ADR-0020): learned from the sweep's
     // observed postures, persisted to (and, here on boot, replayed from) the SAME decision
     // journal the engine already owns — so a repo's established signed history survives a
@@ -491,9 +529,19 @@ pub async fn run_watch(
         // shared admission-decision log (JEF-261). Bounded by the observer's cache + MAX_IMAGES;
         // a no-op when no observer is configured. Run before `process` so the inventory reflects
         // the same snapshot the engine just reasoned over.
-        super::signing_sweep::sweep(
+        let signing_map = super::signing_sweep::sweep(
             signing_observer.as_ref(),
             &snapshot,
+            &policy_log,
+            Some(&mut signing_baselines),
+            signing_journal.as_ref(),
+        )
+        .await;
+        // Opt-in Rekor reconciliation (JEF-266): corroborate baselines against the public log and
+        // surface registry↔log divergence. A no-op (zero egress) when the lane is off.
+        super::signing_rekor::reconcile(
+            rekor_lane.as_ref(),
+            &signing_map,
             &policy_log,
             Some(&mut signing_baselines),
             signing_journal.as_ref(),

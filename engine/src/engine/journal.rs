@@ -147,6 +147,12 @@ pub enum Decision {
         /// `false` is a freshly-learned baseline (weaker evidence).
         #[serde(default)]
         established: bool,
+        /// Whether the public Rekor transparency log corroborates this repo's signing history
+        /// (JEF-266, ADR-0020 §4) — `true` is real provenance read from the append-only log
+        /// (stronger than local-only TOFU). `#[serde(default)]` so lines predating the Rekor lane
+        /// replay as local-only (`false`), never a fabricated corroboration.
+        #[serde(default)]
+        log_corroborated: bool,
     },
 }
 

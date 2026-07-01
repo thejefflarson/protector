@@ -79,6 +79,12 @@ pub struct SigningBaseline {
     /// Whether the signed history has matured past the TOFU grace window (see
     /// [`ESTABLISH_AGE_MS`]). `false` ⇒ a freshly-learned baseline: weaker evidence.
     pub established: bool,
+    /// Whether the public Rekor transparency log corroborates this repo's signing history
+    /// (JEF-266, ADR-0020 §4). `true` ⇒ real provenance read from the append-only log, not just
+    /// what we happened to observe first locally — a **stronger** baseline than local-only TOFU,
+    /// which defeats the cold-start weakness. Set only by the opt-in Rekor lane; `false` when the
+    /// lane is off or the log had no entry, which is the honest "new baseline (local only)" state.
+    pub log_corroborated: bool,
     /// When this baseline was last updated (observed or replayed), Unix epoch millis. In-memory
     /// only (not journaled) — used solely to order eviction. `pub(crate)` so it isn't part of
     /// the public value shape.
@@ -94,6 +100,7 @@ impl SigningBaseline {
             issuers: self.issuers.iter().cloned().collect(),
             first_seen_ms: self.first_seen_ms,
             established: self.established,
+            log_corroborated: self.log_corroborated,
         }
     }
 }
@@ -196,10 +203,28 @@ impl SigningBaselineStore {
                 first_seen_ms: now_ms,
                 // First sight is always cold-start (first_seen == now): weakest evidence.
                 established: false,
+                // Local observation alone never corroborates against the log — that is the opt-in
+                // Rekor lane's job (JEF-266). A fresh baseline is local-only until it does.
+                log_corroborated: false,
                 last_updated_ms: now_ms,
             },
         );
         Some(repo)
+    }
+
+    /// Mark a repo's baseline as **log-corroborated** by the Rekor transparency log (JEF-266,
+    /// ADR-0020 §4): the public append-only log carries a signing entry for this repo, so its
+    /// history is real provenance rather than local trust-on-first-sight. Returns `true` when the
+    /// flag actually flipped (so the caller persists just that change); `false` if the repo is
+    /// untracked or already corroborated. Monotonic — corroboration is never un-set by observation.
+    pub fn mark_corroborated(&mut self, repo: &str) -> bool {
+        match self.baselines.get_mut(repo) {
+            Some(baseline) if !baseline.log_corroborated => {
+                baseline.log_corroborated = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Persist one repo's current baseline to the journal as a full-state line. A no-op if the
@@ -237,6 +262,7 @@ impl SigningBaselineStore {
                 issuers,
                 first_seen_ms,
                 established,
+                log_corroborated,
             } = entry.decision
             {
                 if repo.is_empty() {
@@ -250,6 +276,9 @@ impl SigningBaselineStore {
                         issuers: issuers.into_iter().collect(),
                         first_seen_ms,
                         established: matured,
+                        // Corroboration survives a restart — a repo the log vouched for stays
+                        // log-corroborated (monotonic, never re-armed to local-only on replay).
+                        log_corroborated,
                         last_updated_ms: entry.at_ms,
                     },
                     repo,

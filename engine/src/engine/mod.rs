@@ -969,5 +969,15 @@ pub mod signing_sweep;
 // sweep can surface an audit-only signing-regression finding on drift from the baseline.
 pub mod signing_drift;
 
+// The per-repo signing-baseline strength row (ADR-0020 §4, JEF-266): surfaces whether a repo's
+// baseline is log-corroborated (Rekor vouches for it) or local-only (weaker TOFU) in the inventory.
+pub mod signing_baseline_strength;
+
+// The opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266): after the sweep observes each
+// image, corroborates the repo baseline against the public signing history (marking it stronger
+// than local-only TOFU) and surfaces registry↔log divergence as a finding. OFF by default —
+// zero egress preserved unless the operator enables it.
+pub mod signing_rekor;
+
 #[cfg(test)]
 mod tests;
