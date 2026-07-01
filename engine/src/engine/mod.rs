@@ -964,5 +964,10 @@ pub use run_loop::run_watch;
 // log, complementing the webhook's admit-time observation.
 pub mod signing_sweep;
 
+// The pure signing-drift classifier (ADR-0020 §3, JEF-264): classifies a fresh posture against
+// the repo's learned baseline into continuous / regression / identity-change / new-repo, so the
+// sweep can surface an audit-only signing-regression finding on drift from the baseline.
+pub mod signing_drift;
+
 #[cfg(test)]
 mod tests;

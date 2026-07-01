@@ -124,3 +124,13 @@ pub fn build_admission_view(
 ) -> AdmissionViewProps {
     admission::build(strip, rows)
 }
+
+/// The standing signing-regression counts `(established, cold)` derived from the admission-decision
+/// log's regression rows (`SigningRegression/<repo>`, JEF-264) — established-baseline regressions
+/// count toward breach, cold-baseline ones toward uncertain. The caller folds these into the
+/// persistent strip (via [`StatusStripProps::with_signing_regressions`]) so a standing regression
+/// keeps the strip non-green on EVERY tab, WITHOUT routing through the reachability findings
+/// pipeline. Pure given its input.
+pub fn signing_regression_counts(rows: &[PolicyDecisionRecord]) -> (usize, usize) {
+    signing_inventory::counts(rows)
+}

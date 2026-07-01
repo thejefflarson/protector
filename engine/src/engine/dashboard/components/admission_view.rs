@@ -10,8 +10,8 @@
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    AdmissionViewProps, DecisionRowProps, GateStatus, SigningPosture, SigningRepoProps,
-    SigningRowProps,
+    AdmissionViewProps, DecisionRowProps, GateStatus, SigningPosture, SigningRegressionProps,
+    SigningRepoProps, SigningRowProps,
 };
 
 /// Render the Admission view: the tallies header, then the per-image signing inventory, then the
@@ -87,23 +87,85 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
     }
 }
 
-/// One repo group: the registry/repo header + a real `<table>` of the images observed under it (so
-/// the machine columns align — the keyboard/semantics gate).
+/// One repo group: the registry/repo header + (when the repo's signed history has drifted) a loud
+/// signing-regression banner + a real `<table>` of the images observed under it (so the machine
+/// columns align — the keyboard/semantics gate). The table is omitted when the regressed image has
+/// aged out of the observation window, so a standing regression still surfaces on its own.
 fn signing_repo(g: &SigningRepoProps) -> Markup {
     html! {
         div.signing-repo {
             h4.signing-repo-h.t-data-strong { (g.repo) }
-            table.signing {
-                thead {
-                    tr {
-                        th.t-micro { "image" }
-                        th.t-micro { "signature" }
-                        th.t-micro { "if enforced" }
+            @if let Some(regression) = &g.regression {
+                (signing_regression(regression))
+            }
+            @if !g.images.is_empty() {
+                table.signing {
+                    thead {
+                        tr {
+                            th.t-micro { "image" }
+                            th.t-micro { "signature" }
+                            th.t-micro { "if enforced" }
+                        }
+                    }
+                    tbody {
+                        @for img in &g.images {
+                            (signing_row(img))
+                        }
                     }
                 }
-                tbody {
-                    @for img in &g.images {
-                        (signing_row(img))
+            }
+        }
+    }
+}
+
+/// The loud signing-regression banner (JEF-264, ADR-0020 §3): a repo's signed history drifted —
+/// now unsigned/invalid, or signed by a new identity. The breach-rail channel (glyph + word,
+/// distinct from calm "not signed"), stating before→after with BOTH identities in FULL. An
+/// established baseline reads as the strong signal; a cold baseline is honestly flagged a weak lead.
+///
+/// Security: every identity/issuer is UNTRUSTED Fulcio SAN, emitted ONLY via maud interpolation
+/// `(x)` (auto-escaped) — never `PreEscaped`, never concatenated into markup, and never used to
+/// derive a `class=`/CSS value (the `data-regression` attribute is the fixed low-cardinality kind
+/// token, not identity text).
+fn signing_regression(r: &SigningRegressionProps) -> Markup {
+    let strength = if r.established {
+        "established baseline"
+    } else {
+        "weak baseline \u{2014} treat as a lead"
+    };
+    html! {
+        div.signing-regression.signing-row-attention data-regression=(r.kind.token()) role="alert" {
+            div.signing-regression-head {
+                span.glyph aria-hidden="true" { "\u{25CF}" }
+                span.signing-regression-word.t-data-strong { (r.kind.word()) }
+                span.signing-regression-strength.t-micro.muted { "(" (strength) ")" }
+            }
+            div.signing-regression-detail {
+                p.t-data { "image: " span.mono { (r.image) } }
+                @if r.before_identities.is_empty() {
+                    p.t-data.muted { "before: baseline signer not recorded" }
+                } @else {
+                    p.t-data {
+                        "before \u{2014} baseline signer"
+                        @if r.before_identities.len() != 1 { "s" }
+                        ":"
+                    }
+                    ul.signing-regression-before {
+                        @for identity in &r.before_identities {
+                            li.t-data { span.mono { (identity) } }
+                        }
+                    }
+                }
+                @match &r.after_identity {
+                    Some(identity) => {
+                        p.t-data { "after \u{2014} now signed by:" }
+                        p.t-data { span.mono { (identity) } }
+                        @if let Some(issuer) = &r.after_issuer {
+                            p.t-data.muted { "issuer: " span.mono { (issuer) } }
+                        }
+                    }
+                    None => {
+                        p.t-data { "after \u{2014} " (r.kind.after_word()) }
                     }
                 }
             }

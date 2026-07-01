@@ -73,9 +73,10 @@ fn judging_axis(s: &StatusStripProps) -> Markup {
             }
         };
     }
-    // Model up but not finished (awaiting/uncertain still open, or a feed degraded): elevated
-    // "watching" — calm, NOT green. Quiet here is "hasn't finished", not "cleared".
-    if s.watching() {
+    // Model up but not finished (awaiting/uncertain still open, or a feed degraded), OR a standing
+    // signing regression (JEF-264): elevated "watching" — calm, NOT green. A standing regression
+    // must never read as the bare green-dot "model judging"; the loud count sits in the headline.
+    if s.watching() || (s.model_is_up() && s.has_signing_regression()) {
         return html! {
             span.axis.judging.watching {
                 span.glyph { "\u{25CC}" }
@@ -164,6 +165,17 @@ fn headline(s: &StatusStripProps) -> Markup {
                 span.count.count-escalated {
                     span.glyph { "\u{25B2}" }
                     (s.escalated_count) " escalated since last pass"
+                }
+            }
+            @let regressions = s.signing_regression_breach + s.signing_regression_uncertain;
+            @if regressions > 0 {
+                // The signing-regression chip (JEF-264): loud (breach-rail), kept lexically distinct
+                // from the reachability breach count. A standing regression is why the strip is not
+                // green — surface it explicitly.
+                span.count.count-breach.count-regression {
+                    span.glyph aria-hidden="true" { "\u{25CF}" }
+                    (regressions)
+                    @if regressions == 1 { " signing regression" } @else { " signing regressions" }
                 }
             }
         }

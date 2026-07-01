@@ -92,13 +92,22 @@ impl DashboardState {
         let findings = self.findings.snapshot();
         let judgements = self.judgements.snapshot();
         let readiness = self.readiness();
-        view_model::build_status_strip(
+        let strip = view_model::build_status_strip(
             self.cluster.clone(),
             &findings,
             &judgements,
             &readiness,
             self.findings.last_pass(),
-        )
+        );
+        let (breach, uncertain) = self.signing_regression_counts();
+        strip.with_signing_regressions(breach, uncertain)
+    }
+
+    /// The standing signing-regression counts `(established, cold)` from the admission-decision log
+    /// (JEF-264) — folded into the persistent strip so a standing regression keeps it non-green on
+    /// EVERY tab, without routing through the reachability findings pipeline.
+    fn signing_regression_counts(&self) -> (usize, usize) {
+        view_model::signing_regression_counts(&self.policy_log.snapshot())
     }
 
     /// Build the whole Findings view props from the live state.
@@ -106,13 +115,19 @@ impl DashboardState {
         let findings = self.findings.snapshot();
         let judgements = self.judgements.snapshot();
         let readiness = self.readiness();
-        view_model::build_findings_view(
+        let mut view = view_model::build_findings_view(
             self.cluster.clone(),
             &findings,
             &judgements,
             &readiness,
             self.findings.last_pass(),
-        )
+        );
+        // The findings-derived strip carries no signing regressions of its own; fold in the
+        // admission-decision log's counts so the Findings strip is non-green when a regression
+        // stands too (the honesty invariant holds on every tab).
+        let (breach, uncertain) = self.signing_regression_counts();
+        view.strip = view.strip.with_signing_regressions(breach, uncertain);
+        view
     }
 
     /// Build the Action view props (the merged Trust + Activity story): the persistent strip + the

@@ -303,6 +303,90 @@ fn signing_inventory_escapes_an_attacker_chosen_identity() {
     assert!(html.contains("&lt;script&gt;"), "the identity is escaped");
 }
 
+// ---- signing-regression banner (JEF-264) render tests --------------------------------------
+
+/// A signing-regression finding row (JEF-264 shape): `SigningRegression/<repo>` subject, the drift
+/// token in `signature`, the before→after prose in `reason`.
+fn regression_rec(repo: &str, image: &str, signature: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "signing-regression",
+        "allow",
+        format!("SigningRegression/{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+#[test]
+fn signing_regression_renders_loud_word_and_before_after_in_full() {
+    let rows = vec![regression_rec(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-identity-established",
+        "signed by https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main via \
+         https://token.actions.githubusercontent.com | before: \
+         https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1",
+    )];
+    let html = render(&rows);
+    // The loud, lexically-distinct posture word (not the calm "not signed").
+    assert!(
+        html.contains("signing regression"),
+        "the loud regression word is rendered"
+    );
+    // Both identities in FULL — the before (old signer) and the after (new signer).
+    assert!(
+        html.contains("https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1"),
+        "the before signer is shown in full"
+    );
+    assert!(
+        html.contains("https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main"),
+        "the after signer is shown in full"
+    );
+}
+
+#[test]
+fn signing_regression_cold_baseline_reads_as_a_weak_lead() {
+    let rows = vec![regression_rec(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-unsigned-cold",
+        "now not signed (was signed) | before: releng@acme.example",
+    )];
+    let html = render(&rows);
+    assert!(html.contains("signing regression"));
+    assert!(
+        html.contains("treat as a lead"),
+        "a cold-baseline regression is honestly flagged a weak lead"
+    );
+}
+
+#[test]
+fn signing_regression_escapes_an_attacker_chosen_identity() {
+    // The before/after signer identities are attacker-influenceable Fulcio SANs — a crafted SAN in a
+    // regression row must not inject markup (maud auto-escape; never PreEscaped).
+    let evil = "<script>alert('pwn')</script>";
+    let rows = vec![regression_rec(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-identity-established",
+        &format!(
+            "signed by {evil} via https://token.actions.githubusercontent.com | before: {evil}"
+        ),
+    )];
+    let html = render(&rows);
+    assert!(
+        !html.contains("<script>alert"),
+        "raw script from either identity must not reach output"
+    );
+    assert!(
+        html.contains("&lt;script&gt;"),
+        "the crafted identity is escaped in the regression banner"
+    );
+}
+
 #[test]
 fn signing_inventory_honest_empty_when_no_images_observed() {
     // Decision rows present, but no signing-sweep observation rows → the inventory is honestly

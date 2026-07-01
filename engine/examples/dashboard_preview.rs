@@ -378,6 +378,21 @@ fn record_signing_inventory(log: &PolicyDecisionLog) {
         "checking",
         "signing posture not yet known (registry/log unreachable)",
     );
+    // A signing-regression finding (JEF-264): the api-gateway repo — with an established signed
+    // history — is now signed by a NEW identity (the push-access-compromise signal). Audit-only:
+    // the image is still admitted; the loud banner surfaces before→after in full.
+    log.record(PolicyDecisionRecord::now(
+        "signing-regression",
+        "allow",
+        "SigningRegression/ghcr.io/acme/api-gateway",
+        "ghcr.io/acme/api-gateway:v1.9.0",
+        "regression-identity-established",
+        "",
+        "",
+        "signed by https://github.com/acme-forks/api-gateway/.github/workflows/build.yaml@refs/heads/main \
+         via https://token.actions.githubusercontent.com | before: \
+         https://github.com/acme/api-gateway/.github/workflows/release.yaml@refs/tags/v1.8.2",
+    ));
 }
 
 /// A representative bake/coverage summary used by the covered scenarios.

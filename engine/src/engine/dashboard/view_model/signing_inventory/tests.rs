@@ -224,3 +224,193 @@ fn dedup_count_is_carried() {
     r.count = 7;
     assert_eq!(build(&[r])[0].images[0].count, 7);
 }
+
+// ---- JEF-264 signing-regression rows -----------------------------------------------------------
+
+/// A signing-regression finding row exactly as `engine::signing_sweep::regression_record` writes it:
+/// `SigningRegression/<repo>` subject, the drift token in `signature`, the before→after prose in
+/// `reason`, decision `allow` (audit-only).
+fn regression(repo: &str, image: &str, signature: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "signing-regression",
+        "allow",
+        format!("SigningRegression/{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+#[test]
+fn unsigned_regression_parses_before_and_after() {
+    let rows = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-unsigned-established",
+        "now not signed (was signed) | before: https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1",
+    )];
+    let group = &build(&rows)[0];
+    let reg = group
+        .regression
+        .as_ref()
+        .expect("the repo carries a regression");
+    assert_eq!(reg.kind, RegressionKind::Unsigned);
+    assert!(
+        reg.established,
+        "an established-baseline regression is the strong signal"
+    );
+    assert_eq!(
+        reg.before_identities,
+        vec!["https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1".to_string()],
+        "the before signer is carried in full"
+    );
+    assert!(reg.after_identity.is_none(), "unsigned has no after signer");
+    assert_eq!(reg.image, "ghcr.io/acme/app:2");
+}
+
+#[test]
+fn identity_change_regression_parses_both_identities_in_full() {
+    let rows = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:3",
+        "regression-identity-established",
+        "signed by https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main via \
+         https://token.actions.githubusercontent.com | before: \
+         https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1",
+    )];
+    let reg = build(&rows)[0].regression.clone().unwrap();
+    assert_eq!(reg.kind, RegressionKind::IdentityChange);
+    assert_eq!(
+        reg.after_identity.as_deref(),
+        Some("https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main"),
+        "the NEW signer is carried in full"
+    );
+    assert_eq!(
+        reg.after_issuer.as_deref(),
+        Some("https://token.actions.githubusercontent.com")
+    );
+    assert_eq!(
+        reg.before_identities,
+        vec!["https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1".to_string()],
+        "the OLD signer is carried in full alongside the new one"
+    );
+}
+
+#[test]
+fn cold_regression_is_flagged_weak() {
+    let rows = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-invalid-cold",
+        "now invalid signature (was signed) | before: releng@acme.example",
+    )];
+    let reg = build(&rows)[0].regression.clone().unwrap();
+    assert_eq!(reg.kind, RegressionKind::Invalid);
+    assert!(!reg.established, "a cold-baseline regression reads as weak");
+}
+
+#[test]
+fn regression_attaches_to_its_repo_group_alongside_the_image_rows() {
+    let rows = vec![
+        observed("ghcr.io/acme/app:2", "not-signed", ""),
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: releng@acme.example",
+        ),
+    ];
+    let groups = build(&rows);
+    assert_eq!(
+        groups.len(),
+        1,
+        "one repo group carries both the image row and the banner"
+    );
+    assert_eq!(groups[0].images.len(), 1);
+    assert!(groups[0].regression.is_some());
+}
+
+#[test]
+fn regression_for_an_aged_out_image_still_surfaces_its_own_group() {
+    // No observation row for the repo (the bad digest aged out of the window), only the regression.
+    let rows = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-unsigned-established",
+        "now not signed (was signed) | before: releng@acme.example",
+    )];
+    let groups = build(&rows);
+    assert_eq!(groups.len(), 1);
+    assert!(
+        groups[0].images.is_empty(),
+        "no image rows, but the regression still shows"
+    );
+    assert!(groups[0].regression.is_some());
+}
+
+#[test]
+fn regression_rows_are_inventory_rows_not_decisions() {
+    let r = regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-unsigned-established",
+        "now not signed (was signed) | before: releng@acme.example",
+    );
+    assert!(
+        is_inventory_row(&r),
+        "a regression row is partitioned out of the webhook decision tallies"
+    );
+}
+
+#[test]
+fn counts_split_established_breach_from_cold_uncertain() {
+    let rows = vec![
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: a",
+        ),
+        regression(
+            "ghcr.io/acme/other",
+            "ghcr.io/acme/other:2",
+            "regression-identity-cold",
+            "signed by b via c | before: a",
+        ),
+    ];
+    let (established, cold) = counts(&rows);
+    assert_eq!(
+        established, 1,
+        "the established regression counts toward breach"
+    );
+    assert_eq!(cold, 1, "the cold regression counts toward uncertain");
+}
+
+#[test]
+fn counts_are_per_repo_not_per_row() {
+    // Two regression rows for the SAME repo collapse to one standing regression (newest wins).
+    let rows = vec![
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:3",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: a",
+        ),
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-invalid-established",
+            "now invalid signature (was signed) | before: a",
+        ),
+    ];
+    assert_eq!(counts(&rows), (1, 0), "one repo, one standing regression");
+    let groups = build(&rows);
+    assert_eq!(groups.len(), 1);
+    // Newest-first: the first row (the unsigned one) wins the banner.
+    assert_eq!(
+        groups[0].regression.as_ref().unwrap().kind,
+        RegressionKind::Unsigned
+    );
+}

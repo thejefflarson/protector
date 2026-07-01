@@ -33,6 +33,8 @@ fn strip() -> StatusStripProps {
         uncertain_count: 0,
         cleared_count: 0,
         escalated_count: 0,
+        signing_regression_breach: 0,
+        signing_regression_uncertain: 0,
     }
 }
 

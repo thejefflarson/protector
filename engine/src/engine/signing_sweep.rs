@@ -8,12 +8,20 @@
 //! [`PolicyDecisionLog`] the webhook writes — so the operator sees one signing inventory
 //! across both admitted and pre-existing workloads.
 //!
-//! Scope (Stage 1): observation + recording only. The posture is recorded as the
-//! low-cardinality status word on an `image-signature` row (the field is free-text, escaped
-//! at render); the signer identity rides the row's reason, also escaped downstream. The
-//! per-repo baseline (JEF-263), drift findings (JEF-264), and the Admission render (JEF-262)
-//! consume this; they are NOT built here. State is the in-memory [`SigningObserver`] cache +
-//! the bounded [`PolicyDecisionLog`] ring — no durable schema.
+//! The posture is recorded as the low-cardinality status word on an `image-signature` row (the
+//! field is free-text, escaped at render); the signer identity rides the row's reason, also escaped
+//! downstream. State is the in-memory [`SigningObserver`] cache + the bounded [`PolicyDecisionLog`]
+//! ring — no durable schema.
+//!
+//! ## Drift findings (JEF-264, ADR-0020 §3)
+//!
+//! After recording each posture, the sweep classifies it against the repo's CURRENT baseline
+//! (JEF-263) via the pure [`signing_drift`](super::signing_drift) classifier and, on a regression
+//! against prior signed history (signed→unsigned/invalid, or a new signer), records a
+//! signing-**regression** finding onto the SAME admission-decision log — keyed
+//! `SigningRegression/<repo>`, decision `allow`. This is **audit-only — still admitted** (the
+//! shadow invariant, ADR-0016): the finding is surfaced, never acted on. Enforcement (JEF-265) and
+//! Rekor history (JEF-266) are later stages and are NOT built here.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -23,8 +31,15 @@ use k8s_openapi::api::core::v1::Pod;
 use super::journal::DecisionJournal;
 use super::observe::Snapshot;
 use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
-use super::state::SigningBaselineStore;
-use crate::policies::signature::{PostureMap, SigningObserver, SigningPosture};
+use super::signing_drift::{RegressionKind, SigningDrift, classify};
+use super::state::{SigningBaseline, SigningBaselineStore};
+use crate::policies::signature::{PostureMap, SigningObserver, SigningPosture, repo_key};
+
+/// The subject prefix a signing-**regression** finding is keyed under (`SigningRegression/<repo>`),
+/// so the row folds one-per-repo and is partitioned OUT of the webhook decision rows (like the
+/// `Image/<ref>` observation rows) by the Admission view_model — a regression is a signing finding,
+/// not a webhook admission decision, and must not inflate the admitted/audited/denied tallies.
+pub const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
 
 /// Collect every distinct container image a running Pod references — regular, init, and
 /// ephemeral containers — across the snapshot. Deduping is left to the observer's sweep (it
@@ -99,6 +114,82 @@ fn record_postures(log: &PolicyDecisionLog, map: &PostureMap) {
     }
 }
 
+/// Encode a signing-regression finding as an admission-decision-log row (JEF-264, ADR-0020 §3).
+///
+/// Routing: the regression rides the SAME admission-decision log as the posture observation rows
+/// (the admission-finding path), NOT the reachability breach/LLM pipeline. It is keyed
+/// `SigningRegression/<repo>` so it folds one-per-repo and the Admission view_model partitions it
+/// out of the webhook decision tallies. The decision word stays `allow`: a drift is **audit-only —
+/// still admitted** (the shadow invariant, ADR-0016); nothing here ever denies.
+///
+/// The row is self-describing so the render needs no baseline handle:
+///   * `signature` carries the low-cardinality drift token `regression-<kind>-<strength>` (kind ∈
+///     unsigned/invalid/identity, strength ∈ established/cold) — the render parses it back.
+///   * `reason` carries the before→after prose: the fresh posture clause, then `| before: <ids>`
+///     (the baseline signers, comma-joined). Both the before signers and any after signer are
+///     UNTRUSTED Fulcio cert text — carried verbatim here and escaped wherever rendered.
+fn regression_record(
+    repo: &str,
+    image: &str,
+    kind: &RegressionKind,
+    established: bool,
+    baseline: Option<&SigningBaseline>,
+) -> PolicyDecisionRecord {
+    let strength = if established { "established" } else { "cold" };
+    let signature = format!("regression-{}-{}", kind.word(), strength);
+    let after_clause = match kind {
+        RegressionKind::Unsigned => "now not signed (was signed)".to_string(),
+        RegressionKind::Invalid => "now invalid signature (was signed)".to_string(),
+        // Reuse the observation-row signer prose (`signed by <id>[ via <issuer>]`) so the view_model
+        // parses the "after" identity with the exact same helper it already uses for observed rows.
+        RegressionKind::IdentityChange {
+            new_identity,
+            new_issuer,
+        } => match new_issuer.as_deref() {
+            Some(issuer) => format!("signed by {new_identity} via {issuer}"),
+            None => format!("signed by {new_identity}"),
+        },
+    };
+    // The baseline signers (the "before"), comma-joined. Fulcio SANs (workflow URIs / emails) don't
+    // contain ", ", so the join round-trips; the render escapes each identity regardless.
+    let before = baseline
+        .map(|b| b.identities.iter().cloned().collect::<Vec<_>>().join(", "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let reason = format!("{after_clause} | before: {before}");
+    PolicyDecisionRecord::now(
+        "signing-regression",
+        "allow",
+        format!("{REGRESSION_SUBJECT_PREFIX}{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+/// Classify each observed posture against the repo's CURRENT baseline (JEF-264) and record a
+/// signing-regression finding for any drift against prior signed history. Runs BEFORE
+/// [`learn_baselines`] so a new signer is still visible as not-yet-in the identity set (learning
+/// would fold it in and hide the change). Pure classification + append-only recording — never a
+/// gate; the store is read, not mutated.
+fn detect_regressions(store: &SigningBaselineStore, log: &PolicyDecisionLog, map: &PostureMap) {
+    for (image, posture) in map.entries() {
+        let repo = repo_key(image);
+        let baseline = store.get(&repo);
+        if let SigningDrift::Regression { kind, established } = classify(baseline, posture) {
+            log.record(regression_record(
+                &repo,
+                image,
+                &kind,
+                established,
+                baseline,
+            ));
+        }
+    }
+}
+
 /// Fold this pass's observed postures into the durable per-repo signing baseline (JEF-263),
 /// then compact the whole store back to the journal so a live repo's baseline stays inside
 /// the rotation window (never aged out). Only `Signed` postures learn a baseline; the store
@@ -146,6 +237,9 @@ pub async fn sweep(
     let map = observer.sweep(images).await;
     record_postures(log, &map);
     if let Some(store) = baseline {
+        // Classify against the baseline as it stands BEFORE this pass's learning, then learn — so
+        // a regression / new signer is detected before the observation folds into the baseline.
+        detect_regressions(store, log, &map);
         learn_baselines(store, journal, &map);
     }
 }
@@ -402,5 +496,146 @@ mod tests {
         )
         .await;
         assert!(baseline.is_empty(), "an unsigned image learns no baseline");
+    }
+
+    // ---- JEF-264 signing-regression detection over the sweep -------------------------------
+
+    const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+    const CI: &str = "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/v1";
+    const ATTACKER: &str = "https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main";
+
+    /// A store carrying an ESTABLISHED signed baseline for `ghcr.io/org/app` (signer `CI`). Seeded
+    /// by observing at t=0 (first_seen), then again well past the 24h grace window so the baseline
+    /// matures — exactly the JEF-263 establishment path, without a real clock.
+    fn established_store() -> SigningBaselineStore {
+        let mut store = SigningBaselineStore::new();
+        let signed = SigningPosture::Signed(Signer {
+            identity: CI.to_string(),
+            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+        });
+        store.observe("ghcr.io/org/app@sha256:seed", &signed, 0);
+        store.observe("ghcr.io/org/app@sha256:seed", &signed, 3 * DAY_MS);
+        assert!(
+            store.get("ghcr.io/org/app").unwrap().established,
+            "the seeded baseline is established"
+        );
+        store
+    }
+
+    /// The regression row recorded for `repo`, if any.
+    fn regression_row(log: &PolicyDecisionLog, repo: &str) -> Option<PolicyDecisionRecord> {
+        log.snapshot()
+            .into_iter()
+            .find(|r| r.subject == format!("{REGRESSION_SUBJECT_PREFIX}{repo}"))
+    }
+
+    async fn run_sweep(
+        obs: &SigningObserver,
+        image: &str,
+        store: &mut SigningBaselineStore,
+    ) -> Arc<PolicyDecisionLog> {
+        let snapshot = Snapshot {
+            pods: vec![pod(&[image], &[])],
+            ..Default::default()
+        };
+        let log = Arc::new(PolicyDecisionLog::new());
+        sweep(
+            Some(obs),
+            &snapshot,
+            &log,
+            Some(store),
+            &DecisionJournal::disabled(),
+        )
+        .await;
+        log
+    }
+
+    #[tokio::test]
+    async fn signed_to_unsigned_on_established_repo_records_a_regression() {
+        let (obs, _c) = observer(vec![]); // unknown image ⇒ NotSigned
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a regression is recorded");
+        assert_eq!(row.signature, "regression-unsigned-established");
+        assert_eq!(
+            row.decision, "allow",
+            "audit-only — the image is still admitted"
+        );
+        assert!(row.reason.contains("now not signed"));
+        assert!(row.reason.contains(&format!("before: {CI}")));
+    }
+
+    #[tokio::test]
+    async fn signed_to_invalid_on_established_repo_records_a_regression() {
+        let (obs, _c) = observer(vec![(
+            "ghcr.io/org/app:2",
+            SigningPosture::InvalidSignature,
+        )]);
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a regression is recorded");
+        assert_eq!(row.signature, "regression-invalid-established");
+        assert_eq!(row.decision, "allow");
+    }
+
+    #[tokio::test]
+    async fn new_signer_on_established_repo_records_an_identity_change() {
+        let (obs, _c) = observer(vec![("ghcr.io/org/app:2", signed(ATTACKER))]);
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a regression is recorded");
+        assert_eq!(row.signature, "regression-identity-established");
+        assert!(row.reason.contains(&format!("signed by {ATTACKER}")));
+        assert!(
+            row.reason.contains(&format!("before: {CI}")),
+            "the before signer is stated in full"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_redeploy_by_a_known_signer_records_no_regression() {
+        // A new digest under a known repo, signed by the KNOWN identity ⇒ no false positive.
+        let (obs, _c) = observer(vec![("ghcr.io/org/app:2", signed(CI))]);
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        assert!(
+            regression_row(&log, "ghcr.io/org/app").is_none(),
+            "a known signer to a new digest is continuous — no finding"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_start_first_signed_sight_records_no_regression() {
+        // First observation of a never-seen repo is TOFU cold start — never a regression.
+        let (obs, _c) = observer(vec![("ghcr.io/new/app:1", signed(CI))]);
+        let mut store = SigningBaselineStore::new();
+        let log = run_sweep(&obs, "ghcr.io/new/app:1", &mut store).await;
+        assert!(
+            regression_row(&log, "ghcr.io/new/app").is_none(),
+            "cold start is TOFU, not drift"
+        );
+        assert!(
+            store.get("ghcr.io/new/app").is_some(),
+            "the baseline is still recorded on first sight"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_against_a_cold_baseline_is_reduced() {
+        // A freshly-learned (cold) baseline that then regresses is flagged reduced-intensity.
+        let mut store = SigningBaselineStore::new();
+        store.observe(
+            "ghcr.io/org/app@sha256:seed",
+            &signed(CI),
+            0, // first sight ⇒ cold (not established)
+        );
+        assert!(!store.get("ghcr.io/org/app").unwrap().established);
+        let (obs, _c) = observer(vec![]); // ⇒ NotSigned
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a regression is recorded");
+        assert_eq!(
+            row.signature, "regression-unsigned-cold",
+            "a cold-baseline regression is flagged weak (reduced intensity)"
+        );
     }
 }
