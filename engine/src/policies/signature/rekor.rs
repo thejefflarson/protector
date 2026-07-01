@@ -198,16 +198,30 @@ impl RekorClient for HttpRekorClient {
             QueryKey::Email(email) => serde_json::json!({ "email": email }),
         };
         let url = format!("{}/api/v1/index/retrieve", self.base_url);
-        let resp =
+        let mut resp =
             tokio::time::timeout(self.timeout, self.client.post(&url).json(&body).send()).await??;
         let status = resp.status();
         if !status.is_success() {
             bail!("rekor index query returned {status}");
         }
-        let text = tokio::time::timeout(self.timeout, resp.text()).await??;
-        if text.len() > self.max_response_bytes {
-            bail!("rekor response exceeded {} bytes", self.max_response_bytes);
-        }
+        // Stream the body under a running byte cap rather than buffering it whole with
+        // `resp.text()`: the response is untrusted (a hostile or compromised log endpoint), and
+        // `.text()` would allocate the entire body BEFORE any size check, so a multi-GB body sent
+        // within the timeout could OOM-kill the engine. Accumulate chunk-by-chunk and bail the
+        // instant the cap would be exceeded — memory stays bounded by `max_response_bytes`. The
+        // outer timeout bounds total read time exactly as the previous single-`.text()` timeout did.
+        let max = self.max_response_bytes;
+        let text = tokio::time::timeout(self.timeout, async {
+            let mut buf: Vec<u8> = Vec::new();
+            while let Some(chunk) = resp.chunk().await? {
+                if buf.len() + chunk.len() > max {
+                    bail!("rekor response exceeded {max} bytes");
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            String::from_utf8(buf).map_err(|e| anyhow::anyhow!("rekor response not utf-8: {e}"))
+        })
+        .await??;
         // The index returns a JSON array of entry UUIDs. A malformed body is an infrastructure
         // error (degrade to local-only), NEVER an empty result — an empty result would fabricate a
         // false "not in log" divergence against a genuinely-signed image.
