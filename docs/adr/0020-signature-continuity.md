@@ -158,3 +158,36 @@ What becomes harder / the downsides we accept:
 - **Keying is a judgement call.** Repo-level baselines can miss a per-tag distinction
   and can over-trust a repo that legitimately serves a mix; the staged rollout starts
   at repo granularity and revisits if observation shows it is too coarse.
+
+## Addenda (JEF-263 — durable TOFU baseline implementation)
+
+These ratify the two implementation decisions the durable baseline (Decision §2)
+required but did not pin. Both preserve the invariant that the *established* signed
+history — the security-bearing state — is the thing that must never be silently lost.
+
+1. **Eviction = per-pass full-state compaction in the journal + a bounded in-memory
+   store.** Each baseline is written as a full-state, last-write-wins journal line and
+   *every* live repo is re-appended each sweep pass, so a live baseline can never age
+   out of the journal's rotation window (the negative-control test proves a
+   write-once line does age out). In memory the store is capped at
+   `DEFAULT_MAX_REPOS` (4096); when a new repo would exceed the cap, a
+   **non-`established`** entry is evicted first (cheap to re-learn), least-recently-
+   updated among candidates, so a matured baseline is never dropped in favour of churn.
+   Full (not change-only) compaction is deliberate and load-bearing: change-only
+   compaction would let an unchanged-but-live established baseline age out. The cost is
+   bounded — tens-to-low-hundreds of small lines per pass — and accepted.
+
+2. **`established` = 24h wall-clock age from `first_seen`, not a digest/observation
+   count.** The first observation is the weakest evidence (it may be the attacker's
+   first signed push), so trust matures over time rather than on a counter an attacker
+   could inflate by burst-pushing many digests. Wall-clock age needs no extra durable
+   state (`first_seen_ms` is already persisted) and is monotonic — once established, a
+   later observation never un-establishes. A digest-count or distinct-day refinement
+   remains a future option; `established` + `first_seen` are exposed so the render
+   (JEF-262) and drift (JEF-264) work can weigh the distinction as they choose.
+
+Follow-up to monitor (not a blocker): per-pass full compaction shares the single
+decision journal with breach/admission lines, so it raises write volume and
+accelerates rotation of those other line kinds. Bounded by `DEFAULT_MAX_REPOS` and
+acceptable at current scale; revisit change-only or a segmented journal if a large
+cluster shows rotation pressure on breach/admission history.
