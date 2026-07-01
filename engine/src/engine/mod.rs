@@ -406,6 +406,11 @@ impl Engine {
                 // restore from the same journal, since it (not the engine) holds the shared
                 // decision ring.
                 journal::Decision::Admission { .. } => {}
+                // Per-repo signing baselines (JEF-263) restore into the dedicated
+                // `SigningBaselineStore`, not the engine's findings/reversion state —
+                // `run_watch` does that restore from the same journal, since it (not the engine
+                // core) owns the baseline store the sweep feeds each pass.
+                journal::Decision::SigningBaseline { .. } => {}
             }
         }
         if latest_at > std::time::SystemTime::UNIX_EPOCH {

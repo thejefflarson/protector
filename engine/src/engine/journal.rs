@@ -120,6 +120,34 @@ pub enum Decision {
         /// decision / reason / count / last-seen). Low-cardinality, no secret values.
         record: crate::engine::policy_log::PolicyDecisionRecord,
     },
+    /// A per-repository TOFU signing baseline (JEF-263, ADR-0020): the learned set of
+    /// identities/issuers that have signed images under one `registry/repo`, plus when the
+    /// repo was first seen signed and whether that history is `established` yet. Written as a
+    /// **compacted, full-state** line — the latest line for a repo supersedes every earlier
+    /// one on replay (last-write-wins), so re-appending it (on change / per pass) keeps a live
+    /// repo's baseline inside the rotation window instead of silently aging out and re-arming
+    /// cold-start trust. Every field is `#[serde(default)]` so a future field can be added
+    /// without breaking replay of older lines. The identities/issuers are UNTRUSTED Fulcio
+    /// cert text — a consumer MUST escape them at render (the zero-egress state never leaves
+    /// the cluster).
+    SigningBaseline {
+        /// The canonical `registry/repo` key (host-normalized, tag/digest stripped).
+        #[serde(default)]
+        repo: String,
+        /// Every signer identity observed signing an image under this repo (sorted, deduped).
+        #[serde(default)]
+        identities: Vec<String>,
+        /// Every OIDC issuer observed signing under this repo (sorted, deduped).
+        #[serde(default)]
+        issuers: Vec<String>,
+        /// When the repo was first observed with a verifying signature, Unix epoch millis.
+        #[serde(default)]
+        first_seen_ms: u64,
+        /// Whether the signed history is `established` (matured past the TOFU grace window) —
+        /// `false` is a freshly-learned baseline (weaker evidence).
+        #[serde(default)]
+        established: bool,
+    },
 }
 
 /// One journal line: a [`Decision`] stamped with when it was recorded. The timestamp is
