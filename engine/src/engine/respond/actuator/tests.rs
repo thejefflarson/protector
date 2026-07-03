@@ -578,12 +578,48 @@ fn render_isolation_builds_deny_all_networkpolicy_on_the_source() {
 }
 
 #[test]
+fn render_isolation_quarantines_the_entry_for_quarantine_entry_action() {
+    // A QuarantineEntry mitigation's cut is a self-reference on the entry, carrying the
+    // entry's labels — so the isolation renderer selects ONLY the entry pod, full
+    // default-deny, and nothing deeper (ADR-0010). It is not gated on DenyNetworkPath.
+    let mut quarantine = mitigation(
+        "workload/edge/Pod/argocd-server",
+        "quarantine-entry",
+        "workload/edge/Pod/argocd-server",
+        ProposedAction::QuarantineEntry,
+    );
+    quarantine.cut.from_labels =
+        std::collections::BTreeMap::from([("app".to_string(), "argocd-server".to_string())]);
+
+    let np = render_isolation(&quarantine).expect("quarantine renders an isolation NetworkPolicy");
+    assert_eq!(np["kind"], "NetworkPolicy");
+    // In the entry's namespace, selecting ONLY the entry pod by label.
+    assert_eq!(np["metadata"]["namespace"], "edge");
+    assert_eq!(
+        np["spec"]["podSelector"]["matchLabels"]["app"],
+        "argocd-server"
+    );
+    // Full default-deny: both policy types, no ingress/egress rules.
+    assert_eq!(np["spec"]["policyTypes"][0], "Ingress");
+    assert_eq!(np["spec"]["policyTypes"][1], "Egress");
+    assert!(np["spec"]["ingress"].is_null());
+    assert!(np["spec"]["egress"].is_null());
+
+    // QuarantineEntry is an additive, reversible network deny — auto-actuatable.
+    assert!(ProposedAction::QuarantineEntry.is_additive_live());
+    assert!(ProposedAction::QuarantineEntry.is_reversible());
+}
+
+#[test]
 fn from_names_arms_only_network_and_ignores_non_actuatable_classes() {
     // Only `network` is live-actuatable, so only it arms. The subtractive classes
     // (rbac/mount/identity), irreversible `escape`, and unknown names are ignored —
     // the engine still proposes those cuts, they just can't be enabled for actuation.
     let policy = EnabledActions::from_names(["network", "rbac", "mount", "escape", "bogus"]);
     assert!(policy.is_enabled(ProposedAction::DenyNetworkPath));
+    // The `network` class arms both network denies — the surgical edge-cut and the
+    // default-deny entry quarantine (ADR-0010), the same additive/reversible mechanism.
+    assert!(policy.is_enabled(ProposedAction::QuarantineEntry));
     assert!(!policy.is_enabled(ProposedAction::RevokeRbacGrant));
     assert!(!policy.is_enabled(ProposedAction::RemoveSecretMount));
     assert!(!policy.is_enabled(ProposedAction::RebindIdentity));

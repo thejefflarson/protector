@@ -16,8 +16,8 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0005](0005-attack-objectives.md) | Objectives are ATT&CK outcomes, not just secrets | Accepted |
 | [0006](0006-build-vs-adopt.md) | Build the substrate; treat KubeHound/IceKube as catalogue and optional provider | Accepted |
 | [0007](0007-live-cuts-via-adminnetworkpolicy.md) | Live network cuts are additive AdminNetworkPolicy Deny rules | Accepted |
-| [0009](0009-asymmetric-action-bar.md) | Asymmetric action bar: live evidence acts, latent exposure proposes | Accepted (amended by 0011, 0013, 0016, 0017) |
-| [0010](0010-flannel-actuator-workload-isolation.md) | Flannel actuator: quarantine the source with a default-deny NetworkPolicy | Accepted |
+| [0009](0009-asymmetric-action-bar.md) | Asymmetric action bar: live evidence acts, latent exposure proposes | Accepted (amended by 0011, 0013, 0016, 0017, 0022) |
+| [0010](0010-flannel-actuator-workload-isolation.md) | Flannel actuator: quarantine the source with a default-deny NetworkPolicy | Accepted (amended by 0022) |
 | [0011](0011-positive-judgement.md) | The model corroborates positively; operator access is out of scope, defended in depth | Superseded in part by 0013 |
 | [0012](0012-exposure-observed-or-declared.md) | Exposure is observed where possible, declared (annotation) where it can't be — tunnels | Accepted |
 | [0013](0013-proof-winnows-model-decides.md) | Proof winnows the search space; the model makes the exploitability call (positive gate + breach-relevance) | Accepted (amended by 0016) |
@@ -29,5 +29,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0019](0019-dashboard-v3-presentation-architecture.md) | Dashboard v3: server-rendered (maud), zero-egress, light-theme presentation — the view_model/component/page split + the honesty invariants | Accepted |
 | [0020](0020-signature-continuity.md) | Supply-chain trust is signature continuity: observe every image, learn a per-repo TOFU baseline, treat the signed→unsigned / identity-change regression as the signal — not prefix-gated single-identity | Accepted |
 | [0021](0021-two-setting-operating-posture.md) | Two-setting operating posture: `mode` (audit default / enforce) + one `enforceScope` arms all three enforcement surfaces (signature + mesh webhooks + engine live cut), fail-closed webhook selector and actuation RBAC derived from it — no per-surface toggle, no wildcard | Accepted |
+| [0022](0022-quarantine-the-entry-is-the-default-containment.md) | Quarantine the internet-facing entry is the default containment (entry-only, additive/reversible default-deny); the surgical edge-cut is the refinement used only when it suffices | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.

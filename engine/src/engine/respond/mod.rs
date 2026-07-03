@@ -38,6 +38,14 @@ pub enum ProposedAction {
     RemoveEscapePrimitive,
     /// Sever a `runs-as` edge by rebinding the workload to a least-privilege identity.
     RebindIdentity,
+    /// Quarantine the internet-facing breach **entry** with a full default-deny
+    /// `NetworkPolicy` (ADR-0010) — the *default* containment when a chain has no
+    /// reversible additive edge-cut (a direct mount/RBAC chain, or a broad grant).
+    /// Additive (a new object) and reversible (delete to lift), so it can be applied
+    /// live without fighting GitOps. It targets the entry *only* — never a deeper or
+    /// objective workload — cutting the front door's whole reach, which contains the
+    /// lateral chain without punishing the victim data plane.
+    QuarantineEntry,
     /// A cut whose remediation isn't yet mapped to an action.
     Unclassified,
 }
@@ -76,9 +84,13 @@ impl ProposedAction {
     /// is a *new* object. Revoking an RBAC grant, removing a secret mount, or
     /// removing an escape primitive are *subtractive* edits to git-managed objects,
     /// so they can't be applied additively — they are durable-fix-PR territory, not
-    /// live actuation.
+    /// live actuation. [`QuarantineEntry`](Self::QuarantineEntry) also qualifies: a
+    /// full default-deny `NetworkPolicy` on the entry is a *new* object (ADR-0010).
     pub fn is_additive_live(&self) -> bool {
-        matches!(self, ProposedAction::DenyNetworkPath)
+        matches!(
+            self,
+            ProposedAction::DenyNetworkPath | ProposedAction::QuarantineEntry
+        )
     }
 
     pub fn describe(&self) -> &'static str {
@@ -90,6 +102,9 @@ impl ProposedAction {
             ProposedAction::RemoveSecretMount => "remove the secret mount/reference",
             ProposedAction::RemoveEscapePrimitive => "remove the container-escape primitive",
             ProposedAction::RebindIdentity => "rebind to a least-privilege ServiceAccount",
+            ProposedAction::QuarantineEntry => {
+                "quarantine the internet-facing entry with a default-deny NetworkPolicy"
+            }
             ProposedAction::Unclassified => "manual remediation (no automatic action mapped)",
         }
     }
@@ -168,6 +183,77 @@ pub fn cut_signature(cut: &Link) -> String {
     format!("{} -[{}]-> {}", cut.from.0, cut.relation, cut.to.0)
 }
 
+/// The synthetic relation on a [`ProposedAction::QuarantineEntry`] mitigation's
+/// `cut` link. A quarantine severs no single edge — it default-denies the entry
+/// itself — so its `Link` is a self-reference on the entry (`from == to == entry`)
+/// carrying the entry's labels. That gives it a stable per-entry signature for the
+/// ledger/self-revert lifecycle, distinct from any edge-cut, and lets the isolation
+/// renderer reuse the `cut.from` selector path unchanged.
+const QUARANTINE_RELATION: &str = "quarantine-entry";
+
+/// Build the quarantine `Link` for a chain: a self-reference on the internet-facing
+/// entry, carrying the entry's labels so the isolation `NetworkPolicy` selects the
+/// entry pod precisely (ADR-0010). Returns `None` when the entry has no labels — we
+/// will not widen a quarantine to a whole namespace (that would punish bystanders);
+/// such a chain falls through to durable-fix/no-cut instead.
+fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
+    // The first hop's `from` is always the entry (the path is reconstructed from the
+    // entry outward), and its `from_labels` are the entry workload's labels.
+    let first = chain.links.first()?;
+    if first.from_labels.is_empty() {
+        return None;
+    }
+    Some(Link {
+        from: chain.entry.clone(),
+        to: chain.entry.clone(),
+        relation: QUARANTINE_RELATION.to_string(),
+        technique: None,
+        from_labels: first.from_labels.clone(),
+        to_labels: first.from_labels.clone(),
+    })
+}
+
+/// Choose the single containment for a chain, by the ADR-0009/0010 precedence — the
+/// narrowest control first, the entry quarantine as the default, durable-fix last:
+///
+/// 1. a **reversible additive** `reaches`/`can-egress` single-edge cut exists → the
+///    surgical [`DenyNetworkPath`](ProposedAction::DenyNetworkPath) edge-cut
+///    (unchanged — the narrowest control, preferred whenever it suffices);
+/// 2. else, a **breach-relevant** chain (internet-facing entry) with a labelled entry
+///    → [`QuarantineEntry`](ProposedAction::QuarantineEntry), the *default*
+///    containment — a full default-deny on the entry contains the whole chain without
+///    touching the objective/data plane;
+/// 3. else → the first single-edge cut as a durable-fix/no-cut proposal (unchanged):
+///    subtractive RBAC/mount edits route to a PR, and a chain with no single cut is
+///    surfaced as unsevered.
+///
+/// Returns the `(cut, action)` seed for a mitigation, or `None` when nothing severs
+/// the chain (an unsevered finding).
+pub fn containment_for(chain: &ProvenChain) -> Option<(Link, ProposedAction)> {
+    // 1. Surgical network edge-cut: the first single-edge cut that is additive-live
+    //    and reversible (i.e. a `reaches`/`can-egress` DenyNetworkPath). Preferred
+    //    whenever it exists — it drops one edge, not the entry's whole reach.
+    if let Some(cut) = chain.single_edge_cuts.iter().find(|c| {
+        let action = ProposedAction::for_cut(c);
+        action.is_additive_live() && action.is_reversible()
+    }) {
+        // The only edge relation that is both additive-live and reversible is a
+        // network deny, so the action is DenyNetworkPath by construction.
+        return Some((cut.clone(), ProposedAction::DenyNetworkPath));
+    }
+    // 2. Default containment: quarantine the internet-facing entry.
+    if chain.is_breach_relevant()
+        && let Some(cut) = quarantine_link(chain)
+    {
+        return Some((cut, ProposedAction::QuarantineEntry));
+    }
+    // 3. Durable-fix / no-cut: the first single-edge cut (subtractive → PR), if any.
+    chain
+        .single_edge_cuts
+        .first()
+        .map(|cut| (cut.clone(), ProposedAction::for_cut(cut)))
+}
+
 /// What changed in the ledger this cycle.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LedgerDelta {
@@ -243,15 +329,16 @@ impl MitigationLedger {
         let mut unsevered = Vec::new();
 
         for chain in chains {
-            // Choose the narrowest action: the first single-edge cut. A chain with
-            // none can't be severed by one action.
-            match chain.single_edge_cuts.first() {
-                Some(cut) => {
+            // Choose the containment by precedence (surgical edge-cut → entry
+            // quarantine → durable-fix). A chain with none can't be severed by one
+            // action, so it is surfaced as unsevered.
+            match containment_for(chain) {
+                Some((cut, action)) => {
                     desired
-                        .entry(cut_signature(cut))
+                        .entry(cut_signature(&cut))
                         .or_insert_with(|| Mitigation {
-                            cut: cut.clone(),
-                            action: ProposedAction::for_cut(cut),
+                            cut,
+                            action,
                             justifications: Vec::new(),
                         })
                         .justifications
@@ -409,6 +496,274 @@ mod tests {
         let third = ledger.reconcile(&[]);
         assert!(third.proposed.is_empty());
         assert_eq!(third.retired.len(), active_after_first);
+        assert_eq!(ledger.active().count(), 0);
+    }
+
+    // --- ADR-0010 default containment: quarantine the internet-facing entry ---
+
+    /// A LoadBalancer Service selecting `app` labels — the exposure adapter marks the
+    /// selected pod internet-facing (`Exposure::Internet`), making its chains
+    /// breach-relevant.
+    fn internet_lb(namespace: &str, app: &str) -> serde_json::Value {
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": format!("{app}-lb"), "namespace": namespace},
+            "spec": {"type": "LoadBalancer", "selector": {"app": app}}
+        })
+    }
+
+    /// A DIRECT breach chain: an internet-facing pod that itself mounts the secret
+    /// (`entry -can-read-> secret`). Its only cut is the subtractive mount — no
+    /// reversible additive edge-cut — so containment defaults to quarantining the entry.
+    fn direct_mount_internet_snapshot() -> Snapshot {
+        let web = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "argocd-server", "namespace": "edge", "labels": {"app": "argocd-server"}},
+            "spec": {"containers": [{
+                "name": "c", "image": "argo:1",
+                "envFrom": [{"secretRef": {"name": "repo-creds"}}]
+            }]}
+        });
+        Snapshot {
+            pods: vec![serde_json::from_value(web).unwrap()],
+            services: vec![serde_json::from_value(internet_lb("edge", "argocd-server")).unwrap()],
+            ..Default::default()
+        }
+    }
+
+    /// The single QuarantineEntry mitigation in a delta (asserting exactly one).
+    fn only_quarantine(delta: &LedgerDelta) -> Mitigation {
+        let quarantines: Vec<_> = delta
+            .proposed
+            .iter()
+            .filter(|m| m.action == ProposedAction::QuarantineEntry)
+            .collect();
+        assert_eq!(
+            quarantines.len(),
+            1,
+            "exactly one QuarantineEntry proposed, got {:?}",
+            delta.proposed
+        );
+        quarantines[0].clone()
+    }
+
+    #[test]
+    fn direct_mount_chain_quarantines_the_entry_not_the_objective() {
+        let chains = prove(&build_graph(
+            &direct_mount_internet_snapshot(),
+            &default_adapters(),
+        ));
+        let mut ledger = MitigationLedger::new();
+        let delta = ledger.reconcile(&chains);
+
+        let q = only_quarantine(&delta);
+        // Targets ONLY the internet-facing entry (from == to == entry), never the secret.
+        assert_eq!(q.cut.from.0, "workload/edge/Pod/argocd-server");
+        assert_eq!(q.cut.to.0, "workload/edge/Pod/argocd-server");
+        assert_eq!(
+            q.cut.from_labels.get("app").map(String::as_str),
+            Some("argocd-server")
+        );
+        assert!(
+            delta
+                .proposed
+                .iter()
+                .all(|m| !m.cut.from.0.starts_with("secret/") && !m.cut.to.0.starts_with("secret/")),
+            "no mitigation ever targets the objective secret"
+        );
+    }
+
+    #[test]
+    fn direct_rbac_chain_quarantines_the_entry() {
+        use crate::engine::observe::SecretMeta;
+        use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
+
+        let app = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "watcher-server", "namespace": "edge", "labels": {"app": "watcher-server"}},
+            "spec": {
+                "serviceAccountName": "watcher-sa",
+                "containers": [{"name": "c", "image": "watcher:1"}]
+            }
+        });
+        let role: Role = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+            "metadata": {"name": "reader", "namespace": "edge"},
+            "rules": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]
+        }))
+        .unwrap();
+        let binding: RoleBinding = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+            "metadata": {"name": "reader-binding", "namespace": "edge"},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "reader"},
+            "subjects": [{"kind": "ServiceAccount", "name": "watcher-sa", "namespace": "edge"}]
+        }))
+        .unwrap();
+        let snap = Snapshot {
+            pods: vec![serde_json::from_value(app).unwrap()],
+            services: vec![serde_json::from_value(internet_lb("edge", "watcher-server")).unwrap()],
+            secrets: vec![SecretMeta {
+                namespace: "edge".into(),
+                name: "api-key".into(),
+            }],
+            roles: vec![role],
+            role_bindings: vec![binding],
+            ..Default::default()
+        };
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let mut ledger = MitigationLedger::new();
+        let delta = ledger.reconcile(&chains);
+
+        let q = only_quarantine(&delta);
+        // The entry pod is quarantined — never the RBAC identity or the secret.
+        assert_eq!(q.cut.from.0, "workload/edge/Pod/watcher-server");
+        assert_eq!(
+            q.cut.from_labels.get("app").map(String::as_str),
+            Some("watcher-server")
+        );
+    }
+
+    #[test]
+    fn lateral_chain_with_reversible_reaches_stays_surgical() {
+        use crate::engine::graph::{Provenance, Severity, Vulnerability};
+        use crate::engine::observe::ImageVulnerabilities;
+        use std::time::SystemTime;
+
+        // A REAL lateral breach: an internet-facing `web` entry reaches a
+        // *compromisable* `db` (a critical CVE lets the walk pivot through it) that
+        // mounts the secret. The `reaches` edge is a reversible additive edge-cut, so
+        // containment stays the surgical DenyNetworkPath — quarantine is only the
+        // fallback when no such edge-cut exists.
+        let web = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web", "namespace": "app", "labels": {"role": "web"}},
+            "spec": {"containers": [{"name": "c", "image": "web:1"}]}
+        });
+        let db = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "db", "namespace": "app", "labels": {"role": "db"}},
+            "spec": {"containers": [{
+                "name": "db", "image": "db:1",
+                "envFrom": [{"secretRef": {"name": "db-creds"}}]
+            }]}
+        });
+        let policy = json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": "db-ingress", "namespace": "app"},
+            "spec": {
+                "podSelector": {"matchLabels": {"role": "db"}},
+                "policyTypes": ["Ingress"],
+                "ingress": [{"from": [{"podSelector": {"matchLabels": {"role": "web"}}}]}]
+            }
+        });
+        let lb = json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web-lb", "namespace": "app"},
+            "spec": {"type": "LoadBalancer", "selector": {"role": "web"}}
+        });
+        let snap = Snapshot {
+            pods: vec![
+                serde_json::from_value(web).unwrap(),
+                serde_json::from_value(db).unwrap(),
+            ],
+            network_policies: vec![serde_json::from_value(policy).unwrap()],
+            services: vec![serde_json::from_value(lb).unwrap()],
+            image_vulns: vec![ImageVulnerabilities {
+                image: "db:1".into(),
+                vulnerabilities: vec![Vulnerability {
+                    id: "CVE-2026-0001".into(),
+                    severity: Severity::Critical,
+                    exploited_in_wild: false,
+                    epss: Some(0.5),
+                    sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let mut ledger = MitigationLedger::new();
+        let delta = ledger.reconcile(&chains);
+
+        // The internet-facing web→db→secret chain is contained by the surgical reaches cut.
+        assert!(
+            delta
+                .proposed
+                .iter()
+                .any(|m| m.action == ProposedAction::DenyNetworkPath
+                    && m.cut.relation.starts_with("reaches")
+                    && m.cut.from.0 == "workload/app/Pod/web"),
+            "a reversible reaches edge-cut is chosen surgically, got {:?}",
+            delta.proposed
+        );
+        // The web (internet-facing) entry is never quarantined — the edge-cut suffices.
+        assert!(
+            delta
+                .proposed
+                .iter()
+                .all(|m| !(m.action == ProposedAction::QuarantineEntry
+                    && m.cut.from.0 == "workload/app/Pod/web")),
+            "no quarantine of the entry when a surgical edge-cut suffices, got {:?}",
+            delta.proposed
+        );
+    }
+
+    #[test]
+    fn internal_direct_mount_is_not_quarantined() {
+        // The same direct mount chain but with NO internet exposure: not breach-relevant,
+        // so it stays a durable-fix (RemoveSecretMount), never a quarantine.
+        let mut snap = direct_mount_internet_snapshot();
+        snap.services.clear();
+
+        let chains = prove(&build_graph(&snap, &default_adapters()));
+        let mut ledger = MitigationLedger::new();
+        let delta = ledger.reconcile(&chains);
+
+        assert!(
+            delta
+                .proposed
+                .iter()
+                .all(|m| m.action != ProposedAction::QuarantineEntry),
+            "no internet-facing entry ⇒ no quarantine"
+        );
+        assert!(
+            delta
+                .proposed
+                .iter()
+                .any(|m| m.action == ProposedAction::RemoveSecretMount),
+            "an internal direct mount stays a durable-fix PR"
+        );
+    }
+
+    #[test]
+    fn quarantine_entry_self_reverts_when_its_chain_is_gone() {
+        // ADR-0017: a QuarantineEntry mitigation retires on the same lifecycle as an
+        // edge-cut — keyed on the chain, it drops out when no chain still justifies it.
+        let chains = prove(&build_graph(
+            &direct_mount_internet_snapshot(),
+            &default_adapters(),
+        ));
+        let mut ledger = MitigationLedger::new();
+
+        let first = ledger.reconcile(&chains);
+        let q = only_quarantine(&first);
+        assert!(
+            ledger
+                .active()
+                .any(|m| m.cut_signature() == q.cut_signature())
+        );
+
+        // Posture improves — the chain is gone. The quarantine retires (Q5).
+        let retired = ledger.reconcile(&[]);
+        assert!(
+            retired
+                .retired
+                .iter()
+                .any(|m| m.action == ProposedAction::QuarantineEntry
+                    && m.cut_signature() == q.cut_signature()),
+            "the quarantine retires when its justifying chain vanishes"
+        );
         assert_eq!(ledger.active().count(), 0);
     }
 }
