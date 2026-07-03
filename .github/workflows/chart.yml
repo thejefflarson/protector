@@ -77,7 +77,7 @@ jobs:
           echo "$audit" | awk '/name: pods-enforce.protector.dev/,/port:/' \
             | grep -q 'protector.dev/enforce-unset-sentinel' \
             || { echo "audit-default enforcing webhook is not scoped to the sentinel"; exit 1; }
-      - name: Assert mode: enforce derives the pod-label objectSelector and actuation RBAC
+      - name: "Assert mode: enforce derives the pod-label objectSelector and actuation RBAC"
         run: |
           # ADR-0021: labels behave like namespaces (objectSelector), and the NetworkPolicy
           # write grant is derived from mode: enforce (not a separate actuationRBAC knob).
