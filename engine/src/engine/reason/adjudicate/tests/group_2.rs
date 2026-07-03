@@ -33,6 +33,7 @@ async fn null_adjudicator_confirms() {
         verdict: None,
         links: vec![],
         single_edge_cuts: vec![],
+        quarantine_targets: vec![],
     };
     assert_eq!(
         NullAdjudicator

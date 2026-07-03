@@ -44,9 +44,10 @@ use render::workload_namespace;
 /// is accepted, because only a network deny is **live-actuatable**: an additive,
 /// engine-owned `NetworkPolicy`/`AuthorizationPolicy` the engine can apply and
 /// self-revert ([`ProposedAction::is_additive_live`], ADR-0002/0007). The `network`
-/// class arms *both* network denies — the surgical edge-cut ([`DenyNetworkPath`]) and
-/// the default-deny entry quarantine ([`QuarantineEntry`], ADR-0010) — since both are
-/// the same additive/reversible mechanism. The other cut classes — `rbac`, `mount`,
+/// class arms *all* network denies — the surgical edge-cut ([`DenyNetworkPath`]), the
+/// default-deny entry quarantine ([`QuarantineEntry`], ADR-0010), and the compromised-
+/// workload quarantine ([`QuarantineWorkload`], JEF-284) — since all are the same
+/// additive/reversible mechanism. The other cut classes — `rbac`, `mount`,
 /// `identity` — are *subtractive* edits to GitOps-managed objects, so [`decide`]
 /// forbids live actuation of them regardless; and `escape` is irreversible. Accepting
 /// those names here would be a lie: the engine still *proposes* those cuts (routed to a
@@ -59,6 +60,7 @@ fn actions_from_name(name: &str) -> &'static [ProposedAction] {
         "network" => &[
             ProposedAction::DenyNetworkPath,
             ProposedAction::QuarantineEntry,
+            ProposedAction::QuarantineWorkload,
         ],
         _ => &[],
     }

@@ -129,6 +129,15 @@ pub(crate) fn classify(
     action: Option<crate::engine::respond::ProposedAction>,
 ) -> String {
     use crate::engine::respond::ProposedAction as A;
+    // JEF-284: a pod that is itself actively exploited (condition 2) is quarantined even
+    // when its chain has no additive-live containment of its own — name that WHY here.
+    // But when the primary containment already contains the entry with an additive-live
+    // control (a surgical edge-cut or the ADR-0022 entry quarantine), that takes
+    // precedence and is named by the existing arms below (matching the reconcile dedup).
+    let additive_primary = action.is_some_and(|a| a.is_additive_live());
+    if !additive_primary && let Some(reason) = chain.entry_quarantine_reason() {
+        return reason.disposition().to_string();
+    }
     match action {
         None => "no-cut",
         Some(A::RemoveEscapePrimitive) => "forbidden",
@@ -136,6 +145,10 @@ pub(crate) fn classify(
         // The default containment (ADR-0010): a full default-deny on the internet-facing
         // entry — distinct from the surgical edge-cut and from a durable-fix PR.
         Some(A::QuarantineEntry) => "quarantine entry (default-deny)",
+        // `containment_for` never returns a workload quarantine (it is a JEF-284 sibling
+        // pass, not a chain's primary containment; the per-pod WHY is named above via
+        // `entry_quarantine_reason`). Handled for exhaustiveness.
+        Some(A::QuarantineWorkload) => "quarantine workload (default-deny)",
         Some(A::Unclassified) => "unclassified",
         Some(A::DenyNetworkPath) => {
             if !chain.meets_action_bar() {
@@ -330,6 +343,49 @@ mod tests {
         assert!(
             !cut.contains("secret/"),
             "cut must not name the objective: {cut}"
+        );
+    }
+
+    /// JEF-284: an internal pod with a live on-pod alert (actively exploited, no internet
+    /// path) is quarantined, and the dashboard disposition names the WHY — distinct from
+    /// the entry-foothold quarantine and a durable-fix PR. Untrusted text isn't involved:
+    /// the label is a fixed internal string.
+    #[test]
+    fn internal_active_pod_disposition_is_quarantine_actively_exploited() {
+        use crate::engine::observe::{Attribution, RuntimeObservation};
+        use protector_behavior::Behavior;
+
+        let watcher = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "watcher", "namespace": "app", "labels": {"role": "watcher"}},
+            "spec": {"containers": [{
+                "name": "c", "image": "watcher:1",
+                "envFrom": [{"secretRef": {"name": "watcher-creds"}}]
+            }]}
+        });
+        let snap = Snapshot {
+            pods: vec![serde_json::from_value(watcher).unwrap()],
+            runtime_events: vec![RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "watcher"),
+                source: Some("falco".into()),
+                observed_at_ms: None,
+                behavior: Behavior::Alert {
+                    rule: "Terminal shell in container".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let graph = build_graph(&snap, &default_adapters());
+        let chain = prove(&graph)
+            .into_iter()
+            .find(|c| c.entry.0 == "workload/app/Pod/watcher")
+            .expect("the internal chain");
+
+        let finding = Finding::from_chain(&chain, &graph);
+        assert_eq!(finding.disposition, "quarantine — actively exploited");
+        assert!(
+            !finding.breach_relevant,
+            "the internal chain is not breach-relevant, yet is quarantined"
         );
     }
 }

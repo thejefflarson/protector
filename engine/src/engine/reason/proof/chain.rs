@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 
-use super::Link;
+use super::{Link, QuarantineReason, QuarantineTarget};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{Exposure, Node, Relation, SecurityGraph, Severity};
+use crate::engine::observe::exec_class::notable_exec;
 
 /// Whether an edge is a valid attacker-movement edge for chain traversal.
 pub(super) fn is_movement(relation: &Relation) -> bool {
@@ -137,6 +138,99 @@ pub(super) fn path_steps(
     }
     steps.reverse();
     steps
+}
+
+/// Whether a workload node carries **direct live on-pod runtime evidence** of
+/// exploitation right now — a Falco-grade `Alert` or a hands-on-keyboard notable exec
+/// (interactive shell / package manager, JEF-117). This is the "actively exploited"
+/// predicate (JEF-284 condition 2): unlike [`compromisable`] (a static CVE), it is a
+/// *live* signal, so it warrants quarantine regardless of the pod's network position.
+/// Non-workload nodes have no runtime and are never actively exploited.
+fn actively_exploited(graph: &SecurityGraph, node: NodeIndex) -> bool {
+    matches!(
+        graph.inner().node_weight(node),
+        Some(Node::Workload(w)) if w.runtime.iter().any(|s|
+            s.behavior.is_alert() || notable_exec(&s.behavior).is_some())
+    )
+}
+
+/// Whether an edge relation is a **network hop** — `reaches` (lateral movement) or
+/// `can-egress` (the exfil channel). These are the edges a pod is "network-reachable"
+/// over from an internet foothold (JEF-284 condition 1); an identity/RBAC/data edge
+/// (`runs-as`/`can-do`/`can-read`) is not a network hop.
+fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
+    graph.inner().edge_weight(edge).is_some_and(|e| {
+        matches!(
+            e.relation,
+            Relation::Reaches { .. } | Relation::CanEgress { .. }
+        )
+    })
+}
+
+/// The workloads on this chain path that qualify for a full-isolation quarantine
+/// (JEF-284). Two independent, HIGH bars — full isolation of a pod is coarse, so it is
+/// reserved for a pod with real *exploitation* evidence, never a merely-reached one:
+///
+/// 1. **Remotely exploitable** ([`QuarantineReason::RemotelyExploitable`]) — a
+///    **non-entry** pod that is network-reachable from an internet foothold (the entry
+///    is internet-exposed, and every hop from it to this pod is a network hop —
+///    `reaches`/`can-egress`) AND is [`compromisable`] (a critical/KEV CVE running on
+///    it). A popped app two hops in counts. The **entry itself is excluded** — its
+///    containment is owned by the ADR-0022 precedence (`respond::containment_for`:
+///    surgical edge-cut → entry quarantine), which we must not duplicate or widen.
+/// 2. **Actively exploited** ([`QuarantineReason::ActivelyExploited`]) — any pod on the
+///    chain (entry included) with [`actively_exploited`] live evidence, regardless of
+///    network position. This is the internal hands-on-keyboard case.
+///
+/// The merely-reached objective never qualifies: an objective is a non-workload node
+/// (a Secret) or, if a workload, one with neither a CVE nor a live signal — reached ≠
+/// exploited. `ActivelyExploited` takes precedence when a pod meets both bars.
+pub(super) fn quarantine_targets_on_path(
+    graph: &SecurityGraph,
+    entry: NodeIndex,
+    steps: &[(NodeIndex, NodeIndex, EdgeIndex)],
+    exposed_entry: bool,
+) -> Vec<QuarantineTarget> {
+    // Network-reachability from the internet foothold, hop by hop along the path: the
+    // entry is a foothold iff it is internet-exposed, and a node stays network-reachable
+    // only while every hop from the entry to it has been a network hop.
+    let mut net_reachable: HashMap<NodeIndex, bool> = HashMap::new();
+    net_reachable.insert(entry, exposed_entry);
+    for &(from, to, edge) in steps {
+        let reached =
+            net_reachable.get(&from).copied().unwrap_or(false) && is_network_hop(graph, edge);
+        net_reachable.insert(to, reached);
+    }
+
+    // Each workload node on the path, in order — the entry, then every hop target. A
+    // node is visited once (a proof path is simple), so `seen` only guards defensively.
+    let mut targets = Vec::new();
+    let mut seen: HashSet<NodeIndex> = HashSet::new();
+    for node in std::iter::once(entry).chain(steps.iter().map(|&(_, to, _)| to)) {
+        if !seen.insert(node) {
+            continue;
+        }
+        let Some(Node::Workload(w)) = graph.inner().node_weight(node) else {
+            continue; // a Secret objective / an identity — never a quarantine target
+        };
+        // Condition 2 (live, "now") takes precedence over condition 1 (static CVE).
+        let reason = if actively_exploited(graph, node) {
+            QuarantineReason::ActivelyExploited
+        } else if node != entry
+            && net_reachable.get(&node).copied().unwrap_or(false)
+            && compromisable(graph, node)
+        {
+            QuarantineReason::RemotelyExploitable
+        } else {
+            continue;
+        };
+        targets.push(QuarantineTarget {
+            node: graph.key_of(node).expect("chain node exists"),
+            labels: w.labels.clone(),
+            reason,
+        });
+    }
+    targets
 }
 
 /// The labels of the workload at `idx`, or empty for any non-workload node.
