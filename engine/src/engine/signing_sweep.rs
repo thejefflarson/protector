@@ -81,8 +81,18 @@ fn posture_reason(posture: &SigningPosture) -> String {
             Some(issuer) => format!("signed by {} via {}", signer.identity, issuer),
             None => format!("signed by {}", signer.identity),
         },
+        SigningPosture::SignedKeyBased => {
+            "signed with a key-based cosign signature (verified transparency-log inclusion, no \
+             Fulcio identity) \u{2014} signer is opaque to keyless verification"
+                .to_string()
+        }
+        SigningPosture::UnverifiableHere => {
+            "signature present but could not be verified against our trust root (transparency-log/\
+             TUF variance) \u{2014} not a verification failure"
+                .to_string()
+        }
         SigningPosture::InvalidSignature => {
-            "signature present but does not verify (untrusted/tampered chain)".to_string()
+            "signature present but genuinely fails to verify (tampered/broken chain)".to_string()
         }
         SigningPosture::NotSigned => String::new(),
         SigningPosture::Checking => {
@@ -640,6 +650,34 @@ mod tests {
         assert!(
             store.get("ghcr.io/new/app").is_some(),
             "the baseline is still recorded on first sight"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_based_posture_is_recorded_calm_and_never_regresses_an_established_repo() {
+        // JEF-276 end-to-end: an established keyless-signed repo that now serves a key-based
+        // signature records the calm `signed-key-based` status, learns NO new baseline (no signer to
+        // teach), and surfaces NO regression — the false-alarm fix, wired through the sweep.
+        let (obs, _c) = observer(vec![("ghcr.io/org/app:2", SigningPosture::SignedKeyBased)]);
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let rows = log.snapshot();
+        let posture_row = rows
+            .iter()
+            .find(|r| r.subject == "Image/ghcr.io/org/app:2")
+            .expect("the posture is recorded");
+        assert_eq!(posture_row.signature, "signed-key-based");
+        assert!(
+            regression_row(&log, "ghcr.io/org/app").is_none(),
+            "a calm key-based signature is not a regression"
+        );
+        assert!(
+            !store
+                .get("ghcr.io/org/app")
+                .unwrap()
+                .identities
+                .contains("ghcr.io/org/app:2"),
+            "a key-based signature teaches no new signer identity"
         );
     }
 

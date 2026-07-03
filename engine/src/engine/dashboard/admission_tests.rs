@@ -257,6 +257,56 @@ fn signing_inventory_renders_every_posture_with_word_and_no_na() {
 }
 
 #[test]
+fn calm_postures_render_calm_only_invalid_is_the_loud_channel() {
+    // JEF-276: the new key-based + unverifiable-here postures render CALM — their own word + posture
+    // token, and NOT the loud breach/attention treatment reserved for a genuine invalid signature.
+    let rows = vec![
+        signing_rec(
+            "quay.io/jetstack/cert-manager-cainjector:v1.20.3",
+            "signed-key-based",
+            "signed with a key-based cosign signature (verified transparency-log inclusion, no \
+             Fulcio identity)",
+        ),
+        signing_rec(
+            "docker.io/curlimages/curl:latest",
+            "unverifiable",
+            "signature present but could not be verified against our trust root",
+        ),
+        signing_rec(
+            "docker.io/library/storefront:latest",
+            "invalid-signature",
+            "signature present but genuinely fails to verify (tampered/broken chain)",
+        ),
+    ];
+    let html = render(&rows);
+    let inv = inventory_slice(&html);
+    // Each calm posture carries its own distinct word + CSS posture token.
+    assert!(inv.contains("signed (key-based)"), "the key-based word");
+    assert!(inv.contains("unverifiable here"), "the unverifiable word");
+    assert!(
+        inv.contains("sign-signedkey"),
+        "the calm key-based chip token"
+    );
+    assert!(
+        inv.contains("sign-unverifiable"),
+        "the calm unverifiable chip token"
+    );
+    // Exactly ONE row gets the loud attention treatment: the genuine invalid. The two calm rows
+    // must not be attention-railed.
+    assert_eq!(
+        inv.matches("signing-row-attention").count(),
+        1,
+        "only the genuine invalid signature is the loud attention channel"
+    );
+    assert!(
+        inv.contains("invalid signature"),
+        "the loud invalid word still renders"
+    );
+    // No n/a leaks in for any of the new postures.
+    assert!(!inv.contains("n/a"), "the inventory never shows n/a");
+}
+
+#[test]
 fn signing_inventory_shows_the_short_signer_and_issuer_badge() {
     let rows = vec![signing_rec(
         "ghcr.io/acme/app@sha256:aa",

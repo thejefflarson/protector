@@ -5,8 +5,11 @@
 //! transparency log. It serves two callers off the *same* registry round-trip:
 //!
 //!   * [`observe`](super::posture::SignatureObserver::observe) — reads any image's
-//!     signing posture (signed / invalid / not-signed) with NO trusted-identity
-//!     config required (ADR-0020 Stage 1: inventory).
+//!     signing posture (keyless-verified / signed-key-based / unverifiable-here /
+//!     invalid / not-signed) with NO trusted-identity config required (ADR-0020 Stage 1:
+//!     inventory; JEF-276 honest, scheme-aware split). Discovery already covers both the
+//!     legacy cosign `.sig` tag AND OCI 1.1 referrer-attached signatures — sigstore-rs
+//!     `trusted_signature_layers` triangulates both and returns their union.
 //!   * [`is_signed`](super::SignatureChecker::is_signed) — the gated admission check,
 //!     which applies the org's identity+issuer constraint to that observation. It is a
 //!     thin wrapper over the same layer fetch, so the gated path stays behavior-identical
@@ -165,40 +168,91 @@ impl SignatureChecker for CosignChecker {
     }
 }
 
-/// Read a signing posture from fetched signature layers (ADR-0020 Stage 1). Pure
-/// classification — no trusted-identity config required, the Fulcio/Rekor chain is the
-/// trust anchor:
-///   * a layer with a verified `certificate_signature` ⇒ **signed**, capturing the signer
-///     (cert subject + OIDC issuer);
-///   * one or more layers but NONE verified ⇒ **invalid signature** (a signature artifact is
-///     present but does not chain to Fulcio / its Rekor bundle does not verify) — more
-///     alarming than, and distinct from, unsigned;
-///   * no layers at all ⇒ **not signed**.
-///
-/// The transient "checking" state is produced by [`observe`](SignatureObserver::observe) on
-/// an `Err`, never here. Free of `self` so it is unit-testable against synthesized layers.
-pub(super) fn classify(layers: &[SignatureLayer]) -> SigningPosture {
-    // Prefer a verified signer: the first layer whose cert chained to Fulcio + verified
-    // against Rekor. `CertificateSubject::Email` is a legitimate keyless signer (a human
-    // who authenticated via GitHub/Google), recorded as such — observation does not gate
-    // (today's org gate rejects Email; the inventory must not).
-    for layer in layers {
-        if let Some(cert) = layer.certificate_signature.as_ref() {
+/// The verification-relevant facts extracted from one fetched [`SignatureLayer`] (JEF-276),
+/// decoupled from sigstore's type so [`classify_facts`] is exhaustively unit-testable without
+/// synthesising a full Fulcio cert + verification key. Every field reflects what sigstore-rs
+/// *already verified* when it built the layer: `certificate_signature` is populated ONLY if the
+/// cert chained to the trusted Fulcio root AND its Rekor bundle verified; `bundle` is populated
+/// ONLY if the transparency-log inclusion verified; and a layer whose signature genuinely fails
+/// (tampered payload, or a Rekor bundle that does not verify) is DROPPED by sigstore-rs before it
+/// reaches us, so it never appears here (see the classify note on the reserved `InvalidSignature`).
+#[derive(Debug)]
+pub(super) struct LayerFacts {
+    /// The keyless signer, present only when the Fulcio cert chained + Rekor inclusion verified.
+    pub signer: Option<Signer>,
+    /// A verified transparency-log (Rekor) bundle is attached — log inclusion held, even when no
+    /// Fulcio cert is present (the key-based signing shape).
+    pub has_verified_bundle: bool,
+    /// A signature artifact is present on the layer at all.
+    pub has_signature: bool,
+}
+
+impl LayerFacts {
+    /// Project the verification-relevant fields off a fetched layer. `CertificateSubject::Email`
+    /// is a legitimate keyless signer (a human who authenticated via GitHub/Google), recorded as
+    /// such — observation does not gate (the org gate rejects Email; the inventory must not).
+    fn from_layer(layer: &SignatureLayer) -> Self {
+        let signer = layer.certificate_signature.as_ref().map(|cert| {
             let identity = match &cert.subject {
                 CertificateSubject::Uri(uri) => uri.clone(),
                 CertificateSubject::Email(email) => email.clone(),
             };
-            return SigningPosture::Signed(Signer {
+            Signer {
                 identity,
                 issuer: cert.issuer.clone(),
-            });
+            }
+        });
+        LayerFacts {
+            signer,
+            has_verified_bundle: layer.bundle.is_some(),
+            has_signature: layer.signature.is_some(),
         }
     }
-    if layers.is_empty() {
+}
+
+/// Read a signing posture from fetched signature layers (ADR-0020 Stage 1; JEF-276 honest split).
+/// Pure classification — no trusted-identity config required, the Fulcio/Rekor chain is the trust
+/// anchor. Delegates to [`classify_facts`] over the per-layer [`LayerFacts`] so the decision table
+/// is unit-testable without synthesising real certs. The transient "checking" state is produced by
+/// [`observe`](SignatureObserver::observe) on an `Err`, never here.
+pub(super) fn classify(layers: &[SignatureLayer]) -> SigningPosture {
+    let facts: Vec<LayerFacts> = layers.iter().map(LayerFacts::from_layer).collect();
+    classify_facts(&facts)
+}
+
+/// The honest posture decision table (JEF-276), in strict precedence — the calmest *supported*
+/// evidence wins, and the loud `InvalidSignature` is reserved for a genuine failure:
+///   1. any layer with a **verified keyless signer** ⇒ [`Signed`](SigningPosture::Signed) — the one
+///      trusted-identity posture (a broken keyless image is dropped by sigstore before it reaches
+///      us, so a signer here always chained + log-verified);
+///   2. else any layer with a **verified Rekor bundle** but no signer ⇒
+///      [`SignedKeyBased`](SigningPosture::SignedKeyBased) — a `cosign sign --key` signature whose
+///      log inclusion verified; signer opaque. CALM, never invalid (reproducer 1: cert-manager);
+///   3. else any layer with a **signature artifact** but nothing verified against our trust root ⇒
+///      [`UnverifiableHere`](SigningPosture::UnverifiableHere) — honest "couldn't verify here", not
+///      "forged" (reproducer 2: curl's transparency-log trust-root variance);
+///   4. no layers at all ⇒ [`NotSigned`](SigningPosture::NotSigned). A genuinely-failed signature
+///      (tampered payload / a cert whose Rekor inclusion doesn't hold) is dropped by sigstore-rs
+///      before it reaches us and so lands here too — the SAFE direction: calm and never a false
+///      "signed", and still caught loudly as a signing regression on an established repo (JEF-264);
+///   5. a degenerate layer with neither signer, verified bundle, nor even a signature ⇒
+///      [`InvalidSignature`](SigningPosture::InvalidSignature), the RESERVED loud channel.
+///
+/// SECURITY: nothing below step 1 is ever read as a trusted signer — key-based and unverifiable are
+/// honestly-labelled-but-not-trusted-as-identity, and no calmer-than-actual state is fabricated.
+pub(super) fn classify_facts(facts: &[LayerFacts]) -> SigningPosture {
+    if let Some(signer) = facts.iter().find_map(|f| f.signer.clone()) {
+        return SigningPosture::Signed(signer);
+    }
+    if facts.iter().any(|f| f.has_verified_bundle) {
+        return SigningPosture::SignedKeyBased;
+    }
+    if facts.iter().any(|f| f.has_signature) {
+        return SigningPosture::UnverifiableHere;
+    }
+    if facts.is_empty() {
         SigningPosture::NotSigned
     } else {
-        // Artifacts present but none verified: the breach-relevant "present but broken"
-        // state ADR-0020 distinguishes from a clean unsigned image.
         SigningPosture::InvalidSignature
     }
 }

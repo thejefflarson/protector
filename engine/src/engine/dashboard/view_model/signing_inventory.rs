@@ -177,13 +177,17 @@ fn short_hash(s: &str) -> String {
 }
 
 /// The attention rank of a posture for the loud-first sort: invalid (loudest) < not signed <
-/// checking < signed (calmest, sinks to the bottom). Mirrors the findings urgency-sort spirit.
+/// unverifiable < checking < signed-key-based < signed (calmest, sinks to the bottom). The two calm
+/// signed states sink last; unverifiable ranks just above the transient. Mirrors the findings
+/// urgency-sort spirit.
 fn posture_rank(p: SigningPosture) -> u8 {
     match p {
         SigningPosture::Invalid => 0,
         SigningPosture::NotSigned => 1,
-        SigningPosture::Checking => 2,
-        SigningPosture::Signed => 3,
+        SigningPosture::Unverifiable => 2,
+        SigningPosture::Checking => 3,
+        SigningPosture::SignedKeyBased => 4,
+        SigningPosture::Signed => 5,
     }
 }
 
