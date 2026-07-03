@@ -79,10 +79,11 @@ impl Finding {
     /// topology, but the CVEs and runtime signals live on the entry's graph node — the same
     /// place the adjudicator reads them.
     pub fn from_chain(chain: &ProvenChain, graph: &SecurityGraph) -> Self {
-        let action = chain
-            .single_edge_cuts
-            .first()
-            .map(crate::engine::respond::ProposedAction::for_cut);
+        // The disposition and the displayed cut both follow the response layer's
+        // containment precedence (surgical edge-cut → entry quarantine → durable-fix),
+        // so the dashboard names the *same* control the engine would propose/apply.
+        let containment = crate::engine::respond::containment_for(chain);
+        let action = containment.as_ref().map(|(_, a)| *a);
         Finding {
             evidence: EntryEvidence::for_entry(graph, &chain.entry),
             entry: chain.entry.0.clone(),
@@ -90,10 +91,9 @@ impl Finding {
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
             disposition: classify(chain, action),
-            cut: chain
-                .single_edge_cuts
-                .first()
-                .map(crate::engine::respond::cut_signature),
+            cut: containment
+                .as_ref()
+                .map(|(cut, _)| crate::engine::respond::cut_signature(cut)),
             breach_relevant: chain.is_breach_relevant(),
             // The verdict is the model's per-ENTRY call (JEF-157), held in the shared verdict
             // store and resolved by [`Findings::snapshot`] at read time. The published row
@@ -133,6 +133,9 @@ pub(crate) fn classify(
         None => "no-cut",
         Some(A::RemoveEscapePrimitive) => "forbidden",
         Some(A::RevokeRbacGrant | A::RemoveSecretMount | A::RebindIdentity) => "durable-fix PR",
+        // The default containment (ADR-0010): a full default-deny on the internet-facing
+        // entry — distinct from the surgical edge-cut and from a durable-fix PR.
+        Some(A::QuarantineEntry) => "quarantine entry (default-deny)",
         Some(A::Unclassified) => "unclassified",
         Some(A::DenyNetworkPath) => {
             if !chain.meets_action_bar() {
@@ -276,5 +279,57 @@ impl Findings {
     #[allow(dead_code)]
     pub fn model_health(&self) -> ModelHealth {
         ModelHealth::from_u8(self.model_health.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::observe::Snapshot;
+    use crate::engine::observe::adapter::{build_graph, default_adapters};
+    use crate::engine::reason::proof::prove;
+    use serde_json::json;
+
+    /// A direct breach chain: an internet-facing pod that itself mounts the secret. Its
+    /// only cut is subtractive, so the default containment quarantines the entry — and the
+    /// dashboard disposition must say so, distinct from an edge-cut or a durable-fix PR.
+    #[test]
+    fn direct_breach_disposition_is_quarantine_entry() {
+        let web = json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "argocd-server", "namespace": "edge", "labels": {"app": "argocd-server"}},
+            "spec": {"containers": [{
+                "name": "c", "image": "argo:1",
+                "envFrom": [{"secretRef": {"name": "repo-creds"}}]
+            }]}
+        });
+        let lb = json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "argocd-lb", "namespace": "edge"},
+            "spec": {"type": "LoadBalancer", "selector": {"app": "argocd-server"}}
+        });
+        let snap = Snapshot {
+            pods: vec![serde_json::from_value(web).unwrap()],
+            services: vec![serde_json::from_value(lb).unwrap()],
+            ..Default::default()
+        };
+        let graph = build_graph(&snap, &default_adapters());
+        let chain = prove(&graph)
+            .into_iter()
+            .find(|c| c.entry.0 == "workload/edge/Pod/argocd-server")
+            .expect("a direct breach chain");
+
+        let finding = Finding::from_chain(&chain, &graph);
+        assert_eq!(finding.disposition, "quarantine entry (default-deny)");
+        // The displayed cut names the entry workload, never the objective secret.
+        let cut = finding.cut.expect("a containment is proposed");
+        assert!(
+            cut.contains("workload/edge/Pod/argocd-server"),
+            "cut = {cut}"
+        );
+        assert!(
+            !cut.contains("secret/"),
+            "cut must not name the objective: {cut}"
+        );
     }
 }

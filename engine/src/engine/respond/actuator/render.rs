@@ -76,11 +76,22 @@ pub fn render_deny(mitigation: &Mitigation) -> Option<serde_json::Value> {
 
 /// Render the additive deny object for the **isolation** actuator (ADR-0010): a
 /// default-deny `NetworkPolicy` selecting the cut's *source* workload by label, so
-/// flannel/kube-router quarantines it. Returns `None` for a non-network cut, a
-/// non-workload source, or a source with no labels (we will not widen to a whole
-/// namespace).
+/// flannel/kube-router quarantines it. This serves two actions, both of which
+/// isolate `cut.from`:
+///
+/// - [`DenyNetworkPath`](ProposedAction::DenyNetworkPath): the flannel fallback for a
+///   `reaches`/`can-egress` edge-cut, quarantining the edge's source; and
+/// - [`QuarantineEntry`](ProposedAction::QuarantineEntry): the *default* containment,
+///   whose `cut.from` is the internet-facing breach **entry** by construction — so the
+///   same `cut.from` selector isolates the entry, never a deeper/objective workload.
+///
+/// Returns `None` for any other action, a non-workload source, or a source with no
+/// labels (we will not widen to a whole namespace).
 pub fn render_isolation(mitigation: &Mitigation) -> Option<serde_json::Value> {
-    if mitigation.action != ProposedAction::DenyNetworkPath {
+    if !matches!(
+        mitigation.action,
+        ProposedAction::DenyNetworkPath | ProposedAction::QuarantineEntry
+    ) {
         return None;
     }
     let source_ns = workload_namespace(&mitigation.cut.from)?;

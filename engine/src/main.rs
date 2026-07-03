@@ -109,13 +109,17 @@ impl Posture {
         }
     }
 
-    /// What the engine may auto-actuate. Under `enforce`: the reversible network cut is
-    /// armed, confined to `enforceScope` (namespaces or Pod labels). Under `audit`:
-    /// nothing armed (dry-run) and unscoped — the shadow default.
+    /// What the engine may auto-actuate. Under `enforce`: the reversible network cuts are
+    /// armed — the surgical edge-cut (`DenyNetworkPath`) and the default-deny entry
+    /// quarantine (`QuarantineEntry`), both additive/reversible network denies (ADR-0010) —
+    /// confined to `enforceScope` (namespaces or Pod labels). Under `audit`: nothing armed
+    /// (dry-run) and unscoped — the shadow default.
     fn engine_arming(&self) -> (EnabledActions, ActuationScope) {
         if self.enforce {
             (
-                EnabledActions::none().enable(ProposedAction::DenyNetworkPath),
+                EnabledActions::none()
+                    .enable(ProposedAction::DenyNetworkPath)
+                    .enable(ProposedAction::QuarantineEntry),
                 ActuationScope::new(self.namespaces.clone(), self.labels.clone()),
             )
         } else {

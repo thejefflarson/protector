@@ -40,18 +40,27 @@ use crate::engine::graph::{Node, Relation, SecurityGraph};
 use crate::engine::observe::health::{Health, HealthReport};
 use render::workload_namespace;
 
-/// Map an operator-facing enable name to the action class it arms. Only `network` is
-/// accepted, because only a network deny is **live-actuatable**: an additive,
+/// Map an operator-facing enable name to the action class(es) it arms. Only `network`
+/// is accepted, because only a network deny is **live-actuatable**: an additive,
 /// engine-owned `NetworkPolicy`/`AuthorizationPolicy` the engine can apply and
-/// self-revert ([`ProposedAction::is_additive_live`], ADR-0002/0007). The other cut
-/// classes — `rbac`, `mount`, `identity` — are *subtractive* edits to GitOps-managed
-/// objects, so [`decide`] forbids live actuation of them regardless; and `escape` is
-/// irreversible. Accepting those names here would be a lie: the engine still *proposes*
-/// those cuts (routed to a human / durable-fix PR), you just can't "enable" them.
-fn action_from_name(name: &str) -> Option<ProposedAction> {
+/// self-revert ([`ProposedAction::is_additive_live`], ADR-0002/0007). The `network`
+/// class arms *both* network denies — the surgical edge-cut ([`DenyNetworkPath`]) and
+/// the default-deny entry quarantine ([`QuarantineEntry`], ADR-0010) — since both are
+/// the same additive/reversible mechanism. The other cut classes — `rbac`, `mount`,
+/// `identity` — are *subtractive* edits to GitOps-managed objects, so [`decide`]
+/// forbids live actuation of them regardless; and `escape` is irreversible. Accepting
+/// those names here would be a lie: the engine still *proposes* those cuts (routed to a
+/// human / durable-fix PR), you just can't "enable" them.
+///
+/// [`DenyNetworkPath`]: ProposedAction::DenyNetworkPath
+/// [`QuarantineEntry`]: ProposedAction::QuarantineEntry
+fn actions_from_name(name: &str) -> &'static [ProposedAction] {
     match name.trim() {
-        "network" => Some(ProposedAction::DenyNetworkPath),
-        _ => None,
+        "network" => &[
+            ProposedAction::DenyNetworkPath,
+            ProposedAction::QuarantineEntry,
+        ],
+        _ => &[],
     }
 }
 
@@ -91,8 +100,10 @@ impl EnabledActions {
         for name in names {
             if name.trim() == "judgement" {
                 policy.judgement = true;
-            } else if let Some(action) = action_from_name(name) {
-                policy = policy.enable(action);
+            } else {
+                for &action in actions_from_name(name) {
+                    policy = policy.enable(action);
+                }
             }
         }
         policy
