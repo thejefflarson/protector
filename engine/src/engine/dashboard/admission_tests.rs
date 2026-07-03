@@ -247,16 +247,9 @@ fn signing_inventory_renders_every_posture_with_word_and_no_na() {
     // The binary if-enforced, both directions — never n/a.
     assert!(html.contains("would admit"), "signed would admit");
     assert!(html.contains("would block"), "unsigned/invalid would block");
-    // Hard rule: the inventory never shows n/a. Slice the inventory section (the next section is the
-    // decision log — `admission-rows` when populated, `admission-empty` when not).
-    let rest = &html[html.find("signing-inventory").unwrap()..];
-    let end = rest
-        .find("admission-rows")
-        .or_else(|| rest.find("admission-empty"))
-        .unwrap_or(rest.len());
-    let inventory = &rest[..end];
+    // Hard rule: the inventory never shows n/a.
     assert!(
-        !inventory.contains("n/a"),
+        !inventory_slice(&html).contains("n/a"),
         "the signing inventory never shows n/a"
     );
     // Grouped under the repo header.
@@ -272,16 +265,187 @@ fn signing_inventory_shows_the_short_signer_and_issuer_badge() {
          via https://token.actions.githubusercontent.com",
     )];
     let html = render(&rows);
-    assert!(html.contains("signed by "), "the in-row signer line");
     assert!(
         html.contains("acme/app"),
-        "the short org/repo identity label"
+        "the short org/repo identity label rides in the signer column"
     );
     assert!(html.contains("github actions"), "the issuer badge");
     // The full SAN is preserved (expand panel + title=), never dropped.
     assert!(
         html.contains("https://github.com/acme/app/.github/workflows/release.yaml@refs/tags/v1"),
         "the full Fulcio SAN is available"
+    );
+}
+
+/// The signing-inventory slice of a render (from its section to the next section), for asserting
+/// structure without matching the decision log below it.
+fn inventory_slice(html: &str) -> &str {
+    let rest = &html[html.find("signing-inventory").unwrap()..];
+    let end = rest
+        .find("admission-rows")
+        .or_else(|| rest.find("admission-empty"))
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// A per-repo baseline-strength row (JEF-266 shape): `SigningStrength/<repo>` subject, the strength
+/// word in `signature`.
+fn strength_rec(repo: &str, word: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "signing-strength",
+        "allow",
+        format!("SigningStrength/{repo}").as_str(),
+        repo,
+        word,
+        "",
+        "",
+        "first_seen:0",
+    )
+}
+
+#[test]
+fn signing_inventory_is_one_aligned_table_with_repo_group_headers() {
+    // The operator's core complaint: it must be ONE table for the whole inventory (columns aligned
+    // across every repo), not one mini-table per repo.
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app@sha256:aa", "not-signed", ""),
+        signing_rec("docker.io/library/postgres:16", "not-signed", ""),
+    ];
+    let html = render(&rows);
+    let inv = inventory_slice(&html);
+    assert_eq!(
+        inv.matches("<table").count(),
+        1,
+        "the whole inventory is a single aligned table, not one per repo"
+    );
+    // Each repo is a spanning group-header row, keeping the repo visible without its own table.
+    assert!(
+        inv.contains("signing-group-head"),
+        "repos are group-header rows in the one table"
+    );
+    assert!(inv.contains("ghcr.io/acme/app"), "the first repo header");
+    assert!(
+        inv.contains("docker.io/library/postgres"),
+        "the second repo header"
+    );
+}
+
+#[test]
+fn signing_rows_are_findings_style_expanders_with_unique_ids() {
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app@sha256:aa", "not-signed", ""),
+        signing_rec(
+            "ghcr.io/acme/app@sha256:bb",
+            "invalid-signature",
+            "tampered",
+        ),
+    ];
+    let html = render(&rows);
+    let inv = inventory_slice(&html);
+    // Findings-style shape: a .row summary carrying data-signing + an .expander, each paired with a
+    // hidden .row-detail pulldown (the same mechanics the client's bindRows toggles).
+    assert!(
+        inv.contains("data-signing="),
+        "rows carry a data-signing id"
+    );
+    assert!(
+        inv.contains("class=\"expander\""),
+        "each row has a +/- expander"
+    );
+    assert_eq!(
+        inv.matches("row-detail").count(),
+        2,
+        "each of the two image rows has its own pulldown"
+    );
+    // Unique, collision-free ids: the two digests get two DISTINCT data-signing values.
+    let ids: Vec<&str> = inv
+        .match_indices("data-signing=\"")
+        .map(|(i, m)| {
+            let start = i + m.len();
+            let end = inv[start..].find('"').unwrap() + start;
+            &inv[start..end]
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "one id per image row");
+    assert_ne!(ids[0], ids[1], "the two rows carry distinct ids");
+    // aria-controls wires each expander to its own detail row.
+    for id in ids {
+        assert!(
+            inv.contains(&format!("aria-controls=\"detail-{id}\"")),
+            "the expander points at its paired detail row"
+        );
+    }
+}
+
+#[test]
+fn signing_row_pulldown_carries_full_identity_and_baseline_detail() {
+    let rows = vec![
+        signing_rec(
+            "ghcr.io/acme/app@sha256:aa",
+            "signed",
+            "signed by https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1 \
+             via https://token.actions.githubusercontent.com",
+        ),
+        strength_rec("ghcr.io/acme/app", "log-corroborated"),
+    ];
+    let html = render(&rows);
+    // The FULL Fulcio SAN + issuer live in the pulldown (never dropped to the short label alone).
+    assert!(
+        html.contains("https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1"),
+        "the full identity is in the pulldown"
+    );
+    assert!(
+        html.contains("https://token.actions.githubusercontent.com"),
+        "the full issuer is in the pulldown"
+    );
+    // The baseline detail prose explains the corroboration (log-corroborated vs local-only).
+    assert!(
+        html.contains("transparency log"),
+        "the baseline detail explains the strength"
+    );
+}
+
+#[test]
+fn signing_regression_before_after_lives_in_the_row_pulldown() {
+    let rows = vec![regression_rec(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-identity-established",
+        "signed by https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main via \
+         https://token.actions.githubusercontent.com | before: \
+         https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1",
+    )];
+    let html = render(&rows);
+    let inv = inventory_slice(&html);
+    // The regression is a loud findings-style row with its own pulldown.
+    assert!(
+        inv.contains("data-regression="),
+        "the regression is a loud row"
+    );
+    assert!(inv.contains("row-detail"), "with its own pulldown");
+    // Both identities in FULL survive in the (always-rendered) detail row markup.
+    assert!(inv.contains("https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1"));
+    assert!(inv.contains("https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main"));
+}
+
+#[test]
+fn signing_inventory_sorts_loud_repos_before_calm_ones() {
+    let rows = vec![
+        signing_rec("ghcr.io/clean/app@sha256:aa", "signed", "signed by x via y"),
+        signing_rec(
+            "docker.io/lib/bad@sha256:bb",
+            "invalid-signature",
+            "tampered",
+        ),
+    ];
+    let html = render(&rows);
+    let inv = inventory_slice(&html);
+    // The loud invalid repo's header appears before the calm signed repo's header.
+    let bad = inv.find("docker.io/lib/bad").unwrap();
+    let clean = inv.find("ghcr.io/clean/app").unwrap();
+    assert!(
+        bad < clean,
+        "the loud (invalid) repo sorts above the signed one"
     );
 }
 

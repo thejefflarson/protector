@@ -451,7 +451,7 @@ summary:focus-visible,
 /* The expander column is flush to the table's left edge so the first column lines up under the
    header brand + the nav tabs (all share the --space-4 page gutter), not pushed in by cell
    padding. */
-.cell-expand, .findings thead th.col-expand { padding-left: var(--space-2); padding-right: 0; }
+.cell-expand, .findings thead th.col-expand, .signing thead th.col-expand { padding-left: var(--space-2); padding-right: 0; }
 .cell-expand { width: 1%; white-space: nowrap; text-align: center; }
 .expander {
   appearance: none;
@@ -829,7 +829,7 @@ summary:focus-visible,
   border-bottom: var(--hairline) solid var(--border);
   white-space: nowrap;
 }
-.decisions tbody td, .signing tbody td {
+.decisions tbody td {
   padding: var(--space-2) var(--space-3);
   border-bottom: var(--hairline) solid var(--border);
   vertical-align: top;
@@ -878,48 +878,74 @@ summary:focus-visible,
 .enforced-deny { color: var(--posture-breach); }
 .enforced-block { color: var(--posture-breach); }
 
-/* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture, grouped
-   under its repo, sitting between the tallies header and the decision log. Posture is always
-   signed / invalid signature / not signed (or the transient checking) — never n/a; the "if
-   enforced" cell is always the binary would-admit / would-block. ---- */
+/* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture as ONE
+   aligned table for the whole inventory (so the machine columns line up across every repo),
+   grouped under repo group-header rows and expandable exactly like the Findings table (reusing the
+   .row / .cell / .row-detail / .expander / .detail mechanics). Posture is always signed / invalid
+   signature / not signed (or the transient checking) — never n/a; the "if enforced" cell is always
+   the binary would-admit / would-block. ---- */
 .view > .signing-inventory { margin-bottom: var(--section-gap); }
-.signing-repo { margin-top: var(--space-4); }
-.signing-repo-head {
-  display: flex; align-items: baseline; gap: var(--space-2);
-  margin: 0 0 var(--space-1);
-}
-.signing-repo-h {
+
+/* a repo group-header row spanning the table: the repo stays visible without breaking the
+   whole-table column alignment (a subtle band, not an alarm). */
+.signing-group-head {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-raised);
+  border-bottom: var(--hairline) solid var(--border);
   color: var(--ink-1); font-family: var(--font-data);
-  margin: 0;
+  white-space: nowrap;
 }
-/* per-repo baseline-strength badge (JEF-266): log-corroborated is the calm cleared channel (the
-   transparency log vouches for it), local-only is muted (weaker TOFU). Colour + word, never colour
-   alone. */
-.signing-strength[data-strength="corroborated"] { color: var(--cov-present); }
-.signing-strength[data-strength="local"] { color: var(--ink-3); }
+
 .signing-row:hover { background: var(--surface-hover); }
-/* an invalid signature is the loud attention case — a breach keyline (calm not-signed gets none). */
-.signing-row-attention td.cell-image {
+/* an invalid signature / a standing regression is the loud attention case — a breach keyline down
+   the row's left edge (calm not-signed / signed rows get none). */
+.signing-row-attention td.cell-expand {
   border-left: var(--rail-strong) solid var(--posture-breach);
 }
-.cell-image { min-width: 0; }
+.cell-image, .cell-signer { min-width: 0; }
 /* the ref + signer line truncate to a single line with an ellipsis (never word-break) so the table
    stays scannable; the full ref/identity lives in the expand panel + title=. */
 .signing-ref {
-  display: inline-block; max-width: 48ch;
+  display: inline-block; max-width: 40ch;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: bottom;
   color: var(--ink-1); font-family: var(--font-data);
 }
 .signing-by {
-  display: block; max-width: 60ch;
+  display: inline-block; max-width: 32ch;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--ink-2);
 }
 .issuer-badge { color: var(--ink-2); }
 .signing-count { margin-left: var(--space-1); }
-.signing-detail[open] > .why-toggle::before { content: "\25BE "; }
-.signing-detail-body { padding: var(--space-2) 0; }
-.signing-detail-body p { margin: var(--space-1) 0; color: var(--ink-2); }
+
+/* per-repo baseline-strength badge (JEF-266): log-corroborated is the calm cleared channel (the
+   transparency log vouches for it), local-only is muted (weaker TOFU). Colour + word, never colour
+   alone. */
+.signing-strength[data-strength="corroborated"] { color: var(--cov-present); }
+.signing-strength[data-strength="local"] { color: var(--ink-3); }
+
+/* the loud signing-regression row (JEF-264): a filled glyph + the "signing regression" word in the
+   breach channel, spanning the machine columns. Distinct from calm "not signed". */
+.signing-regression-head {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  color: var(--posture-breach);
+}
+.signing-regression-head .glyph { font-weight: var(--fw-bold); }
+.signing-regression-word { color: var(--posture-breach); }
+.signing-regression-strength { color: var(--ink-3); }
+.signing-regression-image { color: var(--ink-2); }
+.signing-regression-before { margin: 0; padding-left: var(--space-4); }
+
+/* the per-posture left rail on the image/regression expand panel (fixed posture token, never
+   untrusted text): invalid + regression are the loud breach rail; signed is the calm cleared rail;
+   not-signed / checking keep the default neutral rail. */
+.detail.detail-sign-invalid, .detail.detail-sign-regression {
+  border-left-color: var(--posture-breach);
+}
+.detail.detail-sign-signed { border-left-color: var(--cov-present); }
 
 /* the signing-posture chip colours: signed is the calm cleared green; invalid is the loud breach
    channel; not signed is calm/muted (no baseline); checking is the transient ochre. Each pairs with
