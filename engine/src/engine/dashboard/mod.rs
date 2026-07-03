@@ -204,18 +204,31 @@ async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>
 }
 
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
+///
+/// `Cache-Control: no-store` is load-bearing behind Cloudflare Access (JEF-283): Cloudflare
+/// caches `.css`/`.js` by file extension even with no origin directive, and it caches 302s —
+/// so an unauthenticated edge hit gets Access's 302→login cached against this URL and then
+/// served (as HTML) to authenticated users, leaving the dashboard unstyled. no-store keeps this
+/// per-session-gated asset out of the shared edge cache. (Bypasses CACHE, never AUTH.)
 async fn dashboard_css() -> Response {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         DASHBOARD_CSS,
     )
         .into_response()
 }
 
 /// `GET /assets/dashboard.js` — the zero-dep client script, same-origin.
+/// `Cache-Control: no-store` for the same Access/edge-cache reason as the stylesheet (JEF-283).
 async fn dashboard_js() -> Response {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         DASHBOARD_JS,
     )
         .into_response()
