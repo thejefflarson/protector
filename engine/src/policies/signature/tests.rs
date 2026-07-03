@@ -12,6 +12,7 @@ use kube::core::admission::AdmissionRequest;
 use serde_json::json;
 use sigstore::registry::Auth;
 
+use super::cosign::{LayerFacts, classify_facts};
 use super::posture::{SignatureObserver, Signer, SigningObserver, SigningPosture};
 use super::{
     CosignChecker, Decision, EnforceScope, Policy, Result, SignatureChecker, SignaturePolicy,
@@ -629,6 +630,132 @@ fn posture_map_records_last_write_wins() {
     );
     assert_eq!(map.get("ghcr.io/org/app:1").unwrap().status(), "signed");
     assert_eq!(map.len(), 1, "the same image is one entry, overwritten");
+}
+
+// ---------------------------------------------------------------------------
+// JEF-276: honest, scheme-aware posture classification (classify_facts)
+// ---------------------------------------------------------------------------
+
+/// A keyless-verified layer: a Fulcio signer that chained + Rekor-verified (sigstore only ever
+/// populates `signer` after both hold).
+fn keyless_layer(identity: &str) -> LayerFacts {
+    LayerFacts {
+        signer: Some(Signer {
+            identity: identity.to_string(),
+            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+        }),
+        has_verified_bundle: true,
+        has_signature: true,
+    }
+}
+
+/// A key-based layer (reproducer 1 — cert-manager): a verified Rekor bundle + signature, but NO
+/// Fulcio cert (`Cert: false`).
+fn key_based_layer() -> LayerFacts {
+    LayerFacts {
+        signer: None,
+        has_verified_bundle: true,
+        has_signature: true,
+    }
+}
+
+/// An unverifiable-here layer (reproducer 2 — curl trust-root variance): a signature is present but
+/// nothing verified against our trust root (no usable signer, no verified log inclusion).
+fn unverifiable_layer() -> LayerFacts {
+    LayerFacts {
+        signer: None,
+        has_verified_bundle: false,
+        has_signature: true,
+    }
+}
+
+#[test]
+fn classify_keyless_verified_yields_signed_with_identity() {
+    // Our own GH-Actions-OIDC images are unchanged: keyless-verified ⇒ signed + captured signer.
+    let posture = classify_facts(&[keyless_layer(
+        "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/v1",
+    )]);
+    assert_eq!(posture.status(), "signed");
+    let signer = posture.signer().expect("keyless-verified carries a signer");
+    assert!(signer.identity.contains("org/app"));
+}
+
+#[test]
+fn classify_key_based_signature_is_signed_not_invalid() {
+    // Reproducer 1 (quay.io/jetstack/cert-manager-cainjector): a valid `cosign sign --key`
+    // signature — cert absent, Rekor bundle present. Must be the CALM key-based state, NEVER the
+    // loud invalid, and it carries no trusted signer identity (opaque).
+    let posture = classify_facts(&[key_based_layer()]);
+    assert_eq!(posture, SigningPosture::SignedKeyBased);
+    assert_eq!(posture.status(), "signed-key-based");
+    assert_ne!(
+        posture,
+        SigningPosture::InvalidSignature,
+        "a real key-based signature must never be the loud invalid channel"
+    );
+    assert_eq!(
+        posture.signer(),
+        None,
+        "key-based is signed-but-opaque — never a trusted identity"
+    );
+}
+
+#[test]
+fn classify_trust_root_variance_is_unverifiable_not_invalid() {
+    // Reproducer 2 (docker.io/curlimages/curl:latest): a signature is present but keyless verify
+    // hits a transparency-log/TUF trust-root variance. Honest "couldn't verify here" — calm-ish,
+    // distinct from a genuine failure, and never a trusted identity.
+    let posture = classify_facts(&[unverifiable_layer()]);
+    assert_eq!(posture, SigningPosture::UnverifiableHere);
+    assert_eq!(posture.status(), "unverifiable");
+    assert_ne!(posture, SigningPosture::InvalidSignature);
+    assert_eq!(posture.signer(), None);
+}
+
+#[test]
+fn classify_no_layers_is_not_signed() {
+    assert_eq!(classify_facts(&[]), SigningPosture::NotSigned);
+}
+
+#[test]
+fn classify_reserves_invalid_for_a_genuine_failure() {
+    // The reserved loud channel: a degenerate layer with neither a signer, a verified bundle, nor
+    // even a signature — the only shape treated as genuinely invalid. (sigstore-rs drops a
+    // tamper/failed-Rekor layer before it reaches classify; see the classify note — such an image
+    // lands as not-signed and, on an established repo, still regresses loudly via JEF-264.)
+    let degenerate = LayerFacts {
+        signer: None,
+        has_verified_bundle: false,
+        has_signature: false,
+    };
+    assert_eq!(
+        classify_facts(&[degenerate]),
+        SigningPosture::InvalidSignature
+    );
+}
+
+#[test]
+fn classify_prefers_keyless_identity_over_a_key_based_layer() {
+    // A multi-scheme image (a keyless referrer sig alongside a key-based .sig): the trusted keyless
+    // identity wins, regardless of layer order.
+    let a = classify_facts(&[
+        key_based_layer(),
+        keyless_layer("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1"),
+    ]);
+    let b = classify_facts(&[
+        keyless_layer("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1"),
+        key_based_layer(),
+    ]);
+    assert_eq!(a.status(), "signed");
+    assert_eq!(b.status(), "signed");
+}
+
+#[test]
+fn classify_prefers_key_based_over_unverifiable() {
+    // A verified Rekor bundle (even without a Fulcio cert) is stronger evidence than a bare,
+    // unverifiable signature — so a mix resolves to the calm key-based state.
+    let posture = classify_facts(&[unverifiable_layer(), key_based_layer()]);
+    assert_eq!(posture, SigningPosture::SignedKeyBased);
 }
 
 #[test]

@@ -3,8 +3,9 @@
 //! dedicated inventory section, and — when a repo's signed history drifts — the loud regression
 //! banner over its rows.
 //!
-//! Two hard operator rules for the inventory: the posture is ALWAYS signed / invalid signature /
-//! not signed (or the transient checking) — never n/a; and the "if enforced" column is ALWAYS the
+//! Two hard operator rules for the inventory: the posture is ALWAYS one of the honest resting
+//! states — keyless-verified / signed-key-based / unverifiable-here / invalid / not-signed (or the
+//! transient checking) — never n/a; and the "if enforced" column is ALWAYS the
 //! binary would-admit / would-block — never n/a. Every string here is UNTRUSTED at render (a Fulcio
 //! SAN / image ref is attacker-influenceable): the components escape it (maud auto-escape; NEVER
 //! `PreEscaped`). Split out of the parent `props` module to keep both files under the repo's
@@ -18,10 +19,18 @@
 /// LOUD channel — visually and lexically distinct from a calm [`NotSigned`](Self::NotSigned).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigningPosture {
-    /// A signature is present and verifies (the signer rides [`SigningRowProps::signer`]).
+    /// Keyless-verified: a signature is present and verifies against Fulcio + Rekor (the signer
+    /// rides [`SigningRowProps::signer`]). The one trusted-identity posture. Calm.
     Signed,
-    /// A signature artifact is present but does NOT verify — the loud, alarming case. Distinct
-    /// from (and more alarming than) [`NotSigned`](Self::NotSigned).
+    /// Signed with a key-based cosign signature (JEF-276): a verified transparency-log bundle but no
+    /// Fulcio identity — real and log-included, signer opaque. CALM, never the loud channel.
+    SignedKeyBased,
+    /// A signature is present but could not be verified against our trust root (JEF-276): a
+    /// Rekor/TUF variance, honestly "couldn't verify here" — NOT "forged". Calm-ish, distinct from
+    /// the loud [`Invalid`](Self::Invalid).
+    Unverifiable,
+    /// A signature artifact is present but GENUINELY fails to verify — the loud, alarming case.
+    /// Distinct from (and more alarming than) every other state.
     Invalid,
     /// No signature at all — calm (no baseline yet), never loud, but never a green pass either.
     NotSigned,
@@ -37,6 +46,8 @@ impl SigningPosture {
     pub fn parse(word: &str) -> SigningPosture {
         match word {
             "signed" => SigningPosture::Signed,
+            "signed-key-based" => SigningPosture::SignedKeyBased,
+            "unverifiable" => SigningPosture::Unverifiable,
             "invalid-signature" => SigningPosture::Invalid,
             "not-signed" => SigningPosture::NotSigned,
             _ => SigningPosture::Checking,
@@ -47,6 +58,8 @@ impl SigningPosture {
     pub fn token(self) -> &'static str {
         match self {
             SigningPosture::Signed => "signed",
+            SigningPosture::SignedKeyBased => "signedkey",
+            SigningPosture::Unverifiable => "unverifiable",
             SigningPosture::Invalid => "invalid",
             SigningPosture::NotSigned => "notsigned",
             SigningPosture::Checking => "checking",
@@ -54,13 +67,15 @@ impl SigningPosture {
     }
 
     /// The glyph carrying the posture without colour — each distinct so `invalid` reads apart from
-    /// `not signed` and `signed` even in greyscale.
+    /// the calm signed/key-based/unverifiable/not-signed states even in greyscale.
     pub fn glyph(self) -> &'static str {
         match self {
-            SigningPosture::Signed => "\u{2713}",    // ✓ present + verified
-            SigningPosture::Invalid => "\u{2715}",   // ✕ present but broken — the loud channel
+            SigningPosture::Signed => "\u{2713}", // ✓ present + keyless-verified
+            SigningPosture::SignedKeyBased => "\u{2714}", // ✔ signed, opaque signer — calm
+            SigningPosture::Unverifiable => "\u{25D0}", // ◐ present, unverified here — calm-ish
+            SigningPosture::Invalid => "\u{2715}", // ✕ present but broken — the loud channel
             SigningPosture::NotSigned => "\u{25CB}", // ○ open — nothing there, calm
-            SigningPosture::Checking => "\u{25CC}",  // ◌ dotted — transient
+            SigningPosture::Checking => "\u{25CC}", // ◌ dotted — transient
         }
     }
 
@@ -68,15 +83,19 @@ impl SigningPosture {
     pub fn word(self) -> &'static str {
         match self {
             SigningPosture::Signed => "signed",
+            SigningPosture::SignedKeyBased => "signed (key-based)",
+            SigningPosture::Unverifiable => "unverifiable here",
             SigningPosture::Invalid => "invalid signature",
             SigningPosture::NotSigned => "not signed",
             SigningPosture::Checking => "checking\u{2026}",
         }
     }
 
-    /// The binary "if enforced" counterfactual: only a verifying [`Signed`](Self::Signed) image
-    /// would be admitted by a signature gate; every other posture (invalid / not signed / the
-    /// unverifiable transient) would be blocked. Fail-closed — never n/a (operator rule #2).
+    /// The binary "if enforced" counterfactual: only a keyless-verified [`Signed`](Self::Signed)
+    /// image (a known, trusted identity) would be admitted by a signature-identity gate; every other
+    /// posture — key-based (opaque signer), unverifiable, invalid, not signed, or the transient —
+    /// would be blocked. Fail-closed — never n/a (operator rule #2). A key-based signature is
+    /// genuinely signed but carries no identity the gate can vouch for, so it too would-block.
     pub fn would_admit(self) -> bool {
         matches!(self, SigningPosture::Signed)
     }

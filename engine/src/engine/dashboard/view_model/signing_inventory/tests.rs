@@ -150,11 +150,90 @@ fn an_unknown_status_word_reads_as_checking_never_a_false_clean() {
 }
 
 #[test]
+fn key_based_posture_maps_calm_carries_no_signer_and_would_block() {
+    // JEF-276 reproducer 1 (cert-manager): a key-based signature is CALM (never invalid), carries no
+    // trusted signer, and — lacking an identity a gate can vouch for — would block if enforced.
+    let rows = vec![observed(
+        "quay.io/jetstack/cert-manager-cainjector:v1.20.3",
+        "signed-key-based",
+        "signed with a key-based cosign signature (verified transparency-log inclusion, no Fulcio \
+         identity) \u{2014} signer is opaque to keyless verification",
+    )];
+    let row = &build(&rows)[0].images[0];
+    assert_eq!(row.posture, SigningPosture::SignedKeyBased);
+    assert_ne!(
+        row.posture,
+        SigningPosture::Invalid,
+        "a real key-based signature must not be the loud invalid channel"
+    );
+    assert!(row.signer.is_none(), "key-based is signed-but-opaque");
+    assert!(
+        !row.posture.would_admit(),
+        "no vouchable identity → would block"
+    );
+    assert!(
+        !row.detail.is_empty(),
+        "the key-based prose rides the expand panel"
+    );
+}
+
+#[test]
+fn unverifiable_posture_maps_calm_distinct_from_invalid() {
+    // JEF-276 reproducer 2 (curl trust-root variance): honest "couldn't verify here", calm-ish, and
+    // lexically + structurally distinct from the loud invalid.
+    let rows = vec![observed(
+        "docker.io/curlimages/curl:latest",
+        "unverifiable",
+        "signature present but could not be verified against our trust root",
+    )];
+    let row = &build(&rows)[0].images[0];
+    assert_eq!(row.posture, SigningPosture::Unverifiable);
+    assert_ne!(row.posture, SigningPosture::Invalid);
+    assert!(row.signer.is_none());
+    assert!(!row.posture.would_admit());
+}
+
+#[test]
 fn only_signed_would_admit() {
     assert!(SigningPosture::Signed.would_admit());
+    assert!(!SigningPosture::SignedKeyBased.would_admit());
+    assert!(!SigningPosture::Unverifiable.would_admit());
     assert!(!SigningPosture::Invalid.would_admit());
     assert!(!SigningPosture::NotSigned.would_admit());
     assert!(!SigningPosture::Checking.would_admit());
+}
+
+#[test]
+fn posture_tokens_glyphs_and_words_are_distinct_per_state() {
+    // Meaning never rides on colour alone, and the loud invalid must read apart from the calm
+    // states in token, glyph, AND word (greyscale-safe).
+    use std::collections::HashSet;
+    let all = [
+        SigningPosture::Signed,
+        SigningPosture::SignedKeyBased,
+        SigningPosture::Unverifiable,
+        SigningPosture::Invalid,
+        SigningPosture::NotSigned,
+        SigningPosture::Checking,
+    ];
+    let tokens: HashSet<_> = all.iter().map(|p| p.token()).collect();
+    let glyphs: HashSet<_> = all.iter().map(|p| p.glyph()).collect();
+    let words: HashSet<_> = all.iter().map(|p| p.word()).collect();
+    assert_eq!(
+        tokens.len(),
+        all.len(),
+        "every posture has a distinct token"
+    );
+    assert_eq!(
+        glyphs.len(),
+        all.len(),
+        "every posture has a distinct glyph"
+    );
+    assert_eq!(words.len(), all.len(), "every posture has a distinct word");
+    // The CSS token is fixed `[a-z]` only (safe attribute value, never untrusted text).
+    for p in all {
+        assert!(p.token().chars().all(|c| c.is_ascii_lowercase()));
+    }
 }
 
 #[test]

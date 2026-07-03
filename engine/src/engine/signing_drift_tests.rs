@@ -153,6 +153,33 @@ fn checking_is_never_a_regression_even_against_an_established_baseline() {
 }
 
 #[test]
+fn key_based_and_unverifiable_are_never_a_regression_even_on_an_established_repo() {
+    // JEF-276: a key-based signature (verified Rekor, no Fulcio identity) or an unverifiable-here
+    // signature (trust-root variance) is signed-but-opaque, NOT unsigned and NOT a comparable
+    // identity — so it must never resurrect the false-alarm this ticket fixes. Continuous, even
+    // against an established keyless-signed baseline. (A genuine signature REMOVAL is NotSigned and
+    // still regresses loudly — see `signed_to_unsigned_on_established_repo_is_a_regression`.)
+    let b = baseline(&[CI], true);
+    assert_eq!(
+        classify(Some(&b), &SigningPosture::SignedKeyBased),
+        SigningDrift::Continuous
+    );
+    assert_eq!(
+        classify(Some(&b), &SigningPosture::UnverifiableHere),
+        SigningDrift::Continuous
+    );
+    // …and with no baseline at all, likewise continuous (nothing to regress against).
+    assert_eq!(
+        classify(None, &SigningPosture::SignedKeyBased),
+        SigningDrift::Continuous
+    );
+    assert_eq!(
+        classify(None, &SigningPosture::UnverifiableHere),
+        SigningDrift::Continuous
+    );
+}
+
+#[test]
 fn classify_is_deterministic() {
     // Same inputs, same class — every time (the property that makes it safe to run per-pass).
     let b = baseline(&[CI], true);

@@ -945,12 +945,18 @@ summary:focus-visible,
 .detail.detail-sign-invalid, .detail.detail-sign-regression {
   border-left-color: var(--posture-breach);
 }
-.detail.detail-sign-signed { border-left-color: var(--cov-present); }
+.detail.detail-sign-signed, .detail.detail-sign-signedkey {
+  border-left-color: var(--cov-present);
+}
 
-/* the signing-posture chip colours: signed is the calm cleared green; invalid is the loud breach
+/* the signing-posture chip colours (JEF-276): keyless-verified is the calm cleared green;
+   signed-key-based is the same calm green (genuinely signed, opaque signer); unverifiable-here is
+   caution amber (couldn't verify against our trust root — NOT a failure); invalid is the loud breach
    channel; not signed is calm/muted (no baseline); checking is the transient ochre. Each pairs with
-   a distinct glyph + word (meaning never by colour alone). */
+   a distinct glyph + word (meaning never by colour alone), and ONLY invalid is the loud channel. */
 .sign-signed { color: var(--cov-present); }
+.sign-signedkey { color: var(--cov-present); }
+.sign-unverifiable { color: var(--posture-uncertain); }
 .sign-invalid { color: var(--posture-breach); }
 .sign-notsigned { color: var(--ink-3); }
 .sign-checking { color: var(--posture-awaiting); }

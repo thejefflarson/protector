@@ -130,6 +130,14 @@ pub fn classify(baseline: Option<&SigningBaseline>, posture: &SigningPosture) ->
     match posture {
         // A transient blip is never a regression — it resolves into a resting posture next pass.
         SigningPosture::Checking => SigningDrift::Continuous,
+        // Signed-but-opaque states (JEF-276): key-based (verified Rekor, no Fulcio identity) and
+        // unverifiable-here (a trust-root variance) are NOT unsigned and carry no comparable
+        // identity, so calling them a regression would resurrect the false-alarm JEF-276 fixes. A
+        // genuine signature *removal* still lands as NotSigned below and regresses loudly; these
+        // are continuous. The baseline (JEF-263) also never learns from them (no signer to teach).
+        SigningPosture::SignedKeyBased | SigningPosture::UnverifiableHere => {
+            SigningDrift::Continuous
+        }
         SigningPosture::Signed(signer) => {
             if baseline.identities.contains(&signer.identity) {
                 // A known signer — a normal redeploy, even to a brand-new digest. No finding.

@@ -4,19 +4,24 @@
 //! *is this gated image signed by the one trusted identity?* — and says
 //! `NotApplicable` about everything else, which reads as a green stamp. This module adds
 //! the missing half: observe **every** image's signing posture, with **no
-//! `gated_prefixes` and no trusted-identity config**, into one of three definitive
-//! resting states (never n/a):
+//! `gated_prefixes` and no trusted-identity config**, into one of five definitive
+//! resting states (never n/a; JEF-276 honest split):
 //!
-//!   * [`Signed`](SigningPosture::Signed) — a signature is present and verifies (chains
-//!     to the public-good Fulcio root + its Rekor bundle), plus the signer identity +
-//!     OIDC issuer read from the Fulcio cert subject.
-//!   * [`InvalidSignature`](SigningPosture::InvalidSignature) — a signature artifact is
-//!     present but does NOT verify (broken chain / tampered / untrusted root). Distinct
-//!     from, and more alarming than, unsigned.
+//!   * [`Signed`](SigningPosture::Signed) — keyless-verified: a signature chains to the
+//!     public-good Fulcio root + its Rekor bundle, so the signer identity + OIDC issuer
+//!     are read from the cert subject. The only trusted-identity posture.
+//!   * [`SignedKeyBased`](SigningPosture::SignedKeyBased) — a `cosign sign --key`
+//!     signature with a verified Rekor bundle but no Fulcio cert: real and log-included,
+//!     signer opaque to keyless. Calm, never invalid.
+//!   * [`UnverifiableHere`](SigningPosture::UnverifiableHere) — a signature is present but
+//!     can't be verified against *our* trust root (a Rekor/TUF variance). Honest, calm-ish.
+//!   * [`InvalidSignature`](SigningPosture::InvalidSignature) — RESERVED loud channel: a
+//!     signature that *genuinely* fails (tampered / a cert whose Rekor inclusion doesn't
+//!     hold). Distinct from, and more alarming than, every other state.
 //!   * [`NotSigned`](SigningPosture::NotSigned) — no signature at all.
 //!
 //! …plus a transient [`Checking`](SigningPosture::Checking) for a registry/Rekor-
-//! unreachable blip, which resolves into one of the three on a later pass — never a
+//! unreachable blip, which resolves into a resting state on a later pass — never a
 //! resting n/a, never a fabricated posture, never a false clean.
 //!
 //! Trust anchor: the Fulcio/Rekor chain, NOT a caller identity. So we learn *who signed*
@@ -47,21 +52,42 @@ pub struct Signer {
     pub issuer: Option<String>,
 }
 
-/// An image's observed signing posture (ADR-0020 Stage 1). Three definitive resting states
-/// plus one transient. Never `NotApplicable` — observation always reaches a posture, and a
-/// registry blip is the explicit [`Checking`](Self::Checking) rather than a fake clean.
+/// An image's observed signing posture (ADR-0020 Stage 1; JEF-276 honest split). Five definitive
+/// resting states plus one transient. Never `NotApplicable` — observation always reaches a posture,
+/// and a registry blip is the explicit [`Checking`](Self::Checking) rather than a fake clean.
+///
+/// The load-bearing distinction (JEF-276): [`InvalidSignature`](Self::InvalidSignature) is the
+/// LOUD channel and means a signature *genuinely failed to verify* — NOT "we don't understand this
+/// signing scheme". A real, correctly-signed image that isn't keyless-Fulcio (a key-based cosign
+/// signature, or one we can't verify against our own trust root) is a CALM, honestly-labelled
+/// state, never the loud one. The critical security property: a calm state is never read as an
+/// identity we trust — it is signed-but-opaque, distinct from a keyless [`Signed`](Self::Signed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningPosture {
-    /// A signature is present and verifies; we captured the signer.
+    /// **Keyless-verified**: a signature is present, its Fulcio cert chained to the trusted root and
+    /// its Rekor inclusion verified — so we captured the signer identity. The only posture that
+    /// yields a trusted signer.
     Signed(Signer),
-    /// A signature artifact is present but does not verify (broken chain / tampered /
-    /// untrusted root). Distinct from — and more alarming than — `NotSigned`.
+    /// **Signed (key-based)**: a signature is present with a verified transparency-log (Rekor)
+    /// bundle but NO Fulcio certificate — a `cosign sign --key` signature (e.g. cert-manager). The
+    /// signature is real and its log inclusion verifies; the signer is simply opaque to keyless
+    /// verification (no SAN/issuer to read). CALM, never invalid — but never a trusted identity.
+    SignedKeyBased,
+    /// **Signed but unverifiable here**: a signature artifact is present but verification could not
+    /// complete against *our* trust root (a Rekor/TUF trust-root variance, e.g. "transparency log
+    /// certificate does not match"). Distinct from a genuine failure — honestly "couldn't verify
+    /// against our trust root", not "forged". Calm-ish, never a trusted identity.
+    UnverifiableHere,
+    /// **Invalid** (RESERVED, the loud channel): a signature artifact is present and *genuinely*
+    /// fails verification (tampered payload, or a Fulcio cert whose Rekor inclusion does not hold).
+    /// Distinct from — and more alarming than — every other state. NOT used for a signing scheme we
+    /// merely can't read.
     InvalidSignature,
     /// No signature at all.
     NotSigned,
     /// Transient: the registry / transparency log was unreachable, so the posture is not yet
-    /// known. Resolves into one of the three resting states on a later pass. Must never be
-    /// rendered as a resting posture and never read as clean.
+    /// known. Resolves into one of the resting states on a later pass. Must never be rendered as a
+    /// resting posture and never read as clean.
     Checking,
 }
 
@@ -73,6 +99,8 @@ impl SigningPosture {
     pub fn status(&self) -> &'static str {
         match self {
             SigningPosture::Signed(_) => "signed",
+            SigningPosture::SignedKeyBased => "signed-key-based",
+            SigningPosture::UnverifiableHere => "unverifiable",
             SigningPosture::InvalidSignature => "invalid-signature",
             SigningPosture::NotSigned => "not-signed",
             SigningPosture::Checking => "checking",
