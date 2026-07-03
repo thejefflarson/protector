@@ -1,3 +1,12 @@
+{{- /* ADR-0021 posture validation (defense-in-depth; the engine also refuses at startup):
+  `mode` must be audit|enforce, and `mode: enforce` requires a non-empty enforceScope —
+  there is no enforce-everywhere wildcard. */}}
+{{- if not (or (eq .Values.mode "audit") (eq .Values.mode "enforce")) }}
+{{- fail (printf "mode must be 'audit' or 'enforce', got %q" .Values.mode) }}
+{{- end }}
+{{- if and (eq .Values.mode "enforce") (not .Values.enforceScope.namespaces) (not .Values.enforceScope.labels) }}
+{{- fail "mode: enforce requires a non-empty enforceScope (namespaces and/or labels) — there is no enforce-everywhere wildcard (ADR-0021)" }}
+{{- end }}
 {{- /*
 Feed-fetcher sidecar wiring (JEF-238, JEF-243). When feedSync is ON (the default), a native
 sidecar (an initContainer with restartPolicy: Always) fetches TWO public read-only feeds
@@ -217,20 +226,24 @@ spec:
               value: {{ .Values.signature.identityRegexp | quote }}
             - name: PROTECTOR_OIDC_ISSUER
               value: {{ .Values.signature.oidcIssuer | quote }}
-            - name: PROTECTOR_ENFORCE_NAMESPACES
-              value: {{ .Values.signature.enforceNamespaces | quote }}
-            - name: PROTECTOR_ENFORCE_LABELS
-              value: {{ .Values.signature.enforceLabels | quote }}
-            - name: PROTECTOR_VERIFY_TIMEOUT
-              value: {{ .Values.signature.verifyTimeout | quote }}
-            - name: PROTECTOR_CACHE_TTL
-              value: {{ .Values.signature.cacheTtl | quote }}
-            - name: PROTECTOR_MAX_IMAGES
-              value: {{ .Values.signature.maxImages | quote }}
-            - name: PROTECTOR_MESH_ENFORCE_NAMESPACES
-              value: {{ .Values.mesh.enforceNamespaces | quote }}
-            - name: PROTECTOR_MESH_ENFORCE_LABELS
-              value: {{ .Values.mesh.enforceLabels | quote }}
+            # --- operating posture (ADR-0021): one `mode` + one `enforceScope` derive the
+            # enforced scope of BOTH admission gates (signature + mesh) AND the engine cut.
+            - name: PROTECTOR_MODE
+              value: {{ .Values.mode | quote }}
+            - name: PROTECTOR_ENFORCE_SCOPE_NAMESPACES
+              value: {{ join "," .Values.enforceScope.namespaces | quote }}
+            - name: PROTECTOR_ENFORCE_SCOPE_LABELS
+              value: {{ include "protector.enforceScopeLabels" . | quote }}
+            {{- if .Values.rekor.enabled }}
+            # Rekor transparency-log lane (ADR-0020 §4): the one opt-in egress carve-out on
+            # the signing lane. Off unless enabled here; timeouts/caps use code defaults.
+            - name: PROTECTOR_REKOR_ENABLE
+              value: "1"
+            {{- with .Values.rekor.url }}
+            - name: PROTECTOR_REKOR_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.registryAuth.secretName }}
             - name: PROTECTOR_REGISTRY_USERNAME
               valueFrom:
@@ -266,13 +279,10 @@ spec:
             {{- end }}
             {{- if .Values.engine.enabled }}
             # --- mitigation engine ---
-            - name: PROTECTOR_ENGINE
-              value: "on"
-            # Empty = propose-only (shadow). The engine forces dry-run actuation while
-            # this is empty, regardless of PROTECTOR_ENGINE_ACTUATOR. Arm classes only
-            # after a journal review.
-            - name: PROTECTOR_ENGINE_ENABLE
-              value: {{ .Values.engine.enable | quote }}
+            # Arming is derived from the top-level `mode`/`enforceScope` (ADR-0021), NOT a
+            # per-engine switch: `mode: enforce` arms the reversible network cut confined to
+            # `enforceScope`; `mode: audit` (default) is dry-run (shadow). `actuator` only
+            # selects the CNI mechanism used when it does actuate.
             - name: PROTECTOR_ENGINE_ACTUATOR
               value: {{ .Values.engine.actuator | quote }}
             {{- if .Values.engine.falco.enabled }}
@@ -310,8 +320,6 @@ spec:
               value: {{ . | quote }}
             - name: PROTECTOR_ENGINE_MODEL_NAME
               value: {{ $.Values.engine.model.name | quote }}
-            - name: PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS
-              value: {{ $.Values.engine.model.timeoutSecs | quote }}
             {{- end }}
             {{- with .Values.engine.notify.url }}
             # Breach notifier (ADR-0018). Unset = zero outbound calls (the default).
@@ -319,8 +327,6 @@ spec:
               value: {{ . | quote }}
             - name: PROTECTOR_ENGINE_NOTIFY_VERBOSE
               value: {{ $.Values.engine.notify.verbose | quote }}
-            - name: PROTECTOR_ENGINE_NOTIFY_TIMEOUT_SECS
-              value: {{ $.Values.engine.notify.timeoutSecs | quote }}
             {{- end }}
             {{- if .Values.engine.journal.enabled }}
             # Persistent decision journal (JEF-141) — survives restarts; the path is on
@@ -328,9 +334,6 @@ spec:
             - name: PROTECTOR_ENGINE_JOURNAL_PATH
               value: {{ .Values.engine.journal.path | quote }}
             {{- end }}
-            {{- else }}
-            - name: PROTECTOR_ENGINE
-              value: "off"
             {{- end }}
           volumeMounts:
             - name: tls

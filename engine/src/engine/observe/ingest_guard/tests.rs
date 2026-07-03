@@ -89,9 +89,10 @@ fn extract_bearer_handles_both_cases_and_whitespace() {
 }
 
 #[test]
-fn from_env_reads_file_before_inline_value() {
-    // File takes precedence over the inline env var, and a trailing newline (the
-    // usual secret-file artifact) is trimmed.
+fn from_env_reads_the_mounted_token_file() {
+    // ADR-0021: the mounted file is the only supported form. Its value is read and a
+    // trailing newline (the usual secret-file artifact) is trimmed; an unset var or empty
+    // file resolves to no token.
     let dir = std::env::temp_dir().join(format!("protector-ingest-tok-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("token");
@@ -100,26 +101,26 @@ fn from_env_reads_file_before_inline_value() {
     // SAFETY: single-threaded test; we set + clear these vars within this test only.
     unsafe {
         std::env::set_var("PROTECTOR_INGEST_TOKEN_FILE", &path);
-        std::env::set_var("PROTECTOR_INGEST_TOKEN", "inline-token");
     }
     let token = IngestToken::from_env().expect("file token resolves");
     assert!(
         token.matches("file-token"),
-        "file value wins and is trimmed"
+        "file value is read and trimmed"
+    );
+
+    // An empty file resolves to no token (not an empty-string token).
+    std::fs::write(&path, "\n").unwrap();
+    assert!(
+        IngestToken::from_env().is_none(),
+        "an empty token file -> None"
     );
 
     unsafe {
         std::env::remove_var("PROTECTOR_INGEST_TOKEN_FILE");
     }
-    let token = IngestToken::from_env().expect("inline token resolves");
-    assert!(token.matches("inline-token"));
-
-    unsafe {
-        std::env::remove_var("PROTECTOR_INGEST_TOKEN");
-    }
     assert!(
         IngestToken::from_env().is_none(),
-        "no token configured -> None"
+        "no token file configured -> None"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

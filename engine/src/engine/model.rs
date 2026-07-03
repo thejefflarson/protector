@@ -38,14 +38,16 @@ async fn acquire_gate() -> tokio::sync::SemaphorePermit<'static> {
 }
 
 /// Total request timeout in seconds, from `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS`
-/// (default 30). A small local model on CPU-only hardware (a Pi cluster) can take far
-/// longer than 30s to answer an adjudication prompt, so the deployment raises this; the
-/// watch loop no longer starves while it waits (the reflectors run in their own tasks).
+/// (default 120 — the buried code default now that the chart no longer sets it, ADR-0021).
+/// A small local model on CPU-only hardware (a Pi cluster) can take far longer than a few
+/// seconds to answer an adjudication prompt, so the default is generous; raise the env
+/// further where needed. The watch loop never starves while it waits (the reflectors run
+/// in their own tasks) and verdicts are cached per entry.
 fn timeout_secs() -> u64 {
     std::env::var("PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(30)
+        .unwrap_or(120)
 }
 
 /// Build a client carrying ONLY the total timeout — the bounded fallback. Public to the

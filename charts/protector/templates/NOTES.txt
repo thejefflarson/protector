@@ -1,14 +1,19 @@
 protector is installed in namespace {{ .Release.Namespace }}.
 
-Posture (all safe-by-default):
-  Webhook signature gating : {{ if .Values.signature.enforceNamespaces }}ENFORCE in [{{ .Values.signature.enforceNamespaces }}]{{ else }}AUDIT-ONLY (logged, never blocked){{ end }}
-  Webhook failurePolicy    : {{ .Values.webhook.failurePolicy }}
-  Engine                   : {{ if .Values.engine.enabled }}{{ if .Values.engine.enable }}ARMED for class(es) [{{ .Values.engine.enable }}] via actuator '{{ .Values.engine.actuator }}'{{ else }}SHADOW (propose-only, touches nothing){{ end }}{{ else }}disabled (webhook only){{ end }}
+Posture (safe-by-default — two settings, ADR-0021):
+{{- $enforce := eq .Values.mode "enforce" }}
+{{- $scope := "" }}
+{{- if .Values.enforceScope.namespaces }}{{ $scope = printf "namespaces=[%s]" (join "," .Values.enforceScope.namespaces) }}{{ end }}
+{{- if .Values.enforceScope.labels }}{{ $scope = printf "%s labels=[%s]" $scope (include "protector.enforceScopeLabels" .) }}{{ end }}
+  Mode                     : {{ if $enforce }}ENFORCE in {{ $scope }} — signature+mesh DENY and the engine actuates (via '{{ .Values.engine.actuator }}'), confined to that scope{{ else }}AUDIT (everything observes & proposes; nothing blocks or acts — shadow){{ end }}
+  Webhook failurePolicy    : {{ .Values.webhook.failurePolicy }} (audit) / {{ .Values.webhook.enforcedFailurePolicy }} (enforcing, scoped to enforceScope)
+  Engine                   : {{ if .Values.engine.enabled }}{{ if $enforce }}ARMED (reversible network cut inside enforceScope){{ else }}SHADOW (propose-only, touches nothing){{ end }}{{ else }}disabled (webhook only){{ end }}
   Model                    : {{ if .Values.engine.model.endpoint }}{{ .Values.engine.model.endpoint }}{{ else }}none (deterministic enumerator only){{ end }}
   Breach notifier          : {{ if .Values.engine.notify.url }}configured (egress to your sink){{ else }}off (zero egress){{ end }}
+  Rekor lane               : {{ if .Values.rekor.enabled }}enabled (opt-in transparency-log egress){{ else }}off (zero egress){{ end }}
   eBPF agent               : {{ if .Values.agent.enabled }}enabled (shadow, observe-only){{ else }}disabled{{ end }}
 
-Watch the audit log before arming anything:
+Watch the audit log before flipping mode: enforce:
   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "protector.name" . }} -f
 
 {{- if .Values.engine.enabled }}
@@ -25,4 +30,5 @@ Verify cert-manager injected the webhook caBundle:
     -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20
 {{- end }}
 
-Arming is always a single, deliberate value change — see the chart README's "Opt-ins".
+Arming is a single, deliberate flip: set `mode: enforce` + `enforceScope` (one scope
+arms all three surfaces). There is no enforce-everywhere wildcard.

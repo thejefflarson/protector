@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use protector::engine::observe::epss::EpssStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::policy_log::PolicyDecisionLog;
+use protector::engine::respond::ProposedAction;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
@@ -16,6 +17,13 @@ use protector::policies::signature::{CosignChecker, SignaturePolicy};
 use protector::policy::{EnforceScope, Engine};
 use protector::server;
 use sigstore::registry::Auth;
+
+/// Fixed mount paths for the exploitation-intel feeds. JEF-273 owns the feed *mechanism*
+/// (the fetcher that writes these files); the engine only reads them, from a fixed path
+/// rather than an operator knob (ADR-0021 config collapse). `PROTECTOR_KEV_FILE` /
+/// `PROTECTOR_EPSS_FILE` remain as escape-hatch overrides.
+const FEEDS_KEV_PATH: &str = "/var/lib/protector/feeds/kev.json";
+const FEEDS_EPSS_PATH: &str = "/var/lib/protector/feeds/epss.csv";
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
@@ -47,10 +55,73 @@ fn env_pairs(key: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Build a policy's enforce scope from its namespaces + labels env vars. Empty
-/// (the default) means audit everywhere — enforcement is strictly opt-in.
-fn enforce_scope(ns_key: &str, labels_key: &str) -> EnforceScope {
-    EnforceScope::new(env_set(ns_key, ""), env_pairs(labels_key))
+/// The two-setting operating posture (ADR-0021): `audit` (the default — everything
+/// observes and proposes, nothing blocks or acts) or `enforce` (arm all three surfaces
+/// — signature webhook deny, mesh webhook deny, engine live cut — confined to exactly
+/// `enforceScope`). Parsed once at startup and derived into the internal
+/// `EnforceScope`/`ActuationScope`/`EnabledActions`; there is no per-surface toggle and
+/// no enforce-everywhere wildcard.
+struct Posture {
+    /// True for `mode: enforce`; false for `mode: audit` (the default).
+    enforce: bool,
+    /// The single enforced scope. Empty (namespaces + labels) is audit-everywhere.
+    namespaces: HashSet<String>,
+    labels: Vec<(String, String)>,
+}
+
+impl Posture {
+    /// Resolve `PROTECTOR_MODE` + `PROTECTOR_ENFORCE_SCOPE_NAMESPACES` /
+    /// `PROTECTOR_ENFORCE_SCOPE_LABELS`. `mode: enforce` with an empty scope is refused
+    /// — enforcing everywhere is the footgun ADR-0021 guards against (no wildcard).
+    fn from_env() -> Result<Self> {
+        let mode = env_or("PROTECTOR_MODE", "audit")
+            .trim()
+            .to_ascii_lowercase();
+        let enforce = match mode.as_str() {
+            "enforce" => true,
+            "audit" | "" => false,
+            other => anyhow::bail!("PROTECTOR_MODE must be 'audit' or 'enforce', got '{other}'"),
+        };
+        let namespaces = env_set("PROTECTOR_ENFORCE_SCOPE_NAMESPACES", "");
+        let labels = env_pairs("PROTECTOR_ENFORCE_SCOPE_LABELS");
+        if enforce && namespaces.is_empty() && labels.is_empty() {
+            anyhow::bail!(
+                "PROTECTOR_MODE=enforce requires a non-empty enforceScope (namespaces \
+                 and/or labels) — refusing to start: there is no enforce-everywhere \
+                 wildcard (ADR-0021). List the namespaces/labels to enforce."
+            );
+        }
+        Ok(Self {
+            enforce,
+            namespaces,
+            labels,
+        })
+    }
+
+    /// The webhook enforce scope: the enforced `EnforceScope` under `enforce`, else the
+    /// empty (audit-everywhere) scope. Both admission gates (signature + mesh) share it,
+    /// so `enforce` arms them together in exactly `enforceScope` (ADR-0021).
+    fn webhook_scope(&self) -> EnforceScope {
+        if self.enforce {
+            EnforceScope::new(self.namespaces.clone(), self.labels.clone())
+        } else {
+            EnforceScope::default()
+        }
+    }
+
+    /// What the engine may auto-actuate. Under `enforce`: the reversible network cut is
+    /// armed, confined to `enforceScope` (namespaces or Pod labels). Under `audit`:
+    /// nothing armed (dry-run) and unscoped — the shadow default.
+    fn engine_arming(&self) -> (EnabledActions, ActuationScope) {
+        if self.enforce {
+            (
+                EnabledActions::none().enable(ProposedAction::DenyNetworkPath),
+                ActuationScope::new(self.namespaces.clone(), self.labels.clone()),
+            )
+        } else {
+            (EnabledActions::none(), ActuationScope::unscoped())
+        }
+    }
 }
 
 /// Registry auth for pulling signatures of *private* gated images. Anonymous
@@ -152,16 +223,15 @@ async fn main() -> Result<()> {
     let cache_ttl = Duration::from_secs(env_parse("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_parse("PROTECTOR_MAX_IMAGES", 32) as usize;
 
-    // Enforcement is opt-in per policy, by namespace and/or pod label. An empty
-    // scope (the default) audits everywhere — violations are logged + metered but
-    // never block. Add namespaces/labels to start blocking, one slice at a time.
-    let signature_enforce =
-        enforce_scope("PROTECTOR_ENFORCE_NAMESPACES", "PROTECTOR_ENFORCE_LABELS");
-    let mesh_enforce = enforce_scope(
-        "PROTECTOR_MESH_ENFORCE_NAMESPACES",
-        "PROTECTOR_MESH_ENFORCE_LABELS",
-    );
+    // The two-setting posture (ADR-0021): `mode` + one `enforceScope` derive BOTH
+    // admission gates' enforced scope. `audit` (the default) audits everywhere — every
+    // violation is logged + metered but never blocks. `enforce` arms both gates together,
+    // confined to exactly `enforceScope`; no per-surface toggle, no wildcard.
+    let posture = Posture::from_env()?;
+    let signature_enforce = posture.webhook_scope();
+    let mesh_enforce = posture.webhook_scope();
     tracing::info!(
+        mode = if posture.enforce { "enforce" } else { "audit" },
         signature = %signature_enforce.describe(),
         mesh = %mesh_enforce.describe(),
         "policy enforcement scopes"
@@ -209,40 +279,22 @@ async fn main() -> Result<()> {
             .with_journal(webhook_journal.clone()),
     );
 
-    // The mitigation engine is the product: it runs by default, out-of-band, with
-    // its *own* kube client (the webhook keeps its zero-cluster-access property).
-    // Set PROTECTOR_ENGINE=off only to fall back to the bare admission floor.
-    let engine_off = matches!(
-        env_or("PROTECTOR_ENGINE", "on")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "off" | "0" | "false" | "no"
-    );
+    // The mitigation engine is the product: it runs by default, out-of-band, with its
+    // *own* kube client (the webhook keeps its zero-cluster-access property). It always
+    // starts — "the engine runs in shadow by default" (ADR-0021); its arming is derived
+    // from `mode`, not a separate on/off master. Without a kube client it degrades to
+    // webhook-only.
     // The engine runs as a detached task; we keep its handle so it can be stopped
     // before telemetry shuts down (otherwise it emits spans after the TracerProvider
     // is gone — "Spans are being emitted even after Shutdown").
     let mut engine_task: Option<tokio::task::JoinHandle<()>> = None;
-    if !engine_off {
-        // Hard mode is opt-in: PROTECTOR_ENGINE_ENABLE is a comma-separated list whose
-        // only live-actuatable class is `network` (an additive deny the engine can apply
-        // and self-revert); `judgement` separately opts into model promotion (ADR-0011).
-        // Empty = none (easy mode — proposals only). The subtractive classes (rbac, mount,
-        // identity) and irreversible `escape` are proposal-only and not enableable here.
-        let enabled = env_or("PROTECTOR_ENGINE_ENABLE", "");
-        // Per-namespace actuation allowlist (JEF-104, ADR-0009/0014 "one reversible
-        // class, watch, widen"). Empty (the default) = unscoped: every namespace is
-        // eligible, preserving current behavior. Non-empty confines the first live cut
-        // to one low-blast-radius namespace — a cut targeting any other namespace is
-        // held as a proposal even when its class is enabled. Mirrors the webhook's
-        // PROTECTOR_ENFORCE_NAMESPACES idiom.
-        let enforce_namespaces = env_set("PROTECTOR_ENGINE_ENFORCE_NAMESPACES", "");
-        let active =
-            EnabledActions::from_names(enabled.split(',').map(str::trim).filter(|s| !s.is_empty()));
-        // The actuation scope is its own seam (JEF-104 follow-up): `active` says what
-        // classes are armed, `scope` says where a cut may be auto-applied. An empty
-        // allowlist is unscoped (every namespace eligible), preserving current behavior.
-        let scope = ActuationScope::enforce_namespaces(enforce_namespaces);
+    {
+        // What the engine may actuate, derived from the same two-setting posture as the
+        // webhooks (ADR-0021): `enforce` arms the reversible network cut confined to
+        // `enforceScope`; `audit` (the default) is dry-run + unscoped (shadow). `active`
+        // says what classes are armed; `scope` says where a cut may land — the JEF-104
+        // seam, now fed by one source instead of two independent env knobs.
+        let (active, scope) = posture.engine_arming();
         // Falco ingest endpoint (falcosidekick POSTs alerts here) for the
         // RuntimeEvidence "corroborated-now" signal. Unset = no runtime feed.
         let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
@@ -255,19 +307,14 @@ async fn main() -> Result<()> {
         let audit_addr = env::var("PROTECTOR_AUDIT_ADDR")
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
-        // KEV catalogue (a synced ConfigMap of actively-exploited CVEs) for the
-        // ExploitIntel "exploited-in-wild" signal. Unset = no exploit intel.
-        let kev = match env::var("PROTECTOR_KEV_FILE") {
-            Ok(path) => KevCatalog::from_file(&path),
-            Err(_) => KevCatalog::empty(),
-        };
-        // EPSS scores (the FIRST.org feed, synced into the same shared volume) for the
-        // ExploitIntel *predictive* exploitation signal (JEF-243). Unset = no EPSS evidence;
-        // a CVE's `epss` then stays `None` and the prompt omits the `[epss: …]` token.
-        let epss = match env::var("PROTECTOR_EPSS_FILE") {
-            Ok(path) => EpssStore::from_file(&path),
-            Err(_) => EpssStore::empty(),
-        };
+        // KEV catalogue (the exploited-in-wild feed) for the ExploitIntel signal. The path
+        // defaults to the fixed feeds mount (JEF-273 owns the feed mechanism); the env is a
+        // code-defaulted escape hatch. A missing/empty file degrades to no exploit intel.
+        let kev = KevCatalog::from_file(&env_or("PROTECTOR_KEV_FILE", FEEDS_KEV_PATH));
+        // EPSS scores (the FIRST.org predictive feed, JEF-243) — same fixed mount default.
+        // Missing/empty ⇒ no EPSS evidence; a CVE's `epss` stays `None` and the prompt omits
+        // the `[epss: …]` token.
+        let epss = EpssStore::from_file(&env_or("PROTECTOR_EPSS_FILE", FEEDS_EPSS_PATH));
         // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
         // the durable journal on boot — the same `Arc` the webhook engine writes to.
         let engine_policy_log = policy_log.clone();
@@ -312,7 +359,112 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::docker_config_basic;
+    use super::{Posture, docker_config_basic};
+    use protector::engine::respond::ProposedAction;
+    use protector::policy::EnforceScope;
+    use std::collections::HashSet;
+
+    /// Build a Posture directly, bypassing env, so the derivation is tested without
+    /// touching process-global env.
+    fn posture(enforce: bool, namespaces: &[&str], labels: &[(&str, &str)]) -> Posture {
+        Posture {
+            enforce,
+            namespaces: namespaces.iter().map(|s| s.to_string()).collect(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn audit_posture_is_the_safe_default_everywhere() {
+        // ADR-0021: `mode: audit` derives the empty (audit-everywhere) webhook scope and a
+        // dry-run, unscoped engine — byte-identical to the historical all-defaults posture.
+        let p = posture(false, &["payments"], &[("tier", "prod")]);
+        assert!(
+            p.webhook_scope().is_audit_only(),
+            "audit mode never enforces, even if a scope is present"
+        );
+        let (active, _scope) = p.engine_arming();
+        assert!(
+            active.is_empty(),
+            "audit mode arms no engine actuation (dry-run)"
+        );
+    }
+
+    #[test]
+    fn enforce_posture_arms_all_surfaces_in_exactly_the_scope() {
+        // `mode: enforce` + a namespace scope arms both webhook gates (same EnforceScope)
+        // AND the engine's network cut, confined to that scope.
+        let p = posture(true, &["payments"], &[]);
+        let scope = p.webhook_scope();
+        assert!(!scope.is_audit_only(), "enforce mode enforces");
+        assert!(
+            scope.describe().contains("payments"),
+            "the webhook scope is exactly enforceScope, got: {}",
+            scope.describe()
+        );
+        let (active, _actuation) = p.engine_arming();
+        assert!(
+            active.is_enabled(ProposedAction::DenyNetworkPath),
+            "enforce arms the reversible network cut"
+        );
+        assert!(
+            !active.judgement_enabled(),
+            "enforce does NOT enable model promotion — only the corroborated cut"
+        );
+    }
+
+    #[test]
+    fn labels_behave_like_namespaces() {
+        // A label-only enforceScope still arms enforcement (the in-process gate matches
+        // namespace OR pod label) and the engine cut.
+        let p = posture(true, &[], &[("tier", "prod")]);
+        assert!(!p.webhook_scope().is_audit_only());
+        let (active, _scope) = p.engine_arming();
+        assert!(active.is_enabled(ProposedAction::DenyNetworkPath));
+    }
+
+    #[test]
+    fn webhook_and_engine_share_one_scope() {
+        // The signature gate, the mesh gate, and the engine cut all derive from the same
+        // enforceScope — they cannot drift.
+        let ns: HashSet<String> = ["payments".to_string()].into_iter().collect();
+        let p = posture(true, &["payments"], &[]);
+        let sig = p.webhook_scope();
+        let mesh = p.webhook_scope();
+        let expected = EnforceScope::new(ns.clone(), vec![]);
+        assert_eq!(sig.describe(), expected.describe());
+        assert_eq!(mesh.describe(), expected.describe());
+    }
+
+    #[test]
+    fn enforce_with_empty_scope_is_refused() {
+        // ADR-0021: no enforce-everywhere wildcard. `mode: enforce` with an empty scope
+        // must fail at startup. Serial env mutation guarded like the other env tests.
+        // SAFETY: single-threaded within this test; vars are set + cleared here only.
+        unsafe {
+            std::env::set_var("PROTECTOR_MODE", "enforce");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_LABELS");
+        }
+        assert!(
+            Posture::from_env().is_err(),
+            "enforce with an empty scope is the wildcard footgun — must refuse to start"
+        );
+        // A scoped enforce is accepted.
+        unsafe {
+            std::env::set_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES", "payments");
+        }
+        let p = Posture::from_env().expect("scoped enforce is accepted");
+        assert!(p.enforce);
+        assert!(p.namespaces.contains("payments"));
+        unsafe {
+            std::env::remove_var("PROTECTOR_MODE");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+        }
+    }
 
     #[test]
     fn docker_config_decodes_ghcr_auth() {

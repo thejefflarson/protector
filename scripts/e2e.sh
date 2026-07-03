@@ -187,8 +187,19 @@ diagnose_protector() {
 # and an active admission webhook would needlessly gate the test pods.
 #
 # Args: <enable> <actuationRBAC:true|false> <model_endpoint> <model_name>
+# `enable` is the legacy caller contract ("network" = hard mode, "" = shadow); it is
+# translated to the two-setting posture (ADR-0021): hard mode ⇒ mode: enforce scoped to
+# the app namespace (where the test workloads + the cut live); shadow ⇒ mode: audit.
 deploy_protector() {
   local enable="$1" actuation_rbac="$2" model_endpoint="$3" model_name="$4"
+
+  # Translate the legacy `enable` flag into PROTECTOR_MODE + enforceScope. Hard mode
+  # confines actuation to APP_NS — both cut endpoints (web + its peer) live there.
+  local mode="audit" enforce_scope=""
+  if [ -n "$enable" ]; then
+    mode="enforce"
+    enforce_scope="$APP_NS"
+  fi
 
   kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
@@ -303,13 +314,9 @@ spec:
             - { name: PROTECTOR_TUF_CACHE, value: /tmp/sigstore }
             - { name: PROTECTOR_GATED_PREFIXES, value: "ghcr.io/thejefflarson/" }
             - { name: PROTECTOR_IDENTITY_REGEXP, value: '^https://github\.com/thejefflarson/' }
-            - { name: PROTECTOR_ENFORCE_NAMESPACES, value: "" }
-            - { name: PROTECTOR_ENFORCE_LABELS, value: "" }
-            - { name: PROTECTOR_MESH_ENFORCE_NAMESPACES, value: "" }
-            - { name: PROTECTOR_MESH_ENFORCE_LABELS, value: "" }
+            - { name: PROTECTOR_MODE, value: "$mode" }
+            - { name: PROTECTOR_ENFORCE_SCOPE_NAMESPACES, value: "$enforce_scope" }
             - { name: RUST_LOG, value: "protector=info,sigstore=error,warn" }
-            - { name: PROTECTOR_ENGINE, value: "on" }
-            - { name: PROTECTOR_ENGINE_ENABLE, value: "$enable" }
             - { name: PROTECTOR_ENGINE_ACTUATOR, value: "networkpolicy" }
             - { name: PROTECTOR_FALCO_ADDR, value: "0.0.0.0:9999" }$model_env
           volumeMounts:

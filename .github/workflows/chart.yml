@@ -35,13 +35,14 @@ jobs:
         run: |
           helm template protector charts/protector --namespace protector \
             --set agent.enabled=true \
-            --set engine.enable=network \
-            --set engine.actuator=networkpolicy \
-            --set engine.actuationRBAC=true \
+            --set mode=enforce \
+            --set 'enforceScope.namespaces={payments}' \
+            --set engine.actuator=adminnetworkpolicy \
             --set engine.model.endpoint=http://model.svc:11434/v1/chat/completions \
             --set engine.model.name=test \
             --set otelEndpoint=http://otel.svc:4318 \
             --set engine.notify.url=https://sink.example/hook \
+            --set rekor.enabled=true \
             --set registryAuth.dockerconfigSecret=registry \
             --set feedSync.enabled=true
       # Security invariants (ingest authn + webhook fail-closed). These assert the
@@ -49,22 +50,55 @@ jobs:
       # regression that quietly drops them fails CI rather than shipping.
       - name: Assert webhook fail-closed for the enforcing webhook
         run: |
+          # ADR-0021: enforcement is `mode: enforce` + `enforceScope`; the fail-closed
+          # webhook selector is DERIVED from that scope (name-In on the enforced namespaces).
           render=$(helm template protector charts/protector --namespace protector \
-            --set webhook.enforcedNamespaceSelector.matchLabels.'protector\.dev/enforce'=true)
+            --set mode=enforce --set 'enforceScope.namespaces={payments}')
           echo "$render" | grep -q 'name: pods-enforce.protector.dev' \
             || { echo "missing enforcing webhook"; exit 1; }
-          # The enforcing webhook must fail CLOSED and be scoped to the enforced label.
+          # The enforcing webhook must fail CLOSED and be scoped to the enforced namespace.
           echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
             | grep -q 'failurePolicy: Fail' \
             || { echo "enforcing webhook is not failurePolicy: Fail"; exit 1; }
           echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
             | grep -q 'operator: In' \
             || { echo "enforcing webhook missing namespaceSelector In match"; exit 1; }
+          echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
+            | grep -q 'payments' \
+            || { echo "enforcing webhook not scoped to enforceScope namespace"; exit 1; }
           # The audit webhook must stay fail-open so a protector outage can't block
           # namespaces that never opted into enforcement.
           echo "$render" | awk '/name: pods.protector.dev/,/port:/' \
             | grep -q 'failurePolicy: Ignore' \
             || { echo "audit webhook is not failurePolicy: Ignore"; exit 1; }
+          # mode: audit (the default) must render the enforcing webhook scoped to the
+          # match-nothing sentinel — it exists but can never block.
+          audit=$(helm template protector charts/protector --namespace protector)
+          echo "$audit" | awk '/name: pods-enforce.protector.dev/,/port:/' \
+            | grep -q 'protector.dev/enforce-unset-sentinel' \
+            || { echo "audit-default enforcing webhook is not scoped to the sentinel"; exit 1; }
+      - name: Assert mode: enforce derives the pod-label objectSelector and actuation RBAC
+        run: |
+          # ADR-0021: labels behave like namespaces (objectSelector), and the NetworkPolicy
+          # write grant is derived from mode: enforce (not a separate actuationRBAC knob).
+          render=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.labels.tier=prod')
+          echo "$render" | awk '/name: pods-enforce.protector.dev/,/port:/' \
+            | grep -q 'objectSelector' \
+            || { echo "label enforceScope did not derive an objectSelector"; exit 1; }
+          echo "$render" | grep -A3 'resources: ."networkpolicies".' \
+            | grep -q 'create' \
+            || { echo "mode: enforce did not derive the NetworkPolicy write grant"; exit 1; }
+          # mode: audit (default) must grant NO NetworkPolicy write verbs.
+          audit=$(helm template protector charts/protector --namespace protector)
+          if echo "$audit" | grep -A3 'resources: ."networkpolicies".' | grep -q 'create'; then
+            echo "audit default leaked a NetworkPolicy write grant"; exit 1
+          fi
+          # mode: enforce with an EMPTY scope is the wildcard footgun — helm must refuse.
+          if helm template protector charts/protector --namespace protector \
+               --set mode=enforce >/dev/null 2>&1; then
+            echo "mode: enforce with empty enforceScope was not refused"; exit 1
+          fi
       - name: Assert ingest auth Secret mounts on engine AND agent
         run: |
           render=$(helm template protector charts/protector --namespace protector \

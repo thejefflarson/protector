@@ -390,6 +390,58 @@ fn actuation_scope_is_unscoped_when_allowlist_empty() {
 }
 
 #[test]
+fn actuation_scope_confines_by_pod_label_like_the_webhook() {
+    // ADR-0021: labels behave like namespaces. A label-only scope confines the cut to
+    // endpoints carrying the label — both endpoints must match, so a scope leak can never
+    // widen actuation beyond enforceScope.
+    let mut m = mitigation(
+        "workload/app/Pod/web",
+        "reaches/Tcp/5432",
+        "workload/data/Pod/db",
+        ProposedAction::DenyNetworkPath,
+    );
+    m.cut.from_labels =
+        std::collections::BTreeMap::from([("tier".to_string(), "prod".to_string())]);
+    m.cut.to_labels = std::collections::BTreeMap::from([("tier".to_string(), "prod".to_string())]);
+
+    // Both endpoints carry tier=prod ⇒ in scope.
+    let prod = ActuationScope::new(
+        std::collections::HashSet::new(),
+        vec![("tier".to_string(), "prod".to_string())],
+    );
+    assert!(prod.in_scope(&m), "both endpoints labelled ⇒ in scope");
+
+    // A different label value ⇒ neither endpoint matches ⇒ out of scope.
+    let staging = ActuationScope::new(
+        std::collections::HashSet::new(),
+        vec![("tier".to_string(), "staging".to_string())],
+    );
+    assert!(
+        !staging.in_scope(&m),
+        "no endpoint matches ⇒ held as a proposal"
+    );
+
+    // Only the source carries the label (target does not) ⇒ out of scope: the cut would
+    // write an object selecting the unlabelled target's namespace.
+    m.cut.to_labels.clear();
+    assert!(
+        !prod.in_scope(&m),
+        "every workload endpoint must be in scope, source-only match is not enough"
+    );
+
+    // A namespace-OR-label scope: the target is reachable via its namespace even without
+    // the label.
+    let mixed = ActuationScope::new(
+        ["data".to_string()].into_iter().collect(),
+        vec![("tier".to_string(), "prod".to_string())],
+    );
+    assert!(
+        mixed.in_scope(&m),
+        "source matches by label, target matches by namespace ⇒ in scope"
+    );
+}
+
+#[test]
 fn decide_auto_applies_a_model_promoted_chain() {
     // ADR-0011: a model-promoted justification (no runtime corroboration) is
     // auto-actionable just like a live one, gated by the same bounded action.

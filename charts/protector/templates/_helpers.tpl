@@ -78,6 +78,19 @@ NVD advisory feed was retired in JEF-242).
 {{- "/var/lib/protector/feeds" -}}
 {{- end }}
 
+{{/*
+Render enforceScope.labels (a map of key: value POD labels) as the comma-separated
+`key=value` list the engine parses into its EnforceScope pod-label matcher
+(PROTECTOR_ENFORCE_SCOPE_LABELS). Empty map → empty string (ADR-0021).
+*/}}
+{{- define "protector.enforceScopeLabels" -}}
+{{- $pairs := list -}}
+{{- range $k, $v := .Values.enforceScope.labels -}}
+{{- $pairs = append $pairs (printf "%s=%s" $k $v) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end }}
+
 {{/* Name of the cert-manager serving Certificate (and its Secret). */}}
 {{- define "protector.servingCertName" -}}
 {{- printf "%s-tls" (include "protector.fullname" .) }}

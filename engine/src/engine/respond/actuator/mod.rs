@@ -115,18 +115,20 @@ impl EnabledActions {
     }
 }
 
-/// The per-namespace actuation allowlist (`PROTECTOR_ENGINE_ENFORCE_NAMESPACES`) — the
-/// scope guard for *where* a cut may be auto-applied, distinct from [`EnabledActions`]
-/// ("what classes are armed"). Empty (the default) = unscoped: every namespace is
-/// eligible, preserving the historical behavior. Non-empty = confine the first live cut
-/// to these namespaces (ADR-0009/0014 "one reversible class, watch, widen") — a cut that
-/// would write into any *other* namespace is held as a proposal even when its class is
-/// enabled and corroborated. Mirrors the webhook's `PROTECTOR_ENFORCE_NAMESPACES`
-/// allowlist idiom. Passed to [`decide`] as its own parameter so the enable decision and
-/// the scope decision stay separable.
+/// The actuation scope guard for *where* a cut may be auto-applied, distinct from
+/// [`EnabledActions`] ("what classes are armed"). It mirrors the webhook's `EnforceScope`
+/// on both axes — namespaces (by name) and Pod labels (`key=value`) — so the engine's
+/// live cut is confined to exactly the same `enforceScope` that arms the admission gates
+/// (ADR-0021). Empty (both axes) = unscoped: every namespace eligible, the historical
+/// shadow-default behavior. Non-empty = confine the cut (ADR-0009/0014 "one reversible
+/// class, watch, widen") — a cut that would write into any endpoint *outside* the scope
+/// is held as a proposal even when its class is enabled and corroborated. Passed to
+/// [`decide`] as its own parameter so the enable decision and the scope decision stay
+/// separable.
 #[derive(Debug, Default, Clone)]
 pub struct ActuationScope {
     namespaces: HashSet<String>,
+    labels: Vec<(String, String)>,
 }
 
 impl ActuationScope {
@@ -139,25 +141,51 @@ impl ActuationScope {
     pub fn enforce_namespaces(namespaces: impl IntoIterator<Item = String>) -> Self {
         Self {
             namespaces: namespaces.into_iter().collect(),
+            labels: Vec::new(),
         }
     }
 
-    /// Whether `mitigation`'s cut is within the actuation namespace allowlist. An empty
-    /// allowlist is unscoped (always eligible) — the historical behavior. When the list
-    /// is non-empty, **every** workload endpoint the cut would write into (source and
-    /// target) must be listed: the live actuators write an `AdminNetworkPolicy`/
-    /// `NetworkPolicy` selecting the target's and the source's namespaces, so an
-    /// out-of-scope endpoint on either side would place an object in an unallowed
-    /// namespace. Non-workload endpoints carry no namespace to scope on and so don't
-    /// constrain (non-network cuts are forbidden upstream anyway).
-    pub fn in_scope(&self, mitigation: &Mitigation) -> bool {
-        if self.namespaces.is_empty() {
+    /// Confine actuation to a namespace allowlist **and/or** a set of `key=value` Pod
+    /// labels (ADR-0021: the single `enforceScope`). Both axes empty leaves it unscoped.
+    pub fn new(namespaces: HashSet<String>, labels: Vec<(String, String)>) -> Self {
+        Self { namespaces, labels }
+    }
+
+    /// Whether one workload endpoint (its namespace + labels) is in scope: its namespace
+    /// is listed, **or** it carries one of the scoped labels. Mirrors `EnforceScope`'s
+    /// namespace-OR-label match so the engine cut and the webhook gates agree.
+    fn endpoint_in_scope(
+        &self,
+        namespace: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        if self.namespaces.contains(namespace) {
             return true;
         }
-        [&mitigation.cut.from, &mitigation.cut.to]
+        self.labels
             .iter()
-            .filter_map(|key| workload_namespace(key))
-            .all(|ns| self.namespaces.contains(ns))
+            .any(|(k, v)| labels.get(k).is_some_and(|pv| pv == v))
+    }
+
+    /// Whether `mitigation`'s cut is within scope. An empty scope (both axes) is unscoped
+    /// (always eligible) — the historical behavior. When scoped, **every** workload
+    /// endpoint the cut would write into (source and target) must be in scope: the live
+    /// actuators write an `AdminNetworkPolicy`/`NetworkPolicy` selecting the source's and
+    /// target's namespaces, so an out-of-scope endpoint on either side would place an
+    /// object outside `enforceScope`. Non-workload endpoints carry no namespace/labels to
+    /// scope on and so don't constrain (non-network cuts are forbidden upstream anyway).
+    pub fn in_scope(&self, mitigation: &Mitigation) -> bool {
+        if self.namespaces.is_empty() && self.labels.is_empty() {
+            return true;
+        }
+        let endpoints = [
+            (&mitigation.cut.from, &mitigation.cut.from_labels),
+            (&mitigation.cut.to, &mitigation.cut.to_labels),
+        ];
+        endpoints
+            .iter()
+            .filter_map(|(key, labels)| workload_namespace(key).map(|ns| (ns, *labels)))
+            .all(|(ns, labels)| self.endpoint_in_scope(ns, labels))
     }
 }
 
