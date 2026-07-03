@@ -28,5 +28,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0018](0018-operator-configured-redacted-breach-notifier.md) | The breach notifier is the one sanctioned outbound path: operator-configured, off by default, redacted by default | Accepted |
 | [0019](0019-dashboard-v3-presentation-architecture.md) | Dashboard v3: server-rendered (maud), zero-egress, light-theme presentation — the view_model/component/page split + the honesty invariants | Accepted |
 | [0020](0020-signature-continuity.md) | Supply-chain trust is signature continuity: observe every image, learn a per-repo TOFU baseline, treat the signed→unsigned / identity-change regression as the signal — not prefix-gated single-identity | Accepted |
+| [0021](0021-two-setting-operating-posture.md) | Two-setting operating posture: `mode` (audit default / enforce) + one `enforceScope` arms all three enforcement surfaces (signature + mesh webhooks + engine live cut), fail-closed webhook selector and actuation RBAC derived from it — no per-surface toggle, no wildcard | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.

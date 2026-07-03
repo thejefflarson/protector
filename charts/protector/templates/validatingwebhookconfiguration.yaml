@@ -2,31 +2,36 @@
 # caBundle from the serving cert's CA (inject-ca-from), so we never hand-manage it; with
 # cert.create=false you must inject the caBundle yourself (annotation/patch).
 #
-# TWO webhooks, by design (security fix — webhook fail-closed):
+# TWO webhooks, by design (ADR-0021 — the enforcing webhook selector is DERIVED from
+# `mode`/`enforceScope`, it can't drift from what the gates enforce):
 #
 #   * pods.protector.dev — the AUDIT webhook. Intercepts EVERY namespace by default
 #     (including kube-system / cert-manager / argocd / linkerd / protector itself) and
 #     FAIL-OPEN (failurePolicy Ignore): a protector outage must never block Pod creation,
 #     and audit never denies, so widening interception cluster-wide is safe. Observe-only.
-#     It excludes only (a) namespaces an operator explicitly opts out via
-#     webhook.excludeNamespaces (EMPTY by default — nothing excluded) and (b) the enforced
-#     namespaces, which the fail-closed webhook below covers instead, so they aren't
-#     double-validated and a protector outage doesn't silently fail those open.
+#     It excludes only namespaces an operator explicitly opts out via
+#     webhook.excludeNamespaces (EMPTY by default — nothing excluded). Enforced Pods are
+#     also matched by the fail-closed webhook below; when protector is UP both reach the
+#     same in-process gate (which denies in-scope Pods), and when protector is DOWN the
+#     fail-closed webhook DOMINATES (the apiserver rejects if any Fail webhook is
+#     unreachable), so an enforced Pod never silently fails open.
 #
-#   * pods-enforce.protector.dev — the ENFORCING webhook. Scoped to enforced namespaces
-#     via a label selector and FAIL-CLOSED (failurePolicy Fail): if protector is down or
-#     a Pod spec is oversized, Pod CREATE is BLOCKED there rather than admitting a
-#     possibly-unsigned/unmeshed image. The blast radius is exactly the namespaces you
-#     labeled in — nowhere else. When webhook.enforcedNamespaceSelector is empty it is
-#     scoped to a sentinel label no namespace carries, so it matches nothing and can
-#     never block until a namespace is opted in.
+#   * pods-enforce.protector.dev — the ENFORCING webhook. Scoped to EXACTLY `enforceScope`
+#     (namespaces → namespaceSelector name-In; pod labels → objectSelector label-In) and
+#     FAIL-CLOSED (failurePolicy Fail): under `mode: enforce`, if protector is down or a
+#     Pod spec is oversized, Pod CREATE is BLOCKED in scope rather than admitting a
+#     possibly-unsigned/unmeshed image. Under `mode: audit` (the default) it is scoped to a
+#     sentinel label no namespace carries, so it renders but matches nothing and can never
+#     block. (Mixing namespaces AND labels in one scope AND-s the two selectors — the
+#     outage-block set is their intersection; the union is still fully enforced when
+#     protector is up via the audit webhook. See ADR-0021.)
 #
-# SELF-DEADLOCK: the audit webhook now intercepts protector's OWN namespace, but it is
+# SELF-DEADLOCK: the audit webhook intercepts protector's OWN namespace, but it is
 # fail-open (Ignore) AND audit can never deny, so it cannot block protector's own pod
 # CREATE during bootstrap — if the webhook endpoint isn't up yet the apiserver simply
-# admits the pod. The enforcing webhook never covers protector's namespace by default
-# (it matches nothing until an operator labels a namespace in), so it can't deadlock the
-# engine either. To audit-exempt a namespace anyway, add it to webhook.excludeNamespaces.
+# admits the pod. The enforcing webhook never covers protector's namespace unless an
+# operator names it in enforceScope, so it can't deadlock the engine either. To
+# audit-exempt a namespace anyway, add it to webhook.excludeNamespaces.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -45,12 +50,9 @@ webhooks:
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     matchPolicy: Equivalent
     timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
-    {{- $enforcedLabels := dict }}
-    {{- with .Values.webhook.enforcedNamespaceSelector }}{{ $enforcedLabels = .matchLabels | default dict }}{{- end }}
-    {{- if or .Values.webhook.excludeNamespaces $enforcedLabels }}
+    {{- if .Values.webhook.excludeNamespaces }}
     namespaceSelector:
       matchExpressions:
-        {{- if .Values.webhook.excludeNamespaces }}
         # Operator opt-out: keep the audit webhook OFF these namespaces.
         - key: kubernetes.io/metadata.name
           operator: NotIn
@@ -58,19 +60,10 @@ webhooks:
             {{- range .Values.webhook.excludeNamespaces }}
             - {{ . }}
             {{- end }}
-        {{- end }}
-        {{- range $key, $value := $enforcedLabels }}
-        # Enforced namespaces are validated by the fail-closed webhook below instead, so
-        # exclude them here — otherwise the fail-open audit webhook would also cover them
-        # and a protector outage would silently fail those open.
-        - key: {{ $key }}
-          operator: NotIn
-          values: [{{ $value | quote }}]
-        {{- end }}
     {{- else }}
-    # AUDIT-EVERYWHERE: excludeNamespaces and enforcedNamespaceSelector both empty, so the
-    # selector is empty ({}) and the fail-open audit webhook fires on Pod CREATE in EVERY
-    # namespace (incl. kube-system / cert-manager / argocd / linkerd / protector itself).
+    # AUDIT-EVERYWHERE: excludeNamespaces empty, so the selector is empty ({}) and the
+    # fail-open audit webhook fires on Pod CREATE in EVERY namespace (incl. kube-system /
+    # cert-manager / argocd / linkerd / protector itself).
     namespaceSelector: {}
     {{- end }}
     rules:
@@ -92,6 +85,11 @@ webhooks:
     failurePolicy: {{ .Values.webhook.enforcedFailurePolicy }}
     matchPolicy: Equivalent
     timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    {{- $enforce := eq .Values.mode "enforce" }}
+    {{- $nsScoped := and $enforce (gt (len .Values.enforceScope.namespaces) 0) }}
+    {{- $labelScoped := and $enforce (gt (len (keys .Values.enforceScope.labels)) 0) }}
+    {{- $sentinel := and (not $nsScoped) (not $labelScoped) }}
+    {{- if or .Values.webhook.excludeNamespaces $nsScoped $sentinel }}
     namespaceSelector:
       matchExpressions:
         {{- if .Values.webhook.excludeNamespaces }}
@@ -103,18 +101,33 @@ webhooks:
             - {{ . }}
             {{- end }}
         {{- end }}
-        {{- with .Values.webhook.enforcedNamespaceSelector }}
-        {{- range $key, $value := .matchLabels }}
+        {{- if $nsScoped }}
+        # Enforced namespaces, derived from enforceScope.namespaces (ADR-0021).
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            {{- range .Values.enforceScope.namespaces }}
+            - {{ . }}
+            {{- end }}
+        {{- else if $sentinel }}
+        # mode: audit — scope to a sentinel label no namespace carries, so the fail-closed
+        # webhook renders but matches nothing until you set mode: enforce + enforceScope.
+        - key: protector.dev/enforce-unset-sentinel
+          operator: Exists
+        {{- end }}
+    {{- end }}
+    {{- if $labelScoped }}
+    # Enforced Pod labels, derived from enforceScope.labels (ADR-0021). A single webhook
+    # AND-s objectSelector with namespaceSelector, so combining namespaces AND labels
+    # narrows the fail-closed set to their intersection (never wider — see ADR-0021).
+    objectSelector:
+      matchExpressions:
+        {{- range $key, $value := .Values.enforceScope.labels }}
         - key: {{ $key }}
           operator: In
           values: [{{ $value | quote }}]
         {{- end }}
-        {{- else }}
-        # Empty selector: scope to a sentinel label no namespace carries, so the
-        # fail-closed webhook matches nothing until an operator opts a namespace in.
-        - key: protector.dev/enforce-unset-sentinel
-          operator: Exists
-        {{- end }}
+    {{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]

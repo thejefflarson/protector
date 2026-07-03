@@ -307,9 +307,9 @@ pub async fn serve_audit(
         None => {
             tracing::warn!(
                 %addr,
-                "k8s audit-log ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN or \
-                 PROTECTOR_INGEST_TOKEN_FILE to require a bearer token. Any caller that can \
-                 reach this port could post forged secret-read observations."
+                "k8s audit-log ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN_FILE \
+                 to require a bearer token. Any caller that can reach this port could post \
+                 forged secret-read observations."
             );
         }
     }

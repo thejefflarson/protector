@@ -23,17 +23,17 @@ reads or transmits any cluster data, and the **engine itself stays zero-egress**
 
 | Property            | Default                                | Why                                                              |
 | ------------------- | -------------------------------------- | --------------------------------------------------------------- |
-| Webhook gating      | **audit-only** (`enforceNamespaces` empty) | Logs unsigned/unmeshed pods, never blocks them.             |
+| Operating posture   | **`mode: audit`** (`enforceScope` empty) | Everything observes & proposes; nothing blocks or acts (ADR-0021). Signature + mesh audit-only, engine shadow. Flip `mode: enforce` + `enforceScope` to arm all three surfaces at once. |
 | Webhook scope       | **audit every namespace** (`webhook.excludeNamespaces: []`) | The fail-open audit webhook observes Pod creates cluster-wide, including kube-system / cert-manager / linkerd / argocd / protector. List names in `excludeNamespaces` to opt some out. |
-| Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes (so auditing every namespace is safe even for kube-system); the fail-closed enforcing webhook matches no namespace until you label one in. |
-| Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token; engine + agent share a chart-provisioned Secret. |
-| Engine              | **shadow** (`engine.enable` empty)     | Detects + proposes; the engine forces dry-run actuation while no class is armed. |
-| Actuator            | `dryrun`                               | Touches nothing even if a class is later armed (a deliberate two-step). |
+| Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes (so auditing every namespace is safe even for kube-system); the fail-closed enforcing webhook matches no namespace until `mode: enforce` + `enforceScope` opt one in. |
+| Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token (mounted file only); engine + agent share a chart-provisioned Secret. |
+| Engine              | **shadow** (`mode: audit`)             | Detects + proposes; the engine is dry-run until `mode: enforce`. |
+| Actuator            | `networkpolicy`                        | The CNI mechanism used *if* it actuates (only under `mode: enforce`); inert in audit. |
 | Engine egress       | **none** (zero-egress, ADR-0015)       | The engine makes no breach-notify call, no OTLP export, no live feed fetch — it only reads mounted feed files; the security graph never leaves the cluster. |
 | Feed-fetcher egress | **on** (`feedSync.enabled: true`)      | The ONE component with egress: a co-located sidecar that GETs public, read-only exploitation-intel feeds (CISA KEV + FIRST.org EPSS) into a shared volume the engine reads. It never reads or transmits cluster data. Set `feedSync.enabled=false` for a fully air-gapped install. |
 | Model               | **off** (`engine.model.endpoint` empty) | Engine runs the deterministic enumerator only; no model required. |
 | eBPF agent          | **off** (`agent.enabled: false`)       | Needs the agent image + probes load-tested on your kernel.      |
-| RBAC                | read-only                              | No write grants unless `actuationRBAC: true` (armed mode).      |
+| RBAC                | read-only                              | No write grants unless `mode: enforce` (derived — arms the cut and its RBAC together). |
 
 ## Prerequisites
 
@@ -73,38 +73,41 @@ Nothing below that **acts on or blocks** your workloads is enabled by default (t
 default-on item is the read-only **feed-fetcher** egress, covered below). Arm in this order
 and review the decision journal / audit log at each step.
 
-### Enforce image signatures in a namespace
+### Enforce: one scope arms all three surfaces (ADR-0021)
+
+Enforcement is **two settings**: `mode` + `enforceScope`. Flipping `mode: enforce`
+arms all three enforcement surfaces together — signature-webhook deny, mesh-webhook
+deny, and the engine's reversible network cut — each confined to *exactly*
+`enforceScope`:
 
 ```sh
---set signature.enforceNamespaces="payments,ingress"
-```
-
-Unsigned gated images are then **denied** in those namespaces (audit everywhere
-else). There is no enforce-everywhere wildcard by design. Same shape for mesh-
-injection: `--set mesh.enforceNamespaces=...`.
-
-### Fail closed in enforced namespaces (webhook availability tradeoff)
-
-By default the admission webhook **fails open** (`failurePolicy: Ignore`): a
-protector outage never blocks Pod creation. That is the right posture for audit, but
-it means an outage could admit an *unsigned* image into a namespace you intended to
-gate. The chart ships a second, **fail-closed** webhook (`pods-enforce.protector.dev`,
-`failurePolicy: Fail`) scoped by a label selector — empty by default, so it blocks
-nothing until you opt a namespace in:
-
-```sh
-kubectl label namespace payments protector.dev/enforce=true
 helm upgrade protector ./charts/protector --namespace protector --reuse-values \
-  --set webhook.enforcedNamespaceSelector.matchLabels.'protector\.dev/enforce'=true
+  --set mode=enforce \
+  --set 'enforceScope.namespaces={payments,ingress}'
 ```
 
-Now in `payments`, if protector is down (or a Pod spec is oversized), Pod **CREATE is
-blocked** instead of admitting a possibly-unsigned image. **Tradeoff:** while
-protector is unavailable, new Pods (including rollouts and HPA scale-ups) cannot be
-created in the labeled namespaces until it recovers. Keep the selector tight and
-aligned with `signature.enforceNamespaces` / `mesh.enforceNamespaces`. The audit
-webhook automatically *excludes* the enforced namespaces, so they aren't
-double-validated and aren't silently failed open.
+Now in `payments`/`ingress`: unsigned/regressed gated images and unmeshed Pods are
+**denied**, and the engine applies its reversible cut on a corroborated attack path —
+everywhere else stays audit. Pod labels behave like namespaces (a Pod carrying one is
+enforced in any namespace):
+
+```sh
+--set 'enforceScope.labels.tier=prod'
+```
+
+There is **no enforce-everywhere wildcard**: `mode: enforce` with an empty
+`enforceScope` is refused (by both helm and the engine at startup).
+
+**The fail-closed webhook and the actuation RBAC are derived from the same
+`enforceScope`** — they can no longer drift from what the gates enforce. By default the
+audit webhook **fails open** (`failurePolicy: Ignore`, so a protector outage never
+blocks Pod creation); the derived `pods-enforce.protector.dev` webhook
+(`failurePolicy: Fail`) is scoped to `enforceScope` (namespaces → `namespaceSelector`,
+labels → `objectSelector`) so that in scope, if protector is down or a Pod spec is
+oversized, Pod **CREATE is blocked** rather than admitting a possibly-unsigned image.
+**Tradeoff:** while protector is unavailable, new Pods (rollouts, HPA scale-ups) cannot
+be created in the enforced scope until it recovers. Bake a scope in `mode: audit`
+(watch the would-deny findings) before flipping.
 
 ### Ingest authentication (on by default) — rollout ordering
 
@@ -209,21 +212,22 @@ your own `kev.json` / `epss.csv` into the engine container at `/var/lib/protecto
 (e.g. via a ConfigMap/Secret/PVC you manage) and set `PROTECTOR_KEV_FILE` /
 `PROTECTOR_EPSS_FILE` accordingly.
 
-### Arm the engine (live actuation) — the careful two-step
+### The engine's live cut is armed by `mode: enforce`
 
-1. **Choose a live actuator** (still no class enabled, so still dry-run):
-   ```sh
-   --set engine.actuator=networkpolicy   # or adminnetworkpolicy (needs a CNI implementing ANP)
-   ```
-2. **Arm a class** and grant the write RBAC together, only after a journal review:
-   ```sh
-   --set engine.enable=network \
-   --set engine.actuationRBAC=true
-   ```
+The engine's reversible network cut is one of the three surfaces `mode: enforce` arms
+(above) — there is no separate engine arming switch. In `mode: audit` the engine is
+always dry-run; under `mode: enforce` it applies its cut on a corroborated attack path
+whose endpoints are within `enforceScope`, and the NetworkPolicy write grant is derived
+from the same `mode` (they arm together). Choose the CNI mechanism the cut renders with:
 
-`network` is the only live-actuatable class today; `escape` is never enableable.
-With `engine.enable` empty the engine forces dry-run regardless of `engine.actuator`,
-so step 1 alone never writes to the cluster.
+```sh
+--set engine.actuator=networkpolicy      # default — any NetworkPolicy-enforcing CNI (ADR-0010)
+# --set engine.actuator=adminnetworkpolicy  # surgical ANP edge-cut; needs Cilium/Calico (ADR-0007)
+# --set engine.actuator=dryrun              # force shadow even under mode: enforce
+```
+
+The cut keeps all its own safety gates (live corroboration, blast-radius guard,
+adjudicator veto, self-revert); `enforceScope` only bounds *where* it may land.
 
 ### Enable the breach notifier (opts you into egress)
 
@@ -251,12 +255,14 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 
 | Key                          | Default                              | Notes                                              |
 | ---------------------------- | ------------------------------------ | -------------------------------------------------- |
+| `mode`                       | `audit`                              | **The posture switch** (ADR-0021). `enforce` arms all three surfaces in `enforceScope`. |
+| `enforceScope.namespaces`    | `[]`                                 | Namespace names to enforce (used only under `mode: enforce`). No wildcard. |
+| `enforceScope.labels`        | `{}`                                 | Pod labels (`key: value`) to enforce anywhere; labels behave like namespaces. |
 | `image.tag`                  | `""` → chart `appVersion`            | Pin a cosign-signed semver tag.                    |
 | `imagePullSecrets`           | `[]`                                 | protector publishes to a public ghcr repo.         |
 | `engine.enabled`             | `true`                               | The mitigation engine (the product).               |
-| `engine.enable`              | `""` (shadow)                        | **Arming switch** — comma list of classes.         |
-| `engine.actuator`            | `dryrun`                             | `networkpolicy` / `adminnetworkpolicy` to go live. |
-| `engine.actuationRBAC`       | `false`                              | NetworkPolicy write grant; arm with the actuator.  |
+| `engine.actuator`            | `networkpolicy`                      | CNI mechanism for the cut (used only under `mode: enforce`); `adminnetworkpolicy` / `dryrun`. |
+| `rekor.enabled`              | `false`                              | Opt-in transparency-log egress carve-out (ADR-0020 §4). |
 | `engine.journal.enabled`     | `true`                               | Persistent decision journal (a PVC).               |
 | `engine.journal.storageClass`| `""` (cluster default)               | RWO; the Deployment uses the `Recreate` strategy.  |
 | `cert.create`                | `true`                               | cert-manager serving cert + caBundle injection.    |
@@ -266,8 +272,7 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `feedSync.kevUrl`            | CISA KEV catalogue JSON              | KEV source (plain JSON, fetched in full). See feeds section. |
 | `feedSync.epssUrl`           | FIRST.org EPSS scores CSV (gzipped)  | EPSS source (gzipped CSV, gunzipped in place). See feeds section. |
 | `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
-| `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy.        |
-| `webhook.enforcedNamespaceSelector` | `{}` (matches nothing)         | Label-select the namespaces that fail closed.      |
+| `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy (its scope is derived from `enforceScope`). |
 | `resources`                  | 10m/64Mi → 250m/256Mi                | RAM-tight, arm64-friendly.                          |
 
 See [`values.yaml`](values.yaml) for the fully commented set.

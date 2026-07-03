@@ -2,8 +2,9 @@
 # The mitigation engine reads observed cluster state to build its security graph.
 # These are the reads ADR-0001 documents the engine needs — the webhook makes no API
 # calls, but the engine shares the pod's ServiceAccount, so the grant lives here.
-# Read-only by default; the NetworkPolicy *write* rule is added ONLY when actuationRBAC
-# is on (armed mode), so a shadow install has zero write grants.
+# Read-only by default; the NetworkPolicy *write* rule is added ONLY under `mode: enforce`
+# (derived from the same posture that arms the cut, ADR-0021), so a `mode: audit` (shadow)
+# install has zero write grants — the grant cannot drift from whether the engine actuates.
 #
 # NOTE: list/watch on secrets grants read of secret *data* at the API level, even though
 # the engine only retains metadata. That is the sensitive read the engine's value rests
@@ -42,11 +43,18 @@ rules:
   - apiGroups: ["policy.linkerd.io"]
     resources: ["servers", "authorizationpolicies", "meshtlsauthentications"]
     verbs: ["get", "list", "watch"]
-  {{- if .Values.engine.actuationRBAC }}
-  # Armed mode: the networkpolicy actuator creates/deletes its own (managed-by:
-  # protector) default-deny NetworkPolicies to quarantine a compromised workload.
+  {{- if eq .Values.mode "enforce" }}
+  # mode: enforce — the network actuator creates/deletes its own (managed-by: protector)
+  # additive, reversible objects to quarantine/sever a corroborated attack path. The
+  # networkpolicy actuator (the default) writes NetworkPolicies; the adminnetworkpolicy
+  # actuator (Cilium/Calico) additionally writes AdminNetworkPolicies (ADR-0007/0010).
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "patch"]
+  {{- if eq .Values.engine.actuator "adminnetworkpolicy" }}
+  - apiGroups: ["policy.networking.k8s.io"]
+    resources: ["adminnetworkpolicies"]
+    verbs: ["create", "delete", "patch"]
+  {{- end }}
   {{- end }}
 {{- end }}

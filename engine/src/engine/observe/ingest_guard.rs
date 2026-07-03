@@ -41,40 +41,32 @@ use subtle::ConstantTimeEq;
 pub struct IngestToken(Arc<String>);
 
 impl IngestToken {
-    /// Resolve the ingest token from the environment, file-before-env:
-    ///
-    ///   * `PROTECTOR_INGEST_TOKEN_FILE` — a mounted file (takes precedence). Read
-    ///     once; its trailing newline (the usual `kubectl create secret` artifact)
-    ///     is trimmed.
-    ///   * `PROTECTOR_INGEST_TOKEN` — an inline value.
-    ///
-    /// Returns `None` when neither is set or the resolved value is empty.
+    /// Resolve the ingest token from `PROTECTOR_INGEST_TOKEN_FILE` — a mounted file. Read
+    /// once; its trailing newline (the usual `kubectl create secret` artifact) is trimmed.
+    /// The mounted-file form is the only supported variant (ADR-0021 config collapse): a
+    /// secret belongs in a file, not an inline env value that leaks into `/proc` and pod
+    /// specs. Returns `None` when unset, unreadable, or empty.
     pub fn from_env() -> Option<Self> {
-        if let Ok(path) = std::env::var("PROTECTOR_INGEST_TOKEN_FILE") {
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => {
-                    let token = contents.trim().to_string();
-                    if token.is_empty() {
-                        tracing::warn!(
-                            %path,
-                            "PROTECTOR_INGEST_TOKEN_FILE is set but empty — ingest token unset"
-                        );
-                        return None;
-                    }
-                    return Some(Self(Arc::new(token)));
-                }
-                Err(error) => {
+        let path = std::env::var("PROTECTOR_INGEST_TOKEN_FILE").ok()?;
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let token = contents.trim().to_string();
+                if token.is_empty() {
                     tracing::warn!(
-                        %path, %error,
-                        "PROTECTOR_INGEST_TOKEN_FILE could not be read — ingest token unset"
+                        %path,
+                        "PROTECTOR_INGEST_TOKEN_FILE is set but empty — ingest token unset"
                     );
                     return None;
                 }
+                Some(Self(Arc::new(token)))
             }
-        }
-        match std::env::var("PROTECTOR_INGEST_TOKEN") {
-            Ok(value) if !value.trim().is_empty() => Some(Self(Arc::new(value.trim().to_string()))),
-            _ => None,
+            Err(error) => {
+                tracing::warn!(
+                    %path, %error,
+                    "PROTECTOR_INGEST_TOKEN_FILE could not be read — ingest token unset"
+                );
+                None
+            }
         }
     }
 

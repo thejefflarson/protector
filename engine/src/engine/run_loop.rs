@@ -157,20 +157,16 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Choose the hypothesis source: a model-backed one when a model is configured AND
-/// `PROTECTOR_ENGINE_HYPOTHESIS=model` opts it in, else the null source. Local-first:
-/// point it at an in-cluster model so the graph never leaves.
+/// Choose the hypothesis source: a model-backed one when a model endpoint is configured,
+/// else the null source (ADR-0021: derive from "a model is configured", don't require a
+/// separate opt-in). Local-first: point it at an in-cluster model so the graph never
+/// leaves. The deterministic enumerator still finds every structural chain; the model
+/// proposer adds contextual chains where a model is available. The hypothesis prompt sends
+/// the graph, so on a Pi-class node keep the model tier fast enough that a pass isn't
+/// blocked — the same node the adjudicator (ADR-0013) uses.
 fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
-    // The model hypothesis source is OFF by default. The deterministic enumerator
-    // already finds every structural chain at this cluster's scale (so model
-    // proposals are redundant), and the hypothesis prompt sends the *whole graph* —
-    // thousands of tokens, minutes of CPU inference on a Pi-class node — which would
-    // block the engine loop every pass for no gain. Opt in with
-    // `PROTECTOR_ENGINE_HYPOTHESIS=model` only where the model is fast enough; the
-    // model's real job is adjudication (ADR-0013), wired separately below.
-    let opt_in = std::env::var("PROTECTOR_ENGINE_HYPOTHESIS").as_deref() == Ok("model");
     match model::config() {
-        Some((endpoint, model)) if opt_in => {
+        Some((endpoint, model)) => {
             tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
             Box::new(reason::hypothesis::ModelHypothesizer::new(
                 endpoint,
@@ -178,7 +174,7 @@ fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
                 reason::hypothesis::Tier::Local,
             ))
         }
-        _ => Box::new(reason::hypothesis::NullHypothesizer),
+        None => Box::new(reason::hypothesis::NullHypothesizer),
     }
 }
 

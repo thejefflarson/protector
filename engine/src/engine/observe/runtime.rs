@@ -249,9 +249,9 @@ pub async fn serve_runtime(
         None => {
             tracing::warn!(
                 %addr,
-                "runtime-evidence ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN \
-                 or PROTECTOR_INGEST_TOKEN_FILE to require a bearer token. Any caller that \
-                 can reach :9999 can post forged observations."
+                "runtime-evidence ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN_FILE \
+                 to require a bearer token. Any caller that can reach :9999 can post forged \
+                 observations."
             );
         }
     }
