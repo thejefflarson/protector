@@ -6,11 +6,12 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::engine::state::SigningBaseline;
-use crate::policies::signature::Signer;
+use crate::policies::signature::{PostureRank, Signer};
 
 /// A baseline that has signed under `identities`, with the given `established` maturity. The
 /// timestamps are irrelevant to the classifier (it reads `established`, never the clock), so they
-/// are fixed.
+/// are fixed. `rank` is [`PostureRank::Keyless`] — a keyless baseline, matching the store, which
+/// only ever learns from a keyless `Signed` posture.
 fn baseline(identities: &[&str], established: bool) -> SigningBaseline {
     SigningBaseline {
         identities: identities.iter().map(|s| s.to_string()).collect(),
@@ -18,6 +19,7 @@ fn baseline(identities: &[&str], established: bool) -> SigningBaseline {
         first_seen_ms: 0,
         established,
         log_corroborated: false,
+        rank: PostureRank::Keyless,
         last_updated_ms: 0,
     }
 }
@@ -153,22 +155,35 @@ fn checking_is_never_a_regression_even_against_an_established_baseline() {
 }
 
 #[test]
-fn key_based_and_unverifiable_are_never_a_regression_even_on_an_established_repo() {
-    // JEF-276: a key-based signature (verified Rekor, no Fulcio identity) or an unverifiable-here
-    // signature (trust-root variance) is signed-but-opaque, NOT unsigned and NOT a comparable
-    // identity — so it must never resurrect the false-alarm this ticket fixes. Continuous, even
-    // against an established keyless-signed baseline. (A genuine signature REMOVAL is NotSigned and
-    // still regresses loudly — see `signed_to_unsigned_on_established_repo_is_a_regression`.)
+fn key_based_or_unverifiable_downgrade_on_an_established_keyless_repo_is_a_regression() {
+    // JEF-280: a key-based / unverifiable posture is individually calm (JEF-276), but on a repo
+    // whose established baseline was KEYLESS-verified it is a rank DOWNGRADE — the
+    // registry-substitution signal that previously evaded the drift alarm. It fires now.
     let b = baseline(&[CI], true);
     assert_eq!(
         classify(Some(&b), &SigningPosture::SignedKeyBased),
-        SigningDrift::Continuous
+        SigningDrift::Regression {
+            kind: RegressionKind::Downgrade {
+                to: PostureRank::KeyBased
+            },
+            established: true,
+        }
     );
     assert_eq!(
         classify(Some(&b), &SigningPosture::UnverifiableHere),
-        SigningDrift::Continuous
+        SigningDrift::Regression {
+            kind: RegressionKind::Downgrade {
+                to: PostureRank::Unverifiable
+            },
+            established: true,
+        }
     );
-    // …and with no baseline at all, likewise continuous (nothing to regress against).
+}
+
+#[test]
+fn a_calm_posture_with_no_baseline_stays_continuous() {
+    // No keyless baseline to downgrade FROM (an always-key-based cert-manager repo has no learned
+    // baseline at all) ⇒ Continuous. This is the JEF-276 false-alarm fix, preserved.
     assert_eq!(
         classify(None, &SigningPosture::SignedKeyBased),
         SigningDrift::Continuous
@@ -176,6 +191,46 @@ fn key_based_and_unverifiable_are_never_a_regression_even_on_an_established_repo
     assert_eq!(
         classify(None, &SigningPosture::UnverifiableHere),
         SigningDrift::Continuous
+    );
+}
+
+#[test]
+fn a_calm_posture_at_the_baseline_rank_stays_continuous() {
+    // A repo whose baseline rank is already key-based (never had a stronger keyless posture) serving
+    // key-based is NOT a downgrade — equal rank ⇒ Continuous. Guards the cert-manager win against a
+    // future path that learns key-based baselines.
+    let mut b = baseline(&[], true);
+    b.rank = PostureRank::KeyBased;
+    assert_eq!(
+        classify(Some(&b), &SigningPosture::SignedKeyBased),
+        SigningDrift::Continuous
+    );
+    // …but unverifiable is still BELOW key-based ⇒ a downgrade even from a key-based baseline.
+    assert_eq!(
+        classify(Some(&b), &SigningPosture::UnverifiableHere),
+        SigningDrift::Regression {
+            kind: RegressionKind::Downgrade {
+                to: PostureRank::Unverifiable
+            },
+            established: true,
+        }
+    );
+}
+
+#[test]
+fn a_downgrade_against_a_cold_keyless_baseline_is_uncertain_not_silent() {
+    // JEF-280 acceptance: a downgrade against a freshly-learned (cold) keyless baseline still FIRES
+    // — as a reduced-intensity `established: false` regression (maps to uncertain / non-green), not
+    // silence.
+    let b = baseline(&[CI], false);
+    assert_eq!(
+        classify(Some(&b), &SigningPosture::SignedKeyBased),
+        SigningDrift::Regression {
+            kind: RegressionKind::Downgrade {
+                to: PostureRank::KeyBased
+            },
+            established: false,
+        }
     );
 }
 
@@ -200,5 +255,19 @@ fn regression_kind_words_are_stable_and_distinct() {
         }
         .word(),
         "identity"
+    );
+    assert_eq!(
+        RegressionKind::Downgrade {
+            to: PostureRank::KeyBased
+        }
+        .word(),
+        "downgrade-key-based"
+    );
+    assert_eq!(
+        RegressionKind::Downgrade {
+            to: PostureRank::Unverifiable
+        }
+        .word(),
+        "downgrade-unverifiable"
     );
 }

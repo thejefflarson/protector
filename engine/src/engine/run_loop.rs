@@ -73,14 +73,21 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
 /// outbound envelope (ADR-0015 carve-out). `None` (a no-op sweep — zero outbound calls) if the
 /// TUF cache dir can't be created, so a misconfigured volume degrades to today's behavior
 /// rather than crashing the engine loop.
+/// The sigstore TUF trust-root cache directory (`PROTECTOR_TUF_CACHE`, default `/tmp/sigstore`) —
+/// the same path [`build_signing_observer`] hands the cosign checker. Its freshness is surfaced in
+/// readiness (JEF-280), so the two must agree on the location.
+fn tuf_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("PROTECTOR_TUF_CACHE").unwrap_or_else(|_| "/tmp/sigstore".to_string()),
+    )
+}
+
 fn build_signing_observer() -> Option<crate::policies::signature::SigningObserver> {
     use crate::policies::signature::{CosignChecker, SigningObserver};
 
     let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
         .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
-    let tuf_cache = std::path::PathBuf::from(
-        std::env::var("PROTECTOR_TUF_CACHE").unwrap_or_else(|_| "/tmp/sigstore".to_string()),
-    );
+    let tuf_cache = tuf_cache_dir();
     let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 5));
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
@@ -280,6 +287,14 @@ pub async fn run_watch(
             epss_count: epss.len(),
             journal_durable: engine.journal().is_enabled(),
             armed: !active.is_empty(),
+            // The signing-trust signals (JEF-280) are LIVE — refreshed each pass below (the TUF
+            // cache ages, and the unverifiable spike is a per-pass fleet reading). Seeded here from
+            // the cache's current age; the spike starts clear until the first sweep.
+            tuf_cache_age_secs: super::signing_trust::tuf_cache_age_secs(
+                &tuf_cache_dir(),
+                std::time::SystemTime::now(),
+            ),
+            unverifiable_spike: false,
         });
 
     // The read-only operator dashboard (ADR-0019), served behind `PROTECTOR_DASHBOARD_ADDR`
@@ -543,6 +558,33 @@ pub async fn run_watch(
             signing_journal.as_ref(),
         )
         .await;
+
+        // Refresh the LIVE signing-trust readiness signals (JEF-280): the TUF-root cache age (it
+        // ages between passes, and a successful verify this pass may have just refreshed it) and a
+        // fleet-wide spike in `UnverifiableHere` postures (a hint the trust root drifted or is being
+        // starved). Only the two live fields are updated; the boot-captured static coverage fields
+        // are preserved. A no-op read on a clean fleet.
+        {
+            use crate::policies::signature::SigningPosture;
+            let mut total = 0usize;
+            let mut unverifiable = 0usize;
+            for (_, posture) in signing_map.entries() {
+                if posture.is_resting() {
+                    total += 1;
+                    if matches!(posture, SigningPosture::UnverifiableHere) {
+                        unverifiable += 1;
+                    }
+                }
+            }
+            let mut rc = engine.findings().readiness_config();
+            rc.tuf_cache_age_secs = super::signing_trust::tuf_cache_age_secs(
+                &tuf_cache_dir(),
+                std::time::SystemTime::now(),
+            );
+            rc.unverifiable_spike =
+                super::signing_trust::is_unverifiable_spike(unverifiable, total);
+            engine.findings().set_readiness_config(rc);
+        }
 
         engine.process(&snapshot).await;
     }

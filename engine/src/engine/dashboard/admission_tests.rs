@@ -21,6 +21,8 @@ fn judging_readiness() -> crate::engine::state::Readiness {
         epss_count: 5,
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(60),
+        unverifiable_spike: false,
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);

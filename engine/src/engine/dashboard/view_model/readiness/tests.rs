@@ -13,6 +13,8 @@ fn covered() -> ReadinessConfig {
         epss_count: 5,
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(60),
+        unverifiable_spike: false,
     }
 }
 
@@ -22,8 +24,8 @@ fn every_input_becomes_a_row_with_state_word_and_why() {
     bake.signals_by_variant.insert("alert".into(), 1);
     let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
     let rows = map_readiness(&r);
-    // model / kev / epss / falco / ebpf-agent / journal / arm-state == 7 inputs.
-    assert_eq!(rows.len(), 7);
+    // model / kev / epss / falco / ebpf-agent / journal / tuf-root / arm-state == 8 inputs.
+    assert_eq!(rows.len(), 8);
     // Every row carries a non-empty label + why + state word (meaning never by colour alone).
     for row in &rows {
         assert!(!row.label.is_empty());

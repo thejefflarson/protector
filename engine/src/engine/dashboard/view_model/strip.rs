@@ -103,6 +103,8 @@ mod tests {
             epss_count: 5,
             journal_durable: true,
             armed: false,
+            tuf_cache_age_secs: Some(60),
+            unverifiable_spike: false,
         }
     }
 

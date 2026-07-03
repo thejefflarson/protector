@@ -241,6 +241,14 @@ pub enum RegressionKind {
     /// Registry↔log divergence (JEF-266): the transparency log records a signature the registry now
     /// serves UNSIGNED (a signature stripped at the registry while the log remembers it).
     DivergenceLogSigned,
+    /// Signing downgrade (JEF-280): a repo whose established baseline was keyless-verified now
+    /// serves a key-based signature (Rekor bundle, no Fulcio identity) — a lesser posture that,
+    /// against a keyless baseline, is the registry-substitution signal.
+    DowngradeKeyBased,
+    /// Signing downgrade (JEF-280): a repo whose established baseline was keyless-verified now
+    /// serves a signature unverifiable against our trust root — a lesser posture that, against a
+    /// keyless baseline, is the registry-substitution / trust-root-drift signal.
+    DowngradeUnverifiable,
 }
 
 impl RegressionKind {
@@ -253,6 +261,8 @@ impl RegressionKind {
             "identity" => RegressionKind::IdentityChange,
             "divergence-registry" => RegressionKind::DivergenceRegistrySigned,
             "divergence-log" => RegressionKind::DivergenceLogSigned,
+            "downgrade-key-based" => RegressionKind::DowngradeKeyBased,
+            "downgrade-unverifiable" => RegressionKind::DowngradeUnverifiable,
             _ => RegressionKind::Unsigned,
         }
     }
@@ -265,6 +275,8 @@ impl RegressionKind {
             RegressionKind::IdentityChange => "identity",
             RegressionKind::DivergenceRegistrySigned => "divergence-registry",
             RegressionKind::DivergenceLogSigned => "divergence-log",
+            RegressionKind::DowngradeKeyBased => "downgrade-key-based",
+            RegressionKind::DowngradeUnverifiable => "downgrade-unverifiable",
         }
     }
 
@@ -277,6 +289,9 @@ impl RegressionKind {
             RegressionKind::IdentityChange => "signing regression \u{2014} new signer",
             RegressionKind::DivergenceRegistrySigned | RegressionKind::DivergenceLogSigned => {
                 "signing regression \u{2014} registry\u{2194}log divergence"
+            }
+            RegressionKind::DowngradeKeyBased | RegressionKind::DowngradeUnverifiable => {
+                "signing regression \u{2014} signing downgrade"
             }
         }
     }
@@ -293,6 +308,12 @@ impl RegressionKind {
             }
             RegressionKind::DivergenceLogSigned => {
                 "the transparency log records a signature the registry now serves unsigned"
+            }
+            RegressionKind::DowngradeKeyBased => {
+                "now key-based \u{2014} no keyless identity (was keyless-verified)"
+            }
+            RegressionKind::DowngradeUnverifiable => {
+                "now unverifiable against our trust root (was keyless-verified)"
             }
         }
     }

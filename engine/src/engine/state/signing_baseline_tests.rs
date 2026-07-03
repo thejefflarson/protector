@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::policies::signature::Signer;
+use crate::policies::signature::{PostureRank, Signer};
 
 /// A unique temp journal path per test (no temp-file crate), mirroring `journal.rs`'s helper.
 fn temp_path(tag: &str) -> PathBuf {
@@ -199,6 +199,56 @@ fn baseline_survives_an_engine_restart_round_trip() {
     assert!(baseline.identities.contains("id-a"));
     assert!(baseline.issuers.contains("issuer-a"));
     assert_eq!(baseline.first_seen_ms, 1_000);
+    cleanup(&path);
+}
+
+#[test]
+fn a_learned_baseline_is_keyless_ranked_and_the_rank_survives_a_restart() {
+    // JEF-280: the store only learns from a keyless `Signed` posture, so a learned baseline is
+    // `Keyless`-ranked — the yardstick downgrade detection compares against — and that rank must
+    // survive a journal round-trip so post-restart downgrade detection stays defined.
+    let path = temp_path("rank-roundtrip");
+    {
+        let journal = DecisionJournal::open(&path);
+        let mut store = SigningBaselineStore::new();
+        let repo = store
+            .observe("ghcr.io/org/app:1", &signed("id-a", None), 1_000)
+            .expect("learned");
+        assert_eq!(
+            store.get(&repo).unwrap().rank,
+            PostureRank::Keyless,
+            "a keyless Signed posture teaches a Keyless-ranked baseline"
+        );
+        store.persist(&journal, &repo);
+    }
+    let reopened = DecisionJournal::open(&path);
+    let mut restored = SigningBaselineStore::new();
+    restored.restore(&reopened);
+    assert_eq!(
+        restored.get("ghcr.io/org/app").unwrap().rank,
+        PostureRank::Keyless,
+        "the learned rank survives a restart"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn a_pre_jef280_line_without_a_rank_replays_as_keyless() {
+    // Forward/back-compat: a baseline line written before the `rank` field existed has no `rank`
+    // key. `#[serde(default)]` must replay it as `Keyless` — its honest historical value (the store
+    // only ever learned from keyless postures), so a persisted keyless baseline still catches a
+    // downgrade after an upgrade.
+    let path = temp_path("prerank");
+    let line = r#"{"at_ms":10,"kind":"signing_baseline","repo":"ghcr.io/org/app","identities":["id-a"],"issuers":[],"first_seen_ms":10,"established":true}"#;
+    std::fs::write(&path, format!("{line}\n")).unwrap();
+    let journal = DecisionJournal::open(&path);
+    let mut store = SigningBaselineStore::new();
+    assert_eq!(store.restore(&journal), 1);
+    assert_eq!(
+        store.get("ghcr.io/org/app").unwrap().rank,
+        PostureRank::Keyless,
+        "an absent rank replays as Keyless, never a weaker rank that would miss a downgrade"
+    );
     cleanup(&path);
 }
 

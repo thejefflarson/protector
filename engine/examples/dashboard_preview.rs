@@ -416,7 +416,9 @@ fn covered_config(model_attached: bool) -> ReadinessConfig {
         kev_count: 1342,
         epss_count: 241_000,
         journal_durable: true,
-        armed: false, // shadow — the safe default (ADR-0016).
+        armed: false,                          // shadow — the safe default (ADR-0016).
+        tuf_cache_age_secs: Some(3 * 60 * 60), // a fresh trust root (3h old).
+        unverifiable_spike: false,
     }
 }
 
@@ -566,6 +568,8 @@ fn build_watching() -> DashboardState {
         epss_count: 0, // degraded — EPSS feed absent.
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(3 * 60 * 60),
+        unverifiable_spike: false,
     });
     findings.set_model_health(ModelHealth::Ok);
     findings.mark_pass(SystemTime::now());

@@ -153,6 +153,14 @@ pub enum Decision {
         /// replay as local-only (`false`), never a fabricated corroboration.
         #[serde(default)]
         log_corroborated: bool,
+        /// The strongest signing-posture rank ever learned under this repo (JEF-280) — the yardstick
+        /// baseline-relative downgrade detection compares a fresh posture against. `#[serde(default)]`
+        /// so a line written before this field existed replays as `Keyless`
+        /// ([`PostureRank::default`](crate::policies::signature::PostureRank::default)) — the honest
+        /// historical value (the store only ever learned from keyless `Signed` postures), never a
+        /// weaker rank that would miss a downgrade.
+        #[serde(default)]
+        rank: crate::policies::signature::PostureRank,
     },
 }
 

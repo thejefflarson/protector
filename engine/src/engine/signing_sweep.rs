@@ -34,7 +34,9 @@ use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use super::signing_baseline_strength::strength_record;
 use super::signing_drift::{RegressionKind, SigningDrift, classify};
 use super::state::{SigningBaseline, SigningBaselineStore};
-use crate::policies::signature::{PostureMap, SigningObserver, SigningPosture, repo_key};
+use crate::policies::signature::{
+    PostureMap, PostureRank, SigningObserver, SigningPosture, repo_key,
+};
 
 /// The subject prefix a signing-**regression** finding is keyed under (`SigningRegression/<repo>`),
 /// so the row folds one-per-repo and is partitioned OUT of the webhook decision rows (like the
@@ -135,7 +137,8 @@ fn record_postures(log: &PolicyDecisionLog, map: &PostureMap) {
 ///
 /// The row is self-describing so the render needs no baseline handle:
 ///   * `signature` carries the low-cardinality drift token `regression-<kind>-<strength>` (kind ∈
-///     unsigned/invalid/identity, strength ∈ established/cold) — the render parses it back.
+///     unsigned/invalid/identity/downgrade-key-based/downgrade-unverifiable, strength ∈
+///     established/cold) — the render parses it back (`rsplit` on the last `-` for the strength).
 ///   * `reason` carries the before→after prose: the fresh posture clause, then `| before: <ids>`
 ///     (the baseline signers, comma-joined). Both the before signers and any after signer are
 ///     UNTRUSTED Fulcio cert text — carried verbatim here and escaped wherever rendered.
@@ -159,6 +162,19 @@ fn regression_record(
         } => match new_issuer.as_deref() {
             Some(issuer) => format!("signed by {new_identity} via {issuer}"),
             None => format!("signed by {new_identity}"),
+        },
+        // A signing downgrade (JEF-280): name the lesser posture it dropped to, against the keyless
+        // baseline it regressed from. No untrusted identity is carried (these postures have none).
+        RegressionKind::Downgrade { to } => match to {
+            PostureRank::KeyBased => {
+                "now key-based signature, no keyless identity (was keyless-verified)".to_string()
+            }
+            PostureRank::Unverifiable => {
+                "now unverifiable against our trust root (was keyless-verified)".to_string()
+            }
+            PostureRank::Unsigned | PostureRank::Keyless => {
+                "now a weaker signing posture (was keyless-verified)".to_string()
+            }
         },
     };
     // The baseline signers (the "before"), comma-joined. Fulcio SANs (workflow URIs / emails) don't
@@ -654,10 +670,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_based_posture_is_recorded_calm_and_never_regresses_an_established_repo() {
-        // JEF-276 end-to-end: an established keyless-signed repo that now serves a key-based
-        // signature records the calm `signed-key-based` status, learns NO new baseline (no signer to
-        // teach), and surfaces NO regression — the false-alarm fix, wired through the sweep.
+    async fn key_based_downgrade_on_an_established_keyless_repo_records_a_regression() {
+        // JEF-280 end-to-end: an established keyless-signed repo that now serves a key-based
+        // signature records the calm `signed-key-based` STATUS on the image row (JEF-276 posture
+        // unchanged), learns NO new baseline (no signer to teach) — but the sweep now surfaces a
+        // `SigningDowngrade` regression (the registry-substitution signal). Audit-only (allow).
         let (obs, _c) = observer(vec![("ghcr.io/org/app:2", SigningPosture::SignedKeyBased)]);
         let mut store = established_store();
         let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
@@ -666,11 +683,16 @@ mod tests {
             .iter()
             .find(|r| r.subject == "Image/ghcr.io/org/app:2")
             .expect("the posture is recorded");
-        assert_eq!(posture_row.signature, "signed-key-based");
-        assert!(
-            regression_row(&log, "ghcr.io/org/app").is_none(),
-            "a calm key-based signature is not a regression"
+        assert_eq!(
+            posture_row.signature, "signed-key-based",
+            "the per-image posture is unchanged (JEF-276)"
         );
+        let row = regression_row(&log, "ghcr.io/org/app")
+            .expect("a downgrade against a keyless baseline is a regression");
+        assert_eq!(row.signature, "regression-downgrade-key-based-established");
+        assert_eq!(row.decision, "allow", "audit-only — still admitted");
+        assert!(row.reason.contains("now key-based"));
+        assert!(row.reason.contains(&format!("before: {CI}")));
         assert!(
             !store
                 .get("ghcr.io/org/app")
@@ -679,6 +701,53 @@ mod tests {
                 .contains("ghcr.io/org/app:2"),
             "a key-based signature teaches no new signer identity"
         );
+    }
+
+    #[tokio::test]
+    async fn unverifiable_downgrade_on_an_established_keyless_repo_records_a_regression() {
+        // JEF-280: an established keyless repo now serving a signature unverifiable against our
+        // trust root (the rogue-Rekor / trust-root-drift substitution) is a downgrade regression.
+        let (obs, _c) = observer(vec![(
+            "ghcr.io/org/app:2",
+            SigningPosture::UnverifiableHere,
+        )]);
+        let mut store = established_store();
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a downgrade is a regression");
+        assert_eq!(
+            row.signature,
+            "regression-downgrade-unverifiable-established"
+        );
+        assert!(row.reason.contains("now unverifiable"));
+    }
+
+    #[tokio::test]
+    async fn always_key_based_repo_with_no_keyless_baseline_stays_continuous() {
+        // JEF-276 win preserved (JEF-280 acceptance): a cert-manager-style repo that has NEVER had
+        // a keyless baseline (key-based teaches nothing) serving key-based surfaces NO regression.
+        let (obs, _c) = observer(vec![(
+            "ghcr.io/certmanager/controller:1",
+            SigningPosture::SignedKeyBased,
+        )]);
+        let mut store = SigningBaselineStore::new(); // no baseline at all
+        let log = run_sweep(&obs, "ghcr.io/certmanager/controller:1", &mut store).await;
+        assert!(
+            regression_row(&log, "ghcr.io/certmanager/controller").is_none(),
+            "an always-key-based repo is not a downgrade — no false alarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn downgrade_against_a_cold_keyless_baseline_is_reduced_not_silent() {
+        // JEF-280 acceptance: a downgrade against a freshly-learned (cold) keyless baseline still
+        // fires, flagged weak (`cold` ⇒ uncertain / non-green), never silent.
+        let mut store = SigningBaselineStore::new();
+        store.observe("ghcr.io/org/app@sha256:seed", &signed(CI), 0); // cold (not established)
+        assert!(!store.get("ghcr.io/org/app").unwrap().established);
+        let (obs, _c) = observer(vec![("ghcr.io/org/app:2", SigningPosture::SignedKeyBased)]);
+        let log = run_sweep(&obs, "ghcr.io/org/app:2", &mut store).await;
+        let row = regression_row(&log, "ghcr.io/org/app").expect("a cold downgrade still fires");
+        assert_eq!(row.signature, "regression-downgrade-key-based-cold");
     }
 
     #[tokio::test]

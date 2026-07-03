@@ -23,6 +23,8 @@ fn judging_readiness() -> Readiness {
         epss_count: 5,
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(60),
+        unverifiable_spike: false,
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
@@ -47,6 +49,8 @@ fn timed_out_readiness() -> Readiness {
         epss_count: 5,
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(60),
+        unverifiable_spike: false,
     };
     derive_readiness(
         &config,
@@ -818,6 +822,8 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
         epss_count: 5,
         journal_durable: true,
         armed: false,
+        tuf_cache_age_secs: Some(60),
+        unverifiable_spike: false,
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);

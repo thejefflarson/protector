@@ -191,3 +191,52 @@ decision journal with breach/admission lines, so it raises write volume and
 accelerates rotation of those other line kinds. Bounded by `DEFAULT_MAX_REPOS` and
 acceptable at current scale; revisit change-only or a segmented journal if a large
 cluster shows rotation pressure on breach/admission history.
+
+## Addenda (JEF-280 — drift is baseline-relative; downgrade is a first-class regression)
+
+The honest-posture split (JEF-276) added two *calm* signing postures — `SignedKeyBased`
+(a real key-based cosign signature: verified Rekor bundle, no Fulcio identity) and
+`UnverifiableHere` (a signature present but unverifiable against our trust root, a
+Rekor/TUF variance) — so a legitimately key-based repo (e.g. cert-manager) stops
+false-alarming. But the first drift classifier read those postures **baseline-blind**:
+BOTH always classified `Continuous`. That reopened the exact hole this ADR set out to
+close. On an **established keyless-signed** repo (baseline = signed-by-identity-`X`), an
+attacker who compromises the registry could substitute a malicious image signed
+*key-based*, or verified only against a *rogue Rekor* (→ `UnverifiableHere`), and the
+drift alarm stayed silent — a **detection-evasion** of the regression signal (worst in
+audit mode). `unsigned→NotSigned` and `keyless→new-identity` were already caught; the
+key-based / unverifiable *downgrade* was not.
+
+These addenda ratify the fix. They change **drift classification only** — the per-image
+posture and the trust/admit semantics (JEF-276) are untouched: the calm postures still
+confer no trusted identity and still `would_admit() == false`.
+
+1. **Drift is baseline-RELATIVE, ranked.** Each signing posture has a trust-strength
+   **rank**: `keyless-verified > key-based > unverifiable > unsigned`. The rank of the
+   strongest posture ever learned under a repo is persisted in the baseline (a new
+   `#[serde(default)]` field on the baseline record + its journal line; an absent rank
+   replays as `Keyless`, the honest historical value — the store only ever learned from
+   keyless `Signed` postures). `Continuous` now means "did NOT drop rank vs the
+   established baseline." A fresh posture whose rank is strictly **below** the baseline's
+   is a downgrade.
+
+2. **Signing downgrade is a first-class regression class.** An established **keyless**
+   baseline now serving a lesser-but-calm posture (`SignedKeyBased` / `UnverifiableHere`)
+   fires a new `SigningDowngrade` regression — the registry-substitution signal. It rides
+   JEF-264's admission-finding path (audit-only, shadow; ADR-0016) and feeds the honesty
+   model exactly as other regressions do: an **established** baseline → breach/non-green;
+   a **cold / freshly-learned** one → uncertain/non-green (never silent). A repo that was
+   **always** key-based (no keyless baseline was ever learned) serving key-based stays
+   `Continuous` — the JEF-276 false-alarm fix is preserved, because there is no stronger
+   baseline rank to drop from.
+
+3. **TUF-staleness is surfaced, never silent.** `UnverifiableHere` is caused by a
+   sigstore trust-root mismatch, so a **stale or starved** TUF root (`PROTECTOR_TUF_CACHE`)
+   can *mass-blind* detection (genuine signatures read unverifiable, downgrade detection
+   loses its keyless yardstick). Readiness now carries a **trust-root** row: the cache age
+   (newest-mtime) with a stale warning, and a non-green degrade when a **fleet-wide spike**
+   in `UnverifiableHere` this pass hints the root drifted or is being starved. This is a
+   read-only readiness signal (ADR-0016), never a gate. The staleness threshold (a coarse
+   wall-clock age on the cache) and the spike heuristic (a fraction of the fleet above a
+   small floor) are deliberately simple; parsing the TUF expiry and tracking a historical
+   unverifiable-rate delta are future refinements.
