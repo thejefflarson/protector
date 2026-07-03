@@ -58,6 +58,46 @@ pub struct Link {
     pub to_labels: BTreeMap<String, String>,
 }
 
+/// Why a workload on a proven chain qualifies for a full-isolation quarantine
+/// (JEF-284). Both bars are HIGH — full isolation of a pod is coarse, so it is
+/// reserved for a pod with real *exploitation* evidence, never a merely-reached one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuarantineReason {
+    /// **Remotely exploitable** — the pod is network-reachable from an internet
+    /// foothold (directly or through `reaches`/`can-egress` hops tracing back to an
+    /// internet-exposed entry) AND carries strong on-pod exploitation evidence: a
+    /// critical/KEV CVE actually running on it (the [`compromisable`] predicate). A
+    /// popped app two hops in counts; a merely-reached clean objective does not.
+    RemotelyExploitable,
+    /// **Actively exploited** — the pod has direct live on-pod runtime evidence (a
+    /// Falco-grade `Alert` or a hands-on-keyboard `notable_exec`) — exploitation
+    /// *now* — regardless of its network position (internal pods included).
+    ActivelyExploited,
+}
+
+impl QuarantineReason {
+    /// A stable, human-facing disposition label naming the containment and its WHY —
+    /// distinct from the entry-foothold quarantine (ADR-0022) and from a durable-fix.
+    /// A fixed internal string (never untrusted input).
+    pub fn disposition(&self) -> &'static str {
+        match self {
+            QuarantineReason::RemotelyExploitable => "quarantine — remotely exploitable",
+            QuarantineReason::ActivelyExploited => "quarantine — actively exploited",
+        }
+    }
+}
+
+/// A workload on a proven chain that qualifies for a full-isolation quarantine
+/// (JEF-284) — the node, its labels (so the isolation `NetworkPolicy` selects it
+/// precisely), and the reason it qualifies. Never the merely-reached objective:
+/// only a pod with its own exploitation evidence appears here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineTarget {
+    pub node: NodeKey,
+    pub labels: BTreeMap<String, String>,
+    pub reason: QuarantineReason,
+}
+
 /// A proven attack chain: a proof-grade path from `entry` to `objective`, plus the
 /// edges that individually sever it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,9 +149,30 @@ pub struct ProvenChain {
     /// suffices: redundant paths exist, and breaking the chain needs more than one
     /// cut. That emptiness is itself a finding, not a failure.
     pub single_edge_cuts: Vec<Link>,
+    /// Workloads *on this chain* that carry their own exploitation evidence and so
+    /// qualify for a full-isolation quarantine (JEF-284) — remotely-exploitable pods
+    /// reachable from an internet foothold with a critical/KEV CVE, and
+    /// actively-exploited pods with a live on-pod runtime signal. The chain **entry**
+    /// is deliberately excluded from the remotely-exploitable set: its containment is
+    /// owned by the ADR-0022 precedence (`respond::containment_for`). The merely-reached
+    /// objective never appears here (reached ≠ exploited). Empty on a chain whose only
+    /// evidence is at the entry / whose nodes are merely reached.
+    pub quarantine_targets: Vec<QuarantineTarget>,
 }
 
 impl ProvenChain {
+    /// The quarantine reason for the chain's **entry**, if the entry itself is an
+    /// actively-exploited target (JEF-284 condition 2). The entry is never a
+    /// remotely-exploitable target (that set excludes it, deferring to the ADR-0022
+    /// precedence), so this surfaces only the "actively exploited" case — the internal
+    /// hands-on-keyboard pod that is the front of its own (non-breach) chain. Drives the
+    /// dashboard disposition.
+    pub fn entry_quarantine_reason(&self) -> Option<QuarantineReason> {
+        self.quarantine_targets
+            .iter()
+            .find(|t| t.node == self.entry)
+            .map(|t| t.reason)
+    }
     /// Chain strength is the number of proven links — the ADR-0001 measure.
     pub fn strength(&self) -> usize {
         self.links.len()
@@ -176,7 +237,7 @@ mod corroborate;
 
 use chain::{
     entry_exposed, entry_foothold, is_cuttable_edge, is_movement, link_of, movement_tree,
-    path_steps, reachable_without,
+    path_steps, quarantine_targets_on_path, reachable_without,
 };
 use corroborate::{corroborated_for, entry_runtime};
 
@@ -239,6 +300,8 @@ pub fn confirm(
         .map(|&(u, v, e)| link_of(graph, u, v, e))
         .collect();
     let foothold = entry_foothold(graph, entry_idx);
+    let exposed_entry = entry_exposed(graph, entry_idx);
+    let quarantine_targets = quarantine_targets_on_path(graph, entry_idx, &edges, exposed_entry);
     Some(ProvenChain {
         entry: entry.clone(),
         objective,
@@ -247,10 +310,11 @@ pub fn confirm(
         corroborated: corroborated_for(entry_runtime(graph, entry_idx), &attack, foothold.as_ref()),
         adjudicated: true,
         promoted: false,
-        exposed_entry: entry_exposed(graph, entry_idx),
+        exposed_entry,
         verdict: None,
         links,
         single_edge_cuts,
+        quarantine_targets,
     })
 }
 
@@ -311,6 +375,8 @@ pub fn prove_with(
                 })
                 .map(|&(u, v, e)| link_of(graph, u, v, e))
                 .collect();
+            let quarantine_targets =
+                quarantine_targets_on_path(graph, entry, &steps, exposed_entry);
             chains.push(ProvenChain {
                 entry: graph.key_of(entry).expect("entry exists"),
                 objective: graph.key_of(objective).expect("objective exists"),
@@ -323,6 +389,7 @@ pub fn prove_with(
                 verdict: None,
                 links,
                 single_edge_cuts,
+                quarantine_targets,
             });
         }
     }

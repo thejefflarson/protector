@@ -83,14 +83,20 @@ pub fn render_deny(mitigation: &Mitigation) -> Option<serde_json::Value> {
 ///   `reaches`/`can-egress` edge-cut, quarantining the edge's source; and
 /// - [`QuarantineEntry`](ProposedAction::QuarantineEntry): the *default* containment,
 ///   whose `cut.from` is the internet-facing breach **entry** by construction — so the
-///   same `cut.from` selector isolates the entry, never a deeper/objective workload.
+///   same `cut.from` selector isolates the entry, never a deeper/objective workload; and
+/// - [`QuarantineWorkload`](ProposedAction::QuarantineWorkload): the JEF-284 quarantine of
+///   a compromised pod on the chain (remotely-exploitable or actively-exploited), whose
+///   `cut.from` is that qualifying pod (a self-reference carrying its labels) — so the
+///   same selector isolates exactly that pod, never a merely-reached objective.
 ///
 /// Returns `None` for any other action, a non-workload source, or a source with no
 /// labels (we will not widen to a whole namespace).
 pub fn render_isolation(mitigation: &Mitigation) -> Option<serde_json::Value> {
     if !matches!(
         mitigation.action,
-        ProposedAction::DenyNetworkPath | ProposedAction::QuarantineEntry
+        ProposedAction::DenyNetworkPath
+            | ProposedAction::QuarantineEntry
+            | ProposedAction::QuarantineWorkload
     ) {
         return None;
     }

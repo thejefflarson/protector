@@ -110,3 +110,52 @@ entry-quarantine default, not only an edge-cut) and
 [ADR-0010](0010-flannel-actuator-workload-isolation.md) (isolation targets the breach
 **entry** by default, not the cut edge's source, and is no longer gated on a network
 edge existing).
+
+## Amendment (JEF-284): quarantine any *compromised* pod on the chain — reached ≠ exploited
+
+The entry quarantine above contains the *front door*. But a breach chain has more than
+a front door: a popped app two hops in, or an internal pod with hands-on-keyboard
+activity, is its own compromise. So target selection generalizes from "the
+internet-facing entry" to **any qualifying pod on a proven chain**, via a new
+`ProposedAction::QuarantineWorkload` proposed by a sibling pass alongside
+`containment_for` (the entry precedence above is unchanged). A pod is quarantined iff
+**either** condition holds:
+
+1. **Remotely exploitable** — the pod is network-reachable from an internet foothold
+   (directly, or through `reaches`/`can-egress` hops tracing back to an internet-exposed
+   entry) **and** carries strong on-pod exploitation evidence: a critical/KEV CVE
+   actually running on it (the `compromisable` predicate — the same bar the proof walk's
+   compromise gate and `entry_foothold` already use). Reachability alone is not enough.
+2. **Actively exploited** — the pod has direct live on-pod runtime evidence
+   (`Behavior::is_alert` / a hands-on-keyboard `notable_exec`, JEF-117) — exploitation
+   *now* — **regardless of network position**, internal pods included.
+
+**The hard guard: never quarantine a merely-reached objective.** A pod that is only a
+*reachable objective* — a plain secret store / db that is just the *target*, with no
+exploitation evidence of its own — is never quarantined. Reached ≠ exploited. This falls
+out of the two conditions (both require the pod's *own* CVE-running or live evidence), is
+regression-tested, and the objective is a non-workload node (a Secret) or a clean pod in
+any case. If several pods on one chain qualify, each is quarantined (independent
+compromises).
+
+The **entry itself stays governed entirely by the precedence above**: it is excluded
+from condition 1, and its condition-2 quarantine is added only when the primary
+containment did not already contain it with an additive-live control (a surgical
+edge-cut or the entry quarantine) — so JEF-279's behavior and the "prefer the narrower
+surgical cut" invariant are preserved byte-for-byte.
+
+`QuarantineWorkload` reuses the ADR-0010 `render_isolation` shape driven from the
+qualifying pod's labels (a self-reference `cut` link, pod-only signature so a pod that
+qualifies on more than one chain collapses to a single isolation). It is additive +
+reversible + **self-reverting** on the same ledger lifecycle: the moment a pod's
+exploitation evidence clears, no chain carries it as a target and the mitigation retires.
+The per-pod bar (a KEV/critical CVE on a reachable pod, or a live alert) *is* the
+auto-action trigger — it is strictly stronger than the entry quarantine's corroboration
+bar, and it deliberately holds for internal actively-exploited pods too. Actuation stays
+gated by [ADR-0021](0021-two-setting-operating-posture.md): under `audit` (the default)
+the `network` class is unarmed, so every workload quarantine is **PROPOSED only** and the
+default posture is byte-identical; under `enforce` the `network` class arms it within
+`enforceScope`, with the blast-radius guard and closed-loop self-revert unchanged. The
+dashboard disposition names the WHY — `quarantine — remotely exploitable` /
+`quarantine — actively exploited` — distinct from the entry-foothold
+`quarantine entry (default-deny)`; all are fixed internal strings (no untrusted text).

@@ -829,3 +829,22 @@ fn library_load_does_not_corroborate_without_foothold() {
         "with no foothold, a library load corroborates nothing"
     );
 }
+
+/// JEF-284: the two quarantine-reason dispositions are distinct, fixed labels — the
+/// dashboard names remotely-exploitable vs actively-exploited separately (and both apart
+/// from the entry-foothold quarantine).
+#[test]
+fn quarantine_reason_dispositions_are_distinct() {
+    assert_eq!(
+        QuarantineReason::RemotelyExploitable.disposition(),
+        "quarantine — remotely exploitable"
+    );
+    assert_eq!(
+        QuarantineReason::ActivelyExploited.disposition(),
+        "quarantine — actively exploited"
+    );
+    assert_ne!(
+        QuarantineReason::RemotelyExploitable.disposition(),
+        QuarantineReason::ActivelyExploited.disposition()
+    );
+}
