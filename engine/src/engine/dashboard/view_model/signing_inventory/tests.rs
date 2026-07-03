@@ -709,3 +709,30 @@ fn divergence_findings_render_through_the_regression_channel() {
         "the cold-strength divergence is a weak lead"
     );
 }
+
+#[test]
+fn signing_downgrade_findings_render_through_the_regression_channel() {
+    // JEF-280: a key-based / unverifiable downgrade rides the SigningRegression channel with a
+    // distinct downgrade kind — the view parses the self-describing signature token back.
+    let key_based = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-downgrade-key-based-established",
+        "now key-based signature, no keyless identity (was keyless-verified) | before: a",
+    )];
+    let groups = build(&key_based);
+    let reg = groups[0].regression.as_ref().unwrap();
+    assert_eq!(reg.kind, RegressionKind::DowngradeKeyBased);
+    assert!(reg.established, "an established-baseline downgrade is loud");
+
+    let unverifiable = vec![regression(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "regression-downgrade-unverifiable-cold",
+        "now unverifiable against our trust root (was keyless-verified) | before: a",
+    )];
+    let groups = build(&unverifiable);
+    let reg = groups[0].regression.as_ref().unwrap();
+    assert_eq!(reg.kind, RegressionKind::DowngradeUnverifiable);
+    assert!(!reg.established, "a cold-baseline downgrade is a weak lead");
+}

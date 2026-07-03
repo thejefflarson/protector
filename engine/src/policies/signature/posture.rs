@@ -36,7 +36,42 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+/// The trust-strength **rank** of a signing posture on the downgrade ladder (JEF-280).
+///
+/// Ordered lowest→highest so the derived [`Ord`] ranks [`Keyless`](Self::Keyless) above every
+/// other posture: a keyless-verified identity is the strongest, an unsigned image the weakest. A
+/// *downgrade* is a fresh posture whose rank is strictly BELOW a repo's **established baseline**
+/// rank — the registry-substitution signal (an established keyless-signed repo suddenly serving
+/// key-based / unverifiable / unsigned). It is a DRIFT notion only: it never changes the per-image
+/// posture or the trust/admit semantics (JEF-276) — the calm postures still confer no trusted
+/// identity and never admit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PostureRank {
+    /// No signature at all — the weakest posture.
+    Unsigned,
+    /// A signature present but unverifiable against our trust root (a Rekor/TUF variance).
+    Unverifiable,
+    /// A key-based cosign signature with a verified transparency-log bundle but no Fulcio
+    /// identity — real and log-included, signer opaque to keyless verification.
+    KeyBased,
+    /// Keyless-verified: a Fulcio cert chained to the trusted root with a verified Rekor
+    /// inclusion — the only posture that yields a trusted signer. The strongest.
+    Keyless,
+}
+
+impl Default for PostureRank {
+    /// A baseline learned before JEF-280 (no persisted rank) was, by construction, ONLY ever
+    /// taught by a keyless [`Signed`](SigningPosture::Signed) posture (the baseline store learns
+    /// from nothing else) — so an absent rank replays as [`Keyless`](Self::Keyless), the honest
+    /// historical value. Never a fabricated weaker rank that would silently miss a downgrade.
+    fn default() -> Self {
+        PostureRank::Keyless
+    }
+}
 
 /// The signer learned from a verified Fulcio cert subject (ADR-0020 §1). Both fields are
 /// UNTRUSTED third-party text — they come from an attacker-influenceable cert — so every
@@ -112,6 +147,20 @@ impl SigningPosture {
         match self {
             SigningPosture::Signed(signer) => Some(signer),
             _ => None,
+        }
+    }
+
+    /// This posture's trust-strength [`PostureRank`] on the downgrade ladder (JEF-280), or `None`
+    /// for the postures that are not points on that ladder: the transient
+    /// [`Checking`](Self::Checking) and the RESERVED-loud [`InvalidSignature`](Self::InvalidSignature)
+    /// (a genuine verification failure, surfaced as its own regression, never a mere downgrade).
+    pub fn rank(&self) -> Option<PostureRank> {
+        match self {
+            SigningPosture::Signed(_) => Some(PostureRank::Keyless),
+            SigningPosture::SignedKeyBased => Some(PostureRank::KeyBased),
+            SigningPosture::UnverifiableHere => Some(PostureRank::Unverifiable),
+            SigningPosture::NotSigned => Some(PostureRank::Unsigned),
+            SigningPosture::InvalidSignature | SigningPosture::Checking => None,
         }
     }
 

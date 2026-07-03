@@ -969,6 +969,12 @@ pub mod signing_sweep;
 // sweep can surface an audit-only signing-regression finding on drift from the baseline.
 pub mod signing_drift;
 
+// TUF trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5, JEF-280): a stale
+// or starved trust root turns genuine signatures into `UnverifiableHere` and can mass-blind signing
+// detection, so its cache age + a fleet-wide unverifiable spike are surfaced (non-green) in
+// readiness. Pure/deterministic signals; never a gate.
+pub mod signing_trust;
+
 // The per-repo signing-baseline strength row (ADR-0020 §4, JEF-266): surfaces whether a repo's
 // baseline is log-corroborated (Rekor vouches for it) or local-only (weaker TOFU) in the inventory.
 pub mod signing_baseline_strength;

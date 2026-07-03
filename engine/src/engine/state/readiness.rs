@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig};
+use crate::engine::signing_trust::TUF_STALE_AFTER_SECS;
 
 /// The LIVE state of one decision input — present, absent, or degraded. Distinct from a
 /// config echo: an input is `Absent` only when it is genuinely unconfigured/empty, and
@@ -166,6 +167,11 @@ pub(crate) fn derive_readiness(
 
     let journal_state = present_if(config.journal_durable);
 
+    // The sigstore TUF trust-root freshness (JEF-280): a stale/starved root, or a fleet-wide spike
+    // in unverifiable signatures, mass-blinds signing detection — surfaced non-green so it can't
+    // read as a silent green.
+    let (tuf_state, tuf_detail) = tuf_row(config.tuf_cache_age_secs, config.unverifiable_spike);
+
     let inputs = vec![
         ReadinessRow {
             id: "model",
@@ -226,6 +232,17 @@ pub(crate) fn derive_readiness(
             weakens_decisions: false,
         },
         ReadinessRow {
+            id: "tuf-root",
+            label: "Signature trust root",
+            state: tuf_state,
+            why: "the sigstore TUF root verifies signatures; a stale/starved root turns genuine signatures unverifiable and mass-blinds signing detection",
+            enable: "PROTECTOR_TUF_CACHE",
+            detail: tuf_detail,
+            // Signing-detection trust, not a model-adjudication enrichment input — its absence
+            // doesn't weaken the model's exploitability call (ADR-0016), so this stays false.
+            weakens_decisions: false,
+        },
+        ReadinessRow {
             id: "arm-state",
             label: "Arm state",
             // Posture, never a gap: shadow is the safe default. Always Present (the engine
@@ -246,6 +263,61 @@ pub(crate) fn derive_readiness(
         inputs,
         warming_up,
         model_judging,
+    }
+}
+
+/// The TUF trust-root readiness row's `(state, detail)` (JEF-280). Honest and non-green whenever
+/// the root can't be trusted to catch a downgrade:
+///   * no cache fetched yet ⇒ `Absent` (signature verification hasn't populated the root),
+///   * cache older than [`TUF_STALE_AFTER_SECS`] ⇒ `Degraded` (stale — refresh may be starved),
+///   * a fleet-wide unverifiable spike this pass ⇒ `Degraded` (the root may have drifted), even if
+///     the cache mtime still looks fresh,
+///   * otherwise ⇒ `Present` (fresh, no spike).
+fn tuf_row(age_secs: Option<u64>, spike: bool) -> (InputState, String) {
+    match age_secs {
+        None => (
+            InputState::Absent,
+            "no sigstore trust root fetched yet \u{2014} signature verification hasn't populated the cache".to_string(),
+        ),
+        Some(age) => {
+            let stale = age >= TUF_STALE_AFTER_SECS;
+            let age_txt = humanize_age(age);
+            match (stale, spike) {
+                (true, _) => (
+                    InputState::Degraded,
+                    format!(
+                        "trust root cache is {age_txt} old (stale) \u{2014} refresh may be starved; genuine signatures may read unverifiable and blind downgrade detection"
+                    ),
+                ),
+                (false, true) => (
+                    InputState::Degraded,
+                    format!(
+                        "cache {age_txt} old but a fleet-wide spike in unverifiable signatures this pass \u{2014} the trust root may have drifted or is being starved"
+                    ),
+                ),
+                (false, false) => (
+                    InputState::Present,
+                    format!("trust root cache {age_txt} old (fresh)"),
+                ),
+            }
+        }
+    }
+}
+
+/// A coarse, human-readable age (`Ns` / `Nm` / `Nh` / `Nd`) for the TUF-root detail line. Whole
+/// units only — the row is a freshness hint, not a precise clock.
+fn humanize_age(secs: u64) -> String {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    if secs >= DAY {
+        format!("{}d", secs / DAY)
+    } else if secs >= HOUR {
+        format!("{}h", secs / HOUR)
+    } else if secs >= MIN {
+        format!("{}m", secs / MIN)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -290,6 +362,9 @@ mod tests {
             epss_count: 5,
             journal_durable: true,
             armed: false,
+            // A fresh trust root, no fleet-wide unverifiable spike ⇒ the TUF row is Present.
+            tuf_cache_age_secs: Some(60),
+            unverifiable_spike: false,
         }
     }
 
@@ -323,6 +398,72 @@ mod tests {
         // The model is still CONFIGURED — attached, just not answering.
         assert!(readiness.model_attached());
         // The model row is degraded and the (quiet) behavioral feeds are absent ⇒ unmet.
+        assert!(readiness.has_unmet());
+    }
+
+    /// The TUF-root row from a readiness snapshot.
+    fn tuf(readiness: &Readiness) -> &ReadinessRow {
+        readiness
+            .inputs
+            .iter()
+            .find(|r| r.id == "tuf-root")
+            .expect("a TUF-root row is present")
+    }
+
+    #[test]
+    fn a_fresh_trust_root_reads_present() {
+        let readiness = derive_readiness(
+            &covered_config(),
+            ModelHealth::Ok,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        assert_eq!(tuf(&readiness).state, InputState::Present);
+        assert!(tuf(&readiness).detail.contains("fresh"));
+    }
+
+    #[test]
+    fn a_stale_trust_root_is_degraded_and_surfaced_non_green() {
+        let mut config = covered_config();
+        config.tuf_cache_age_secs = Some(TUF_STALE_AFTER_SECS + 1);
+        let readiness = derive_readiness(
+            &config,
+            ModelHealth::Ok,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        assert_eq!(tuf(&readiness).state, InputState::Degraded);
+        assert!(tuf(&readiness).detail.contains("stale"));
+        // Non-green: a stale trust root counts as an unmet input.
+        assert!(readiness.has_unmet());
+    }
+
+    #[test]
+    fn a_never_fetched_trust_root_reads_absent() {
+        let mut config = covered_config();
+        config.tuf_cache_age_secs = None;
+        let readiness = derive_readiness(
+            &config,
+            ModelHealth::Ok,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        assert_eq!(tuf(&readiness).state, InputState::Absent);
+    }
+
+    #[test]
+    fn a_fleet_wide_unverifiable_spike_is_surfaced_even_on_a_fresh_root() {
+        let mut config = covered_config();
+        config.tuf_cache_age_secs = Some(60); // fresh mtime …
+        config.unverifiable_spike = true; // … but a mass unverifiable spike this pass
+        let readiness = derive_readiness(
+            &config,
+            ModelHealth::Ok,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+        );
+        assert_eq!(tuf(&readiness).state, InputState::Degraded);
+        assert!(tuf(&readiness).detail.contains("spike"));
         assert!(readiness.has_unmet());
     }
 

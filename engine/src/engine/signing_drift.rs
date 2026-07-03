@@ -31,6 +31,13 @@
 //!     [`IdentityChange`](RegressionKind::IdentityChange).
 //!   * now **unsigned** / **invalid** ⇒ [`Regression`] with
 //!     [`Unsigned`](RegressionKind::Unsigned) / [`Invalid`](RegressionKind::Invalid).
+//!   * now a **lesser-but-calm** posture (key-based / unverifiable-here) whose
+//!     [`rank`](crate::policies::signature::PostureRank) is BELOW the baseline's learned rank ⇒
+//!     [`Regression`] with [`Downgrade`](RegressionKind::Downgrade) — the JEF-280
+//!     signing-downgrade / registry-substitution signal. A calm posture at or above the baseline
+//!     rank (an always-key-based repo with no keyless baseline) stays [`Continuous`] — the JEF-276
+//!     false-alarm fix is preserved. This is DRIFT classification only; the per-image posture and
+//!     the trust/admit semantics (JEF-276) are unchanged.
 //!   * a transient [`Checking`](SigningPosture::Checking) ⇒ [`Continuous`] (a registry blip is
 //!     never a regression; it resolves next pass).
 //!
@@ -49,7 +56,7 @@
 //! [`Regression`]: SigningDrift::Regression
 
 use crate::engine::state::SigningBaseline;
-use crate::policies::signature::SigningPosture;
+use crate::policies::signature::{PostureRank, SigningPosture};
 
 /// Which kind of regression a fresh posture represents against a repo's baseline (JEF-264). The
 /// identity strings are UNTRUSTED Fulcio cert text — every consumer MUST escape them at render.
@@ -67,6 +74,17 @@ pub enum RegressionKind {
         /// The new signer's OIDC issuer, if the cert carried one (UNTRUSTED — escape at render).
         new_issuer: Option<String>,
     },
+    /// A **signing downgrade** (JEF-280): a repo whose established baseline was a STRONGER posture
+    /// (a keyless-verified identity was learned) now serves a lesser-but-calm posture — key-based
+    /// (Rekor bundle, no Fulcio cert) or unverifiable-here (a trust-root variance). These postures
+    /// are individually calm (JEF-276), but against a keyless baseline the *downgrade* is the
+    /// registry-substitution signal an attacker used to slip past the drift alarm. Carries the
+    /// posture it downgraded `to` so the finding names it.
+    Downgrade {
+        /// The (lesser) rank the repo downgraded to — [`KeyBased`](PostureRank::KeyBased) or
+        /// [`Unverifiable`](PostureRank::Unverifiable).
+        to: PostureRank,
+    },
 }
 
 impl RegressionKind {
@@ -77,6 +95,13 @@ impl RegressionKind {
             RegressionKind::Unsigned => "unsigned",
             RegressionKind::Invalid => "invalid",
             RegressionKind::IdentityChange { .. } => "identity",
+            RegressionKind::Downgrade { to } => match to {
+                PostureRank::KeyBased => "downgrade-key-based",
+                PostureRank::Unverifiable => "downgrade-unverifiable",
+                // Unsigned/Keyless never construct a `Downgrade` (unsigned is its own kind; keyless
+                // is the top rank, never a downgrade target) — keep `word` total regardless.
+                PostureRank::Unsigned | PostureRank::Keyless => "downgrade",
+            },
         }
     }
 }
@@ -131,13 +156,22 @@ pub fn classify(baseline: Option<&SigningBaseline>, posture: &SigningPosture) ->
         // A transient blip is never a regression — it resolves into a resting posture next pass.
         SigningPosture::Checking => SigningDrift::Continuous,
         // Signed-but-opaque states (JEF-276): key-based (verified Rekor, no Fulcio identity) and
-        // unverifiable-here (a trust-root variance) are NOT unsigned and carry no comparable
-        // identity, so calling them a regression would resurrect the false-alarm JEF-276 fixes. A
-        // genuine signature *removal* still lands as NotSigned below and regresses loudly; these
-        // are continuous. The baseline (JEF-263) also never learns from them (no signer to teach).
-        SigningPosture::SignedKeyBased | SigningPosture::UnverifiableHere => {
-            SigningDrift::Continuous
-        }
+        // unverifiable-here (a trust-root variance) are individually calm — NOT unsigned, NOT a
+        // genuine failure, and never a trusted identity. But they ARE ranked BELOW keyless on the
+        // downgrade ladder (JEF-280), so against a repo whose established baseline was a stronger
+        // posture (a keyless identity was learned) serving one of these is a `SigningDowngrade`
+        // regression — the registry-substitution signal that previously evaded the alarm. This
+        // fires ONLY on a real rank downgrade vs the baseline: a repo whose baseline is already at
+        // (or below) this rank — e.g. an always-key-based cert-manager repo, which has NO keyless
+        // baseline — stays Continuous, preserving the JEF-276 false-alarm fix. The trust/admit
+        // semantics are unchanged: this changes DRIFT classification only.
+        SigningPosture::SignedKeyBased | SigningPosture::UnverifiableHere => match posture.rank() {
+            Some(current) if current < baseline.rank => SigningDrift::Regression {
+                kind: RegressionKind::Downgrade { to: current },
+                established: baseline.established,
+            },
+            _ => SigningDrift::Continuous,
+        },
         SigningPosture::Signed(signer) => {
             if baseline.identities.contains(&signer.identity) {
                 // A known signer — a normal redeploy, even to a brand-new digest. No finding.

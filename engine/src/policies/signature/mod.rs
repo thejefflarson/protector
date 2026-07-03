@@ -29,7 +29,9 @@ use tokio::sync::Mutex;
 use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
 pub use cosign::CosignChecker;
-pub use posture::{PostureMap, SignatureObserver, Signer, SigningObserver, SigningPosture};
+pub use posture::{
+    PostureMap, PostureRank, SignatureObserver, Signer, SigningObserver, SigningPosture,
+};
 pub use rekor::{HttpRekorClient, RekorClient, RekorConfig, RekorHistory, RekorLane};
 
 /// Decides whether a single image reference carries a trusted signature.

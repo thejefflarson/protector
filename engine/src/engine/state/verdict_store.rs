@@ -129,6 +129,17 @@ pub struct ReadinessConfig {
     /// is posture, not a gap: shadow is the safe default, reported so the operator can SEE
     /// it rather than infer it.
     pub armed: bool,
+    /// Age (seconds) of the sigstore **TUF trust-root cache** (`PROTECTOR_TUF_CACHE`), or `None`
+    /// when no cache has been fetched yet (JEF-280). A stale/starved trust root causes signatures
+    /// to read [`UnverifiableHere`](crate::policies::signature::SigningPosture::UnverifiableHere)
+    /// and can mass-blind signing detection, so its freshness is surfaced in readiness. Refreshed
+    /// each pass from the cache dir's newest mtime.
+    pub tuf_cache_age_secs: Option<u64>,
+    /// A fleet-wide spike in `UnverifiableHere` postures this pass (JEF-280): a large fraction of
+    /// observed images suddenly fail to verify against our trust root — a hint the trust root
+    /// drifted or is being starved. Surfaced (non-green) rather than silently swallowed. Computed
+    /// each pass by [`is_unverifiable_spike`](crate::engine::signing_trust::is_unverifiable_spike).
+    pub unverifiable_spike: bool,
 }
 
 /// One internet-facing entry's verdict state — the SINGLE source of truth for the

@@ -42,7 +42,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::engine::journal::{Decision, DecisionJournal};
-use crate::policies::signature::{SigningPosture, repo_key};
+use crate::policies::signature::{PostureRank, SigningPosture, repo_key};
 
 /// How long after `first_seen` a baseline is considered [`established`](SigningBaseline::established).
 ///
@@ -85,6 +85,14 @@ pub struct SigningBaseline {
     /// which defeats the cold-start weakness. Set only by the opt-in Rekor lane; `false` when the
     /// lane is off or the log had no entry, which is the honest "new baseline (local only)" state.
     pub log_corroborated: bool,
+    /// The strongest signing-posture [`PostureRank`] ever learned under this repo (JEF-280) — the
+    /// yardstick a fresh posture's rank is compared against to define a *downgrade*. By construction
+    /// this is [`PostureRank::Keyless`] (the store only learns from a keyless `Signed` posture), so
+    /// serving a lesser-but-calm posture (key-based / unverifiable) against it is the
+    /// registry-substitution signal. Persisted so "downgrade" is well-defined and survives a
+    /// restart; a line written before this field existed replays as `Keyless` (its honest historical
+    /// value — see [`PostureRank::default`]).
+    pub rank: PostureRank,
     /// When this baseline was last updated (observed or replayed), Unix epoch millis. In-memory
     /// only (not journaled) — used solely to order eviction. `pub(crate)` so it isn't part of
     /// the public value shape.
@@ -101,6 +109,7 @@ impl SigningBaseline {
             first_seen_ms: self.first_seen_ms,
             established: self.established,
             log_corroborated: self.log_corroborated,
+            rank: self.rank,
         }
     }
 }
@@ -183,6 +192,15 @@ impl SigningBaselineStore {
                 existing.established = established;
                 changed = true;
             }
+            // Raise the learned rank monotonically to the strongest posture ever seen (JEF-280).
+            // Only a `Signed` posture reaches here (see `signer()?` above), so this is `Keyless`;
+            // written generically so a future teaching path can't silently weaken the baseline.
+            if let Some(rank) = posture.rank()
+                && rank > existing.rank
+            {
+                existing.rank = rank;
+                changed = true;
+            }
             existing.last_updated_ms = now_ms;
             return if changed { Some(repo) } else { None };
         }
@@ -206,6 +224,9 @@ impl SigningBaselineStore {
                 // Local observation alone never corroborates against the log — that is the opt-in
                 // Rekor lane's job (JEF-266). A fresh baseline is local-only until it does.
                 log_corroborated: false,
+                // The rank of the posture that taught this baseline (JEF-280). Only a `Signed`
+                // posture reaches here, so this is `Keyless` — the strongest rung.
+                rank: posture.rank().unwrap_or_default(),
                 last_updated_ms: now_ms,
             },
         );
@@ -263,6 +284,7 @@ impl SigningBaselineStore {
                 first_seen_ms,
                 established,
                 log_corroborated,
+                rank,
             } = entry.decision
             {
                 if repo.is_empty() {
@@ -279,6 +301,9 @@ impl SigningBaselineStore {
                         // Corroboration survives a restart — a repo the log vouched for stays
                         // log-corroborated (monotonic, never re-armed to local-only on replay).
                         log_corroborated,
+                        // The learned rank survives a restart (JEF-280), so downgrade detection is
+                        // defined against it post-boot; a pre-JEF-280 line defaults to `Keyless`.
+                        rank,
                         last_updated_ms: entry.at_ms,
                     },
                     repo,
