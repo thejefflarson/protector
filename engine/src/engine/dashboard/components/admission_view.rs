@@ -62,10 +62,12 @@ fn tallies_header(v: &AdmissionViewProps) -> Markup {
 }
 
 /// The per-image signing inventory (JEF-262 / ADR-0020): the observed signing posture of EVERY
-/// image, grouped under its repo, sitting between the tallies header and the decision log. Two hard
-/// rules the operator set: the posture is always signed / invalid signature / not signed (or the
-/// transient checking) — never n/a; and the "if enforced" cell is always the binary would-admit /
-/// would-block. Honest empty ("no images observed yet") — explicitly NOT an all-clear.
+/// image, as ONE aligned `<table>` for the whole inventory (so the machine columns line up across
+/// every repo — the operator's core complaint against the old per-repo mini-tables), grouped under
+/// repo group-header rows and expandable exactly like the Findings table. Two hard rules the
+/// operator set: the posture is always signed / invalid signature / not signed (or the transient
+/// checking) — never n/a; and the "if enforced" cell is always the binary would-admit / would-block.
+/// Honest empty ("no images observed yet") — explicitly NOT an all-clear.
 fn signing_inventory(v: &AdmissionViewProps) -> Markup {
     html! {
         section.signing-inventory aria-label="signing inventory" {
@@ -79,45 +81,20 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
             @if v.signing.is_empty() {
                 (signing_empty())
             } @else {
-                @for repo in &v.signing {
-                    (signing_repo(repo))
-                }
-            }
-        }
-    }
-}
-
-/// One repo group: the registry/repo header + (when the repo's signed history has drifted) a loud
-/// signing-regression banner + a real `<table>` of the images observed under it (so the machine
-/// columns align — the keyboard/semantics gate). The table is omitted when the regressed image has
-/// aged out of the observation window, so a standing regression still surfaces on its own.
-fn signing_repo(g: &SigningRepoProps) -> Markup {
-    html! {
-        div.signing-repo {
-            div.signing-repo-head {
-                h4.signing-repo-h.t-data-strong { (g.repo) }
-                @if g.strength != RepoStrength::Unknown {
-                    span.signing-strength.t-micro.muted data-strength=(g.strength.token())
-                        title="whether the public transparency log corroborates this repo's signing history (JEF-266)" {
-                        (g.strength.word())
-                    }
-                }
-            }
-            @if let Some(regression) = &g.regression {
-                (signing_regression(regression))
-            }
-            @if !g.images.is_empty() {
                 table.signing {
                     thead {
                         tr {
-                            th.t-micro { "image" }
+                            th.col-expand.t-micro {}
                             th.t-micro { "signature" }
+                            th.t-micro { "image" }
+                            th.t-micro { "signer" }
+                            th.t-micro { "baseline" }
                             th.t-micro { "if enforced" }
                         }
                     }
                     tbody {
-                        @for img in &g.images {
-                            (signing_row(img))
+                        @for repo in &v.signing {
+                            (signing_group(repo))
                         }
                     }
                 }
@@ -126,37 +103,196 @@ fn signing_repo(g: &SigningRepoProps) -> Markup {
     }
 }
 
-/// The loud signing-regression banner (JEF-264, ADR-0020 §3): a repo's signed history drifted —
-/// now unsigned/invalid, or signed by a new identity. The breach-rail channel (glyph + word,
-/// distinct from calm "not signed"), stating before→after with BOTH identities in FULL. An
-/// established baseline reads as the strong signal; a cold baseline is honestly flagged a weak lead.
+/// One repo group inside the single table: a spanning group-header row carrying the registry/repo,
+/// then (when the repo's signed history drifted) the loud regression row, then the repo's image rows
+/// sorted loud-first. The repo stays visible without breaking the whole-table column alignment.
+fn signing_group(g: &SigningRepoProps) -> Markup {
+    html! {
+        tr.signing-group {
+            th.signing-group-head.t-data-strong colspan="6" scope="colgroup" { (g.repo) }
+        }
+        @if let Some(regression) = &g.regression {
+            (signing_regression_row(regression))
+        }
+        @for img in &g.images {
+            (signing_row(img, g.strength))
+        }
+    }
+}
+
+/// One image row: a findings-style summary `<tr.row>` (a `+/-` expander · posture chip · image ·
+/// signer · baseline strength · the binary "if enforced") paired with a hidden full-width
+/// `<tr.row-detail>` the client toggles open in place. An invalid signature is the loud attention
+/// case (a breach keyline on the row). Every untrusted field (image/label/signer identity+issuer)
+/// is emitted ONLY via maud interpolation (auto-escaped) — never `PreEscaped`; the `data-signing`
+/// id and `data-posture` token are fixed `[a-z0-9-]`, never derived from untrusted text.
+fn signing_row(r: &SigningRowProps, strength: RepoStrength) -> Markup {
+    let attention = r.posture == SigningPosture::Invalid;
+    let tr_class = if attention {
+        "row signing-row signing-row-attention"
+    } else {
+        "row signing-row"
+    };
+    let detail_id = format!("detail-{}", r.dom_id);
+    html! {
+        tr class=(tr_class) id=(r.dom_id) data-signing=(r.dom_id) data-posture=(r.posture.token()) {
+            td.cell.cell-expand {
+                button.expander
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls=(detail_id)
+                    aria-label="expand image signing detail" {
+                    span.expander-glyph aria-hidden="true" { "+" }
+                }
+            }
+            td.cell.cell-gate { (signing_chip(r.posture)) }
+            td.cell.cell-image {
+                span.signing-ref.t-data-strong title=(r.image) { (r.label) }
+                @if r.count > 1 {
+                    span.signing-count.t-micro.muted title="distinct image observed this many times" {
+                        "\u{00D7}" (r.count)
+                    }
+                }
+            }
+            td.cell.cell-signer {
+                @match &r.signer {
+                    Some(signer) => {
+                        span.signing-by.t-micro title=(signer.identity_full) {
+                            (signer.identity_short)
+                            @if !signer.issuer_badge.is_empty() {
+                                " \u{00B7} " span.issuer-badge { (signer.issuer_badge) }
+                            }
+                        }
+                    }
+                    None => span.t-micro.muted title="no trusted signer for this image" { "\u{2014}" }
+                }
+            }
+            td.cell.cell-baseline {
+                @if strength == RepoStrength::Unknown {
+                    span.t-micro.muted title="no signing baseline learned for this repo yet" {
+                        "\u{2014}"
+                    }
+                } @else {
+                    span.signing-strength.t-micro.muted data-strength=(strength.token())
+                        title="whether the public transparency log corroborates this repo's signing history (JEF-266)" {
+                        (strength.word())
+                    }
+                }
+            }
+            td.cell.cell-enforced { (if_enforced_signing(r.posture.would_admit())) }
+        }
+        tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
+            td.detail-host colspan="6" {
+                (signing_detail(r, strength))
+            }
+        }
+    }
+}
+
+/// The expand-in-place detail for an image row: the FULL image ref, the FULL Fulcio SAN identity +
+/// issuer (or the posture prose for a non-signed image), and the repo's baseline detail. Every
+/// identity/issuer/image is UNTRUSTED — emitted only via maud interpolation (auto-escaped, never
+/// `PreEscaped`). The detail rail class is the fixed posture token, never untrusted text.
+fn signing_detail(r: &SigningRowProps, strength: RepoStrength) -> Markup {
+    html! {
+        div class={ "detail detail-sign-" (r.posture.token()) } {
+            section.detail-section {
+                h3.detail-h { "image" }
+                p.t-data { span.mono { (r.image) } }
+            }
+            section.detail-section {
+                h3.detail-h { "signer" }
+                @match &r.signer {
+                    Some(signer) => {
+                        p.t-data { "identity: " span.mono { (signer.identity_full) } }
+                        @match &signer.issuer_full {
+                            Some(issuer) => p.t-data { "issuer: " span.mono { (issuer) } }
+                            None => p.t-data.muted { "issuer: none recorded" }
+                        }
+                    }
+                    None => {
+                        @if r.detail.is_empty() {
+                            p.t-data.muted { "no signature artifact present for this image" }
+                        } @else {
+                            p.t-data { (r.detail) }
+                        }
+                    }
+                }
+            }
+            section.detail-section {
+                h3.detail-h { "baseline" }
+                p.t-data.muted { (strength.detail()) }
+            }
+        }
+    }
+}
+
+/// The loud signing-regression row (JEF-264, ADR-0020 §3): a repo's signed history drifted — now
+/// unsigned/invalid, or signed by a new identity. It stays PROMINENT — a findings-style expander
+/// row with a breach keyline, a filled glyph + the loud "signing regression" word (lexically
+/// distinct from calm "not signed"), spanning the machine columns (a repo-level alert, not an image
+/// posture, so it carries no per-image if-enforced). The FULL before→after identities live in its
+/// pulldown. An established baseline reads as the strong signal; a cold baseline a weak lead.
 ///
 /// Security: every identity/issuer is UNTRUSTED Fulcio SAN, emitted ONLY via maud interpolation
 /// `(x)` (auto-escaped) — never `PreEscaped`, never concatenated into markup, and never used to
 /// derive a `class=`/CSS value (the `data-regression` attribute is the fixed low-cardinality kind
 /// token, not identity text).
-fn signing_regression(r: &SigningRegressionProps) -> Markup {
+fn signing_regression_row(r: &SigningRegressionProps) -> Markup {
     let strength = if r.established {
         "established baseline"
     } else {
         "weak baseline \u{2014} treat as a lead"
     };
+    let detail_id = format!("detail-{}", r.dom_id);
     html! {
-        div.signing-regression.signing-row-attention data-regression=(r.kind.token()) role="alert" {
-            div.signing-regression-head {
-                span.glyph aria-hidden="true" { "\u{25CF}" }
-                span.signing-regression-word.t-data-strong { (r.kind.word()) }
-                span.signing-regression-strength.t-micro.muted { "(" (strength) ")" }
+        tr.row.signing-row.signing-row-attention id=(r.dom_id) data-signing=(r.dom_id)
+            data-regression=(r.kind.token()) role="alert" {
+            td.cell.cell-expand {
+                button.expander
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls=(detail_id)
+                    aria-label="expand signing regression detail" {
+                    span.expander-glyph aria-hidden="true" { "+" }
+                }
             }
-            div.signing-regression-detail {
+            td.cell.cell-regression colspan="5" {
+                span.signing-regression-head {
+                    span.glyph aria-hidden="true" { "\u{25CF}" }
+                    span.signing-regression-word.t-data-strong { (r.kind.word()) }
+                    span.signing-regression-strength.t-micro.muted { "(" (strength) ")" }
+                }
+                span.signing-regression-image.t-data { " image: " span.mono { (r.image) } }
+            }
+        }
+        tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
+            td.detail-host colspan="6" {
+                (signing_regression_detail(r))
+            }
+        }
+    }
+}
+
+/// The expand-in-place detail for a regression row: the before→after with BOTH identities in FULL
+/// and the reason. Every identity/issuer is UNTRUSTED — emitted only via maud interpolation
+/// (auto-escaped, never `PreEscaped`). Kept prominent (its own breach-railed panel).
+fn signing_regression_detail(r: &SigningRegressionProps) -> Markup {
+    html! {
+        div.detail.detail-sign-regression {
+            section.detail-section {
+                h3.detail-h { "what changed" }
                 p.t-data { "image: " span.mono { (r.image) } }
+                p.t-data { (r.kind.word()) }
+            }
+            section.detail-section {
                 @if r.before_identities.is_empty() {
-                    p.t-data.muted { "before: baseline signer not recorded" }
+                    h3.detail-h { "before \u{2014} baseline signer" }
+                    p.t-data.muted { "baseline signer not recorded" }
                 } @else {
-                    p.t-data {
+                    h3.detail-h {
                         "before \u{2014} baseline signer"
                         @if r.before_identities.len() != 1 { "s" }
-                        ":"
                     }
                     ul.signing-regression-before {
                         @for identity in &r.before_identities {
@@ -164,77 +300,22 @@ fn signing_regression(r: &SigningRegressionProps) -> Markup {
                         }
                     }
                 }
+            }
+            section.detail-section {
+                h3.detail-h { "after" }
                 @match &r.after_identity {
                     Some(identity) => {
-                        p.t-data { "after \u{2014} now signed by:" }
+                        p.t-data { "now signed by:" }
                         p.t-data { span.mono { (identity) } }
                         @if let Some(issuer) = &r.after_issuer {
                             p.t-data.muted { "issuer: " span.mono { (issuer) } }
                         }
                     }
                     None => {
-                        p.t-data { "after \u{2014} " (r.kind.after_word()) }
+                        p.t-data { (r.kind.after_word()) }
                     }
                 }
             }
-        }
-    }
-}
-
-/// One image row: the ref (expand-in-place for the full ref + signer/issuer detail) · the signing
-/// posture chip · the binary "if enforced". An invalid signature is the loud attention case (a
-/// breach keyline). The signer identity (untrusted Fulcio SAN) truncates in-row and is auto-escaped;
-/// its full value lives in the expand panel + `title=`.
-fn signing_row(r: &SigningRowProps) -> Markup {
-    let attention = r.posture == SigningPosture::Invalid;
-    let tr_class = if attention {
-        "signing-row signing-row-attention"
-    } else {
-        "signing-row"
-    };
-    html! {
-        tr class=(tr_class) data-posture=(r.posture.token()) {
-            td.cell-image {
-                details.signing-detail {
-                    summary.why-toggle role="button" aria-expanded="false" {
-                        span.signing-ref.t-data-strong title=(r.image) { (r.label) }
-                        @if r.count > 1 {
-                            span.signing-count.t-micro.muted title="distinct image observed this many times" {
-                                "\u{00D7}" (r.count)
-                            }
-                        }
-                        @if let Some(signer) = &r.signer {
-                            span.signing-by.t-micro.muted title=(signer.identity_full) {
-                                "signed by " (signer.identity_short)
-                                @if !signer.issuer_badge.is_empty() {
-                                    " \u{00B7} " span.issuer-badge { (signer.issuer_badge) }
-                                }
-                            }
-                        }
-                    }
-                    div.signing-detail-body {
-                        p.t-data { "image: " span.mono { (r.image) } }
-                        @match &r.signer {
-                            Some(signer) => {
-                                p.t-data { "identity: " span.mono { (signer.identity_full) } }
-                                @match &signer.issuer_full {
-                                    Some(issuer) => p.t-data { "issuer: " span.mono { (issuer) } }
-                                    None => p.t-data.muted { "issuer: none recorded" }
-                                }
-                            }
-                            None => {
-                                @if r.detail.is_empty() {
-                                    p.t-data.muted { "no signature artifact present for this image" }
-                                } @else {
-                                    p.t-data { (r.detail) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            td.cell-gate { (signing_chip(r.posture)) }
-            td.cell-enforced { (if_enforced_signing(r.posture.would_admit())) }
         }
     }
 }

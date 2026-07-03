@@ -219,6 +219,127 @@ fn empty_input_is_an_empty_inventory() {
 }
 
 #[test]
+fn image_rows_carry_a_prefixed_dom_id() {
+    let row = &build(&[observed("ghcr.io/acme/app:1", "not-signed", "")])[0].images[0];
+    assert!(
+        row.dom_id.starts_with("si-"),
+        "an image row's id is prefixed to keep its namespace apart from regressions"
+    );
+    assert!(
+        row.dom_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "the id is [a-z0-9-] only — a safe id/data-*/aria-controls value"
+    );
+}
+
+#[test]
+fn slug_colliding_images_still_get_distinct_dom_ids() {
+    // Two refs that SLUGIFY to the same string (`ghcr-io-a-b-1`) must not share an id — otherwise
+    // the whole-row toggle would open the wrong adjacent detail row (the finding_id collision bug).
+    // The short hash of the FULL ref is what separates them.
+    let rows = vec![
+        observed("ghcr.io/a/b:1", "not-signed", ""),
+        observed("ghcr.io/a/b-1", "not-signed", ""),
+    ];
+    let ids: Vec<String> = build(&rows)
+        .iter()
+        .flat_map(|g| g.images.iter().map(|i| i.dom_id.clone()))
+        .collect();
+    assert_eq!(ids.len(), 2, "both images are inventoried");
+    assert_ne!(ids[0], ids[1], "slug-colliding images get distinct ids");
+}
+
+#[test]
+fn a_regression_dom_id_never_collides_with_a_bare_image_ref() {
+    // A bare image ref can equal its repo string; distinct prefixes (si- vs sr-) keep the image
+    // row's id and the repo's regression-row id apart.
+    let rows = vec![
+        observed("ghcr.io/acme/app", "not-signed", ""),
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: a",
+        ),
+    ];
+    let g = &build(&rows)[0];
+    let image_id = &g.images[0].dom_id;
+    let reg_id = &g.regression.as_ref().unwrap().dom_id;
+    assert!(image_id.starts_with("si-"));
+    assert!(reg_id.starts_with("sr-"));
+    assert_ne!(image_id, reg_id, "the two rows never share an id");
+}
+
+#[test]
+fn images_within_a_group_sort_loud_first() {
+    // invalid (loudest) → not signed → checking → signed (calmest, sinks to the bottom).
+    let rows = vec![
+        observed("ghcr.io/acme/app@sha256:aa", "signed", "signed by x via y"),
+        observed("ghcr.io/acme/app@sha256:bb", "checking", "unreachable"),
+        observed("ghcr.io/acme/app@sha256:cc", "not-signed", ""),
+        observed(
+            "ghcr.io/acme/app@sha256:dd",
+            "invalid-signature",
+            "tampered",
+        ),
+    ];
+    let g = &build(&rows)[0];
+    let order: Vec<SigningPosture> = g.images.iter().map(|i| i.posture).collect();
+    assert_eq!(
+        order,
+        vec![
+            SigningPosture::Invalid,
+            SigningPosture::NotSigned,
+            SigningPosture::Checking,
+            SigningPosture::Signed,
+        ],
+        "images sort most-attention-worthy first"
+    );
+}
+
+#[test]
+fn groups_sort_loud_first_and_a_regression_floats_to_the_top() {
+    let rows = vec![
+        observed("ghcr.io/clean/app:1", "signed", "signed by x via y"),
+        observed("docker.io/lib/plain:1", "not-signed", ""),
+        observed("docker.io/lib/bad:1", "invalid-signature", "tampered"),
+        regression(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: a",
+        ),
+    ];
+    let groups = build(&rows);
+    // A standing regression is the loudest — it sorts above every clean/plain/invalid repo.
+    assert!(
+        groups[0].regression.is_some(),
+        "the regressed repo floats to the top"
+    );
+    // The invalid-image repo outranks the plain and the signed ones.
+    let invalid_pos = groups
+        .iter()
+        .position(|g| {
+            g.images
+                .iter()
+                .any(|i| i.posture == SigningPosture::Invalid)
+        })
+        .unwrap();
+    let signed_pos = groups
+        .iter()
+        .position(|g| g.images.iter().any(|i| i.posture == SigningPosture::Signed))
+        .unwrap();
+    assert!(invalid_pos < signed_pos, "invalid outranks signed");
+    // The all-signed repo sinks to the bottom.
+    assert_eq!(
+        groups.last().unwrap().images[0].posture,
+        SigningPosture::Signed,
+        "the calmest (all-signed) repo sits last"
+    );
+}
+
+#[test]
 fn dedup_count_is_carried() {
     let mut r = observed("ghcr.io/acme/app:1", "not-signed", "");
     r.count = 7;

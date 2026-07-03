@@ -19,6 +19,13 @@ use super::props::{
     SigningRepoProps, SigningRowProps,
 };
 
+/// The DOM-id prefix for an image summary/detail row (`si-<slug>-<hash>`).
+const IMAGE_ID_PREFIX: &str = "si";
+/// The DOM-id prefix for a signing-regression summary/detail row (`sr-<slug>-<hash>`). A distinct
+/// prefix from images guarantees a bare image ref that equals its repo can never collide with the
+/// repo's regression row.
+const REGRESSION_ID_PREFIX: &str = "sr";
+
 /// The subject prefix the signing sweep keys its posture rows under (`Image/<ref>`). A row whose
 /// subject starts with this is an observation row for the inventory, distinct from the webhook's
 /// workload decision rows (`Pod/…`, `Deployment/…`).
@@ -141,6 +148,60 @@ fn signer_from_reason(reason: &str) -> Option<SignerProps> {
     })
 }
 
+/// A stable, collision-free DOM/fragment id for a signing row, `<prefix>-<slug>-<hash>` (mirrors
+/// the findings `finding_id`). The slug alone is lossy — distinct keys can slugify alike — so the
+/// short FNV hash of the FULL key is what guarantees two rows never share an `id`/`data-signing`/
+/// `aria-controls`; a distinct prefix per row-kind (image vs regression) keeps the two namespaces
+/// apart. The result is `[a-z0-9-]` only, so it is always a safe attribute value.
+fn signing_dom_id(prefix: &str, key: &str) -> String {
+    let slug: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("{prefix}-{slug}-{}", short_hash(key))
+}
+
+/// A short, stable hex hash of a key — the collision-breaking suffix for [`signing_dom_id`]. FNV-1a
+/// 64-bit (no dependency, deterministic across runs — unlike `DefaultHasher`'s process-seeded
+/// output, which would change the id between renders and break the client's persisted open-state
+/// keying), rendered as 8 hex chars.
+fn short_hash(s: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in s.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:08x}", hash & 0xffff_ffff)
+}
+
+/// The attention rank of a posture for the loud-first sort: invalid (loudest) < not signed <
+/// checking < signed (calmest, sinks to the bottom). Mirrors the findings urgency-sort spirit.
+fn posture_rank(p: SigningPosture) -> u8 {
+    match p {
+        SigningPosture::Invalid => 0,
+        SigningPosture::NotSigned => 1,
+        SigningPosture::Checking => 2,
+        SigningPosture::Signed => 3,
+    }
+}
+
+/// The attention rank of a repo group: a standing regression is the loudest (floats above every
+/// clean repo), otherwise the group ranks by its loudest image posture. An empty group (regression
+/// aged out, no images) with no regression sorts last.
+fn group_rank(g: &SigningRepoProps) -> u8 {
+    if g.regression.is_some() {
+        return 0;
+    }
+    g.images
+        .iter()
+        .map(|i| posture_rank(i.posture))
+        .min()
+        .map(|r| r.saturating_add(1))
+        .unwrap_or(u8::MAX)
+}
+
 /// Project one observation record into its inventory row. The posture always resolves to one of the
 /// four states (never n/a); the signer is attached only for a verifying signature.
 fn signing_row(r: &PolicyDecisionRecord) -> SigningRowProps {
@@ -152,6 +213,7 @@ fn signing_row(r: &PolicyDecisionRecord) -> SigningRowProps {
         None
     };
     SigningRowProps {
+        dom_id: signing_dom_id(IMAGE_ID_PREFIX, &r.image),
         image: r.image.clone(),
         label: if remainder.is_empty() {
             r.image.clone()
@@ -204,8 +266,9 @@ fn parse_regression(r: &PolicyDecisionRecord) -> Option<(String, SigningRegressi
     };
 
     Some((
-        repo,
+        repo.clone(),
         SigningRegressionProps {
+            dom_id: signing_dom_id(REGRESSION_ID_PREFIX, &repo),
             kind,
             established,
             before_identities,
@@ -304,6 +367,14 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
             group.strength = strength;
         }
     }
+    // Loud-first ordering (mirrors the findings urgency sort): images within a group float the
+    // loudest posture up, and groups float a standing regression / the loudest image to the top —
+    // most-attention-worthy on top. Both sorts are STABLE, so equal-urgency rows/groups keep their
+    // first-seen (newest-first) order and a steady inventory renders stably across polls.
+    for group in &mut groups {
+        group.images.sort_by_key(|img| posture_rank(img.posture));
+    }
+    groups.sort_by_key(group_rank);
     groups
 }
 

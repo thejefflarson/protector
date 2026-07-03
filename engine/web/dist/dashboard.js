@@ -46,8 +46,13 @@
     if (glyph) glyph.textContent = isOpen ? "−" : "+"; // − when open, + when closed
   };
 
+  // A summary row's persisted-open key: a finding row carries data-finding, a signing-inventory row
+  // (image or regression) carries data-signing. Both id spaces are globally unique (distinct
+  // prefixes), so one `expanded` Set keys them all without collision.
+  const rowId = (row) => row.dataset.finding ?? row.dataset.signing;
+
   const toggleRow = (row) => {
-    const id = row.dataset.finding;
+    const id = rowId(row);
     if (!id) return;
     const isOpen = !expanded.has(id);
     isOpen ? expanded.add(id) : expanded.delete(id);
@@ -56,9 +61,10 @@
   };
 
   // Summary rows are click/keyboard toggles for their detail row; restore persisted state on bind.
+  // Both findings rows and signing-inventory rows share the .row + .expander + .row-detail shape.
   const bindRows = (root) => {
-    for (const row of root.querySelectorAll("tr.row[data-finding]")) {
-      applyRowState(row, expanded.has(row.dataset.finding));
+    for (const row of root.querySelectorAll("tr.row[data-finding], tr.row[data-signing]")) {
+      applyRowState(row, expanded.has(rowId(row)));
       // The whole row is the toggle; the expander button's click bubbles here too (one handler).
       row.addEventListener("click", () => toggleRow(row));
     }

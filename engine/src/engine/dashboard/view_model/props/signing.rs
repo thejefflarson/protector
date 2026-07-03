@@ -105,6 +105,12 @@ pub struct SignerProps {
 /// engine `PolicyDecisionRecord` at the view_model boundary. Every string is UNTRUSTED at render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningRowProps {
+    /// A stable, collision-free DOM/fragment id for this image's summary + detail rows — the key
+    /// the client toggles/persists across the /fragment poll (mirrors `FindingProps::id`). Derived
+    /// in the view_model from the FULL image ref (a readable slug + a short hash of the ref, so two
+    /// images that slugify alike still get distinct ids). Never untrusted free-text: it is
+    /// `[a-z0-9-]` only, so it is safe as an `id`/`data-*`/`aria-controls` value.
+    pub dom_id: String,
     /// The full image ref (registry/repo + digest/tag), untrusted — shown in the expand panel and
     /// the `title=`.
     pub image: String,
@@ -155,12 +161,29 @@ impl RepoStrength {
         }
     }
 
-    /// The badge word shown in the repo header.
+    /// The badge word shown in the baseline column.
     pub fn word(self) -> &'static str {
         match self {
             RepoStrength::LogCorroborated => "log-corroborated",
             RepoStrength::LocalOnly => "new baseline (local only)",
             RepoStrength::Unknown => "",
+        }
+    }
+
+    /// The honest baseline prose for the row's expand panel: what the strength means for how much
+    /// the operator should trust this repo's learned signing history. `Unknown` is stated as "no
+    /// baseline learned yet" — never implied as an all-clear.
+    pub fn detail(self) -> &'static str {
+        match self {
+            RepoStrength::LogCorroborated => {
+                "log-corroborated \u{2014} the public transparency log vouches for this repo's \
+                 signing history (a stronger baseline than local trust-on-first-sight)."
+            }
+            RepoStrength::LocalOnly => {
+                "new baseline (local only) \u{2014} trust-on-first-sight; the public transparency \
+                 log has not yet corroborated this repo's signing history."
+            }
+            RepoStrength::Unknown => "no signing baseline learned for this repo yet.",
         }
     }
 }
@@ -266,6 +289,11 @@ impl RegressionKind {
 /// show the operator EXACTLY what changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningRegressionProps {
+    /// A stable, collision-free DOM/fragment id for the regression's summary + detail rows (the key
+    /// the client toggles/persists). Derived in the view_model from the repo, with a distinct
+    /// prefix from image rows so an image whose ref equals its repo can never share an id. `[a-z0-9-]`
+    /// only — safe as an `id`/`data-*`/`aria-controls` value.
+    pub dom_id: String,
     /// What drifted (unsigned / invalid / new signer).
     pub kind: RegressionKind,
     /// Whether the baseline was established (a strong breach signal) or cold/freshly-learned (a
