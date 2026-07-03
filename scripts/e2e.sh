@@ -213,6 +213,15 @@ deploy_protector() {
     verbs: ["create", "delete", "patch"]'
   fi
 
+  # These two are the ONLY operator-set values interpolated into the manifest heredoc
+  # below (PROTECTOR_E2E_MODEL / _MODEL_NAME). They come from whoever runs the e2e — a
+  # test-harness input, not an untrusted boundary — but reject YAML-breaking chars anyway
+  # so a stray quote/newline can't corrupt the Deployment we `kubectl apply`.
+  case "$model_endpoint$model_name" in
+    *'"'* | *'\'* | *'
+'*) echo "e2e: PROTECTOR_E2E_MODEL/_MODEL_NAME contain YAML-unsafe characters" >&2; exit 1 ;;
+  esac
+
   # The model-decides env is added only when an endpoint is given (phases 10-11).
   local model_env=""
   if [ -n "$model_endpoint" ]; then
