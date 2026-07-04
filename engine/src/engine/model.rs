@@ -151,6 +151,19 @@ pub async fn chat(
         "messages": [{ "role": "user", "content": prompt }]
     });
     let response = client.post(endpoint).json(&body).send().await.ok()?;
+    // JEF-301: a non-success HTTP status (the 500 Ollama returns when it OOM-crashes ingesting
+    // a heavy prompt, a 502/503 while it restarts, etc.) is a FAILURE, not an answer. Return
+    // `None` explicitly so the caller records it as `Uncertain` ("model unavailable") — feeding
+    // the per-entry backoff and the global breaker (JEF-234) — rather than trying to parse an
+    // error body as a verdict. This makes "a 500 counts as a failure" structural instead of
+    // relying on the error body happening not to parse into a verdict shape.
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "model endpoint returned a non-success status; treating as unavailable (no verdict)"
+        );
+        return None;
+    }
     let bytes = bounded_body(response).await?;
     let json: Value = serde_json::from_slice(&bytes).ok()?;
     json["choices"][0]["message"]["content"]
@@ -609,6 +622,93 @@ mod tests {
             "an over-cap response must be rejected as None, not buffered/parsed"
         );
         let _ = server.await;
+    }
+
+    /// JEF-301: a server 500 (the status Ollama returns when it OOM-crashes ingesting a heavy
+    /// prompt) must be treated as a FAILURE — `chat` returns `None` so the caller records an
+    /// `Uncertain` that feeds the backoff/breaker — NOT parsed as a verdict. Served from a
+    /// localhost server so no real model is needed.
+    #[tokio::test]
+    async fn server_500_is_treated_as_unavailable_not_a_verdict() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                // A 500 with a JSON error body — exactly what an OOM-crashing Ollama returns.
+                // Even though the body IS valid JSON, it is NOT a verdict and must be rejected
+                // on the status alone.
+                let payload =
+                    json!({ "error": "model runner has crashed (out of memory)" }).to_string();
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let client = timeout_only_client(5).unwrap();
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+        let out = chat(&client, &endpoint, "m", "p").await;
+        assert!(
+            out.is_none(),
+            "a 500 must be treated as unavailable (None), never parsed as a verdict"
+        );
+        let _ = server.await;
+    }
+
+    /// JEF-301: the single-flight permit must be released on the ERROR path too (a 500), so a
+    /// failing request can never strand the gate and deadlock every later model call. We fire 3
+    /// concurrent `chat` calls at a server that always 500s: if the permit leaked on the error
+    /// path, the second and third would block forever and this test would hang. That they all
+    /// complete (each returning `None`) proves the guard releases on drop on the error path.
+    #[tokio::test]
+    async fn the_gate_is_released_on_the_error_path_so_later_calls_proceed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const CALLS: usize = 3;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..CALLS {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..CALLS {
+            let endpoint = endpoint.clone();
+            set.spawn(async move {
+                let client = timeout_only_client(5).unwrap();
+                chat(&client, &endpoint, "m", "p").await
+            });
+        }
+        let mut completed = 0;
+        while let Some(res) = set.join_next().await {
+            assert!(
+                res.unwrap().is_none(),
+                "a 500 yields None (the permit released, the call did not hang)"
+            );
+            completed += 1;
+        }
+        assert_eq!(
+            completed, CALLS,
+            "every gated call after an error must proceed — the permit is never stranded"
+        );
+        server.await.unwrap();
     }
 
     /// JEF-236: the process-wide single-flight gate must keep at most ONE model request

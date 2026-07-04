@@ -266,6 +266,8 @@ fn sample_journal() -> Arc<DecisionJournal> {
         verdict: "exploitable — KEV-listed RCE loaded at runtime; reaches the live payments key"
             .into(),
         coverage: backed(),
+        fingerprint: None,
+        verdict_typed: None,
     });
     // SHORT-LIVED would-act — opened then immediately cleared (the likely-FP signature).
     journal.record(Decision::Breach {
@@ -273,12 +275,16 @@ fn sample_journal() -> Arc<DecisionJournal> {
         objectives: 1,
         verdict: "exploitable — transient: session key briefly reachable during a rollout".into(),
         coverage: backed(),
+        fingerprint: None,
+        verdict_typed: None,
     });
     journal.record(Decision::Breach {
         entry: "deployment/web/storefront".into(),
         objectives: 1,
         verdict: "not exploitable — rollout completed; the edge is mTLS-gated again".into(),
         coverage: backed(),
+        fingerprint: None,
+        verdict_typed: None,
     });
     // COVERAGE-GAP would-act — affirmed with NO CVE/behavioral backing (scrutinise first).
     journal.record(Decision::Breach {
@@ -286,6 +292,8 @@ fn sample_journal() -> Arc<DecisionJournal> {
         objectives: 7,
         verdict: "exploitable — broad reach to repo-cred secrets (no CVE/runtime backing)".into(),
         coverage: unbacked(),
+        fingerprint: None,
+        verdict_typed: None,
     });
     // LEFT-ALONE clears — proven paths the model deliberately cleared (the trust half).
     journal.record(Decision::Breach {
@@ -293,6 +301,8 @@ fn sample_journal() -> Arc<DecisionJournal> {
         objectives: 1,
         verdict: "not exploitable — no reachable secret objective; only a public CDN origin".into(),
         coverage: backed(),
+        fingerprint: None,
+        verdict_typed: None,
     });
     journal.record(Decision::Breach {
         entry: "daemonset/obs/node-exporter".into(),
@@ -300,6 +310,8 @@ fn sample_journal() -> Arc<DecisionJournal> {
         verdict: "not exploitable — scrape token is read-only metrics scope; no lateral path"
             .into(),
         coverage: backed(),
+        fingerprint: None,
+        verdict_typed: None,
     });
 
     Arc::new(journal)

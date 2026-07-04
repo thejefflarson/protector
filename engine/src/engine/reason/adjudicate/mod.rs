@@ -37,7 +37,12 @@ use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 
 /// The model's judgement on a proven chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` (JEF-301) let a DECISIVE verdict be persisted in the durable
+/// decision journal and replayed on boot as the EXACT prior decision — an `Exploitable`
+/// replays as `Exploitable`, never downgraded — so an unchanged entry is served from the
+/// verdict cache without a fresh (slow, OOM-prone) model call after a restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// A real, contextually-exploitable attack — let the deterministic decision stand.
     Confirmed,
