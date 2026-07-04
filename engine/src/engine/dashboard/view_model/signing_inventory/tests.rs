@@ -103,9 +103,11 @@ fn invalid_posture_maps_and_would_block() {
         row.signer.is_none(),
         "an invalid signature has no trusted signer"
     );
-    assert!(
-        !row.posture.would_admit(),
-        "invalid would block if enforced"
+    assert_eq!(
+        row.enforcement,
+        SigningEnforcement::WouldBlock,
+        "a genuinely-invalid signature is the loud channel \u{2014} would block independent of any \
+         baseline (JEF-297)"
     );
     assert!(
         !row.detail.is_empty(),
@@ -114,20 +116,23 @@ fn invalid_posture_maps_and_would_block() {
 }
 
 #[test]
-fn not_signed_posture_maps_is_calm_and_would_block() {
+fn not_signed_on_a_never_signed_repo_is_calm_tofu_and_would_admit() {
+    // JEF-297: not-signed with NO signed baseline is not a regression (nothing to regress against)
+    // — TOFU, calm, would-admit. The pre-ADR-0020 gate wrongly blocked it.
     let rows = vec![observed("docker.io/library/postgres:16", "not-signed", "")];
     let row = &build(&rows)[0].images[0];
     assert_eq!(row.posture, SigningPosture::NotSigned);
     assert!(row.signer.is_none());
-    assert!(
-        !row.posture.would_admit(),
-        "not signed would block if enforced"
+    assert_eq!(
+        row.enforcement,
+        SigningEnforcement::WouldAdmit,
+        "not-signed with no signed history is continuous (TOFU), not a regression"
     );
     assert!(row.detail.is_empty(), "not-signed needs no prose");
 }
 
 #[test]
-fn checking_is_transient_never_a_resting_clean() {
+fn checking_is_transient_and_continuous_never_a_regression() {
     let rows = vec![observed(
         "registry.k8s.io/pause:3.9",
         "checking",
@@ -135,9 +140,10 @@ fn checking_is_transient_never_a_resting_clean() {
     )];
     let row = &build(&rows)[0].images[0];
     assert_eq!(row.posture, SigningPosture::Checking);
-    assert!(
-        !row.posture.would_admit(),
-        "an unverifiable posture is fail-closed (would block), never admitted"
+    assert_eq!(
+        row.enforcement,
+        SigningEnforcement::WouldAdmit,
+        "a transient checking blip is continuous, never a regression (JEF-297)"
     );
 }
 
@@ -150,9 +156,11 @@ fn an_unknown_status_word_reads_as_checking_never_a_false_clean() {
 }
 
 #[test]
-fn key_based_posture_maps_calm_carries_no_signer_and_would_block() {
-    // JEF-276 reproducer 1 (cert-manager): a key-based signature is CALM (never invalid), carries no
-    // trusted signer, and — lacking an identity a gate can vouch for — would block if enforced.
+fn consistent_key_based_posture_is_calm_and_would_admit() {
+    // JEF-297 / JEF-276 reproducer 1 (cert-manager, homegrown fleet): a consistently key-based image
+    // has NO keyless baseline, so no downgrade/regression stands for it — it is continuous, CALM, and
+    // would-ADMIT. The pre-ADR-0020 keyless-only gate wrongly showed the whole key-based fleet as
+    // would-block; that is the bug this ticket fixes.
     let rows = vec![observed(
         "quay.io/jetstack/cert-manager-cainjector:v1.20.3",
         "signed-key-based",
@@ -167,9 +175,10 @@ fn key_based_posture_maps_calm_carries_no_signer_and_would_block() {
         "a real key-based signature must not be the loud invalid channel"
     );
     assert!(row.signer.is_none(), "key-based is signed-but-opaque");
-    assert!(
-        !row.posture.would_admit(),
-        "no vouchable identity → would block"
+    assert_eq!(
+        row.enforcement,
+        SigningEnforcement::WouldAdmit,
+        "a consistent key-based posture is continuous vs baseline \u{2014} would admit (JEF-297)"
     );
     assert!(
         !row.detail.is_empty(),
@@ -178,9 +187,24 @@ fn key_based_posture_maps_calm_carries_no_signer_and_would_block() {
 }
 
 #[test]
-fn unverifiable_posture_maps_calm_distinct_from_invalid() {
-    // JEF-276 reproducer 2 (curl trust-root variance): honest "couldn't verify here", calm-ish, and
-    // lexically + structurally distinct from the loud invalid.
+fn consistent_keyless_signed_posture_would_admit() {
+    // JEF-297: a keyless-verified image continuous with its baseline admits (no regression stands).
+    let rows = vec![observed(
+        "ghcr.io/acme/app@sha256:aa",
+        "signed",
+        "signed by https://github.com/acme/app/.github/workflows/r.yaml@refs/tags/v1 via \
+         https://token.actions.githubusercontent.com",
+    )];
+    let row = &build(&rows)[0].images[0];
+    assert_eq!(row.posture, SigningPosture::Signed);
+    assert_eq!(row.enforcement, SigningEnforcement::WouldAdmit);
+}
+
+#[test]
+fn consistent_unverifiable_posture_is_calm_and_would_admit() {
+    // JEF-297 / JEF-276 reproducer 2 (curl trust-root variance): honest "couldn't verify here",
+    // calm-ish, distinct from the loud invalid, and — with no keyless baseline to downgrade from —
+    // continuous, so it would admit.
     let rows = vec![observed(
         "docker.io/curlimages/curl:latest",
         "unverifiable",
@@ -190,17 +214,7 @@ fn unverifiable_posture_maps_calm_distinct_from_invalid() {
     assert_eq!(row.posture, SigningPosture::Unverifiable);
     assert_ne!(row.posture, SigningPosture::Invalid);
     assert!(row.signer.is_none());
-    assert!(!row.posture.would_admit());
-}
-
-#[test]
-fn only_signed_would_admit() {
-    assert!(SigningPosture::Signed.would_admit());
-    assert!(!SigningPosture::SignedKeyBased.would_admit());
-    assert!(!SigningPosture::Unverifiable.would_admit());
-    assert!(!SigningPosture::Invalid.would_admit());
-    assert!(!SigningPosture::NotSigned.would_admit());
-    assert!(!SigningPosture::Checking.would_admit());
+    assert_eq!(row.enforcement, SigningEnforcement::WouldAdmit);
 }
 
 #[test]

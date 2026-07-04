@@ -11,7 +11,8 @@ use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
     AdmissionViewProps, DecisionRowProps, GateStatus, ProvenanceChangeProps, ProvenancePosture,
-    RepoStrength, SigningPosture, SigningRegressionProps, SigningRepoProps, SigningRowProps,
+    RepoStrength, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
+    SigningRowProps,
 };
 
 /// Render the Admission view: the tallies header, then the per-image signing inventory, then the
@@ -66,8 +67,9 @@ fn tallies_header(v: &AdmissionViewProps) -> Markup {
 /// every repo — the operator's core complaint against the old per-repo mini-tables), grouped under
 /// repo group-header rows and expandable exactly like the Findings table. Two hard rules the
 /// operator set: the posture is always signed / invalid signature / not signed (or the transient
-/// checking) — never n/a; and the "if enforced" cell is always the binary would-admit / would-block.
-/// Honest empty ("no images observed yet") — explicitly NOT an all-clear.
+/// checking) — never n/a; and the "if enforced" cell is always a definite continuity verdict —
+/// would-admit / would-block / uncertain (JEF-297, ADR-0020). Honest empty ("no images observed
+/// yet") — explicitly NOT an all-clear.
 fn signing_inventory(v: &AdmissionViewProps) -> Markup {
     html! {
         section.signing-inventory aria-label="signing inventory" {
@@ -75,8 +77,10 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
             p.section-sub.t-body.muted {
                 "the observed signing posture of every image \u{2014} signed, invalid signature, or \
                  not signed (or a transient check while a registry is unreachable). This is \
-                 observation, not a gate; the 'if enforced' column is the binary what-if a \
-                 signature gate would apply (only a verifying signature would admit)."
+                 observation, not a gate; the 'if enforced' column is the what-if a signature-\
+                 continuity gate would apply \u{2014} a calm, consistent posture would admit, only a \
+                 regression against the repo's established baseline would block (a cold-baseline \
+                 regression reads uncertain, not blocked)."
             }
             @if v.signing.is_empty() {
                 (signing_empty())
@@ -125,7 +129,7 @@ fn signing_group(g: &SigningRepoProps) -> Markup {
 }
 
 /// One image row: a findings-style summary `<tr.row>` (a `+/-` expander · posture chip · image ·
-/// signer · baseline strength · the binary "if enforced") paired with a hidden full-width
+/// signer · baseline strength · the continuity "if enforced") paired with a hidden full-width
 /// `<tr.row-detail>` the client toggles open in place. An invalid signature is the loud attention
 /// case (a breach keyline on the row). Every untrusted field (image/label/signer identity+issuer)
 /// is emitted ONLY via maud interpolation (auto-escaped) — never `PreEscaped`; the `data-signing`
@@ -191,7 +195,7 @@ fn signing_row(r: &SigningRowProps, strength: RepoStrength) -> Markup {
                     }
                 }
             }
-            td.cell.cell-enforced { (if_enforced_signing(r.posture.would_admit())) }
+            td.cell.cell-enforced { (if_enforced_signing(r.enforcement)) }
         }
         tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
             td.detail-host colspan="7" {
@@ -459,20 +463,22 @@ fn provenance_change_detail(r: &ProvenanceChangeProps) -> Markup {
     }
 }
 
-/// The binary "if enforced" for a signing posture: would admit / would block (never n/a). Colour +
-/// glyph + word; a would-block is the loud channel (a signature gate would reject the image).
-fn if_enforced_signing(would_admit: bool) -> Markup {
+/// The baseline-relative "if enforced" continuity verdict for a signing posture (JEF-297): would
+/// admit / would block / uncertain (never n/a). Colour + glyph + word, so meaning never rides on
+/// colour alone. A would-block is the loud channel (a genuine regression, or a genuinely-invalid
+/// signature, a continuity gate would reject); uncertain is the honest non-green weak lead for a
+/// cold-baseline regression — never a hard block. The `enforced-{token}` class is a fixed
+/// low-cardinality token, never untrusted text.
+fn if_enforced_signing(v: SigningEnforcement) -> Markup {
+    let class = match v {
+        SigningEnforcement::WouldAdmit => "enforced-chip enforced-admit",
+        SigningEnforcement::WouldBlock => "enforced-chip enforced-block",
+        SigningEnforcement::Uncertain => "enforced-chip enforced-uncertain",
+    };
     html! {
-        @if would_admit {
-            span.enforced-chip.enforced-admit {
-                span.glyph aria-hidden="true" { "\u{2713}" }
-                span.enforced-word { "would admit" }
-            }
-        } @else {
-            span.enforced-chip.enforced-block {
-                span.glyph aria-hidden="true" { "\u{2715}" }
-                span.enforced-word { "would block" }
-            }
+        span class=(class) {
+            span.glyph aria-hidden="true" { (v.glyph()) }
+            span.enforced-word { (v.word()) }
         }
     }
 }

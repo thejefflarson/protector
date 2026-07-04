@@ -1,6 +1,7 @@
 //! Render-level tests for the Admission/policy view (the webhook floor, brief §6): the tallies
 //! header (never blank, honest at zero), the per-image signing inventory (JEF-262 — every posture,
-//! the binary if-enforced, honest empty), the deduped decision rows + the "if enforced" what-if, the
+//! the continuity if-enforced verdict, honest empty), the deduped decision rows + the "if enforced"
+//! what-if, the
 //! real fourth nav tab, and escaping of the untrusted image/subject/reason/identity text. These
 //! drive the view_model + component directly (no HTTP, no engine), so they are fast and pure. Kept
 //! in their own file so `tests.rs` stays under the 1,000-line cap (CLAUDE.md).
@@ -246,9 +247,16 @@ fn signing_inventory_renders_every_posture_with_word_and_no_na() {
     );
     assert!(html.contains("not signed"), "not-signed word — distinct");
     assert!(html.contains("checking"), "the transient checking word");
-    // The binary if-enforced, both directions — never n/a.
-    assert!(html.contains("would admit"), "signed would admit");
-    assert!(html.contains("would block"), "unsigned/invalid would block");
+    // The continuity if-enforced verdict (JEF-297): a continuous posture (signed / not-signed with
+    // no baseline / transient checking) admits; a genuinely-invalid signature is the loud
+    // would-block. Assert on the chip CLASS token (not the word, which also appears in the section
+    // prose) so the assertion is load-bearing. Never n/a.
+    let inv = inventory_slice(&html);
+    assert!(inv.contains("enforced-admit"), "continuous postures admit");
+    assert!(
+        inv.contains("enforced-block"),
+        "a genuinely-invalid signature would block"
+    );
     // Hard rule: the inventory never shows n/a.
     assert!(
         !inventory_slice(&html).contains("n/a"),
@@ -576,6 +584,72 @@ fn signing_regression_cold_baseline_reads_as_a_weak_lead() {
     assert!(
         html.contains("treat as a lead"),
         "a cold-baseline regression is honestly flagged a weak lead"
+    );
+}
+
+#[test]
+fn if_enforced_column_is_continuity_based_not_keyless_based() {
+    // JEF-297: a consistently key-based image (homegrown fleet / cert-manager) with NO keyless
+    // baseline is continuous — its if-enforced verdict must be "would admit", NOT the old
+    // keyless-only "would block". This is the exact bug the ticket fixes.
+    let rows = vec![signing_rec(
+        "quay.io/jetstack/cert-manager-cainjector:v1.20.3",
+        "signed-key-based",
+        "signed with a key-based cosign signature (verified transparency-log inclusion, no Fulcio \
+         identity)",
+    )];
+    let html = render(&rows);
+    // Assert on the chip CLASS token (the word also appears in the section prose).
+    let inv = inventory_slice(&html);
+    assert!(
+        inv.contains("enforced-admit"),
+        "a consistent key-based image would admit under continuity semantics"
+    );
+    assert!(
+        !inv.contains("enforced-block"),
+        "a calm, consistent key-based image is NOT would-block (the JEF-297 fix)"
+    );
+}
+
+#[test]
+fn if_enforced_shows_would_block_for_an_established_regression() {
+    // An established-baseline regression: the regressed image's if-enforced verdict is would-block.
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app:2", "not-signed", ""),
+        regression_rec(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-unsigned-established",
+            "now not signed (was signed) | before: releng@acme.example",
+        ),
+    ];
+    let inv = inventory_slice(&render(&rows)).to_string();
+    assert!(
+        inv.contains("enforced-block"),
+        "signed\u{2192}unsigned on an established repo renders would-block"
+    );
+}
+
+#[test]
+fn if_enforced_shows_uncertain_for_a_cold_baseline_regression() {
+    // A cold-baseline regression: the regressed image reads UNCERTAIN (non-green), never would-block.
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app:2", "not-signed", ""),
+        regression_rec(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "regression-unsigned-cold",
+            "now not signed (was signed) | before: releng@acme.example",
+        ),
+    ];
+    let inv = inventory_slice(&render(&rows)).to_string();
+    assert!(
+        inv.contains("enforced-uncertain"),
+        "the uncertain verdict carries its own colour token, distinct from block"
+    );
+    assert!(
+        !inv.contains("enforced-block"),
+        "a cold-baseline regression is never a hard would-block"
     );
 }
 
