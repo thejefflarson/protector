@@ -299,3 +299,50 @@ SLSA layer; until then the production observer yields `Absent`/`Checking` — th
 honest degradation. Closing the gap (compose sigstore's lower-level DSSE + Fulcio + Rekor
 primitives, or an upgraded `sigstore` release) is a follow-up that does not change this
 addendum's contract.
+
+## Addenda (JEF-297 — the rendered "if enforced" is CONTINUITY, not keyless-identity)
+
+The signing inventory's **"if enforced"** column is a counterfactual: *what would a
+signature gate do to this image?* Its first implementation read that column off the raw
+posture — `would_admit ⇔ keyless-Fulcio Signed`, every other posture would-block. That is
+the **pre-ADR-0020 single-identity gate**, and it directly contradicts the continuity
+thesis of this ADR and the honest-posture split (JEF-276): the *entire* key-based-signed
+homegrown fleet (and cert-manager) rendered **would-block**, even though such a repo is
+perfectly calm and continuous. The JEF-280 addendum's aside that the calm postures "still
+`would_admit() == false`" was itself this bug — it conflated the *inventory trust
+semantic* ("this posture confers no trusted keyless identity", which is true) with the
+*enforcement counterfactual* ("a continuity gate would reject this image", which is
+false for a consistent repo).
+
+This addendum corrects the render. It changes **presentation only** — no observation, no
+drift classification, no enforcement, no egress changes.
+
+1. **would-admit is the negation of a REGRESSION, not a posture test.** The counterfactual
+   a signature-continuity gate (JEF-265) applies is: *block on a genuine regression from
+   the repo's established baseline; admit everything continuous.* So the column is derived
+   from the baseline-relative drift verdict (JEF-264/280), NOT the raw posture:
+   * **would-admit** — any calm posture with no regression: keyless-verified `Signed`,
+     consistent `SignedKeyBased` / `UnverifiableHere` (no keyless baseline to drop from),
+     and `NotSigned` where the repo was never signed (TOFU). This is `block == regression`
+     read the other way, so the column can never disagree with what enforcement blocks.
+   * **would-block** — a genuine regression against an **established** baseline
+     (`SigningDowngrade` / `IdentityChange` / signed→`NotSigned` / signed→invalid), OR a
+     genuinely `InvalidSignature` (the reserved loud channel — a broken signature is never
+     admissible independent of any baseline).
+   * **uncertain** — a regression against a **cold / freshly-learned** baseline: a weak
+     lead (JEF-280 cold=uncertain), non-green but never a hard block. This keeps the
+     cold-baseline honesty invariant on the enforcement column too.
+
+2. **Single source of truth = the recorded drift verdict.** The render reads the SAME
+   `SigningRegression/<repo>` rows the sweep already recorded (one per regressing image),
+   keyed per image — it never re-classifies against the baseline, so the "if enforced"
+   column and the recorded regression a gate enforces are the same fact. The old per-posture
+   `SigningPosture::would_admit()` is retired as the render input (superseding the JEF-280
+   addendum's `would_admit() == false` note); the inventory trust semantic it expressed
+   (`Signed` is the only *keyless-verified* posture) is unchanged and still drives the
+   posture chip.
+
+3. **No evasion.** `InvalidSignature` short-circuits to would-block regardless of baseline
+   strength, so an attacker cannot downgrade a genuine failure to *uncertain* by keeping
+   the repo's baseline cold. Cold-baseline regressions read *uncertain* (non-green), never
+   silent and never a fabricated green admit.

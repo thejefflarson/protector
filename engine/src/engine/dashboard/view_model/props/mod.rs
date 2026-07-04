@@ -820,5 +820,6 @@ pub struct AdmissionViewProps {
 mod signing;
 pub use signing::{
     ProvenanceChangeProps, ProvenancePosture, ProvenanceProps, RegressionKind, RepoStrength,
-    SignerProps, SigningPosture, SigningRegressionProps, SigningRepoProps, SigningRowProps,
+    SignerProps, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
+    SigningRowProps,
 };

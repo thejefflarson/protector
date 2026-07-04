@@ -910,13 +910,15 @@ summary:focus-visible,
 .enforced-admit { color: var(--cov-present); }
 .enforced-deny { color: var(--posture-breach); }
 .enforced-block { color: var(--posture-breach); }
+/* JEF-297: a cold-baseline signing regression — non-green, but a weak lead, never a hard block. */
+.enforced-uncertain { color: var(--posture-uncertain); }
 
 /* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture as ONE
    aligned table for the whole inventory (so the machine columns line up across every repo),
    grouped under repo group-header rows and expandable exactly like the Findings table (reusing the
    .row / .cell / .row-detail / .expander / .detail mechanics). Posture is always signed / invalid
    signature / not signed (or the transient checking) — never n/a; the "if enforced" cell is always
-   the binary would-admit / would-block. ---- */
+   a definite continuity verdict — would-admit / would-block / uncertain (JEF-297). ---- */
 .view > .signing-inventory { margin-bottom: var(--section-gap); }
 
 /* a repo group-header row spanning the table: the repo stays visible without breaking the

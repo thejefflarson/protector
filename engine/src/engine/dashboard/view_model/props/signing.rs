@@ -5,9 +5,13 @@
 //!
 //! Two hard operator rules for the inventory: the posture is ALWAYS one of the honest resting
 //! states — keyless-verified / signed-key-based / unverifiable-here / invalid / not-signed (or the
-//! transient checking) — never n/a; and the "if enforced" column is ALWAYS the
-//! binary would-admit / would-block — never n/a. Every string here is UNTRUSTED at render (a Fulcio
-//! SAN / image ref is attacker-influenceable): the components escape it (maud auto-escape; NEVER
+//! transient checking) — never n/a; and the "if enforced" column is ALWAYS a definite
+//! continuity verdict — would-admit / would-block / uncertain — never n/a. That verdict is
+//! baseline-relative continuity (JEF-297, ADR-0020), NOT the raw posture: a calm, consistent
+//! posture admits, only a genuine REGRESSION against the repo's established baseline blocks, and a
+//! regression against a cold/freshly-learned baseline reads UNCERTAIN (non-green, never a hard
+//! block). See [`SigningEnforcement`]. Every string here is UNTRUSTED at render (a Fulcio SAN /
+//! image ref is attacker-influenceable): the components escape it (maud auto-escape; NEVER
 //! `PreEscaped`). Split out of the parent `props` module to keep both files under the repo's
 //! 1,000-line cap (CLAUDE.md); re-exported flat, so `props::SigningPosture` etc. resolve unchanged.
 
@@ -91,13 +95,98 @@ impl SigningPosture {
         }
     }
 
-    /// The binary "if enforced" counterfactual: only a keyless-verified [`Signed`](Self::Signed)
-    /// image (a known, trusted identity) would be admitted by a signature-identity gate; every other
-    /// posture — key-based (opaque signer), unverifiable, invalid, not signed, or the transient —
-    /// would be blocked. Fail-closed — never n/a (operator rule #2). A key-based signature is
-    /// genuinely signed but carries no identity the gate can vouch for, so it too would-block.
-    pub fn would_admit(self) -> bool {
-        matches!(self, SigningPosture::Signed)
+    /// Whether this posture is the RESERVED loud channel: a signature artifact that GENUINELY fails
+    /// to verify (tampered payload / a Fulcio cert whose Rekor inclusion does not hold). Distinct
+    /// from every calm state. A genuinely-broken signature is never admissible independent of any
+    /// baseline, so the continuity verdict blocks it outright (see
+    /// [`SigningEnforcement::for_image`]) — an attacker cannot dodge the would-block by keeping a
+    /// repo's baseline cold.
+    pub fn is_genuinely_invalid(self) -> bool {
+        matches!(self, SigningPosture::Invalid)
+    }
+}
+
+/// The baseline-relative "if enforced" verdict for an image's signing posture (JEF-297, ADR-0020) —
+/// the counterfactual a signature-continuity gate (JEF-265) would apply. It is deliberately NOT the
+/// raw posture: the pre-ADR-0020 single-identity gate (would-admit ⇔ keyless-Fulcio) showed the
+/// entire key-based-signed fleet as would-block, contradicting JEF-276 (key-based is calm) and
+/// ADR-0020 (block on REGRESSION from baseline, not on keyless-ness). The verdict here is the
+/// negation of a REGRESSION: a calm, consistent posture with no drift vs its baseline admits; only a
+/// genuine drift blocks.
+///
+/// Three definite states (never n/a — operator rule #2):
+///   * [`WouldAdmit`](Self::WouldAdmit) — continuous vs the baseline: keyless-verified `Signed`,
+///     consistent key-based / unverifiable-here, or not-signed where the repo was never signed
+///     (TOFU). No regression stands for the image.
+///   * [`WouldBlock`](Self::WouldBlock) — a genuine regression against an ESTABLISHED baseline
+///     (signing downgrade / identity change / signed→unsigned / signed→invalid), OR a genuinely
+///     invalid signature (the loud channel, inadmissible independent of baseline).
+///   * [`Uncertain`](Self::Uncertain) — a regression against a COLD/freshly-learned baseline: a weak
+///     lead (JEF-280 cold=uncertain). Non-green, but NOT a hard block — honours the cold-baseline
+///     honesty invariant (a fresh baseline is the weakest evidence, never enforced as breach).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningEnforcement {
+    /// Continuous vs baseline — a continuity gate would admit. The calm/consistent resting state.
+    WouldAdmit,
+    /// A genuine regression against an established baseline, or a genuinely-invalid signature — a
+    /// continuity gate would block. The loud channel.
+    WouldBlock,
+    /// A regression against a cold/freshly-learned baseline — a weak lead: non-green, not a block.
+    Uncertain,
+}
+
+impl SigningEnforcement {
+    /// The continuity verdict for one image, given its posture and whether a signing-regression
+    /// stands for that image (and, when it does, whether the regressed baseline was `established`).
+    ///
+    /// The drift verdict is the SINGLE source of truth: it is the SAME recorded
+    /// [`SigningDrift::Regression`](crate::engine::signing_drift::SigningDrift) the sweep (JEF-264 /
+    /// JEF-280) classified via [`classify`](crate::engine::signing_drift::classify) and a continuity
+    /// gate (JEF-265) would enforce — the view never re-derives it, so the "if enforced" column can
+    /// never disagree with what enforcement actually blocks (`block == regression`).
+    ///
+    /// `regression`: `Some(established)` when a signing-regression stands for the image (`true` ⇒ an
+    /// established baseline, `false` ⇒ cold); `None` when the image is continuous. A genuinely
+    /// [`invalid`](SigningPosture::is_genuinely_invalid) posture blocks outright regardless — a
+    /// broken signature is never admissible, and short-circuiting it keeps an attacker from evading
+    /// the would-block by keeping the repo's baseline cold.
+    pub fn for_image(posture: SigningPosture, regression: Option<bool>) -> SigningEnforcement {
+        if posture.is_genuinely_invalid() {
+            return SigningEnforcement::WouldBlock;
+        }
+        match regression {
+            Some(true) => SigningEnforcement::WouldBlock,
+            Some(false) => SigningEnforcement::Uncertain,
+            None => SigningEnforcement::WouldAdmit,
+        }
+    }
+
+    /// The CSS token suffix (`--enforced-{token}`) + the fixed low-cardinality word for this verdict.
+    /// Both are constant strings, never untrusted text.
+    pub fn token(self) -> &'static str {
+        match self {
+            SigningEnforcement::WouldAdmit => "admit",
+            SigningEnforcement::WouldBlock => "block",
+            SigningEnforcement::Uncertain => "uncertain",
+        }
+    }
+
+    /// The word shown alongside colour + glyph, lexically distinct per verdict.
+    pub fn word(self) -> &'static str {
+        match self {
+            SigningEnforcement::WouldAdmit => "would admit",
+            SigningEnforcement::WouldBlock => "would block",
+            SigningEnforcement::Uncertain => "uncertain",
+        }
+    }
+
+    /// The glyph carrying the verdict without colour — each distinct so meaning survives greyscale.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SigningEnforcement::WouldAdmit => "\u{2713}", // ✓ admit
+            SigningEnforcement::WouldBlock => "\u{2715}", // ✕ block — the loud channel
+            SigningEnforcement::Uncertain => "\u{25D0}",  // ◐ half — weak lead, non-green
+        }
     }
 }
 
@@ -238,6 +327,10 @@ pub struct SigningRowProps {
     /// The human-facing posture prose for the expand panel (why invalid / still checking); empty
     /// for a plain not-signed, which needs no prose. Untrusted.
     pub detail: String,
+    /// The baseline-relative "if enforced" continuity verdict for this image (JEF-297) — would-admit
+    /// / would-block / uncertain, derived from whether a signing-regression stands for this image,
+    /// NOT from the raw posture. See [`SigningEnforcement`].
+    pub enforcement: SigningEnforcement,
     /// How many times this exact image was observed (the dedup count).
     pub count: u64,
 }

@@ -9,8 +9,13 @@
 //! into its repo + digest/tag, and groups the images under their repo. It NEVER changes how the
 //! posture is produced (the producer is JEF-261's sweep); it only shapes it for rendering. Two hard
 //! operator rules are encoded here: the posture is always one of the four states — never n/a — and
-//! the "if enforced" binary is derived from the posture (only a verifying signature would admit).
-//! Data layer: touches `engine::`; the components never do.
+//! the "if enforced" column is always a definite continuity verdict — would-admit / would-block /
+//! uncertain (JEF-297). That verdict is baseline-relative CONTINUITY (ADR-0020), not the raw
+//! posture: a calm, consistent posture admits, only a genuine regression against the repo's
+//! established baseline blocks, and a cold-baseline regression reads uncertain. The regression is
+//! read from the SAME `SigningRegression/<repo>` rows the sweep recorded (JEF-264/280) — the single
+//! source of truth a continuity gate (JEF-265) enforces, so the column can never disagree with what
+//! enforcement blocks. Data layer: touches `engine::`; the components never do.
 
 use std::collections::HashMap;
 
@@ -18,7 +23,8 @@ use crate::engine::policy_log::PolicyDecisionRecord;
 
 use super::props::{
     ProvenanceChangeProps, ProvenancePosture, ProvenanceProps, RegressionKind, RepoStrength,
-    SignerProps, SigningPosture, SigningRegressionProps, SigningRepoProps, SigningRowProps,
+    SignerProps, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
+    SigningRowProps,
 };
 
 /// The DOM-id prefix for an image summary/detail row (`si-<slug>-<hash>`).
@@ -289,10 +295,12 @@ fn group_rank(g: &SigningRepoProps) -> u8 {
 }
 
 /// Project one observation record into its inventory row. The posture always resolves to one of the
-/// four states (never n/a); the signer is attached only for a verifying signature.
+/// four states (never n/a); the signer is attached only for a verifying signature; the "if enforced"
+/// continuity verdict is derived from `regressing` (JEF-297), not the raw posture.
 fn signing_row(
     r: &PolicyDecisionRecord,
     provenance: &HashMap<String, (ProvenancePosture, Option<ProvenanceProps>)>,
+    regressing: &HashMap<String, bool>,
 ) -> SigningRowProps {
     let posture = SigningPosture::parse(&r.signature);
     let (_, remainder) = split_ref(&r.image);
@@ -307,6 +315,10 @@ fn signing_row(
         .get(&r.image)
         .cloned()
         .unwrap_or((ProvenancePosture::Absent, None));
+    // The baseline-relative continuity verdict (JEF-297): a standing signing-regression for THIS
+    // image (`Some(established)`) drives would-block (established) / uncertain (cold); no regression
+    // is continuous (would-admit). A genuinely-invalid posture blocks outright (the loud channel).
+    let enforcement = SigningEnforcement::for_image(posture, regressing.get(&r.image).copied());
     SigningRowProps {
         dom_id: signing_dom_id(IMAGE_ID_PREFIX, &r.image),
         image: r.image.clone(),
@@ -320,8 +332,39 @@ fn signing_row(
         provenance: provenance_posture,
         provenance_info,
         detail: r.reason.clone(),
+        enforcement,
         count: r.count,
     }
+}
+
+/// The per-IMAGE signing-regression lookup (JEF-297): image ref → whether the regressed baseline was
+/// `established` (`true`) or cold (`false`). Read from the SAME `SigningRegression/<repo>` rows the
+/// sweep recorded (JEF-264/280) — the recorded drift verdict a continuity gate (JEF-265) enforces —
+/// so the "if enforced" column can never disagree with what enforcement blocks.
+///
+/// Unlike [`regressions_by_repo`] (one banner per repo), this keys per image: the sweep records one
+/// regression row per regressing image, so every downgraded/regressed digest under a repo gets its
+/// own would-block, while the repo's calm/continuous images still admit. Newest-first order wins
+/// (the caller passes newest-first rows), matching the banner. The strength is parsed from the
+/// self-describing `regression-<kind>-<strength>` token exactly as [`parse_regression`] does.
+fn regressing_images(rows: &[PolicyDecisionRecord]) -> HashMap<String, bool> {
+    let mut out: HashMap<String, bool> = HashMap::new();
+    for r in rows.iter().filter(|r| is_regression_row(r)) {
+        let Some(token) = r.signature.strip_prefix(REGRESSION_STATUS_PREFIX) else {
+            continue;
+        };
+        let Some((_, strength)) = token.rsplit_once('-') else {
+            continue;
+        };
+        let established = match strength {
+            "established" => true,
+            "cold" => false,
+            _ => continue,
+        };
+        // Newest-first: the first (newest) regression for an image wins its verdict.
+        out.entry(r.image.clone()).or_insert(established);
+    }
+    out
 }
 
 /// Parse a provenance-change row (`ProvenanceChange/<repo>`, JEF-275) into `(repo, props)`, or `None`
@@ -487,10 +530,11 @@ fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength
 /// are ignored — they drive the decision log, not the inventory.
 pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
     let provenance = provenance_by_image(rows);
+    let regressing = regressing_images(rows);
     let mut groups: Vec<SigningRepoProps> = Vec::new();
     for record in rows.iter().filter(|r| is_observation_row(r)) {
         let (repo, _) = split_ref(&record.image);
-        let row = signing_row(record, &provenance);
+        let row = signing_row(record, &provenance, &regressing);
         match groups.iter_mut().find(|g| g.repo == repo) {
             Some(group) => group.images.push(row),
             None => groups.push(SigningRepoProps {
@@ -549,3 +593,6 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod enforcement_tests;
