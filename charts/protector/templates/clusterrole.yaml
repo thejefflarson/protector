@@ -48,9 +48,27 @@ rules:
   # additive, reversible objects to quarantine/sever a corroborated attack path. The
   # networkpolicy actuator (the default) writes NetworkPolicies; the adminnetworkpolicy
   # actuator (Cilium/Calico) additionally writes AdminNetworkPolicies (ADR-0007/0010).
+  #
+  # NetworkPolicy is a NAMESPACED resource and the engine only writes cuts inside
+  # `enforceScope` (ActuationScope::in_scope). When the scope is purely NAMESPACE-based
+  # (no pod labels) the create/delete/patch grant is rendered instead as a per-namespace
+  # Role + RoleBinding in each enforced namespace (see role.yaml) — least privilege, RBAC
+  # matching the actuation reach — and is NOT granted cluster-wide here (JEF-277).
+  #
+  # The cluster-wide NetworkPolicy write grant below is kept ONLY when the scope includes
+  # POD LABELS. A label-matched Pod can live in ANY namespace
+  # (ActuationScope::endpoint_in_scope is "namespace listed OR label matched"), so the
+  # engine may need to write a cut in a namespace not known at render time. A label-bearing
+  # scope therefore can't be pre-narrowed to a fixed namespace list and retains the
+  # cluster-wide grant.
+  {{- if gt (len (keys .Values.enforceScope.labels)) 0 }}
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "patch"]
+  {{- end }}
+  # AdminNetworkPolicy is a CLUSTER-scoped resource (ADR-0007), so the adminnetworkpolicy
+  # actuator's write grant is inherently cluster-wide and stays here even for a
+  # namespace-only scope.
   {{- if eq .Values.engine.actuator "adminnetworkpolicy" }}
   - apiGroups: ["policy.networking.k8s.io"]
     resources: ["adminnetworkpolicies"]

@@ -99,6 +99,52 @@ jobs:
                --set mode=enforce >/dev/null 2>&1; then
             echo "mode: enforce with empty enforceScope was not refused"; exit 1
           fi
+      - name: "Assert namespace-scoped enforce tightens NetworkPolicy write to per-namespace Roles (JEF-277)"
+        run: |
+          # JEF-277: NetworkPolicy is namespaced and the engine only writes cuts inside
+          # enforceScope. A NAMESPACE-only enforceScope must derive a per-namespace
+          # Role+RoleBinding for networkpolicies create/delete/patch in EACH listed namespace,
+          # and must NOT grant the cluster-wide networkpolicies write on the ClusterRole.
+          render=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.namespaces={payments,checkout}')
+          # A namespaced Role scoped to each enforced namespace, with the write verbs.
+          for ns in payments checkout; do
+            echo "$render" | grep -qE "^  namespace: $ns$" \
+              || { echo "no per-namespace RBAC object for $ns"; exit 1; }
+          done
+          echo "$render" | awk '/^kind: Role$/,/subjects:/' \
+            | grep -q 'create' \
+            || { echo "per-namespace Role missing networkpolicies write verbs"; exit 1; }
+          echo "$render" | grep -q '^kind: RoleBinding$' \
+            || { echo "per-namespace RoleBinding not rendered"; exit 1; }
+          # The cluster-wide networkpolicies WRITE grant must be gone for a namespace-only
+          # scope (the ClusterRole keeps only the read grant get/list/watch).
+          cr=$(echo "$render" | awk '/^kind: ClusterRole$/,/^kind: ClusterRoleBinding$/' \
+            | grep -vE '^\s*#')
+          if echo "$cr" | grep -A3 'resources: ."networkpolicies".' | grep -q 'create'; then
+            echo "cluster-wide NetworkPolicy write grant not removed for namespace-only scope"; exit 1
+          fi
+          # LABEL-bearing scope keeps the cluster-wide grant (a label-matched Pod can live in
+          # any namespace, so it can't be pre-narrowed) and renders NO per-namespace Role.
+          lbl=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.labels.tier=prod')
+          echo "$lbl" | grep -A3 'resources: ."networkpolicies".' | grep -q 'create' \
+            || { echo "label-only scope dropped the cluster-wide NetworkPolicy write grant"; exit 1; }
+          if echo "$lbl" | grep -q '^kind: Role$'; then
+            echo "label-only scope rendered a per-namespace Role (should keep ClusterRole)"; exit 1
+          fi
+          # AdminNetworkPolicy is cluster-scoped (ADR-0007): its write grant stays on the
+          # ClusterRole even for a namespace-only scope.
+          anp=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.namespaces={payments}' \
+            --set engine.actuator=adminnetworkpolicy)
+          echo "$anp" | grep -A3 'resources: ."adminnetworkpolicies".' | grep -q 'create' \
+            || { echo "adminnetworkpolicy actuator lost its cluster-wide ANP write grant"; exit 1; }
+          # audit (default) still grants NO NetworkPolicy write anywhere and renders no Role.
+          audit=$(helm template protector charts/protector --namespace protector)
+          if echo "$audit" | grep -q '^kind: Role$'; then
+            echo "audit default leaked a per-namespace Role"; exit 1
+          fi
       - name: Assert ingest auth Secret mounts on engine AND agent
         run: |
           render=$(helm template protector charts/protector --namespace protector \

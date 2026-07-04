@@ -1,0 +1,57 @@
+{{- if and .Values.engine.enabled .Values.serviceAccount.create }}
+{{- if eq .Values.mode "enforce" }}
+{{- $nsScoped := gt (len .Values.enforceScope.namespaces) 0 }}
+{{- $labelScoped := gt (len (keys .Values.enforceScope.labels)) 0 }}
+{{- /*
+  JEF-277 — least-privilege NetworkPolicy write grant.
+
+  NetworkPolicy is a NAMESPACED resource, and under `mode: enforce` the engine only
+  writes its reversible cuts inside `enforceScope` (ActuationScope::in_scope: every cut
+  endpoint must be in scope). When the scope is defined purely by NAMESPACE (no pod
+  labels) the enforced namespaces are known at render time, so instead of the cluster-wide
+  ClusterRole grant (clusterrole.yaml) we render a per-namespace Role + RoleBinding for
+  `networkpolicies` create/delete/patch in each enforced namespace — the RBAC then matches
+  the actuation reach exactly.
+
+  The cluster-wide grant is retained ONLY when the scope includes pod LABELS, because a
+  label-matched Pod can live in any namespace (endpoint_in_scope is "namespace listed OR
+  label matched"), which can't be pre-narrowed to a fixed namespace list — see
+  clusterrole.yaml. So these per-namespace Roles render only for the pure-namespace case.
+*/}}
+{{- if and $nsScoped (not $labelScoped) }}
+{{- range $ns := .Values.enforceScope.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "protector.fullname" $ }}-engine-netpol
+  namespace: {{ $ns }}
+  labels:
+    {{- include "protector.labels" $ | nindent 4 }}
+rules:
+  # The network actuator creates/deletes its own (managed-by: protector) additive,
+  # reversible NetworkPolicies to quarantine/sever a corroborated attack path in this
+  # enforced namespace (ADR-0010). Scoped to exactly this namespace (JEF-277).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "protector.fullname" $ }}-engine-netpol
+  namespace: {{ $ns }}
+  labels:
+    {{- include "protector.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "protector.fullname" $ }}-engine-netpol
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "protector.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
