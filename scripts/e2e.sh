@@ -119,14 +119,23 @@ pf_reset() {
 }
 
 # --- predicates ---------------------------------------------------------------
-# The engine has proven at least one attack chain this run. The engine has no read API
-# (its output state is in-memory; a presentation layer is being redesigned), so we observe
-# the "proven chains" log line — the synchronization signal that a chain is now provable
-# before we assert what shadow/hard mode did about it (the actuation assertions below read
-# the cluster's NetworkPolicy state, which is the authoritative behavioral check).
+# The engine has proven the web→session-key attack chain this run. The engine has no read API
+# (its output state is in-memory; a presentation layer is being redesigned), so we observe the
+# per-chain proof log line — the synchronization signal that this chain is now provable — before
+# we assert what shadow/hard mode did about it (the actuation assertions below read the cluster's
+# NetworkPolicy state, which is the authoritative behavioral check).
+#
+# JEF-300: grep the FULL log (no --tail) for the SPECIFIC chain, not `--tail=400 | grep 'proven
+# chains'`. The engine emits the "proven chains" summary once per structural pass, then FLOODS the
+# stream (one `proven chain` line per chain + per-pass behavior batches + the signing sweep), so
+# the single summary line scrolls out of a 400-line tail long before we poll — the assertion timed
+# out even though the chain proved minutes earlier (the timeout was a red herring). Matching the
+# exact `proven chain entry=…/web objective=…/session-key` line on the whole log is both
+# window-proof (grep -q short-circuits on first match) and a stronger assertion: it proves THE
+# chain, not merely that some pass ran.
 chains_proven() {
-  kubectl -n "$NS" logs deploy/protector --tail=400 2>/dev/null \
-    | grep -q 'proven chains'
+  kubectl -n "$NS" logs deploy/protector 2>/dev/null \
+    | grep -qE 'proven chain .*entry=workload/app/Pod/web .*objective=secret/app/session-key'
 }
 
 post_falco() {
