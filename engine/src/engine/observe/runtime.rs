@@ -184,10 +184,12 @@ async fn ingest_behavior(
 /// Upper bound on observations accepted per `/behavior` batch. Each `record()` is an
 /// O(n) scan over up to `MAX_EVENTS` entries while the store mutex is held, so an
 /// oversized batch would do O(batch x MAX_EVENTS) work under the lock — a cheap DoS
-/// (Fix 7). The agent reports in small batches, so this never truncates a legitimate
-/// report; anything past the cap is dropped (the body cap already bounds bytes, this
-/// bounds work-under-lock).
-const MAX_BATCH: usize = 256;
+/// (Fix 7). Sized to match the audit sibling's `MAX_EVENTS_PER_BODY` (1024): under real
+/// cluster load the agent legitimately posts batches of ~512 (the old 256 cap was
+/// silently truncating them and dropping live runtime signals — a corroboration blind
+/// spot), so 1024 gives ~2x headroom while still bounding work-under-lock for an abusive
+/// batch (the 256KB body cap + per-peer rate limit are the other two bounds).
+const MAX_BATCH: usize = 1024;
 
 /// Record at most [`MAX_BATCH`] observations from one batch, returning whether the
 /// store changed (so the caller wakes the engine only on a real change). Split out and
