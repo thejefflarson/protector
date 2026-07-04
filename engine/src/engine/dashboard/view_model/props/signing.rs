@@ -101,6 +101,96 @@ impl SigningPosture {
     }
 }
 
+/// An image's observed build-provenance posture (JEF-275 / ADR-0020 §5) — the presentation mirror of
+/// the domain `signature::provenance::ProvenancePosture` (mapped at the view_model boundary so
+/// components never import the domain type). NEVER n/a: observation always reaches a posture, and a
+/// registry blip is the explicit transient [`Checking`](Self::Checking), not a fabricated clean.
+/// Carried as colour + glyph + word so meaning never rides on colour alone.
+///
+/// SECURITY: only [`Verified`](Self::Verified) confers a trusted build. [`Absent`](Self::Absent) —
+/// the common case today — is calm (like a not-signed image), NEVER an alarm, but never a trusted
+/// build either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenancePosture {
+    /// A SLSA build-provenance attestation verified against Fulcio + Rekor and yielded a builder
+    /// identity (which rides [`SigningRowProps::provenance_info`]). The one trusted-build posture.
+    Verified,
+    /// A provenance attestation is present but could not be verified against our trust root, or
+    /// verified but carried no builder identity. Honest "present, not trusted here" — never trusted.
+    Unverifiable,
+    /// No provenance attestation at all — the common case today. Calm, never an alarm, but never a
+    /// trusted build either.
+    Absent,
+    /// Transient: the registry / transparency log was unreachable, so the posture is not yet known.
+    /// Never read as clean; resolves into a resting posture on a later pass.
+    Checking,
+}
+
+impl ProvenancePosture {
+    /// Parse the engine's low-cardinality status word (`ProvenancePosture::status()`). An unknown /
+    /// empty word reads as the transient [`Checking`](Self::Checking) rather than a fabricated
+    /// resting posture — never a false "no provenance", never a false "verified".
+    pub fn parse(word: &str) -> ProvenancePosture {
+        match word {
+            "provenance-verified" => ProvenancePosture::Verified,
+            "provenance-unverifiable" => ProvenancePosture::Unverifiable,
+            "no-provenance" => ProvenancePosture::Absent,
+            _ => ProvenancePosture::Checking,
+        }
+    }
+
+    /// The CSS token suffix (`--prov-{kind}`) + `data-provenance` value (fixed, never untrusted).
+    pub fn token(self) -> &'static str {
+        match self {
+            ProvenancePosture::Verified => "verified",
+            ProvenancePosture::Unverifiable => "unverifiable",
+            ProvenancePosture::Absent => "absent",
+            ProvenancePosture::Checking => "checking",
+        }
+    }
+
+    /// The glyph carrying the posture without colour.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            ProvenancePosture::Verified => "\u{2713}", // ✓ verified build
+            ProvenancePosture::Unverifiable => "\u{25D0}", // ◐ present, not trusted here
+            ProvenancePosture::Absent => "\u{25CB}",   // ○ open — none, calm
+            ProvenancePosture::Checking => "\u{25CC}", // ◌ dotted — transient
+        }
+    }
+
+    /// The word — always present alongside colour + glyph, lexically distinct per state.
+    pub fn word(self) -> &'static str {
+        match self {
+            ProvenancePosture::Verified => "provenance",
+            ProvenancePosture::Unverifiable => "unverifiable",
+            ProvenancePosture::Absent => "no provenance",
+            ProvenancePosture::Checking => "checking\u{2026}",
+        }
+    }
+
+    /// Whether this posture confers a trusted build (only [`Verified`](Self::Verified)). The honesty
+    /// side: absent / unverifiable / checking never read as a trusted build.
+    pub fn is_verified(self) -> bool {
+        matches!(self, ProvenancePosture::Verified)
+    }
+}
+
+/// The build provenance learned from a VERIFIED SLSA attestation (only present when
+/// [`ProvenancePosture::Verified`]). Both fields are UNTRUSTED predicate text — the component escapes
+/// them at render (maud auto-escape; NEVER `PreEscaped`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceProps {
+    /// A short, scannable source-repo label (`org/repo` from `github.com/org/repo`), shown in-row.
+    pub source_short: String,
+    /// The full source repo, shown in the expand panel + `title=`.
+    pub source_full: String,
+    /// A short builder label (`org/repo` from a GitHub Actions workflow URI), shown in-row.
+    pub builder_short: String,
+    /// The full builder identity (SLSA `builder.id`), shown in the expand panel + `title=`.
+    pub builder_full: String,
+}
+
 /// The signer learned from a verified Fulcio cert (only present when [`SigningPosture::Signed`]).
 /// Both the identity and issuer are UNTRUSTED third-party free-text (an attacker-influenceable cert
 /// subject) — the component escapes them at render (maud auto-escape; NEVER `PreEscaped`).
@@ -139,6 +229,12 @@ pub struct SigningRowProps {
     pub posture: SigningPosture,
     /// The signer, present only when [`posture`](Self::posture) is [`SigningPosture::Signed`].
     pub signer: Option<SignerProps>,
+    /// The observed build-provenance posture (JEF-275) — the second continuity axis, rendered as its
+    /// own column. [`ProvenancePosture::Absent`] (the common case today) renders calm, never n/a.
+    pub provenance: ProvenancePosture,
+    /// The verified build provenance (source + builder), present only when
+    /// [`provenance`](Self::provenance) is [`ProvenancePosture::Verified`]. UNTRUSTED — escaped.
+    pub provenance_info: Option<ProvenanceProps>,
     /// The human-facing posture prose for the expand panel (why invalid / still checking); empty
     /// for a plain not-signed, which needs no prose. Untrusted.
     pub detail: String,
@@ -219,9 +315,38 @@ pub struct SigningRepoProps {
     /// A standing signing regression against this repo's baseline (JEF-264), rendered as the LOUD
     /// channel above the image rows; `None` when the repo is continuous.
     pub regression: Option<SigningRegressionProps>,
+    /// A standing build-provenance change against this repo's provenance baseline (JEF-275), rendered
+    /// as the LOUD channel above the image rows (distinct from a signing regression — a repo can have
+    /// both); `None` when the repo's provenance is continuous.
+    pub provenance_change: Option<ProvenanceChangeProps>,
     /// The strength of this repo's baseline (JEF-266): log-corroborated vs local-only, rendered as
     /// a small header badge. [`RepoStrength::Unknown`] when no baseline strength was observed.
     pub strength: RepoStrength,
+}
+
+/// A standing build-provenance change banner for a repo group (JEF-275, ADR-0020 §5): the repo's
+/// established provenance identity drifted — an image was built by an unexpected builder or from an
+/// unexpected source. Audit-only (the image is still admitted); rendered as the LOUD channel with the
+/// FULL before→after builder identities.
+///
+/// Every builder/source string is UNTRUSTED predicate text — the component escapes it via maud
+/// interpolation (NEVER `PreEscaped`, never a `class=`/CSS value). The full identities are shown
+/// deliberately: the point is to show the operator EXACTLY what changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceChangeProps {
+    /// A stable, collision-free DOM/fragment id (a distinct prefix from image + signing-regression
+    /// rows). `[a-z0-9-]` only — safe as an `id`/`data-*`/`aria-controls` value.
+    pub dom_id: String,
+    /// Whether the baseline was established (a strong signal) or cold/freshly-learned (a weak lead).
+    pub established: bool,
+    /// The baseline builder identities in FULL (the "before"), UNTRUSTED — escaped at render.
+    pub before_builders: Vec<String>,
+    /// The new (deviating) builder identity in FULL (the "after"), UNTRUSTED — escaped at render.
+    pub after_builder: String,
+    /// The new (deviating) source repo in FULL (the "after"), UNTRUSTED — escaped at render.
+    pub after_source: String,
+    /// The image ref that drifted (the "after" image), UNTRUSTED — escaped at render.
+    pub image: String,
 }
 
 /// Which kind of signing regression a repo drifted into (JEF-264) — the presentation mirror of the

@@ -20,6 +20,8 @@ fn baseline(identities: &[&str], established: bool) -> SigningBaseline {
         established,
         log_corroborated: false,
         rank: PostureRank::Keyless,
+        provenance_sources: BTreeSet::new(),
+        provenance_builders: BTreeSet::new(),
         last_updated_ms: 0,
     }
 }

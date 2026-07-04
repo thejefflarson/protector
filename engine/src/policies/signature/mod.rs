@@ -11,6 +11,7 @@
 
 mod cosign;
 pub mod posture;
+pub mod provenance;
 pub mod rekor;
 
 #[cfg(test)]
@@ -31,6 +32,9 @@ use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 pub use cosign::CosignChecker;
 pub use posture::{
     PostureMap, PostureRank, SignatureObserver, Signer, SigningObserver, SigningPosture,
+};
+pub use provenance::{
+    Provenance, ProvenanceMap, ProvenanceObserver, ProvenancePosture, ProvenanceScanner,
 };
 pub use rekor::{HttpRekorClient, RekorClient, RekorConfig, RekorHistory, RekorLane};
 

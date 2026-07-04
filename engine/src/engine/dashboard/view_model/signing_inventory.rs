@@ -12,11 +12,13 @@
 //! the "if enforced" binary is derived from the posture (only a verifying signature would admit).
 //! Data layer: touches `engine::`; the components never do.
 
+use std::collections::HashMap;
+
 use crate::engine::policy_log::PolicyDecisionRecord;
 
 use super::props::{
-    RegressionKind, RepoStrength, SignerProps, SigningPosture, SigningRegressionProps,
-    SigningRepoProps, SigningRowProps,
+    ProvenanceChangeProps, ProvenancePosture, ProvenanceProps, RegressionKind, RepoStrength,
+    SignerProps, SigningPosture, SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
 
 /// The DOM-id prefix for an image summary/detail row (`si-<slug>-<hash>`).
@@ -25,6 +27,10 @@ const IMAGE_ID_PREFIX: &str = "si";
 /// prefix from images guarantees a bare image ref that equals its repo can never collide with the
 /// repo's regression row.
 const REGRESSION_ID_PREFIX: &str = "sr";
+/// The DOM-id prefix for a provenance-change summary/detail row (`pc-<slug>-<hash>`, JEF-275) — a
+/// distinct namespace from image + signing-regression rows so a repo carrying both a signing
+/// regression and a provenance change never shares an id.
+const PROVENANCE_CHANGE_ID_PREFIX: &str = "pc";
 
 /// The subject prefix the signing sweep keys its posture rows under (`Image/<ref>`). A row whose
 /// subject starts with this is an observation row for the inventory, distinct from the webhook's
@@ -41,6 +47,20 @@ const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
 /// webhook decision), partitioned out of the tallies and feeding the repo group's strength badge.
 const STRENGTH_SUBJECT_PREFIX: &str = "SigningStrength/";
 
+/// The subject prefix the provenance sweep keys a per-image provenance observation under
+/// (`Provenance/<ref>`, JEF-275). A signing-inventory row (not a webhook decision), partitioned out
+/// of the decision tallies and joined onto its image row as the provenance column.
+const PROVENANCE_SUBJECT_PREFIX: &str = "Provenance/";
+
+/// The subject prefix the provenance sweep keys a provenance-**change** finding under
+/// (`ProvenanceChange/<repo>`, JEF-275) — one row per repo, feeding the repo group's provenance-change
+/// banner. A signing row, partitioned out of the tallies.
+const PROVENANCE_CHANGE_SUBJECT_PREFIX: &str = "ProvenanceChange/";
+
+/// The signature-column prefix marking a provenance-change row's drift token
+/// (`provenance-change-<strength>`), written by `engine::provenance_sweep::change_record`.
+const PROVENANCE_CHANGE_STATUS_PREFIX: &str = "provenance-change-";
+
 /// The signature-column prefix marking a regression row's drift token (`regression-<kind>-
 /// <strength>`), written by `engine::signing_sweep::regression_record`.
 const REGRESSION_STATUS_PREFIX: &str = "regression-";
@@ -53,7 +73,21 @@ const BEFORE_SEP: &str = " | before: ";
 /// regression finding (`SigningRegression/<repo>`) — as opposed to a webhook workload decision.
 /// Both are partitioned out of the Admission view's decision tallies.
 pub(super) fn is_inventory_row(r: &PolicyDecisionRecord) -> bool {
-    is_observation_row(r) || is_regression_row(r) || is_strength_row(r)
+    is_observation_row(r)
+        || is_regression_row(r)
+        || is_strength_row(r)
+        || is_provenance_row(r)
+        || is_provenance_change_row(r)
+}
+
+/// Whether a record is a per-image provenance observation row (`Provenance/<ref>`, JEF-275).
+fn is_provenance_row(r: &PolicyDecisionRecord) -> bool {
+    r.subject.starts_with(PROVENANCE_SUBJECT_PREFIX)
+}
+
+/// Whether a record is a provenance-change finding row (`ProvenanceChange/<repo>`, JEF-275).
+fn is_provenance_change_row(r: &PolicyDecisionRecord) -> bool {
+    r.subject.starts_with(PROVENANCE_CHANGE_SUBJECT_PREFIX)
 }
 
 /// Whether a record is a per-image posture observation row (`Image/<ref>`).
@@ -148,6 +182,54 @@ fn signer_from_reason(reason: &str) -> Option<SignerProps> {
     })
 }
 
+/// Parse the provenance sweep's posture prose (`built by <builder> from <source>`) into
+/// `(builder, source)`. Returns `None` when the prose isn't a provenance line (a non-verified
+/// posture), so a malformed / unexpected reason never fabricates a provenance. `rsplit` on the LAST
+/// ` from ` so a builder URI containing the token cannot mis-split the source.
+fn parse_provenance_reason(reason: &str) -> Option<(&str, &str)> {
+    let rest = reason.strip_prefix("built by ")?;
+    let (builder, source) = rest.rsplit_once(" from ")?;
+    Some((builder, source))
+}
+
+/// Derive a short, scannable source-repo label. `github.com/org/repo` (and any `host/org/repo`)
+/// collapses to `org/repo`; a shorter path is kept verbatim. The full source is preserved for the
+/// expand panel + `title=`.
+fn short_source(source: &str) -> String {
+    let segments: Vec<&str> = source.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() >= 3 {
+        // host / org / repo[/...] → org/repo
+        format!("{}/{}", segments[1], segments[2])
+    } else {
+        source.to_string()
+    }
+}
+
+/// Build the per-image provenance lookup (JEF-275) from the `Provenance/<ref>` rows: image ref →
+/// (posture, verified source+builder). Reuses `short_identity` for the builder label (a GitHub
+/// Actions workflow URI → `org/repo`) so the provenance column reads like the signer column.
+fn provenance_by_image(
+    rows: &[PolicyDecisionRecord],
+) -> HashMap<String, (ProvenancePosture, Option<ProvenanceProps>)> {
+    let mut out = HashMap::new();
+    for r in rows.iter().filter(|r| is_provenance_row(r)) {
+        let posture = ProvenancePosture::parse(&r.signature);
+        let info = if posture == ProvenancePosture::Verified {
+            parse_provenance_reason(&r.reason).map(|(builder, source)| ProvenanceProps {
+                source_short: short_source(source),
+                source_full: source.to_string(),
+                builder_short: short_identity(builder),
+                builder_full: builder.to_string(),
+            })
+        } else {
+            None
+        };
+        // Newest row wins (the caller passes newest-first): only insert if not already set.
+        out.entry(r.image.clone()).or_insert((posture, info));
+    }
+    out
+}
+
 /// A stable, collision-free DOM/fragment id for a signing row, `<prefix>-<slug>-<hash>` (mirrors
 /// the findings `finding_id`). The slug alone is lossy — distinct keys can slugify alike — so the
 /// short FNV hash of the FULL key is what guarantees two rows never share an `id`/`data-signing`/
@@ -195,7 +277,7 @@ fn posture_rank(p: SigningPosture) -> u8 {
 /// clean repo), otherwise the group ranks by its loudest image posture. An empty group (regression
 /// aged out, no images) with no regression sorts last.
 fn group_rank(g: &SigningRepoProps) -> u8 {
-    if g.regression.is_some() {
+    if g.regression.is_some() || g.provenance_change.is_some() {
         return 0;
     }
     g.images
@@ -208,7 +290,10 @@ fn group_rank(g: &SigningRepoProps) -> u8 {
 
 /// Project one observation record into its inventory row. The posture always resolves to one of the
 /// four states (never n/a); the signer is attached only for a verifying signature.
-fn signing_row(r: &PolicyDecisionRecord) -> SigningRowProps {
+fn signing_row(
+    r: &PolicyDecisionRecord,
+    provenance: &HashMap<String, (ProvenancePosture, Option<ProvenanceProps>)>,
+) -> SigningRowProps {
     let posture = SigningPosture::parse(&r.signature);
     let (_, remainder) = split_ref(&r.image);
     let signer = if posture == SigningPosture::Signed {
@@ -216,6 +301,12 @@ fn signing_row(r: &PolicyDecisionRecord) -> SigningRowProps {
     } else {
         None
     };
+    // Join the provenance axis (JEF-275) onto the image row. Absent when the provenance sweep is off
+    // or observed no provenance for this image — the honest calm default, never n/a.
+    let (provenance_posture, provenance_info) = provenance
+        .get(&r.image)
+        .cloned()
+        .unwrap_or((ProvenancePosture::Absent, None));
     SigningRowProps {
         dom_id: signing_dom_id(IMAGE_ID_PREFIX, &r.image),
         image: r.image.clone(),
@@ -226,9 +317,66 @@ fn signing_row(r: &PolicyDecisionRecord) -> SigningRowProps {
         },
         posture,
         signer,
+        provenance: provenance_posture,
+        provenance_info,
         detail: r.reason.clone(),
         count: r.count,
     }
+}
+
+/// Parse a provenance-change row (`ProvenanceChange/<repo>`, JEF-275) into `(repo, props)`, or `None`
+/// when the row isn't well-formed. Self-describing (the sweep writes the drift token in `signature`
+/// and the before→after prose in `reason`); nothing here reaches the baseline store. Every
+/// builder/source that comes back is UNTRUSTED — escaped at render.
+fn parse_provenance_change(r: &PolicyDecisionRecord) -> Option<(String, ProvenanceChangeProps)> {
+    let repo = r
+        .subject
+        .strip_prefix(PROVENANCE_CHANGE_SUBJECT_PREFIX)?
+        .to_string();
+    // signature = "provenance-change-<strength>" (strength ∈ established/cold).
+    let strength = r.signature.strip_prefix(PROVENANCE_CHANGE_STATUS_PREFIX)?;
+    let established = match strength {
+        "established" => true,
+        "cold" => false,
+        _ => return None,
+    };
+    // reason = "built by <builder> from <source> | before: <b1>, <b2>, …".
+    let (after_clause, before) = r.reason.split_once(BEFORE_SEP).unwrap_or((&r.reason, ""));
+    let (after_builder, after_source) = parse_provenance_reason(after_clause)
+        .map(|(b, s)| (b.to_string(), s.to_string()))
+        .unwrap_or_default();
+    let before_builders: Vec<String> = before
+        .split(", ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some((
+        repo.clone(),
+        ProvenanceChangeProps {
+            dom_id: signing_dom_id(PROVENANCE_CHANGE_ID_PREFIX, &repo),
+            established,
+            before_builders,
+            after_builder,
+            after_source,
+            image: r.image.clone(),
+        },
+    ))
+}
+
+/// The standing provenance changes, one per repo (newest wins), preserving newest-first order.
+fn provenance_changes_by_repo(
+    rows: &[PolicyDecisionRecord],
+) -> Vec<(String, ProvenanceChangeProps)> {
+    let mut out: Vec<(String, ProvenanceChangeProps)> = Vec::new();
+    for record in rows.iter().filter(|r| is_provenance_change_row(r)) {
+        if let Some((repo, props)) = parse_provenance_change(record)
+            && !out.iter().any(|(existing, _)| *existing == repo)
+        {
+            out.push((repo, props));
+        }
+    }
+    out
 }
 
 /// Parse a signing-regression row (`SigningRegression/<repo>`, JEF-264) into `(repo, props)`, or
@@ -338,16 +486,18 @@ fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength
 /// newest-first rows), so a steady inventory renders stably. The webhook's workload decision rows
 /// are ignored — they drive the decision log, not the inventory.
 pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
+    let provenance = provenance_by_image(rows);
     let mut groups: Vec<SigningRepoProps> = Vec::new();
     for record in rows.iter().filter(|r| is_observation_row(r)) {
         let (repo, _) = split_ref(&record.image);
-        let row = signing_row(record);
+        let row = signing_row(record, &provenance);
         match groups.iter_mut().find(|g| g.repo == repo) {
             Some(group) => group.images.push(row),
             None => groups.push(SigningRepoProps {
                 repo: repo.to_string(),
                 images: vec![row],
                 regression: None,
+                provenance_change: None,
                 strength: RepoStrength::Unknown,
             }),
         }
@@ -361,6 +511,21 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
                 repo,
                 images: Vec::new(),
                 regression: Some(regression),
+                provenance_change: None,
+                strength: RepoStrength::Unknown,
+            }),
+        }
+    }
+    // Attach the standing provenance change (JEF-275) to its repo group, creating the group if the
+    // drifted image has aged out of the observation window (the change must still surface loudly).
+    for (repo, change) in provenance_changes_by_repo(rows) {
+        match groups.iter_mut().find(|g| g.repo == repo) {
+            Some(group) => group.provenance_change = Some(change),
+            None => groups.push(SigningRepoProps {
+                repo,
+                images: Vec::new(),
+                regression: None,
+                provenance_change: Some(change),
                 strength: RepoStrength::Unknown,
             }),
         }

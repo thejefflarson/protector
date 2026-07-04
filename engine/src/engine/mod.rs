@@ -969,6 +969,13 @@ pub mod signing_sweep;
 // sweep can surface an audit-only signing-regression finding on drift from the baseline.
 pub mod signing_drift;
 
+// The build-provenance drift classifier + sweep (ADR-0020 §5, JEF-275): the provenance twin of
+// signing_drift/signing_sweep — observes each image's SLSA provenance posture, learns the per-repo
+// provenance identity (TOFU), and surfaces an audit-only provenance-change finding when an
+// established repo is built by an unexpected builder/source. OFF by default — zero extra egress.
+pub mod provenance_drift;
+pub mod provenance_sweep;
+
 // TUF trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5, JEF-280): a stale
 // or starved trust root turns genuine signatures into `UnverifiableHere` and can mass-blind signing
 // detection, so its cache age + a fleet-wide unverifiable spike are surfaced (non-green) in

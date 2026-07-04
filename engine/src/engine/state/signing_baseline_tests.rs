@@ -493,3 +493,102 @@ fn repo_key_folds_tags_digests_and_host_variants() {
     store.observe("postgres:16", &signed(id, None), 4);
     assert!(store.get("postgres").is_some());
 }
+
+// ---- provenance axis (JEF-275) ------------------------------------------------------------
+
+fn verified_provenance(
+    source: &str,
+    builder: &str,
+) -> crate::policies::signature::ProvenancePosture {
+    crate::policies::signature::ProvenancePosture::Verified(
+        crate::policies::signature::Provenance {
+            source_repo: source.to_string(),
+            builder: builder.to_string(),
+        },
+    )
+}
+
+#[test]
+fn provenance_is_augment_only_never_creates_a_baseline() {
+    // A repo with NO signing baseline: verified provenance learns nothing (augment-only).
+    let mut store = SigningBaselineStore::new();
+    let changed = store.observe_provenance(
+        "ghcr.io/new/app:1",
+        &verified_provenance("github.com/new/app", "builder-a"),
+        1_000,
+    );
+    assert!(changed.is_none());
+    assert!(store.get("ghcr.io/new/app").is_none());
+}
+
+#[test]
+fn verified_provenance_augments_an_existing_baseline() {
+    let mut store = SigningBaselineStore::new();
+    store.observe("ghcr.io/org/app:1", &signed("id-a", None), 1_000);
+    let repo = store
+        .observe_provenance(
+            "ghcr.io/org/app:1",
+            &verified_provenance("github.com/org/app", "builder-a"),
+            1_000,
+        )
+        .expect("augmented");
+    assert_eq!(repo, "ghcr.io/org/app");
+    let b = store.get("ghcr.io/org/app").unwrap();
+    assert!(b.has_provenance());
+    assert!(b.provenance_sources.contains("github.com/org/app"));
+    assert!(b.provenance_builders.contains("builder-a"));
+    // Re-observing the same provenance is a no-op (nothing changed).
+    assert!(
+        store
+            .observe_provenance(
+                "ghcr.io/org/app:1",
+                &verified_provenance("github.com/org/app", "builder-a"),
+                2_000,
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn absent_provenance_never_learns() {
+    let mut store = SigningBaselineStore::new();
+    store.observe("ghcr.io/org/app:1", &signed("id-a", None), 1_000);
+    assert!(
+        store
+            .observe_provenance(
+                "ghcr.io/org/app:1",
+                &crate::policies::signature::ProvenancePosture::Absent,
+                1_000,
+            )
+            .is_none()
+    );
+    assert!(!store.get("ghcr.io/org/app").unwrap().has_provenance());
+}
+
+#[test]
+fn provenance_identity_survives_a_restart_round_trip() {
+    let path = temp_path("prov-roundtrip");
+    {
+        let journal = DecisionJournal::open(&path);
+        let mut store = SigningBaselineStore::new();
+        store.observe("ghcr.io/org/app:1", &signed("id-a", None), 1_000);
+        let repo = store
+            .observe_provenance(
+                "ghcr.io/org/app:1",
+                &verified_provenance("github.com/org/app", "builder-a"),
+                1_000,
+            )
+            .expect("augmented");
+        store.persist(&journal, &repo);
+    }
+    let reopened = DecisionJournal::open(&path);
+    let mut restored = SigningBaselineStore::new();
+    restored.restore(&reopened);
+    let b = restored.get("ghcr.io/org/app").expect("restored");
+    assert!(
+        b.provenance_builders.contains("builder-a"),
+        "the learned provenance identity survives a restart"
+    );
+    assert!(b.provenance_sources.contains("github.com/org/app"));
+    cleanup(&path);
+}

@@ -30,6 +30,10 @@ use tokio::sync::OnceCell;
 
 use super::SignatureChecker;
 use super::posture::{SignatureObserver, Signer, SigningPosture};
+use super::provenance::{
+    ProvenanceFacts, ProvenanceObserver, ProvenancePosture, classify_provenance,
+    is_slsa_predicate_type,
+};
 
 /// The production [`SignatureChecker`] / [`SignatureObserver`]: verifies keyless cosign
 /// signatures with sigstore-rs against the public-good sigstore TUF root.
@@ -157,6 +161,22 @@ impl SignatureObserver for CosignChecker {
 }
 
 #[async_trait]
+impl ProvenanceObserver for CosignChecker {
+    async fn observe_provenance(&self, image: &str) -> ProvenancePosture {
+        // Reuse the SAME sanctioned registry/Rekor round trip as signature verification (ADR-0015):
+        // `trusted_signature_layers` already returns any attached in-toto/DSSE attestation layer.
+        // No second verifier, no new egress path. An infra error is the transient "checking" state.
+        match self.fetch_layers(image).await {
+            Ok(layers) => classify_provenance(&provenance_facts(&layers)),
+            Err(err) => {
+                tracing::debug!(%image, error = %err, "build-provenance: registry/Rekor unreachable — checking");
+                ProvenancePosture::Checking
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl SignatureChecker for CosignChecker {
     async fn is_signed(&self, image: &str) -> Result<bool> {
         // Share the ONE registry/Rekor round trip with observation: fetch the layers once,
@@ -257,6 +277,63 @@ pub(super) fn classify_facts(facts: &[LayerFacts]) -> SigningPosture {
     }
 }
 
+/// Project the SLSA build-provenance facts (JEF-275) off fetched layers: one [`ProvenanceFacts`]
+/// per layer whose in-toto predicate type is a SLSA provenance type (a plain signature layer never
+/// produces one). `keyless_verified` mirrors the signing axis — sigstore populates
+/// `certificate_signature` ONLY when the attestation's cert chained to the trusted Fulcio root AND
+/// its Rekor bundle verified, so an attacker-attached, unverifiable attestation comes back with
+/// `keyless_verified: false` (which classifies as [`Unverifiable`](ProvenancePosture::Unverifiable),
+/// never trusted). The predicate is decoded from the layer's DSSE PAE payload (the in-toto
+/// statement), which the classifier reads for the source repo + builder identity.
+pub(super) fn provenance_facts(layers: &[SignatureLayer]) -> Vec<ProvenanceFacts> {
+    layers
+        .iter()
+        .filter(|layer| is_slsa_predicate_type(&layer.simple_signing.critical.type_name))
+        .map(|layer| ProvenanceFacts {
+            predicate_type: layer.simple_signing.critical.type_name.clone(),
+            predicate: predicate_from_pae(&layer.raw_data),
+            keyless_verified: layer.certificate_signature.is_some(),
+        })
+        .collect()
+}
+
+/// Decode the SLSA `predicate` object out of a layer's DSSE PAE-encoded `raw_data`. sigstore stores
+/// the DSSE Pre-Authentication-Encoding (`DSSEv1 <len> <payloadType> <len> <payload>`) in
+/// `raw_data`; the `<payload>` is the in-toto Statement JSON, whose `predicate` field carries the
+/// SLSA provenance. Returns `None` when the PAE is malformed or the payload isn't the expected
+/// in-toto shape — a present-but-opaque attestation (never a fabricated predicate).
+fn predicate_from_pae(raw_data: &[u8]) -> Option<serde_json::Value> {
+    let payload = pae_payload(raw_data)?;
+    let statement: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    statement.get("predicate").cloned()
+}
+
+/// Extract the `<payload>` bytes from a DSSE PAE header
+/// (`DSSEv1 <len(type)> <type> <len(payload)> <payload>`, all lengths ASCII decimal). The type and
+/// payload can themselves contain spaces, so this reads by the declared lengths rather than
+/// splitting on whitespace. Returns `None` on any malformed field.
+fn pae_payload(raw: &[u8]) -> Option<&[u8]> {
+    let rest = raw.strip_prefix(b"DSSEv1 ")?;
+    // <len(type)> up to the next space.
+    let sp = rest.iter().position(|&b| b == b' ')?;
+    let type_len: usize = std::str::from_utf8(&rest[..sp]).ok()?.parse().ok()?;
+    let rest = &rest[sp + 1..];
+    // Skip the type itself (type_len bytes) then a single space.
+    let rest = rest.get(type_len..)?;
+    let rest = rest.strip_prefix(b" ")?;
+    // <len(payload)> up to the next space.
+    let sp = rest.iter().position(|&b| b == b' ')?;
+    let payload_len: usize = std::str::from_utf8(&rest[..sp]).ok()?.parse().ok()?;
+    let payload = rest.get(sp + 1..)?;
+    // The declared length must match exactly what remains — a defensive check against a truncated
+    // or over-long PAE.
+    if payload.len() == payload_len {
+        Some(payload)
+    } else {
+        None
+    }
+}
+
 /// A [`VerificationConstraint`] that admits a signing cert whose SAN identity
 /// matches a (start-anchored) regex and whose OIDC issuer matches exactly.
 /// sigstore-rs ships only an exact-match URL verifier; our identity is a
@@ -279,5 +356,58 @@ impl VerificationConstraint for IdentityVerifier {
             CertificateSubject::Email(_) => false,
         };
         Ok(issuer_ok && identity_ok)
+    }
+}
+
+#[cfg(test)]
+mod provenance_pae_tests {
+    use super::*;
+
+    /// Build a DSSE PAE the way sigstore's `compute_pae` does, so the extractor is tested against
+    /// the exact on-the-wire shape (`DSSEv1 <len> <type> <len> <payload>`).
+    fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "DSSEv1 {} {} {} ",
+            payload_type.len(),
+            payload_type,
+            payload.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn extracts_predicate_from_a_well_formed_pae() {
+        let statement = br#"{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://slsa.dev/provenance/v1","predicate":{"runDetails":{"builder":{"id":"https://github.com/org/app/.github/workflows/x.yml@refs/heads/main"}}}}"#;
+        let raw = pae("application/vnd.in-toto+json", statement);
+        let predicate = predicate_from_pae(&raw).expect("predicate decoded");
+        assert_eq!(
+            predicate.pointer("/runDetails/builder/id").unwrap(),
+            "https://github.com/org/app/.github/workflows/x.yml@refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn payload_with_embedded_spaces_is_read_by_length() {
+        // The in-toto statement JSON can contain spaces; the extractor must read by the declared
+        // length, not split on whitespace.
+        let statement = br#"{ "predicate": { "buildType": "a b c" } }"#;
+        let raw = pae("application/vnd.in-toto+json", statement);
+        let predicate = predicate_from_pae(&raw).expect("predicate decoded");
+        assert_eq!(predicate.pointer("/buildType").unwrap(), "a b c");
+    }
+
+    #[test]
+    fn malformed_pae_yields_none() {
+        assert!(pae_payload(b"not a dsse pae").is_none());
+        assert!(predicate_from_pae(b"garbage").is_none());
+    }
+
+    #[test]
+    fn a_truncated_payload_is_rejected() {
+        // Declared length longer than the actual bytes must not silently succeed.
+        let raw = b"DSSEv1 4 json 999 {}".to_vec();
+        assert!(pae_payload(&raw).is_none());
     }
 }
