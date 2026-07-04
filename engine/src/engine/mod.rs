@@ -374,6 +374,8 @@ impl Engine {
                 journal::Decision::Breach {
                     entry: key,
                     verdict,
+                    fingerprint,
+                    verdict_typed,
                     ..
                 } => {
                     // Carry the model's prior words forward verbatim as a display memory,
@@ -388,6 +390,14 @@ impl Engine {
                     // `Restored`, not NEW, until a live pass re-judges it.
                     self.verdicts
                         .seed_restored(key, verdict.clone(), restored_at);
+                    // JEF-301: re-seed the verdict CACHE so an UNCHANGED entry skips a fresh
+                    // (slow, OOM-prone) model call across a restart — the big request-volume cut.
+                    // Restores the EXACT prior decision (a persisted `Exploitable` stays one);
+                    // `cached_for` serves it only while the fingerprint matches, so changed
+                    // evidence re-judges — never a stale verdict. Older lines are display-only.
+                    if let (Some(fp), Some(typed)) = (fingerprint, verdict_typed) {
+                        self.verdicts.cache_decisive(key, fp.clone(), typed.clone());
+                    }
                     restored_verdicts += 1;
                 }
                 journal::Decision::Revert { cut, reason } => {
@@ -603,20 +613,16 @@ impl Engine {
         }
         let current_entries: HashSet<String> = by_entry.keys().cloned().collect();
         let mut verdict_counts: HashMap<&'static str, u64> = HashMap::new();
-        // How often we actually call the (slow, CPU-bound) model this pass vs reuse a
-        // cached verdict. A persistently high `judged` means the verdict-cache fingerprint
-        // is churning (re-judging unchanged entries) — the thing to watch for model load.
+        // Model calls this pass vs cache reuse: a persistently high `judged` means the
+        // fingerprint is churning (re-judging unchanged entries) — watch it for model load.
         let (mut judged, mut cached) = (0u64, 0u64);
-        // JEF-234: cache misses that we DECLINE to send to the model this pass because the
-        // entry (or the whole fleet, via the global breaker) is in inconclusive-adjudication
-        // backoff. A degraded Ollama was previously re-judged for every failed entry every
-        // pass — a feedback loop that hammered the struggling model. `skipped` makes the
-        // bounding visible: a sustained nonzero rate means the model is down and we are
-        // correctly NOT hammering it.
+        // JEF-234: cache misses we DECLINE to send to the model this pass because the entry
+        // (or the whole fleet, via the global breaker) is in inconclusive-adjudication backoff.
+        // A sustained nonzero rate means the model is down and we are correctly NOT hammering it.
         let mut skipped = 0u64;
-        // One `now` for the whole pass so every backoff/breaker decision in this loop shares
-        // a single clock read — the timing seam the JEF-234 tests drive deterministically
-        // (the store methods all take `now`, never reach for `Instant::now()` themselves).
+        // One `now` for the whole pass so every backoff/breaker decision shares a single clock
+        // read — the timing seam the JEF-234 tests drive deterministically (store methods all
+        // take `now`, never reach for `Instant::now()`).
         let pass_now = std::time::Instant::now();
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
@@ -635,10 +641,9 @@ impl Engine {
                     v
                 }
                 // JEF-234: the GLOBAL breaker is open — the model looks fully down, so skip
-                // EVERY entry's model call this pass (a fully-down Ollama is then probed at
-                // most ~once per cooldown, regardless of entry count). Synthesize an
-                // Uncertain so the display logic below carries forward the prior decisive
-                // verdict and model-health stays Timeout, exactly as a real timeout would.
+                // EVERY entry's model call this pass (a fully-down Ollama is probed at most
+                // ~once per cooldown). Synthesize an Uncertain so the display logic carries
+                // forward the prior decisive verdict, exactly as a real timeout would.
                 None if self.verdicts.breaker_open(pass_now) => {
                     skipped += 1;
                     reason::adjudicate::Verdict::Uncertain(
@@ -654,19 +659,17 @@ impl Engine {
                 }
                 None => {
                     judged += 1;
-                    // Time the (slow, CPU-bound) model call so its latency tail is
-                    // observable in shadow (JEF-100). Recorded for every fresh call,
-                    // success or timeout — the `result` label below distinguishes them.
+                    // Time the (slow, CPU-bound) model call so its latency tail is observable in
+                    // shadow (JEF-100). Recorded for every fresh call; `result` labels the outcome.
                     let started = std::time::Instant::now();
                     let v = self.adjudicator.judge(&entry, &objectives, &graph).await;
                     self.metrics
                         .model_latency_ms
                         .record(started.elapsed().as_secs_f64() * 1000.0, &[]);
-                    // An Uncertain is usually a transient model outage (e.g. a CPU-model
-                    // timeout) — re-judge next pass rather than pin the failure into the
-                    // cache. Logged at info (not debug): on a slow CPU model nearly every
-                    // verdict lands here, and a silent inconclusive looks indistinguishable
-                    // from "the model never ran" — surface why (timeout vs unparseable).
+                    // An Uncertain is usually a transient model outage — re-judge later rather
+                    // than pin the failure into the cache. Logged at info: on a slow CPU model
+                    // nearly every verdict lands here, and a silent inconclusive is
+                    // indistinguishable from "the model never ran" — surface why.
                     let result = match &v {
                         reason::adjudicate::Verdict::Uncertain(why) => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), %why, "adjudication inconclusive (will retry)");
@@ -680,7 +683,7 @@ impl Engine {
                         decisive => {
                             tracing::info!(entry = %entry.0, objectives = objectives.len(), verdict = ?decisive, "adjudicated entry");
                             self.verdicts
-                                .cache_decisive(entry_key, fingerprint, v.clone());
+                                .cache_decisive(entry_key, fingerprint.clone(), v.clone());
                             // JEF-234: a decisive answer means the model is alive — clear this
                             // entry's backoff and close the global breaker so judging resumes
                             // normally for the whole fleet.
@@ -688,11 +691,9 @@ impl Engine {
                             "ok"
                         }
                     };
-                    // Piggyback the readiness aggregation's LIVE model health (JEF-160) on
-                    // this call's outcome — cheap, no extra model call. A decisive verdict
-                    // means the model answered; an Uncertain ("model unavailable") means it
-                    // timed out / the endpoint is down. The readiness aggregation reads this
-                    // back.
+                    // Piggyback the readiness aggregation's LIVE model health (JEF-160) on this
+                    // call's outcome — cheap, no extra call: decisive ⇒ answered, Uncertain ⇒
+                    // timed out / endpoint down. The readiness aggregation reads this back.
                     self.findings.set_model_health(match result {
                         "ok" => state::ModelHealth::Ok,
                         _ => state::ModelHealth::Timeout,
@@ -715,36 +716,36 @@ impl Engine {
                 }
                 _ => verdict.clone(),
             };
-            // Write the displayed verdict to the single source of truth (JEF-157) the
-            // MOMENT it's decided — so the findings snapshot resolves it immediately, not
-            // only after an end-of-pass re-publish. A live verdict supersedes any
-            // journal-restored one for this entry (handled inside `set_display`).
+            // Write the displayed verdict to the single source of truth (JEF-157) the MOMENT
+            // it's decided, so the findings snapshot resolves it immediately (no end-of-pass
+            // re-publish). A live verdict supersedes any journal-restored one (in `set_display`).
             self.verdicts.set_display(entry_key, display.clone());
             // Record this pass's display POSTURE for the Δ / recency column (JEF-201): the
             // store sets `first_seen` on first sight and diffs against the previous pass to
-            // derive the Δ glyph (NEW / ↑ / ↓ / steady). Shares `pass_now` with the JEF-234
-            // backoff so the recency clock is the single injected seam the tests drive. Pure
-            // presentation metadata — it gates nothing (ADR-0016: recency is a view).
+            // derive the Δ glyph. Shares `pass_now` with the JEF-234 backoff (one injected
+            // clock). Pure presentation metadata — it gates nothing (ADR-0016: recency is a view).
             self.verdicts.record_recency(
                 entry_key,
                 state::StoredPosture::of_verdict(Some(&display)),
                 pass_now,
             );
-            // Append the breach decision to the durable journal (JEF-141) — but only a
-            // DECISIVE verdict, and only when it changed from the last line we wrote for
-            // this entry, so a steady-state cluster doesn't append an identical line every
-            // pass. Uncertain (transient timeout) is skipped, mirroring the verdict-cache
-            // discipline. A no-op when the journal is disabled (no volume).
+            // Append the breach decision to the durable journal (JEF-141) — only a DECISIVE
+            // verdict, and only when it changed from the last line for this entry, so a
+            // steady-state cluster doesn't append an identical line every pass. Uncertain is
+            // skipped (mirrors the cache discipline). A no-op when the journal is disabled.
             let summary = display.summary();
             if !matches!(display, reason::adjudicate::Verdict::Uncertain(_))
                 && self.verdicts.journaled(entry_key).as_ref() != Some(&summary)
             {
-                // Re-derive the structured enrichment-coverage (JEF-145) from the SAME
-                // evidence the model was given (`entry_evidence`, via `entry_coverage`),
-                // so the would-have-acted report aggregation classifies an enrichment-coverage
-                // gap from fact instead of grepping this verdict's prose for a `CVE-` token.
-                // Cheap and pure.
+                // Re-derive the structured enrichment-coverage (JEF-145) from the SAME evidence
+                // the model was given, so the would-have-acted report classifies a coverage gap
+                // from fact instead of grepping the verdict prose for a `CVE-` token. Cheap+pure.
                 let coverage = reason::adjudicate::entry_coverage(&graph, &entry);
+                // JEF-301: persist fingerprint + TYPED verdict so a restart re-seeds the cache.
+                // Pair them ONLY when THIS pass judged decisively for THIS fingerprint; a
+                // carried-forward prior (this pass Uncertain) doesn't belong to the current
+                // fingerprint, so persist `None` rather than seed a stale pair (re-judge on boot).
+                let decisive_now = !matches!(verdict, reason::adjudicate::Verdict::Uncertain(_));
                 self.journal.record(journal::Decision::Breach {
                     entry: entry_key.clone(),
                     objectives: objectives.len(),
@@ -753,6 +754,8 @@ impl Engine {
                         cves: coverage.cves,
                         behavioral: coverage.behavioral,
                     }),
+                    fingerprint: decisive_now.then(|| fingerprint.clone()),
+                    verdict_typed: decisive_now.then(|| verdict.clone()),
                 });
                 self.verdicts.set_journaled(entry_key, summary.clone());
                 // The ONE sanctioned outbound notification (JEF-144, ADR-0018), fired on the

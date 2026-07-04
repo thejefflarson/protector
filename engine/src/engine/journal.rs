@@ -95,6 +95,23 @@ pub enum Decision {
         /// false positive.
         #[serde(default)]
         coverage: Option<EnrichmentCoverage>,
+        /// The evidence FINGERPRINT this decisive verdict was judged against (JEF-301) — the
+        /// freshness key. On boot the engine re-seeds the verdict cache from this line, so an
+        /// entry whose current fingerprint still MATCHES is served from cache with NO model
+        /// call (the big request-volume cut across a protector/Ollama restart); the moment the
+        /// fingerprint CHANGES (new CVE / runtime / objective) the cache misses and the entry
+        /// re-judges — a stale verdict is never served for changed evidence. `None` on lines
+        /// written before JEF-301 (via `#[serde(default)]`): those replay display-only, exactly
+        /// today's behaviour, never a cache hit against an unknown fingerprint.
+        #[serde(default)]
+        fingerprint: Option<String>,
+        /// The TYPED decisive verdict (JEF-301), so replay restores the EXACT prior decision
+        /// into the verdict cache — a persisted `Exploitable` (a breach) stays `Exploitable`
+        /// on boot, never downgraded to a benign or display-only string. Only decisive
+        /// verdicts are ever journaled (an `Uncertain`/backed-off timeout never is), so this is
+        /// never a persisted "awaiting". `None` on pre-JEF-301 lines (display-only restore).
+        #[serde(default)]
+        verdict_typed: Option<crate::engine::reason::adjudicate::Verdict>,
     },
     /// A mitigation applied (a cut went live), keyed by its cut signature.
     Apply {
@@ -415,6 +432,10 @@ mod tests {
                     cves: vec!["CVE-2021-44228".into()],
                     behavioral: false,
                 }),
+                fingerprint: Some("cves=CVE-2021-44228|rt=|objs=secret|findings=".into()),
+                verdict_typed: Some(crate::engine::reason::adjudicate::Verdict::Exploitable(
+                    "CVE-2021-44228 reaches the secret".into(),
+                )),
             });
             journal.record(Decision::Apply {
                 cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
@@ -428,7 +449,30 @@ mod tests {
         let reopened = DecisionJournal::open(&path);
         let entries = reopened.replay();
         assert_eq!(entries.len(), 3, "all three decisions survive the reopen");
-        assert!(matches!(entries[0].decision, Decision::Breach { .. }));
+        // JEF-301: the breach line carries the evidence fingerprint AND the TYPED decisive
+        // verdict across the reopen, so the post-restart engine can re-seed the verdict cache
+        // (serve an unchanged entry with no model call) and replay the EXACT prior decision.
+        match &entries[0].decision {
+            Decision::Breach {
+                fingerprint,
+                verdict_typed,
+                ..
+            } => {
+                assert_eq!(
+                    fingerprint.as_deref(),
+                    Some("cves=CVE-2021-44228|rt=|objs=secret|findings="),
+                    "the evidence fingerprint (the freshness key) survives the reopen"
+                );
+                assert_eq!(
+                    verdict_typed.as_ref(),
+                    Some(&crate::engine::reason::adjudicate::Verdict::Exploitable(
+                        "CVE-2021-44228 reaches the secret".into()
+                    )),
+                    "a persisted BREACH replays as the EXACT typed Exploitable, not a downgrade"
+                );
+            }
+            other => panic!("expected a Breach, got {other:?}"),
+        }
         assert!(matches!(entries[1].decision, Decision::Apply { .. }));
         match &entries[2].decision {
             Decision::Revert { cut, reason } => {
@@ -575,10 +619,28 @@ mod tests {
         let line = r#"{"at_ms":1,"kind":"breach","entry":"workload/app/Pod/web","objectives":2,"verdict":"exploitable — reaches the secret"}"#;
         let entry: JournalEntry = serde_json::from_str(line).expect("old line still parses");
         match entry.decision {
-            Decision::Breach { coverage, .. } => {
+            Decision::Breach {
+                coverage,
+                fingerprint,
+                verdict_typed,
+                ..
+            } => {
                 assert!(
                     coverage.is_none(),
                     "absent coverage degrades to unknown, not a gap"
+                );
+                // JEF-301 back-compat: a line written before the fingerprint/typed-verdict
+                // fields existed has neither key. `#[serde(default)]` must yield `None` for
+                // both — the replay then restores it display-only (exactly today's behaviour)
+                // and never treats a missing fingerprint as a cache hit against changed
+                // evidence.
+                assert!(
+                    fingerprint.is_none(),
+                    "an absent fingerprint replays as None (display-only, no false cache hit)"
+                );
+                assert!(
+                    verdict_typed.is_none(),
+                    "an absent typed verdict replays as None (display-only restore)"
                 );
             }
             other => panic!("expected a Breach, got {other:?}"),

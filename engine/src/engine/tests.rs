@@ -744,3 +744,65 @@ fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
         "the first decisive success closes the breaker"
     );
 }
+
+/// JEF-301: decisive verdicts persist across a restart, so an UNCHANGED entry is served from
+/// the replayed cache with NO fresh model call — the biggest request-volume cut when a
+/// protector/Ollama restart would otherwise re-judge the whole fleet. A persisted BREACH
+/// (Exploitable) replays as the EXACT prior decision (never downgraded), and a CHANGED
+/// fingerprint still forces a fresh judge (a stale verdict is never served for new evidence).
+#[tokio::test]
+async fn decisive_verdicts_persist_across_a_restart_and_skip_re_judging() {
+    // A unique temp journal path (no temp-file crate), cleaned up at the end.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "protector-jef301-{}-{nanos}.jsonl",
+        std::process::id()
+    ));
+
+    // Pre-restart: a model that decisively judges Exploitable. Attaching the (writable) journal
+    // enables durable writes, so the decisive verdict + its fingerprint land on disk.
+    {
+        let mut engine = engine_with_adjudicator(Box::new(FixedAdjudicator(Verdict::Exploitable(
+            "RCE reaches the secret".into(),
+        ))))
+        .with_journal(journal::DecisionJournal::open(&path));
+        engine.process(&exposed_snapshot(true)).await;
+    }
+
+    // Restart: a fresh engine whose adjudicator COUNTS calls (and would return Refuted if
+    // consulted). Replaying the journal must re-seed the verdict cache.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine_with(calls.clone()).with_journal(journal::DecisionJournal::open(&path));
+
+    // Same evidence ⇒ unchanged fingerprint ⇒ served from the replayed cache: NO model call,
+    // and the persisted BREACH replays EXACTLY (Exploitable — NOT the counting adjudicator's
+    // Refuted, which would prove a re-judge AND a downgrade).
+    engine.process(&exposed_snapshot(true)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "an unchanged entry is served from the replayed cache with no fresh model call"
+    );
+    assert!(
+        engine
+            .findings()
+            .snapshot()
+            .iter()
+            .any(|f| f.breach_relevant
+                && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                    == Some("exploitable — RCE reaches the secret")),
+        "a persisted BREACH replays as the EXACT prior decision, never downgraded"
+    );
+
+    // Changed evidence (no CVE) ⇒ different fingerprint ⇒ cache miss ⇒ a fresh judge fires.
+    engine.process(&exposed_snapshot(false)).await;
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "a changed fingerprint invalidates the persisted verdict and re-judges"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

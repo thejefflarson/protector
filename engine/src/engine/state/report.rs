@@ -313,6 +313,8 @@ mod tests {
                 objectives: 1,
                 verdict: verdict.to_string(),
                 coverage: None,
+                fingerprint: None,
+                verdict_typed: None,
             },
         }
     }
