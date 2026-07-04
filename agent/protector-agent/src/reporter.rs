@@ -233,7 +233,7 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protector_behavior::{Attribution, Behavior};
+    use protector_behavior::{Attribution, Behavior, SecretReadSource};
 
     fn reporter_with(token: Option<&str>) -> Reporter {
         let owned = token.map(str::to_string);
@@ -256,6 +256,7 @@ mod tests {
             observed_at_ms: None,
             behavior: Behavior::SecretRead {
                 secret: "app/session-key".into(),
+                source: SecretReadSource::Mounted,
             },
         }]
     }
