@@ -571,6 +571,39 @@ summary:focus-visible,
   font-weight: var(--fw-bold); letter-spacing: var(--track-micro); text-transform: uppercase;
 }
 
+/* ---- multi-path proven-paths view (JEF-281) ---- */
+/* The legibility header for a wide finding: how many redundant paths reach the objective, and
+   whether any single edge severs them (the no-cut reason made explicit). */
+.paths-summary {
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+  color: var(--ink-2);
+}
+.paths-count { font-family: var(--font-data); font-weight: var(--fw-bold); color: var(--ink-1); }
+/* the stack of proven paths */
+.paths { display: flex; flex-direction: column; gap: var(--space-3); }
+/* one numbered alternative path in the stack */
+.path-alt { display: flex; flex-direction: column; gap: var(--space-1); }
+.path-alt-label {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro); text-transform: uppercase;
+  color: var(--ink-3);
+}
+/* the collapsed overflow of extra paths (native <details>, no JS) */
+.more-paths { margin-top: var(--space-2); }
+.more-paths-body { display: flex; flex-direction: column; gap: var(--space-3); padding-top: var(--space-2); }
+.more-paths-note { font-size: var(--fs-micro); color: var(--ink-3); }
+/* a shared edge — present on EVERY proven path (a single-edge-cut candidate). */
+.chain-edge-shared .chain-rel { color: var(--ink-1); font-weight: var(--fw-bold); }
+.chain-shared {
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro); text-transform: uppercase;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid var(--border);
+  color: var(--ink-2);
+}
+
 .cut-sig code {
   display: inline-block;
   background: var(--surface); border: var(--hairline) solid var(--border);

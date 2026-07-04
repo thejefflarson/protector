@@ -14,7 +14,7 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
     html! {
         div class={ "detail rail-" (f.posture.token()) } {
             (verdict_block(f))
-            (path_block(&f.path))
+            (path_block(f))
             (evidence_tables(&f.evidence))
             (cut_block(f))
             (model_prompt(&f.id, &f.judgement))
@@ -46,37 +46,117 @@ fn chain_step_class(step: usize) -> String {
     format!("chain-step-{}", step.min(CHAIN_STEP_MAX))
 }
 
-/// The proven path as a **vertical chain diagram** (brief §3): the internet/entry node at the
-/// top, then each successive hop indented one step deeper than the one above — a **staircase**
-/// that visibly cascades entry → … → objective. Each node carries its node-kind glyph + label;
-/// the relation is the labelled connector between nodes (an edge sits at the same indent as the
-/// node it leads into); the severable edge is marked with a prominent ✂ "cut here". Structural
-/// hops are muted; the objective node is emphasized. Honest when no path is recorded.
-fn path_block(path: &[HopProps]) -> Markup {
+/// The number of proven paths shown OPEN by default before the rest fold into an expandable
+/// disclosure (JEF-281). Enough to make redundancy visible immediately (the common no-cut shape
+/// is two paths) while a wide objective stays collapsed-by-default but one click from the full set.
+const PATHS_SHOWN_OPEN: usize = 3;
+
+/// The proven path(s) as **vertical chain diagrams** (brief §3 / JEF-281). When the objective is
+/// reachable ONE way this is a single staircase — the internet/entry node at the top, each hop
+/// indented one step deeper, the severable edge marked ✂ "cut here". When it is reachable SEVERAL
+/// ways (a wide finding) it renders ALL the proven paths as stacked staircases, edges shared by
+/// every path marked so the redundancy is visible — and when no single edge severs the chain, the
+/// multiple paths ARE the reason, stated in the header line. Honest when no path is recorded.
+fn path_block(f: &FindingProps) -> Markup {
+    // The complete proven-path set (the view_model always fills at least the representative path);
+    // drop any empty path defensively so a lone empty entry reads as "no path recorded".
+    let paths: Vec<&Vec<HopProps>> = f.paths.iter().filter(|p| !p.is_empty()).collect();
+    let multi = paths.len() > 1;
     html! {
         section.detail-section.path-block {
-            h3.detail-h { "proven path" }
-            @if path.is_empty() {
+            h3.detail-h { (if multi { "proven paths" } else { "proven path" }) }
+            @if paths.is_empty() {
                 p.muted { "no path recorded" }
+            } @else if multi {
+                (paths_summary(paths.len(), f.cut.is_some()))
+                (stacked_paths(&paths, f.paths_truncated))
             } @else {
-                ol.chain aria-label="proven attack path, entry to objective" {
-                    // The entry node (top of the chain, step 0) — the very first hop's `from`.
-                    (chain_node(&path[0].from_glyph, &path[0].from, 0, true, false))
-                    // Then, for each hop, the labelled connector edge and its `to` node, each
-                    // indented one step deeper than the previous so the path cascades. The edge
-                    // and the node it leads into share the hop's indent; the last hop's `to` is
-                    // the objective node, emphasized.
-                    @for (i, hop) in path.iter().enumerate() {
-                        (chain_edge(hop, i + 1))
-                        (chain_node(
-                            &hop.to_glyph,
-                            &hop.to,
-                            i + 1,
-                            false,
-                            i == path.len() - 1, // the final node is the objective
-                        ))
+                (chain_diagram(paths[0]))
+            }
+        }
+    }
+}
+
+/// The one-line legibility header for a multi-path finding (JEF-281): how many proven paths reach
+/// the objective, and — the crux — whether any single edge severs them. When there is no
+/// single-edge cut, the several redundant paths ARE the explanation, so we say so in words.
+fn paths_summary(n: usize, has_cut: bool) -> Markup {
+    html! {
+        p.paths-summary {
+            "reachable via " span.paths-count { (n) } " redundant paths"
+            @if has_cut {
+                " \u{2014} one shared edge severs all (marked \u{2702})"
+            } @else {
+                " \u{2014} no single edge severs the objective"
+            }
+        }
+    }
+}
+
+/// The stacked proven paths: the first [`PATHS_SHOWN_OPEN`] rendered open, the rest folded into a
+/// native `<details>` disclosure (server-rendered, no JS — the fan-out stays collapsed by default
+/// but the operator can expand to the full picture, JEF-281). A `truncated` set adds an honest
+/// bounded "+more" note rather than an unbounded wall.
+fn stacked_paths(paths: &[&Vec<HopProps>], truncated: bool) -> Markup {
+    let shown = paths.len().min(PATHS_SHOWN_OPEN);
+    html! {
+        div.paths {
+            @for (i, p) in paths.iter().take(shown).enumerate() {
+                (labelled_path(i + 1, p))
+            }
+            @if paths.len() > shown {
+                details.more-paths {
+                    summary.why-toggle role="button" aria-expanded="false" {
+                        "show " (paths.len() - shown) " more path"
+                        @if paths.len() - shown != 1 { "s" }
+                    }
+                    div.more-paths-body {
+                        @for (i, p) in paths.iter().enumerate().skip(shown) {
+                            (labelled_path(i + 1, p))
+                        }
+                        @if truncated {
+                            p.muted.more-paths-note { "+ more proven paths exist (bounded)" }
+                        }
                     }
                 }
+            } @else if truncated {
+                p.muted.more-paths-note { "+ more proven paths exist (bounded)" }
+            }
+        }
+    }
+}
+
+/// One numbered path in the stack — a "path N" label above its chain staircase, so the operator
+/// can tell the redundant routes apart.
+fn labelled_path(n: usize, path: &[HopProps]) -> Markup {
+    html! {
+        div.path-alt {
+            span.path-alt-label { "path " (n) }
+            (chain_diagram(path))
+        }
+    }
+}
+
+/// One proven path as the vertical chain staircase: the entry node at step 0, then each hop's
+/// labelled connector edge + its `to` node one indent deeper, cascading to the emphasized
+/// objective. The severable edge is marked ✂; edges shared across every path are marked too.
+fn chain_diagram(path: &[HopProps]) -> Markup {
+    html! {
+        ol.chain aria-label="proven attack path, entry to objective" {
+            // The entry node (top of the chain, step 0) — the very first hop's `from`.
+            (chain_node(&path[0].from_glyph, &path[0].from, 0, true, false))
+            // Then, for each hop, the labelled connector edge and its `to` node, each indented one
+            // step deeper than the previous so the path cascades; the last hop's `to` is the
+            // objective node, emphasized.
+            @for (i, hop) in path.iter().enumerate() {
+                (chain_edge(hop, i + 1))
+                (chain_node(
+                    &hop.to_glyph,
+                    &hop.to,
+                    i + 1,
+                    false,
+                    i == path.len() - 1, // the final node is the objective
+                ))
             }
         }
     }
@@ -115,13 +195,17 @@ fn chain_node(glyph: &str, label: &str, step: usize, is_entry: bool, is_objectiv
 /// breach colour — the actionable heart of the diagram (brief §3).
 fn chain_edge(hop: &HopProps, step: usize) -> Markup {
     let depth = chain_step_class(step);
-    let cls = if hop.is_cut {
+    let mut cls = if hop.is_cut {
         format!("chain-edge chain-edge-cut {depth}")
     } else if hop.structural {
         format!("chain-edge chain-edge-structural {depth}")
     } else {
         format!("chain-edge {depth}")
     };
+    // An edge on EVERY proven path is a shared bottleneck — a single-edge-cut candidate (JEF-281).
+    if hop.shared {
+        cls.push_str(" chain-edge-shared");
+    }
     html! {
         li class=(cls) {
             span.chain-rel { span.chain-rel-line aria-hidden="true" { "\u{2500}[" } (hop.relation) span.chain-rel-line aria-hidden="true" { "]\u{2192}" } }
@@ -130,6 +214,9 @@ fn chain_edge(hop: &HopProps, step: usize) -> Markup {
                     span.chain-cut-glyph { "\u{2702}" }
                     span.chain-cut-label { "cut here" }
                 }
+            } @else if hop.shared {
+                // Shared-but-not-the-cut: mark it so the operator sees the common bottleneck.
+                span.chain-shared title="on every proven path \u{2014} a shared bottleneck" { "shared" }
             }
         }
     }

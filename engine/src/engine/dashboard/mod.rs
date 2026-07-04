@@ -267,4 +267,7 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 mod tests;
 
 #[cfg(test)]
+mod path_view_tests;
+
+#[cfg(test)]
 mod admission_tests;

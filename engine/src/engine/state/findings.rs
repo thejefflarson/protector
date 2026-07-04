@@ -47,8 +47,18 @@ pub struct Finding {
     /// from the shared [`VerdictStore`] at [`Findings::snapshot`] time, so posture is never
     /// re-parsed from verdict prose.
     pub verdict: Option<Verdict>,
-    /// The proven attack path, hop by hop (entry → … → objective).
+    /// The proven attack path, hop by hop (entry → … → objective). The REPRESENTATIVE
+    /// (shortest) path — the row summary and the cut reference it. See [`paths`](Self::paths)
+    /// for the complete set when the objective is reachable several ways.
     pub path: Vec<PathStep>,
+    /// EVERY proven path to the objective (bounded, shortest-first; the first mirrors
+    /// [`path`](Self::path)) — the complete reachability picture the finding detail restores
+    /// (JEF-281). When an objective is reachable by several redundant paths, showing them all is
+    /// what makes a no-single-edge-cut disposition legible: the redundancy IS the reason.
+    pub paths: Vec<Vec<PathStep>>,
+    /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
+    /// detail renders a "+N more" note rather than an unbounded wall (JEF-281).
+    pub paths_truncated: bool,
     /// The evidence the adjudicator weighed for this path's entry (JEF-133) — the CVEs
     /// on the entry's image and the runtime signals observed on it. Pulled from the same
     /// [`SecurityGraph::entry_evidence`] the model reads, so the evidence is the model's own
@@ -71,6 +81,18 @@ pub struct PathStep {
     pub from: String,
     pub relation: String,
     pub to: String,
+}
+
+/// Project a proven chain's `Link` list into the presentation-agnostic [`PathStep`] hops.
+fn path_steps_of(links: &[crate::engine::reason::proof::Link]) -> Vec<PathStep> {
+    links
+        .iter()
+        .map(|l| PathStep {
+            from: l.from.0.clone(),
+            relation: l.relation.clone(),
+            to: l.to.0.clone(),
+        })
+        .collect()
 }
 
 impl Finding {
@@ -99,15 +121,16 @@ impl Finding {
             // store and resolved by [`Findings::snapshot`] at read time. The published row
             // carries none of its own.
             verdict: None,
-            path: chain
-                .links
-                .iter()
-                .map(|l| PathStep {
-                    from: l.from.0.clone(),
-                    relation: l.relation.clone(),
-                    to: l.to.0.clone(),
-                })
-                .collect(),
+            path: path_steps_of(&chain.links),
+            // The complete proven-path set (bounded, JEF-281). Fall back to the representative
+            // path if the enumeration produced nothing (it always finds at least the shortest,
+            // but never render an empty multi-path list).
+            paths: if chain.paths.is_empty() {
+                vec![path_steps_of(&chain.links)]
+            } else {
+                chain.paths.iter().map(|p| path_steps_of(p)).collect()
+            },
+            paths_truncated: chain.paths_truncated,
             recency: None,
         }
     }

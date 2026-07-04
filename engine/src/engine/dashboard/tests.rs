@@ -16,7 +16,7 @@ use super::view_model::{
 };
 
 /// A readiness snapshot for a fully-covered, actively-judging model.
-fn judging_readiness() -> Readiness {
+pub(super) fn judging_readiness() -> Readiness {
     let config = ReadinessConfig {
         model_attached: true,
         kev_count: 5,
@@ -60,7 +60,7 @@ fn timed_out_readiness() -> Readiness {
     )
 }
 
-fn breach_finding(entry: &str, verdict: Verdict) -> Finding {
+pub(super) fn breach_finding(entry: &str, verdict: Verdict) -> Finding {
     Finding {
         entry: entry.to_string(),
         objective: "secret/app/db-creds".to_string(),
@@ -75,6 +75,8 @@ fn breach_finding(entry: &str, verdict: Verdict) -> Finding {
             relation: "reaches/Tcp/5432".into(),
             to: "secret/app/db-creds".into(),
         }],
+        paths: vec![],
+        paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
     }

@@ -133,7 +133,56 @@ fn path_props(path: &[PathStep], cut: Option<&str>, foothold: bool) -> Vec<HopPr
                 to_glyph: node_kind_glyph(&h.to).to_string(),
                 structural: is_structural_relation(&h.relation),
                 is_cut: cut == Some(signature.as_str()),
+                // Set by [`multi_path_props`] once all paths are known; a lone path shares nothing.
+                shared: false,
             }
+        })
+        .collect()
+}
+
+/// The `from -[relation]-> to` signature of one hop — the same shape as the cut signature, used
+/// to find edges SHARED across proven paths.
+fn hop_signature(h: &PathStep) -> String {
+    format!("{} -[{}]-> {}", h.from, h.relation, h.to)
+}
+
+/// Map ALL proven paths to the objective into stacked hop-lists (JEF-281), marking every edge
+/// that appears in EVERY path as [`HopProps::shared`] so redundancy — and the reason a chain is
+/// no-single-edge-cut — is visible. A single path shares nothing (there is nothing to compare).
+/// Falls back to the representative `path` when the complete set is empty, so a finding always
+/// renders at least one chain.
+fn multi_path_props(
+    paths: &[Vec<PathStep>],
+    representative: &[PathStep],
+    cut: Option<&str>,
+    foothold: bool,
+) -> Vec<Vec<HopProps>> {
+    use std::collections::HashSet;
+    let source: Vec<&[PathStep]> = if paths.is_empty() {
+        vec![representative]
+    } else {
+        paths.iter().map(|p| p.as_slice()).collect()
+    };
+    // Shared edges = the signatures present in EVERY path (the intersection). With one path
+    // there is no redundancy to surface, so the set stays empty.
+    let shared: HashSet<String> = if source.len() < 2 {
+        HashSet::new()
+    } else {
+        let mut acc: HashSet<String> = source[0].iter().map(hop_signature).collect();
+        for p in &source[1..] {
+            let sigs: HashSet<String> = p.iter().map(hop_signature).collect();
+            acc.retain(|s| sigs.contains(s));
+        }
+        acc
+    };
+    source
+        .iter()
+        .map(|p| {
+            let mut hops = path_props(p, cut, foothold);
+            for (hop, step) in hops.iter_mut().zip(p.iter()) {
+                hop.shared = shared.contains(&hop_signature(step));
+            }
+            hops
         })
         .collect()
 }
@@ -212,6 +261,8 @@ pub(super) fn finding_props(f: &Finding, judgements: &[Judgement]) -> FindingPro
         disposition: f.disposition.clone(),
         verdict_summary: f.verdict.as_ref().map(|v| v.summary()),
         path: path_props(&f.path, f.cut.as_deref(), f.foothold),
+        paths: multi_path_props(&f.paths, &f.path, f.cut.as_deref(), f.foothold),
+        paths_truncated: f.paths_truncated,
         cut: f.cut.clone(),
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),

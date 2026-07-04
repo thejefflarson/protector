@@ -148,6 +148,35 @@ fn redundant_paths_have_no_single_edge_cut() {
         from_web.single_edge_cuts.is_empty(),
         "redundant paths ⇒ no single edge severs the chain"
     );
+    // JEF-281: the redundancy is enumerated, not collapsed to one path — BOTH proven paths
+    // (web → db → secret AND web → cache → secret) are carried, so the finding detail can show
+    // the complete picture. This is the exact information that explains the no-single-edge-cut
+    // disposition. Bounded and not truncated on this small graph.
+    assert_eq!(
+        from_web.paths.len(),
+        2,
+        "both redundant paths to the shared secret are enumerated"
+    );
+    assert!(
+        !from_web.paths_truncated,
+        "two paths is well under the bound — nothing truncated"
+    );
+    // Every enumerated path starts at the web entry and ends at the shared secret objective.
+    for path in &from_web.paths {
+        assert_eq!(path.first().map(|l| &l.from), Some(&from_web.entry));
+        assert_eq!(path.last().map(|l| &l.to), Some(&from_web.objective));
+    }
+    // The two paths diverge at their middle node (db vs cache) — genuinely distinct routes.
+    let mids: std::collections::HashSet<&str> = from_web
+        .paths
+        .iter()
+        .filter_map(|p| p.first().map(|l| l.to.0.as_str()))
+        .collect();
+    assert_eq!(
+        mids.len(),
+        2,
+        "the two routes go through different backends"
+    );
 }
 
 /// The RBAC path class: a workload assumes its ServiceAccount identity, which

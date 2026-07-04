@@ -122,6 +122,140 @@ pub(super) fn reachable_without(
     movement_tree(graph, start, Some(excluded)).contains_key(&target)
 }
 
+/// One proven path as an ordered list of `(from, to, edge)` steps — the shape both
+/// [`path_steps`] and [`proven_paths`] speak in.
+pub(super) type PathSteps = Vec<(NodeIndex, NodeIndex, EdgeIndex)>;
+
+/// The maximum number of distinct proven paths we enumerate (and the dashboard renders)
+/// per (entry, objective). A wide finding can be reachable by many redundant paths (the
+/// exact shape that makes a chain no-single-edge-cut, JEF-281); we surface up to this many
+/// as stacked hop-lists and collapse the rest to a "+N more" note, so a dense mesh never
+/// produces an unbounded wall of paths. Bounds both the enumeration and the render.
+pub(super) const MAX_PROVEN_PATHS: usize = 6;
+
+/// A hard ceiling on the enumeration's exploration budget (edge relaxations) for a single
+/// (entry, objective). A dense graph can hold exponentially many simple paths; this caps
+/// the *work* regardless of density, so [`proven_paths`] can never blow up combinatorially
+/// (JEF-281). When the budget is exhausted we stop and report `truncated`.
+const PATH_ENUM_BUDGET: usize = 50_000;
+
+/// The mutable state of a single [`proven_paths`] depth-first enumeration, kept in one
+/// struct so the recursive walk stays a method (not a free function with a long argument
+/// list). `graph`/`entry`/`objective`/`cap` are fixed; the rest track the DFS.
+struct PathEnum<'g> {
+    graph: &'g SecurityGraph,
+    entry: NodeIndex,
+    objective: NodeIndex,
+    /// The most paths we keep; we collect up to `cap + 1` to *detect* truncation.
+    cap: usize,
+    /// The nodes currently on the DFS stack — enforces SIMPLE paths (no node repeats).
+    on_path: HashSet<NodeIndex>,
+    /// The steps of the path currently being built (entry → … → cursor).
+    steps: PathSteps,
+    /// The paths found so far (each a full entry → objective step list).
+    found: Vec<PathSteps>,
+    /// Remaining edge-relaxation budget — the anti-blowup valve.
+    budget: usize,
+    /// Set when more paths exist than `cap`, or the budget was exhausted.
+    truncated: bool,
+}
+
+impl PathEnum<'_> {
+    /// One DFS step from `u`. Records a path on reaching the objective; otherwise expands
+    /// over proof-grade movement edges, honouring the SAME compromise gate as
+    /// [`movement_tree`] (you may only move *out of* a workload you control — the entry or a
+    /// compromisable one), so every enumerated path is as proof-grounded as the shortest one.
+    fn walk(&mut self, u: NodeIndex) {
+        // We only need `cap + 1` paths: one extra proves there are "more" than we show.
+        if self.found.len() > self.cap {
+            return;
+        }
+        if u == self.objective {
+            self.found.push(self.steps.clone());
+            return;
+        }
+        // Copy the reference out so the graph borrow does not alias the `&mut self` below.
+        let graph = self.graph;
+        let g = graph.inner();
+        // Compromise gate: a merely-reached, uncompromised workload is a dead end — you
+        // cannot pivot onward from it (mirrors `movement_tree`).
+        let blocked = matches!(g.node_weight(u), Some(Node::Workload(_)))
+            && u != self.entry
+            && !compromisable(graph, u);
+        if blocked {
+            return;
+        }
+        for edge in g.edges(u) {
+            if self.budget == 0 {
+                self.truncated = true;
+                return;
+            }
+            self.budget -= 1;
+            if !edge.weight().is_proof_grade() || !is_movement(&edge.weight().relation) {
+                continue;
+            }
+            let v = edge.target();
+            // Skip a node already on this path (keep the path simple — no cycles).
+            if !self.on_path.insert(v) {
+                continue;
+            }
+            self.steps.push((u, v, edge.id()));
+            self.walk(v);
+            self.steps.pop();
+            self.on_path.remove(&v);
+            if self.found.len() > self.cap {
+                return; // collected cap + 1 — we now know the set is truncated
+            }
+        }
+    }
+}
+
+/// Enumerate up to `cap` distinct proof-grade movement paths from `entry` to `objective`,
+/// each grounded in the same compromise gate as [`movement_tree`]. Bounded DFS over SIMPLE
+/// paths, returned shortest-first (then by node order for a stable render). The `bool` is
+/// `truncated`: `true` when more than `cap` paths exist or the [`PATH_ENUM_BUDGET`] was
+/// exhausted, so the caller can render a "+N more" note. This is the multi-path picture the
+/// finding detail restores (JEF-281): the several redundant paths ARE the reason a chain is
+/// no-single-edge-cut. Never blows up combinatorially — the budget caps total work.
+pub(super) fn proven_paths(
+    graph: &SecurityGraph,
+    entry: NodeIndex,
+    objective: NodeIndex,
+    cap: usize,
+) -> (Vec<PathSteps>, bool) {
+    let mut state = PathEnum {
+        graph,
+        entry,
+        objective,
+        cap,
+        on_path: HashSet::from([entry]),
+        steps: Vec::new(),
+        found: Vec::new(),
+        budget: PATH_ENUM_BUDGET,
+        truncated: false,
+    };
+    state.walk(entry);
+    let mut found = state.found;
+    let mut truncated = state.truncated;
+    // Shortest-first, then by the (source, target) index sequence for a deterministic render.
+    found.sort_by(|a, b| {
+        a.len().cmp(&b.len()).then_with(|| {
+            let key = |p: &[(NodeIndex, NodeIndex, EdgeIndex)]| {
+                p.iter()
+                    .map(|s| (s.0.index(), s.1.index()))
+                    .collect::<Vec<_>>()
+            };
+            key(a).cmp(&key(b))
+        })
+    });
+    // We collected up to `cap + 1` to detect "more"; trim to `cap` for the caller.
+    if found.len() > cap {
+        found.truncate(cap);
+        truncated = true;
+    }
+    (found, truncated)
+}
+
 /// Reconstruct the path entry → target from a shortest-path tree, as a list of
 /// `(from, to, edge)` steps in order.
 pub(super) fn path_steps(

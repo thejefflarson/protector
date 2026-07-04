@@ -142,8 +142,21 @@ pub struct ProvenChain {
     /// calls, kept so a consumer can show *why* the model did or didn't act. `None`
     /// when no model was consulted (no evidence to weigh, or no model configured).
     pub verdict: Option<String>,
-    /// The path, entry → objective, in order.
+    /// The path, entry → objective, in order. This is the REPRESENTATIVE (shortest) path —
+    /// the one the response layer reasons about (its cut, its strength). See
+    /// [`paths`](Self::paths) for the complete set when an objective is reachable several ways.
     pub links: Vec<Link>,
+    /// EVERY proven path entry → objective, bounded to [`chain::MAX_PROVEN_PATHS`] and
+    /// shortest-first (the first entry mirrors [`links`](Self::links)). A wide objective —
+    /// reachable by several redundant paths — carries them all here, so the finding detail can
+    /// show the whole reachability picture rather than one path (JEF-281). Crucially, multiple
+    /// paths ARE the explanation for an empty [`single_edge_cuts`](Self::single_edge_cuts): a
+    /// chain is no-single-edge-cut precisely because redundant paths route around any one edge.
+    pub paths: Vec<Vec<Link>>,
+    /// `true` when there are MORE proven paths than the [`chain::MAX_PROVEN_PATHS`] bound shown
+    /// in [`paths`](Self::paths) (or the enumeration budget was hit) — the detail renders a
+    /// bounded "+N more" note rather than an unbounded wall (JEF-281).
+    pub paths_truncated: bool,
     /// Edges on the path whose removal alone disconnects `entry` from `objective`
     /// — the minimal-cut candidates (ADR-0002). Empty means no single edge
     /// suffices: redundant paths exist, and breaking the chain needs more than one
@@ -236,8 +249,8 @@ mod chain;
 mod corroborate;
 
 use chain::{
-    entry_exposed, entry_foothold, is_cuttable_edge, is_movement, link_of, movement_tree,
-    path_steps, quarantine_targets_on_path, reachable_without,
+    MAX_PROVEN_PATHS, entry_exposed, entry_foothold, is_cuttable_edge, is_movement, link_of,
+    movement_tree, path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
 };
 use corroborate::{corroborated_for, entry_runtime};
 
@@ -288,7 +301,7 @@ pub fn confirm(
         .map(|o| o.attack)?;
     let objective_idx = graph.index_of(&objective)?;
 
-    let links = edges
+    let links: Vec<Link> = edges
         .iter()
         .map(|&(u, v, e)| link_of(graph, u, v, e))
         .collect();
@@ -312,6 +325,10 @@ pub fn confirm(
         promoted: false,
         exposed_entry,
         verdict: None,
+        // A confirmed chain is one specific proposed path; its complete-set view is just
+        // that path (the dashboard's multi-path enumeration runs in `prove_with`).
+        paths: vec![links.clone()],
+        paths_truncated: false,
         links,
         single_edge_cuts,
         quarantine_targets,
@@ -375,6 +392,15 @@ pub fn prove_with(
                 })
                 .map(|&(u, v, e)| link_of(graph, u, v, e))
                 .collect();
+            // Enumerate EVERY proven path to this objective (bounded), not just the shortest —
+            // the multi-path picture the finding detail restores (JEF-281). Redundant paths are
+            // exactly why `single_edge_cuts` can be empty.
+            let (path_steps_all, paths_truncated) =
+                proven_paths(graph, entry, objective, MAX_PROVEN_PATHS);
+            let paths: Vec<Vec<Link>> = path_steps_all
+                .iter()
+                .map(|p| p.iter().map(|&(u, v, e)| link_of(graph, u, v, e)).collect())
+                .collect();
             let quarantine_targets =
                 quarantine_targets_on_path(graph, entry, &steps, exposed_entry);
             chains.push(ProvenChain {
@@ -388,6 +414,8 @@ pub fn prove_with(
                 exposed_entry,
                 verdict: None,
                 links,
+                paths,
+                paths_truncated,
                 single_edge_cuts,
                 quarantine_targets,
             });
