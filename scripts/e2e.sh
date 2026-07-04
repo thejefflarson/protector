@@ -164,6 +164,24 @@ spec:
 YAML
 }
 
+# Dump why the structural chain web→store→session-key never proved (the cluster is torn
+# down on exit, so grab this before failing). A *structural* chain is deterministic graph
+# reachability — no model — so a timeout means the engine hasn't finished building the graph
+# and running a proof pass, OR a graph input is missing. Surface both: what the engine logged
+# (the proof/graph/watch signals + whether "proven chains" ever appeared) and the app-namespace
+# inputs the chain is derived from (the workloads + their images, the session-key secret, the
+# store-ingress reaches-edge NetworkPolicy, web's LoadBalancer exposure, the CVE reports).
+diagnose_chain() {
+  log "structural chain never proved — diagnostics (deterministic reachability, no model):"
+  log "  engine — did it log a proof pass at all? (proven chains / proven chain / graph / watch / error)"
+  kubectl -n "$NS" logs deploy/protector --tail=400 2>&1 \
+    | grep -iE 'proven chain|graph|watch|error|panic|signing|sweep' | tail -30 | sed 's/^/    /' || true
+  log "  app workloads + images (entry web, pivot store):"
+  kubectl -n "$APP_NS" get pods -o wide 2>&1 | sed 's/^/    /' || true
+  log "  chain inputs: session-key secret, store-ingress (web→store reaches edge), web LB (exposure), CVE reports:"
+  kubectl -n "$APP_NS" get secret,networkpolicy,service,vulnerabilityreports 2>&1 | sed 's/^/    /' || true
+}
+
 # Dump why protector didn't become Ready (the cluster is torn down on exit, so grab
 # this before failing): pod state, recent events, the cert + its serving secret.
 diagnose_protector() {
@@ -433,7 +451,17 @@ YAML
 kubectl -n "$APP_NS" wait --for=condition=Ready pod/web pod/store --timeout=120s
 
 step "6/11  SHADOW: chain proves structurally, then corroboration would flip it auto-eligible — but NOTHING is applied"
-wait_until "structural chain web→session-key proven" 90 chains_proven
+# This is the FIRST proof pass after a fresh rollout, and it is gated behind the engine's
+# per-pass signing-posture sweep (ADR-0020), which runs BEFORE process() on every image
+# running in the cluster. On a cold TUF cache with CI's constrained egress that first sweep
+# can burn most of a minute (per-image verify timeouts) before the deterministic proof pass
+# even runs — so the old 90s bound timed out chronically on loaded CI nodes even though the
+# chain proves. The assertion is unchanged (the engine must still LOG a proven chain — real
+# deterministic reachability, no model); only the wait is widened to the same generous
+# envelope the rollout waits above use, with a diagnostic dump so a genuine failure is
+# debuggable rather than an opaque "timed out".
+wait_until "structural chain web→session-key proven" 300 chains_proven \
+  || { diagnose_chain; fail "structural chain web→session-key never proved within 300s"; }
 pass "structural chain proven (no foothold, no corroboration)"
 
 post_falco
