@@ -712,13 +712,14 @@ fn build_breach() -> DashboardState {
         );
     }
 
-    // UNCERTAIN: a model-timeout verdict.
+    // UNCERTAIN: a model-timeout verdict. Its posture is `Unknown`, never `Safe` — an
+    // inconclusive read is never green (JEF-302 honesty).
     let uncertain = "deployment/web/storefront";
     verdicts.set_display(
         uncertain,
         Verdict::Uncertain("model unavailable — adjudication timed out (CPU model)".into()),
     );
-    verdicts.record_recency(uncertain, StoredPosture::Safe, now);
+    verdicts.record_recency(uncertain, StoredPosture::Unknown, now);
 
     // CLEARED: Refuted verdicts for the remaining single entries + the argocd fan-out.
     let cleared: &[(&str, &str)] = &[
