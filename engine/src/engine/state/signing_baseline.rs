@@ -42,7 +42,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::engine::journal::{Decision, DecisionJournal};
-use crate::policies::signature::{PostureRank, SigningPosture, repo_key};
+use crate::policies::signature::{PostureRank, ProvenancePosture, SigningPosture, repo_key};
 
 /// How long after `first_seen` a baseline is considered [`established`](SigningBaseline::established).
 ///
@@ -93,10 +93,29 @@ pub struct SigningBaseline {
     /// restart; a line written before this field existed replays as `Keyless` (its honest historical
     /// value — see [`PostureRank::default`]).
     pub rank: PostureRank,
+    /// Every source repository observed in a VERIFIED SLSA build-provenance attestation under this
+    /// repo (JEF-275, ADR-0020 §5). The provenance continuity axis, TOFU-learned exactly like the
+    /// signer identities: a verified provenance whose source is not in this set (on an established
+    /// repo) is provenance drift. Empty until a verified provenance is observed. Deduped + sorted.
+    /// UNTRUSTED predicate text — escape at render.
+    pub provenance_sources: BTreeSet<String>,
+    /// Every builder identity (SLSA `builder.id`) observed in a VERIFIED provenance attestation
+    /// under this repo (JEF-275). The second half of the provenance identity; a new builder on an
+    /// established repo is provenance drift. Deduped + sorted. UNTRUSTED — escape at render.
+    pub provenance_builders: BTreeSet<String>,
     /// When this baseline was last updated (observed or replayed), Unix epoch millis. In-memory
     /// only (not journaled) — used solely to order eviction. `pub(crate)` so it isn't part of
     /// the public value shape.
     pub(crate) last_updated_ms: u64,
+}
+
+impl SigningBaseline {
+    /// Whether this repo has a learned provenance identity yet (a verified SLSA attestation was
+    /// observed). `false` ⇒ provenance is cold for this repo, so provenance drift can only ever be
+    /// a weak lead (never a silent miss), mirroring the signing-baseline cold-start honesty.
+    pub fn has_provenance(&self) -> bool {
+        !self.provenance_builders.is_empty() || !self.provenance_sources.is_empty()
+    }
 }
 
 impl SigningBaseline {
@@ -110,6 +129,8 @@ impl SigningBaseline {
             established: self.established,
             log_corroborated: self.log_corroborated,
             rank: self.rank,
+            provenance_sources: self.provenance_sources.iter().cloned().collect(),
+            provenance_builders: self.provenance_builders.iter().cloned().collect(),
         }
     }
 }
@@ -227,10 +248,54 @@ impl SigningBaselineStore {
                 // The rank of the posture that taught this baseline (JEF-280). Only a `Signed`
                 // posture reaches here, so this is `Keyless` — the strongest rung.
                 rank: posture.rank().unwrap_or_default(),
+                // Provenance is a separate axis (JEF-275), learned by `observe_provenance`; a
+                // signature-only baseline starts with no provenance identity.
+                provenance_sources: BTreeSet::new(),
+                provenance_builders: BTreeSet::new(),
                 last_updated_ms: now_ms,
             },
         );
         Some(repo)
+    }
+
+    /// Learn from one observed build-provenance posture (JEF-275, ADR-0020 §5), keyed by the image's
+    /// `registry/repo`. Only a [`Verified`](ProvenancePosture::Verified) provenance updates a
+    /// baseline (absent / unverifiable / checking never create or mutate one — that is drift
+    /// territory, and absent provenance is calm, never learned). Returns the repo key when the
+    /// baseline's provenance identity was created or changed, so the caller persists just that
+    /// change; `None` otherwise.
+    ///
+    /// AUGMENT-ONLY: provenance folds into an EXISTING repo baseline (one taught by a keyless
+    /// `Signed` posture); it never creates a baseline on its own. This keeps the signature-baseline
+    /// invariants (rank / `established` maturation) intact — a repo with no signing baseline has a
+    /// cold provenance axis (drift reads as a weak lead, never a silent miss), rather than
+    /// fabricating a baseline with an empty signer set + default keyless rank.
+    pub fn observe_provenance(
+        &mut self,
+        image: &str,
+        posture: &ProvenancePosture,
+        now_ms: u64,
+    ) -> Option<String> {
+        let provenance = posture.provenance()?;
+        let repo = repo_key(image);
+        let existing = self.baselines.get_mut(&repo)?;
+        let mut changed = false;
+        if !provenance.source_repo.is_empty() {
+            changed |= existing
+                .provenance_sources
+                .insert(provenance.source_repo.clone());
+        }
+        if !provenance.builder.is_empty() {
+            changed |= existing
+                .provenance_builders
+                .insert(provenance.builder.clone());
+        }
+        if changed {
+            existing.last_updated_ms = now_ms;
+            Some(repo)
+        } else {
+            None
+        }
     }
 
     /// Mark a repo's baseline as **log-corroborated** by the Rekor transparency log (JEF-266,
@@ -285,6 +350,8 @@ impl SigningBaselineStore {
                 established,
                 log_corroborated,
                 rank,
+                provenance_sources,
+                provenance_builders,
             } = entry.decision
             {
                 if repo.is_empty() {
@@ -304,6 +371,10 @@ impl SigningBaselineStore {
                         // The learned rank survives a restart (JEF-280), so downgrade detection is
                         // defined against it post-boot; a pre-JEF-280 line defaults to `Keyless`.
                         rank,
+                        // The learned provenance identity survives a restart (JEF-275); a line
+                        // written before this axis existed replays with empty sets (cold provenance).
+                        provenance_sources: provenance_sources.into_iter().collect(),
+                        provenance_builders: provenance_builders.into_iter().collect(),
                         last_updated_ms: entry.at_ms,
                     },
                     repo,

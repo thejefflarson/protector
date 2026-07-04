@@ -10,8 +10,8 @@
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    AdmissionViewProps, DecisionRowProps, GateStatus, RepoStrength, SigningPosture,
-    SigningRegressionProps, SigningRepoProps, SigningRowProps,
+    AdmissionViewProps, DecisionRowProps, GateStatus, ProvenanceChangeProps, ProvenancePosture,
+    RepoStrength, SigningPosture, SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
 
 /// Render the Admission view: the tallies header, then the per-image signing inventory, then the
@@ -88,6 +88,7 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
                             th.t-micro { "signature" }
                             th.t-micro { "image" }
                             th.t-micro { "signer" }
+                            th.t-micro { "provenance" }
                             th.t-micro { "baseline" }
                             th.t-micro { "if enforced" }
                         }
@@ -109,10 +110,13 @@ fn signing_inventory(v: &AdmissionViewProps) -> Markup {
 fn signing_group(g: &SigningRepoProps) -> Markup {
     html! {
         tr.signing-group {
-            th.signing-group-head.t-data-strong colspan="6" scope="colgroup" { (g.repo) }
+            th.signing-group-head.t-data-strong colspan="7" scope="colgroup" { (g.repo) }
         }
         @if let Some(regression) = &g.regression {
             (signing_regression_row(regression))
+        }
+        @if let Some(change) = &g.provenance_change {
+            (provenance_change_row(change))
         }
         @for img in &g.images {
             (signing_row(img, g.strength))
@@ -167,6 +171,14 @@ fn signing_row(r: &SigningRowProps, strength: RepoStrength) -> Markup {
                     None => span.t-micro.muted title="no trusted signer for this image" { "\u{2014}" }
                 }
             }
+            td.cell.cell-provenance data-provenance=(r.provenance.token()) {
+                (provenance_chip(r.provenance))
+                @if let Some(prov) = &r.provenance_info {
+                    span.provenance-by.t-micro title=(prov.builder_full) {
+                        " \u{00B7} " (prov.builder_short)
+                    }
+                }
+            }
             td.cell.cell-baseline {
                 @if strength == RepoStrength::Unknown {
                     span.t-micro.muted title="no signing baseline learned for this repo yet" {
@@ -182,7 +194,7 @@ fn signing_row(r: &SigningRowProps, strength: RepoStrength) -> Markup {
             td.cell.cell-enforced { (if_enforced_signing(r.posture.would_admit())) }
         }
         tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
-            td.detail-host colspan="6" {
+            td.detail-host colspan="7" {
                 (signing_detail(r, strength))
             }
         }
@@ -216,6 +228,26 @@ fn signing_detail(r: &SigningRowProps, strength: RepoStrength) -> Markup {
                         } @else {
                             p.t-data { (r.detail) }
                         }
+                    }
+                }
+            }
+            section.detail-section {
+                h3.detail-h { "build provenance" }
+                @match &r.provenance_info {
+                    Some(prov) => {
+                        p.t-data { "source: " span.mono { (prov.source_full) } }
+                        p.t-data { "builder: " span.mono { (prov.builder_full) } }
+                    }
+                    None => @match r.provenance {
+                        ProvenancePosture::Absent => p.t-data.muted {
+                            "no SLSA build-provenance attestation for this image \u{2014} calm, not \
+                             an alarm, but not a verified build either"
+                        },
+                        ProvenancePosture::Unverifiable => p.t-data.muted {
+                            "a provenance attestation is present but was not verified against our \
+                             trust root (or carried no builder identity) \u{2014} not a trusted build"
+                        },
+                        _ => p.t-data.muted { "build provenance not yet known (registry/log unreachable)" },
                     }
                 }
             }
@@ -257,7 +289,7 @@ fn signing_regression_row(r: &SigningRegressionProps) -> Markup {
                     span.expander-glyph aria-hidden="true" { "+" }
                 }
             }
-            td.cell.cell-regression colspan="5" {
+            td.cell.cell-regression colspan="6" {
                 span.signing-regression-head {
                     span.glyph aria-hidden="true" { "\u{25CF}" }
                     span.signing-regression-word.t-data-strong { (r.kind.word()) }
@@ -267,7 +299,7 @@ fn signing_regression_row(r: &SigningRegressionProps) -> Markup {
             }
         }
         tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
-            td.detail-host colspan="6" {
+            td.detail-host colspan="7" {
                 (signing_regression_detail(r))
             }
         }
@@ -327,6 +359,102 @@ fn signing_chip(p: SigningPosture) -> Markup {
         span class={ "gate-chip sign-" (p.token()) } {
             span.glyph aria-hidden="true" { (p.glyph()) }
             span.gate-word { (p.word()) }
+        }
+    }
+}
+
+/// A build-provenance-posture chip (JEF-275): colour + glyph + word, never colour alone. `verified`
+/// is the one trusted-build state; `no provenance` (the common case) is calm, `unverifiable` is the
+/// honest "present, not trusted here". The `prov-*` colour tokens are fixed, never untrusted text.
+fn provenance_chip(p: ProvenancePosture) -> Markup {
+    html! {
+        span class={ "gate-chip prov-" (p.token()) } {
+            span.glyph aria-hidden="true" { (p.glyph()) }
+            span.gate-word { (p.word()) }
+        }
+    }
+}
+
+/// The loud build-provenance-change row (JEF-275, ADR-0020 §5): a repo's established provenance
+/// identity drifted — an image was built by an unexpected builder or from an unexpected source. Like
+/// the signing-regression row it stays PROMINENT (a breach keyline, filled glyph, the loud "build
+/// provenance change" word), spans the machine columns, and carries the FULL before→after builders in
+/// its pulldown. Audit-only (the image is still admitted).
+///
+/// Security: every builder/source is UNTRUSTED predicate text, emitted ONLY via maud interpolation
+/// `(x)` (auto-escaped) — never `PreEscaped`, never concatenated into markup, never a `class=` value
+/// (the `data-provenance` attribute is the fixed `changed` token, not identity text).
+fn provenance_change_row(r: &ProvenanceChangeProps) -> Markup {
+    let strength = if r.established {
+        "established baseline"
+    } else {
+        "weak baseline \u{2014} treat as a lead"
+    };
+    let detail_id = format!("detail-{}", r.dom_id);
+    html! {
+        tr.row.signing-row.signing-row-attention id=(r.dom_id) data-signing=(r.dom_id)
+            data-provenance="changed" role="alert" {
+            td.cell.cell-expand {
+                button.expander
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls=(detail_id)
+                    aria-label="expand build-provenance change detail" {
+                    span.expander-glyph aria-hidden="true" { "+" }
+                }
+            }
+            td.cell.cell-regression colspan="6" {
+                span.signing-regression-head {
+                    span.glyph aria-hidden="true" { "\u{25CF}" }
+                    span.signing-regression-word.t-data-strong {
+                        "build provenance change \u{2014} unexpected builder/source"
+                    }
+                    span.signing-regression-strength.t-micro.muted { "(" (strength) ")" }
+                }
+                span.signing-regression-image.t-data { " image: " span.mono { (r.image) } }
+            }
+        }
+        tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
+            td.detail-host colspan="7" {
+                (provenance_change_detail(r))
+            }
+        }
+    }
+}
+
+/// The expand-in-place detail for a provenance-change row: the before→after builders in FULL + the
+/// deviating source. Every builder/source is UNTRUSTED — emitted only via maud interpolation
+/// (auto-escaped, never `PreEscaped`).
+fn provenance_change_detail(r: &ProvenanceChangeProps) -> Markup {
+    html! {
+        div.detail.detail-sign-regression {
+            section.detail-section {
+                h3.detail-h { "what changed" }
+                p.t-data { "image: " span.mono { (r.image) } }
+                p.t-data { "built by an unexpected builder / from an unexpected source" }
+            }
+            section.detail-section {
+                @if r.before_builders.is_empty() {
+                    h3.detail-h { "before \u{2014} baseline builder" }
+                    p.t-data.muted { "baseline builder not recorded" }
+                } @else {
+                    h3.detail-h {
+                        "before \u{2014} baseline builder"
+                        @if r.before_builders.len() != 1 { "s" }
+                    }
+                    ul.signing-regression-before {
+                        @for builder in &r.before_builders {
+                            li.t-data { span.mono { (builder) } }
+                        }
+                    }
+                }
+            }
+            section.detail-section {
+                h3.detail-h { "after" }
+                p.t-data { "now built by:" }
+                p.t-data { span.mono { (r.after_builder) } }
+                p.t-data.muted { "source: " span.mono { (r.after_source) } }
+            }
         }
     }
 }

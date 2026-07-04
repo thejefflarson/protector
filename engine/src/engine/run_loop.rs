@@ -111,6 +111,46 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     }
 }
 
+/// Build the opt-in build-provenance scanner (ADR-0020 §5, JEF-275). Returns `None` — and so makes
+/// NO extra outbound call ever — unless `PROTECTOR_PROVENANCE_ENABLE` is explicitly set (the default
+/// posture adds zero egress beyond the signing sweep). When enabled it observes each running image's
+/// SLSA provenance on the SAME sanctioned registry/sigstore path as signature verification
+/// (ADR-0015), bounded by a per-image timeout + a TTL cache + a `max_images` cap. It reuses the
+/// [`CosignChecker`] verifier — no second verifier. A build failure degrades to `None` (off) rather
+/// than crashing the loop.
+fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceScanner> {
+    use crate::policies::signature::{CosignChecker, ProvenanceScanner};
+
+    if std::env::var("PROTECTOR_PROVENANCE_ENABLE").is_err() {
+        return None;
+    }
+    let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
+        .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
+    let tuf_cache = tuf_cache_dir();
+    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 5));
+    let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
+    let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
+    let auth = registry_auth();
+    // Provenance observation ignores the identity regex entirely (the Fulcio/Rekor chain of the
+    // attestation is the trust anchor); a match-nothing pattern keeps the constructor happy.
+    match CosignChecker::new("$^", oidc_issuer, auth, tuf_cache, verify_timeout) {
+        Ok(checker) => {
+            tracing::info!(
+                "build-provenance scanner ENABLED (opt-in; reuses the sanctioned cosign fetch path, ADR-0020 §5)"
+            );
+            Some(ProvenanceScanner::new(
+                std::sync::Arc::new(checker),
+                max_images,
+                cache_ttl,
+            ))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "build-provenance scanner unavailable (TUF cache dir?); provenance sweep disabled");
+            None
+        }
+    }
+}
+
 /// Build the opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266). Returns `None` — and so
 /// makes NO outbound transparency-log call ever — unless `PROTECTOR_REKOR_ENABLE` is explicitly set
 /// (zero egress preserved by default). When enabled it queries the public log (or a self-hosted
@@ -348,6 +388,13 @@ pub async fn run_watch(
     // divergence.
     let rekor_lane = build_rekor_lane();
 
+    // The opt-in build-provenance scanner (ADR-0020 §5, JEF-275): OFF unless
+    // `PROTECTOR_PROVENANCE_ENABLE` is set, so the default posture adds zero egress beyond the
+    // signing sweep. Built once so its TTL cache persists across passes. When enabled, each pass
+    // observes every running image's SLSA provenance posture (verified / unverifiable / no-provenance
+    // / checking) and folds the verified provenance identity into the SAME per-repo baseline.
+    let provenance_scanner = build_provenance_scanner();
+
     // The durable per-repo TOFU signing baseline (JEF-263, ADR-0020): learned from the sweep's
     // observed postures, persisted to (and, here on boot, replayed from) the SAME decision
     // journal the engine already owns — so a repo's established signed history survives a
@@ -553,6 +600,18 @@ pub async fn run_watch(
         super::signing_rekor::reconcile(
             rekor_lane.as_ref(),
             &signing_map,
+            &policy_log,
+            Some(&mut signing_baselines),
+            signing_journal.as_ref(),
+        )
+        .await;
+        // Observe each running image's SLSA build provenance (JEF-275, ADR-0020 §5) and fold the
+        // verified provenance identity into the SAME per-repo baseline. A no-op (zero extra egress)
+        // when the scanner is off. Runs AFTER the signing sweep so the baseline it augments already
+        // exists (provenance is augment-only).
+        super::provenance_sweep::sweep(
+            provenance_scanner.as_ref(),
+            &snapshot,
             &policy_log,
             Some(&mut signing_baselines),
             signing_journal.as_ref(),

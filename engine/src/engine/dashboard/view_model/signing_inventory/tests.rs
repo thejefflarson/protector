@@ -736,3 +736,138 @@ fn signing_downgrade_findings_render_through_the_regression_channel() {
     assert_eq!(reg.kind, RegressionKind::DowngradeUnverifiable);
     assert!(!reg.established, "a cold-baseline downgrade is a weak lead");
 }
+
+// ---- Build-provenance axis (JEF-275) --------------------------------------------------------
+
+/// A provenance observation row, as `engine::provenance_sweep` records it.
+fn provenance_observed(image: &str, status: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "build-provenance",
+        "allow",
+        format!("Provenance/{image}"),
+        image,
+        status,
+        "",
+        "",
+        reason,
+    )
+}
+
+/// A provenance-change finding row, as `engine::provenance_sweep::change_record` records it.
+fn provenance_change(
+    repo: &str,
+    image: &str,
+    signature: &str,
+    reason: &str,
+) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "provenance-change",
+        "allow",
+        format!("ProvenanceChange/{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+#[test]
+fn verified_provenance_joins_onto_its_image_row() {
+    let rows = vec![
+        observed("ghcr.io/acme/app:1", "signed", "signed by x"),
+        provenance_observed(
+            "ghcr.io/acme/app:1",
+            "provenance-verified",
+            "built by https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main from github.com/acme/app",
+        ),
+    ];
+    let groups = build(&rows);
+    let img = &groups[0].images[0];
+    assert_eq!(img.provenance, ProvenancePosture::Verified);
+    let info = img.provenance_info.as_ref().expect("verified ⇒ info");
+    assert_eq!(info.source_short, "acme/app");
+    assert_eq!(info.builder_short, "acme/app");
+    assert_eq!(info.source_full, "github.com/acme/app");
+}
+
+#[test]
+fn image_with_no_provenance_row_defaults_to_absent_never_na() {
+    let rows = vec![observed("ghcr.io/acme/app:1", "signed", "signed by x")];
+    let groups = build(&rows);
+    assert_eq!(groups[0].images[0].provenance, ProvenancePosture::Absent);
+    assert!(groups[0].images[0].provenance_info.is_none());
+}
+
+#[test]
+fn absent_provenance_row_is_calm_absent() {
+    let rows = vec![
+        observed("ghcr.io/acme/app:1", "signed", "signed by x"),
+        provenance_observed("ghcr.io/acme/app:1", "no-provenance", ""),
+    ];
+    let groups = build(&rows);
+    assert_eq!(groups[0].images[0].provenance, ProvenancePosture::Absent);
+}
+
+#[test]
+fn provenance_change_becomes_the_repo_banner() {
+    let rows = vec![
+        observed("ghcr.io/acme/app:2", "signed", "signed by x"),
+        provenance_change(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "provenance-change-established",
+            "built by https://github.com/evil/app/.github/workflows/pwn.yml@refs/heads/main from github.com/evil/app | before: https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main",
+        ),
+    ];
+    let groups = build(&rows);
+    let change = groups[0]
+        .provenance_change
+        .as_ref()
+        .expect("provenance change banner");
+    assert!(change.established);
+    assert_eq!(
+        change.after_builder,
+        "https://github.com/evil/app/.github/workflows/pwn.yml@refs/heads/main"
+    );
+    assert_eq!(change.after_source, "github.com/evil/app");
+    assert_eq!(
+        change.before_builders,
+        vec!["https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main".to_string()]
+    );
+}
+
+#[test]
+fn provenance_change_floats_the_group_to_the_top() {
+    // A clean repo and a provenance-drifted repo: the drifted one must sort first (loud-first).
+    let rows = vec![
+        observed("ghcr.io/clean/app:1", "signed", "signed by x"),
+        observed("ghcr.io/drift/app:1", "signed", "signed by x"),
+        provenance_change(
+            "ghcr.io/drift/app",
+            "ghcr.io/drift/app:1",
+            "provenance-change-established",
+            "built by b from s | before: a",
+        ),
+    ];
+    let groups = build(&rows);
+    assert_eq!(
+        groups[0].repo, "ghcr.io/drift/app",
+        "drift floats to the top"
+    );
+}
+
+#[test]
+fn provenance_rows_are_inventory_not_decision_rows() {
+    assert!(is_inventory_row(&provenance_observed(
+        "ghcr.io/acme/app:1",
+        "no-provenance",
+        ""
+    )));
+    assert!(is_inventory_row(&provenance_change(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:1",
+        "provenance-change-cold",
+        "built by b from s | before: a"
+    )));
+}

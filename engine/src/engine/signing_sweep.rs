@@ -47,7 +47,7 @@ pub const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
 /// Collect every distinct container image a running Pod references — regular, init, and
 /// ephemeral containers — across the snapshot. Deduping is left to the observer's sweep (it
 /// keys on the image ref), so this just flattens.
-fn snapshot_images(pods: &[Pod]) -> Vec<String> {
+pub(super) fn snapshot_images(pods: &[Pod]) -> Vec<String> {
     let mut images = Vec::new();
     for pod in pods {
         let Some(spec) = pod.spec.as_ref() else {

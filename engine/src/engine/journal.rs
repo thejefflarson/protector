@@ -161,6 +161,18 @@ pub enum Decision {
         /// weaker rank that would miss a downgrade.
         #[serde(default)]
         rank: crate::policies::signature::PostureRank,
+        /// Every source repository observed in a VERIFIED SLSA build-provenance attestation under
+        /// this repo (JEF-275, ADR-0020 §5) — the provenance continuity axis, TOFU-learned like the
+        /// signer identities (sorted, deduped). `#[serde(default)]` so lines predating the
+        /// provenance axis replay with an empty set (cold provenance), never a fabricated identity.
+        /// UNTRUSTED predicate text — escape at render.
+        #[serde(default)]
+        provenance_sources: Vec<String>,
+        /// Every builder identity (SLSA `builder.id`) observed in a VERIFIED provenance attestation
+        /// under this repo (JEF-275). `#[serde(default)]` for the same forward-compat reason.
+        /// UNTRUSTED — escape at render.
+        #[serde(default)]
+        provenance_builders: Vec<String>,
     },
 }
 

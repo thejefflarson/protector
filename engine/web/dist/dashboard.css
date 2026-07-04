@@ -993,3 +993,14 @@ summary:focus-visible,
 .sign-invalid { color: var(--posture-breach); }
 .sign-notsigned { color: var(--ink-3); }
 .sign-checking { color: var(--posture-awaiting); }
+
+/* the build-provenance-posture chip colours (JEF-275, ADR-0020 §5): a VERIFIED build is the calm
+   cleared green (the one trusted-build state); unverifiable is caution amber (present but not trusted
+   here); no-provenance is calm/muted (the common case today — never an alarm); checking is the
+   transient ochre. Each pairs with a distinct glyph + word (meaning never by colour alone). Absent is
+   deliberately NOT green: calm, but not a trusted build. */
+.prov-verified { color: var(--cov-present); }
+.prov-unverifiable { color: var(--posture-uncertain); }
+.prov-absent { color: var(--ink-3); }
+.prov-checking { color: var(--posture-awaiting); }
+.provenance-by { color: var(--ink-3); }

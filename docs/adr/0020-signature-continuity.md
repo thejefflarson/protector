@@ -240,3 +240,62 @@ confer no trusted identity and still `would_admit() == false`.
    wall-clock age on the cache) and the spike heuristic (a fraction of the fleet above a
    small floor) are deliberately simple; parsing the TUF expiry and tracking a historical
    unverifiable-rate delta are future refinements.
+
+## Addenda (JEF-275 — provenance is a second continuity axis)
+
+A cosign signature proves *who* signed an image; SLSA **build provenance** proves *how it
+was built* — the source repository and the builder/workflow (a GitHub Actions OIDC
+workflow) that produced it. Signature continuity (this ADR) and provenance continuity are
+the same idea on two axes: **observe → learn a per-repo TOFU baseline → treat a deviation
+on an established baseline as the signal.** This addendum extends the family to the
+provenance axis. It changes **observation + drift only** — it adds no enforcement and no
+new egress path.
+
+1. **Observe every image's provenance posture.** The same production verifier
+   (`CosignChecker`) fetches an image's cosign-attest SLSA provenance attestation on the
+   SAME sanctioned registry/sigstore round trip as signature verification (§4/ADR-0015 —
+   `trusted_signature_layers` already returns any attached in-toto/DSSE attestation layer;
+   there is **no second verifier and no new egress**). The DSSE envelope + Fulcio cert are
+   verified exactly as a signature is, and the in-toto/SLSA predicate (v0.2 and v1) is
+   parsed for the source repo + `builder.id`. Every image resolves to one of four honest
+   resting states, mirroring the signing split: `Verified` (the one trusted-build state),
+   `Unverifiable` (attestation present but not verified here / no builder id), `Absent`
+   (no provenance — the common case today), and the transient `Checking`. **Absent is
+   calm, never n/a and never an alarm** — like a never-signed image — but it is likewise
+   **never read as a trusted build**.
+
+2. **TOFU-learn the provenance identity per repo.** The learned `(source_repo, builder)`
+   folds into the SAME per-repo baseline record + its journal line as the signer
+   identities — two new `#[serde(default)]` fields (`provenance_sources`,
+   `provenance_builders`), so older journal lines replay with an empty (cold) provenance
+   axis, never a fabricated one. Learning is **augment-only**: provenance folds into a
+   baseline already taught by a keyless `Signed` posture; it never *creates* a baseline on
+   its own, so the signature-baseline invariants (rank, `established` maturation) are
+   untouched. A repo with no signing baseline therefore has a **cold** provenance axis —
+   its provenance drift is a weak lead, never a silent miss.
+
+3. **Provenance change is a drift class on JEF-264's audit channel.** A verified
+   provenance whose source or builder is **not** in an established repo's learned set fires
+   a **provenance-change** finding — the "built by an unexpected workflow / from an
+   unexpected source" signal — distinct in reason from a signing regression (a repo can
+   carry both). It rides the same admission-finding path (audit-only, shadow; ADR-0016):
+   an **established** baseline → strong signal; a **cold** one → a weak lead, never silent
+   — exactly the baseline-relative semantics JEF-280 established. Absent / unverifiable /
+   checking never fire a change.
+
+4. **Off by default; degrades cleanly.** The provenance sweep is opt-in
+   (`PROTECTOR_PROVENANCE_ENABLE`, mirroring the Rekor lane), so the default posture adds
+   **zero egress** beyond the signing sweep, and an image with no provenance (today's
+   norm) simply reads `Absent`. This is safe to ship before any CI attaches provenance.
+
+**Known limitation (DECISION NEEDED — recorded for the architect).** The pinned
+`sigstore` crate (0.14) verifies DSSE bundle referrers only for the cosign `sign/v1`
+predicate — `from_sigstore_bundle` rejects any other predicate type, so a **SLSA
+provenance** attestation is currently *not surfaced* by `trusted_signature_layers` end to
+end. The full verify → baseline → drift → render pipeline, the SLSA-predicate parser, and
+the DSSE-PAE extraction are implemented and unit-tested against synthetic attestations, so
+the `Verified` path is real, correct code that activates the moment the verifier surfaces a
+SLSA layer; until then the production observer yields `Absent`/`Checking` — the safe,
+honest degradation. Closing the gap (compose sigstore's lower-level DSSE + Fulcio + Rekor
+primitives, or an upgraded `sigstore` release) is a follow-up that does not change this
+addendum's contract.

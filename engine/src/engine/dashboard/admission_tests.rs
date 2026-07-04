@@ -617,3 +617,108 @@ fn signing_inventory_honest_empty_when_no_images_observed() {
         "the empty inventory disclaims being an all-clear"
     );
 }
+
+// ---- build-provenance axis (JEF-275) render tests ------------------------------------------
+
+/// A provenance observation row (JEF-275 shape): `Provenance/<ref>` subject, the posture word in
+/// `signature`, the `built by <builder> from <source>` prose in `reason`.
+fn provenance_rec(image: &str, status: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "build-provenance",
+        "allow",
+        format!("Provenance/{image}"),
+        image,
+        status,
+        "",
+        "",
+        reason,
+    )
+}
+
+/// A provenance-change finding row (`ProvenanceChange/<repo>`).
+fn provenance_change_rec(
+    repo: &str,
+    image: &str,
+    signature: &str,
+    reason: &str,
+) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "provenance-change",
+        "allow",
+        format!("ProvenanceChange/{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+#[test]
+fn provenance_column_header_and_verified_builder_render() {
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app:1", "signed", "signed by x"),
+        provenance_rec(
+            "ghcr.io/acme/app:1",
+            "provenance-verified",
+            "built by https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main from github.com/acme/app",
+        ),
+    ];
+    let html = render(&rows);
+    assert!(
+        html.contains("provenance"),
+        "the provenance column is rendered"
+    );
+    // The verified builder's full identity is available (title=) and its short label in-row.
+    assert!(
+        html.contains("https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main"),
+        "the full builder identity is shown"
+    );
+}
+
+#[test]
+fn absent_provenance_renders_calm_never_na() {
+    let rows = vec![
+        signing_rec("ghcr.io/acme/app:1", "signed", "signed by x"),
+        provenance_rec("ghcr.io/acme/app:1", "no-provenance", ""),
+    ];
+    let html = render(&rows);
+    assert!(
+        html.contains("no provenance"),
+        "absent renders honest 'no provenance'"
+    );
+    // The provenance chip must never read as n/a (operator rule: never n/a).
+    assert!(
+        !html.contains("data-provenance=\"na\""),
+        "provenance is never n/a"
+    );
+}
+
+#[test]
+fn provenance_change_renders_loud_and_escapes_untrusted_builder() {
+    // The builder + source are attacker-influenceable predicate text — a crafted value must not
+    // inject markup (maud auto-escape; never PreEscaped).
+    let evil = "<script>alert('pwn')</script>";
+    let rows = vec![provenance_change_rec(
+        "ghcr.io/acme/app",
+        "ghcr.io/acme/app:2",
+        "provenance-change-established",
+        &format!(
+            "built by {evil} from {evil} | before: https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main"
+        ),
+    )];
+    let html = render(&rows);
+    assert!(
+        html.contains("build provenance change"),
+        "the loud provenance-change word is rendered"
+    );
+    assert!(
+        html.contains("https://github.com/acme/app/.github/workflows/r.yml@refs/heads/main"),
+        "the before builder is shown in full"
+    );
+    assert!(
+        !html.contains("<script>alert"),
+        "raw script from the builder must not reach output"
+    );
+    assert!(html.contains("&lt;script&gt;"), "the builder is escaped");
+}
