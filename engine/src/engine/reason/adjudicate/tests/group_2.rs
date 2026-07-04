@@ -32,6 +32,8 @@ async fn null_adjudicator_confirms() {
         exposed_entry: true,
         verdict: None,
         links: vec![],
+        paths: vec![],
+        paths_truncated: false,
         single_edge_cuts: vec![],
         quarantine_targets: vec![],
     };

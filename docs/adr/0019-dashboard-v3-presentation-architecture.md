@@ -97,6 +97,39 @@ while `model_judging == true`.** When the model is warming or not answering, exp
    HTML-escaped at render (maud auto-escape). (Render test.)
 7. No source file exceeds 1,000 lines. (`file_size_guard`.)
 
+## Amendment (JEF-281) — the finding detail shows ALL proven paths, not one
+
+The v3 rewrite retired the old Mermaid graph (deliberately: it drew an unreadable "wall of
+arrows", pulled a third-party client graph library over a CDN — a zero-egress violation — and fed
+untrusted node keys into a graph renderer). In its place the finding detail rendered a single text
+hop-list: **one** proven path per finding. For a wide finding — an objective reachable several ways
+— that is lossy, and worse than aesthetic: it **hides the no-cut reason**. A chain is
+no-single-edge-cut (`single_edge_cuts` empty) *precisely because redundant paths route around any
+one edge*; showing one path erases the exact information that explains the disposition.
+
+The fix restores the complete-graph picture **within the v3 constraints** — no Mermaid, no client
+graph lib, still server-rendered and zero-egress:
+
+- The proof layer enumerates **every** proof-grade path entry → objective (not just the shortest),
+  honouring the same compromise gate as the shortest-path walk, so each path is equally grounded.
+  Enumeration is **bounded** — `MAX_PROVEN_PATHS` results and a hard exploration budget — so a
+  dense mesh can never blow up combinatorially; a truncated set is reported honestly (`+N more`).
+- The finding detail renders the paths as **stacked chain staircases** (the existing hop-list
+  component, reused). Edges present on *every* path are marked **shared** (a single-edge-cut
+  candidate / bottleneck); when no single edge severs the objective, the redundant paths ARE the
+  explanation and the header says so in words ("reachable via N redundant paths — no single edge
+  severs the objective").
+- A wide path fan-out stays **collapsed by default** (first paths open, the rest behind a native
+  `<details>` disclosure — no JS) but is one click from the full set, mirroring the row-level
+  `→ ×N` fan-out collapse.
+
+Every node key / relation label stays auto-escaped by maud (never `PreEscaped` for untrusted text)
+and every visual is a STYLEGUIDE class (no inline style) — the invariants below are unchanged. This
+is the safest defensible restoration; the larger "server-rendered DOT→SVG subgraph" option was
+weighed and **deliberately deferred** (an in-cluster DOT renderer + inline-SVG escaping surface is
+more moving parts and more injection surface than the stacked hop-lists, which reuse a
+guard-tested component). It can be revisited if the stacked view proves insufficient.
+
 ## Consequences
 
 - The presentation can be unit-tested at the props boundary and the render boundary with no

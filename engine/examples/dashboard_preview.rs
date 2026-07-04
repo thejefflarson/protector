@@ -116,6 +116,8 @@ fn breach_finding() -> Finding {
                 "secret/payments/stripe-live-key",
             ),
         ],
+        paths: vec![],
+        paths_truncated: false,
         evidence,
         recency: None,
     }
@@ -134,6 +136,40 @@ fn simple_finding(entry: &str, objective: &str) -> Finding {
         breach_relevant: true,
         verdict: None,
         path: vec![hop(entry, "reaches/Tcp/443", objective)],
+        paths: vec![],
+        paths_truncated: false,
+        evidence: EntryEvidence::default(),
+        recency: None,
+    }
+}
+
+/// A wide, NO-CUT finding (JEF-281): an internet-facing front door reaching one secret via TWO
+/// redundant backends, so no single edge severs the objective. Showcases the multi-path detail —
+/// both proven paths stacked, and the "reachable via N redundant paths" reason line.
+fn redundant_finding() -> Finding {
+    let entry = "deployment/edge/webhook-router";
+    let objective = "secret/app/shared-creds";
+    let path_via_db = vec![
+        hop(entry, "reaches/Tcp/5432", "statefulset/app/ledger-db"),
+        hop("statefulset/app/ledger-db", "mounts", objective),
+    ];
+    let path_via_cache = vec![
+        hop(entry, "reaches/Tcp/6379", "deployment/app/cache"),
+        hop("deployment/app/cache", "mounts", objective),
+    ];
+    Finding {
+        entry: entry.into(),
+        objective: objective.into(),
+        foothold: true,
+        corroborated: false,
+        disposition: "no-cut".into(),
+        // No single edge severs the chain — the redundant paths ARE the reason.
+        cut: None,
+        breach_relevant: true,
+        verdict: None,
+        path: path_via_db.clone(),
+        paths: vec![path_via_db, path_via_cache],
+        paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
     }
@@ -594,6 +630,8 @@ fn build_breach() -> DashboardState {
     let mut rows: Vec<Finding> = vec![
         // BREACH — internet-facing, proven multi-hop, KEV CVE, runtime alert, proposed cut.
         breach_finding(),
+        // NO-CUT — one secret reachable via two redundant backends (JEF-281 multi-path view).
+        redundant_finding(),
         // AWAITING — a breach-relevant entry the model has not yet reached (no verdict).
         simple_finding(
             "deployment/edge/auth-proxy",

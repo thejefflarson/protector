@@ -182,6 +182,11 @@ pub struct HopProps {
     pub structural: bool,
     /// Whether the proposed cut severs at this hop.
     pub is_cut: bool,
+    /// Whether this edge is SHARED across every proven path to the objective — a common
+    /// bottleneck (JEF-281). When several paths share an edge it is a single-edge-cut candidate;
+    /// when they share none, no single edge severs the objective. Only meaningful in the
+    /// multi-path view; `false` for a lone path. Marked visually so redundancy is legible.
+    pub shared: bool,
 }
 
 /// The verbatim model judgement behind a finding, for the "show model prompt" disclosure.
@@ -268,7 +273,16 @@ pub struct FindingProps {
     pub disposition: String,
     /// The verbatim verdict summary (`Verdict::summary()`), or `None` while awaiting.
     pub verdict_summary: Option<String>,
+    /// The REPRESENTATIVE (shortest) proven path — kept for the row's one-line summary.
     pub path: Vec<HopProps>,
+    /// EVERY proven path to the objective (bounded, shortest-first), each a hop-list — the
+    /// complete reachability picture the finding detail renders as stacked chains (JEF-281).
+    /// Edges shared across all paths carry [`HopProps::shared`] so redundancy is visible; when
+    /// several redundant paths exist and none is a single cut, that IS the no-cut explanation.
+    pub paths: Vec<Vec<HopProps>>,
+    /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
+    /// detail shows a "+N more" note rather than an unbounded wall (JEF-281).
+    pub paths_truncated: bool,
     /// The proposed/applied cut signature, if one exists.
     pub cut: Option<String>,
     pub evidence: EvidenceProps,

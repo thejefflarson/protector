@@ -24,6 +24,8 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
             relation: "reaches/Tcp/5432".into(),
             to: objective.to_string(),
         }],
+        paths: vec![],
+        paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
     }
@@ -193,6 +195,70 @@ fn path_props_carry_node_glyphs_and_mark_the_cut() {
     // The severable edge is marked; the structural `mounts` edge is not the cut.
     assert!(path[0].is_cut);
     assert!(!path[1].is_cut);
+}
+
+#[test]
+fn multi_path_marks_edges_shared_across_all_paths() {
+    // JEF-281: an objective reachable two ways through a common first hop (a shared bottleneck)
+    // then divergent second hops. The shared edge must be marked in BOTH paths; the divergent
+    // edges must not — that marking is what makes redundancy (and the cut/no-cut reason) legible.
+    let mut f = finding(
+        "deployment/edge/gw",
+        "secret/app/creds",
+        Some(Verdict::Confirmed),
+    );
+    f.cut = None;
+    let shared = PathStep {
+        from: "deployment/edge/gw".into(),
+        relation: "reaches/Tcp/443".into(),
+        to: "deployment/app/hub".into(),
+    };
+    let path_a = vec![
+        shared.clone(),
+        PathStep {
+            from: "deployment/app/hub".into(),
+            relation: "reaches/Tcp/5432".into(),
+            to: "secret/app/creds".into(),
+        },
+    ];
+    let path_b = vec![
+        shared.clone(),
+        PathStep {
+            from: "deployment/app/hub".into(),
+            relation: "reaches/Tcp/6379".into(),
+            to: "secret/app/creds".into(),
+        },
+    ];
+    f.paths = vec![path_a, path_b];
+    let rows = map_findings(&[f], &[]);
+    let paths = &rows[0].paths;
+    assert_eq!(paths.len(), 2, "both proven paths are mapped, not just one");
+    // The common first hop is a shared bottleneck in both routes...
+    assert!(
+        paths[0][0].shared,
+        "the common edge is marked shared in path A"
+    );
+    assert!(
+        paths[1][0].shared,
+        "the common edge is marked shared in path B"
+    );
+    // ...while the divergent second hops are not shared.
+    assert!(!paths[0][1].shared);
+    assert!(!paths[1][1].shared);
+}
+
+#[test]
+fn single_path_finding_falls_back_and_marks_no_shared_edge() {
+    // A lone-path finding (the common case) sets no `paths`; the mapper falls back to the
+    // representative path so a chain always renders, and nothing is marked shared.
+    let f = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
+    let rows = map_findings(&[f], &[]);
+    assert_eq!(
+        rows[0].paths.len(),
+        1,
+        "a lone path still renders (fallback)"
+    );
+    assert!(rows[0].paths[0].iter().all(|h| !h.shared));
 }
 
 #[test]
