@@ -22,7 +22,12 @@ use crate::engine::reason::adjudicate::Verdict;
 pub enum StoredPosture {
     /// The model affirmed a real breach (a `Confirmed` / `Exploitable` verdict).
     Breach,
-    /// The model judged this NOT a breach (a `Refuted` / `Uncertain` call).
+    /// The model reached this entry but its call was INCONCLUSIVE (an `Uncertain`
+    /// verdict — timed out, unparseable, or genuinely undecided). Distinct from `Safe`:
+    /// an inconclusive read is NEVER green (ADR-0016: honesty — Uncertain/Awaiting is
+    /// never safe). It must never map to `Safe` anywhere in the Δ path (JEF-302).
+    Unknown,
+    /// The model judged this NOT a breach (a decisive `Refuted` call).
     Safe,
     /// No verdict has been displayed for this entry yet (the model hasn't reached it).
     Awaiting,
@@ -30,27 +35,35 @@ pub enum StoredPosture {
 
 impl StoredPosture {
     /// The posture a TYPED verdict carries (JEF-255) — `Confirmed`/`Exploitable`
-    /// ([`Verdict::is_confirmed`]) is a BREACH, any decisive negative (`Refuted`/`Uncertain`)
-    /// is `Safe`, and `None` (no verdict yet) is `Awaiting`. This is the one place posture is
-    /// derived from a verdict, so the recency diff and any downstream posture can never drift.
-    /// (v1 string-matched the "exploitable" prefix here, and missed `Confirmed`; JEF-255 fixes
-    /// that.)
+    /// ([`Verdict::is_confirmed`]) is a BREACH, an inconclusive `Uncertain` is `Unknown`
+    /// (never green — ADR-0016 honesty; JEF-302), a decisive `Refuted` is `Safe`, and `None`
+    /// (no verdict yet) is `Awaiting`. This is the one place posture is derived from a verdict,
+    /// so the recency diff and any downstream posture can never drift. (v1 string-matched the
+    /// "exploitable" prefix here, and missed `Confirmed`; JEF-255 fixes that.)
+    ///
+    /// `Uncertain` MUST NOT map to `Safe`: an inconclusive read is a latent honesty foot-gun —
+    /// if the posture ever feeds a status color or a gate, an undecided entry must never read
+    /// green (JEF-302).
     pub fn of_verdict(verdict: Option<&Verdict>) -> Self {
         match verdict {
             None => StoredPosture::Awaiting,
             Some(v) if v.is_confirmed() => StoredPosture::Breach,
+            Some(Verdict::Uncertain(_)) => StoredPosture::Unknown,
             Some(_) => StoredPosture::Safe,
         }
     }
 
-    /// Rank for the escalation diff (lower = calmer): Awaiting < Safe < Breach. A rise in
-    /// rank is an escalation (`↑`), a fall a de-escalation (`↓`). Awaiting ranks lowest so a
-    /// NEW entry's first real verdict reads via [`Delta::New`], not a spurious arrow.
+    /// Rank for the escalation diff (lower = calmer): Awaiting < Safe < Unknown < Breach. A
+    /// rise in rank is an escalation (`↑`), a fall a de-escalation (`↓`). Awaiting ranks lowest
+    /// so a NEW entry's first real verdict reads via [`Delta::New`], not a spurious arrow.
+    /// `Unknown` (an inconclusive `Uncertain`) ranks ABOVE `Safe` and below `Breach`: an
+    /// undecided read is a mild concern, never as calm as a decisive clear (JEF-302).
     pub fn rank(self) -> u8 {
         match self {
             StoredPosture::Awaiting => 0,
             StoredPosture::Safe => 1,
-            StoredPosture::Breach => 2,
+            StoredPosture::Unknown => 2,
+            StoredPosture::Breach => 3,
         }
     }
 
@@ -136,10 +149,20 @@ mod tests {
             StoredPosture::of_verdict(Some(&Verdict::Refuted("internal only".into()))),
             StoredPosture::Safe
         );
-        assert_eq!(
-            StoredPosture::of_verdict(Some(&Verdict::Uncertain("model timed out".into()))),
-            StoredPosture::Safe
-        );
+    }
+
+    #[test]
+    fn uncertain_never_maps_to_safe() {
+        // JEF-302: an inconclusive verdict is a latent honesty foot-gun — it must map to a
+        // non-green `Unknown`, NEVER to `Safe`, so an undecided entry can never read green if
+        // the posture ever feeds a status color or a gate (ADR-0016 honesty).
+        let posture =
+            StoredPosture::of_verdict(Some(&Verdict::Uncertain("model timed out".into())));
+        assert_eq!(posture, StoredPosture::Unknown);
+        assert_ne!(posture, StoredPosture::Safe);
+        // `Unknown` outranks `Safe` (never as calm as a decisive clear) and stays below `Breach`.
+        assert!(StoredPosture::Unknown.rank() > StoredPosture::Safe.rank());
+        assert!(StoredPosture::Unknown.rank() < StoredPosture::Breach.rank());
     }
 
     #[test]
