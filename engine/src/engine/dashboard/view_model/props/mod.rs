@@ -819,7 +819,7 @@ pub struct AdmissionViewProps {
 // unchanged for every consumer.
 mod signing;
 pub use signing::{
-    ProvenanceChangeProps, ProvenancePosture, ProvenanceProps, RegressionKind, RepoStrength,
-    SignerProps, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
-    SigningRowProps,
+    ExceptionAcceptedProps, ProvenanceChangeProps, ProvenancePosture, ProvenanceProps,
+    RegressionKind, RepoStrength, SignerProps, SigningEnforcement, SigningPosture,
+    SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };

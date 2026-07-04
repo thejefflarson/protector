@@ -271,6 +271,13 @@ pub async fn run_watch(
     // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
     // carries the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
+    // The read-only, cross-task signing-baseline snapshot (JEF-265, ADR-0020 Stage 3): the engine
+    // is the SOLE writer — it publishes a snapshot after each sweep pass; the admission webhook only
+    // ever reads it, so admission can never poison the baseline.
+    shared_baseline: state::SharedSigningBaseline,
+    // The scoped "exception accepted" config (JEF-265), read by BOTH the webhook block predicate and
+    // the sweep's render so the gate and the inventory never disagree about what is excepted.
+    signing_exceptions: crate::policies::signature::SigningExceptions,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
@@ -410,6 +417,10 @@ pub async fn run_watch(
             "restored per-repo signing baselines from the durable journal"
         );
     }
+    // Publish the restored baseline to the webhook immediately (JEF-265), so a post-restart
+    // admission consults real, established history rather than an empty (cold ⇒ never-denies)
+    // snapshot until the first sweep completes.
+    shared_baseline.publish(&signing_baselines);
 
     // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
     // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
@@ -593,6 +604,7 @@ pub async fn run_watch(
             &policy_log,
             Some(&mut signing_baselines),
             signing_journal.as_ref(),
+            &signing_exceptions,
         )
         .await;
         // Opt-in Rekor reconciliation (JEF-266): corroborate baselines against the public log and
@@ -617,6 +629,13 @@ pub async fn run_watch(
             signing_journal.as_ref(),
         )
         .await;
+
+        // Publish the freshly-updated baseline snapshot for the admission webhook (JEF-265). The
+        // engine is the SOLE writer; this is the ONLY path baselines reach the webhook, and it is
+        // read-only there — so admission can consult signature continuity without ever being able to
+        // teach (poison) it. Done after ALL baseline-mutating sweeps this pass so the webhook always
+        // sees a consistent, whole-pass snapshot.
+        shared_baseline.publish(&signing_baselines);
 
         // Refresh the LIVE signing-trust readiness signals (JEF-280): the TUF-root cache age (it
         // ages between passes, and a successful verify this pass may have just refreshed it) and a

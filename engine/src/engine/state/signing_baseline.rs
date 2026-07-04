@@ -40,6 +40,7 @@
 //! cluster).
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, RwLock};
 
 use crate::engine::journal::{Decision, DecisionJournal};
 use crate::policies::signature::{PostureRank, ProvenancePosture, SigningPosture, repo_key};
@@ -417,6 +418,56 @@ impl SigningBaselineStore {
         if let Some(victim) = victim {
             self.baselines.remove(&victim);
         }
+    }
+}
+
+/// A read-only, cross-task snapshot handle onto the analysis engine's per-repo signing baseline
+/// (JEF-265, ADR-0020 Stage 3 ENFORCE).
+///
+/// The critical invariant it enforces: **the admission webhook consults the baseline but never
+/// writes/learns it.** The analysis engine's running-Pod sweep OWNS the authoritative
+/// [`SigningBaselineStore`] and, after each pass, [`publish`](Self::publish)es a snapshot here; the
+/// webhook holds this handle and only ever [`get`](Self::get)s from it. If admission could teach the
+/// baseline, admission would become its own baseline-poisoning oracle — an attacker who can get a
+/// Pod admitted could TOFU-establish an identity and then never regress against it. This handle has
+/// no learn/observe method, so that path structurally cannot exist.
+///
+/// Cheap by construction: `publish` replaces the snapshot with a clone of the store (tens-to-low-
+/// hundreds of small entries — the same order as the per-pass journal compaction), and `get` clones
+/// out one entry under a brief read lock. No lock is ever held across an `.await`. A poisoned lock
+/// fails **safe** (`get` returns `None` → cold → never denies; `publish` skips).
+#[derive(Clone, Default)]
+pub struct SharedSigningBaseline {
+    inner: Arc<RwLock<SigningBaselineStore>>,
+}
+
+impl SharedSigningBaseline {
+    /// An empty shared baseline (nothing learned yet — every repo reads cold, so nothing denies).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish a snapshot of the authoritative store. Called ONLY by the analysis engine's sweep
+    /// task after each pass — the webhook NEVER calls this (it has no writable handle to the store).
+    pub fn publish(&self, store: &SigningBaselineStore) {
+        if let Ok(mut guard) = self.inner.write() {
+            *guard = store.clone();
+        }
+    }
+
+    /// The learned baseline for a `registry/repo` key in the current snapshot, cloned out. `None`
+    /// when the repo is untracked (cold — never a deny) or the lock is poisoned (fail-safe).
+    pub fn get(&self, repo: &str) -> Option<SigningBaseline> {
+        self.inner.read().ok()?.get(repo).cloned()
+    }
+
+    /// Number of tracked repos in the current snapshot (inspection / tests).
+    pub fn len(&self) -> usize {
+        self.inner.read().map(|s| s.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

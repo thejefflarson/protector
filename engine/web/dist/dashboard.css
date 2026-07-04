@@ -912,6 +912,11 @@ summary:focus-visible,
 .enforced-block { color: var(--posture-breach); }
 /* JEF-297: a cold-baseline signing regression — non-green, but a weak lead, never a hard block. */
 .enforced-uncertain { color: var(--posture-uncertain); }
+/* JEF-265: a scoped, recorded "exception accepted" — calm but DISTINCT (never green-cleared),
+   visible, and never counted toward breach. Its own muted-accent colour + a distinct glyph/word. */
+.enforced-exception { color: var(--posture-uncertain); font-style: italic; }
+.signing-exception-head { display: inline-flex; align-items: baseline; gap: var(--gap-2, .35rem); }
+.signing-exception-word { font-style: italic; }
 
 /* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture as ONE
    aligned table for the whole inventory (so the machine columns line up across every repo),

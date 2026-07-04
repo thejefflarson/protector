@@ -88,6 +88,20 @@ pub enum RegressionKind {
 }
 
 impl RegressionKind {
+    /// A stable FINGERPRINT identifying THIS specific drift (JEF-265, ADR-0020 Stage 3), so an
+    /// "exception accepted" can be pinned to the exact change it accepts. A DIFFERENT subsequent
+    /// change yields a different fingerprint and re-flags loud (the acceptance is scoped, never a
+    /// blanket mute). For an identity change the fingerprint carries the new identity (UNTRUSTED
+    /// Fulcio SAN — never rendered as markup/CSS by any consumer); the calm kinds are their word.
+    pub fn fingerprint(&self) -> String {
+        match self {
+            RegressionKind::IdentityChange { new_identity, .. } => {
+                format!("identity:{new_identity}")
+            }
+            other => other.word().to_string(),
+        }
+    }
+
     /// A stable, low-cardinality word for the regression kind — for the recorded row's status
     /// column and metrics. NOT the identity (that is untrusted text carried separately).
     pub fn word(&self) -> &'static str {
@@ -134,6 +148,31 @@ impl SigningDrift {
     /// [`Continuous`](Self::Continuous)/[`NewRepo`](Self::NewRepo) never do.
     pub fn is_regression(&self) -> bool {
         matches!(self, SigningDrift::Regression { .. })
+    }
+
+    /// The admission-continuity BLOCK predicate (JEF-265, ADR-0020 Stage 3) — the DOMAIN source of
+    /// truth a signature-continuity gate enforces in enforced scope, and the exact semantic the
+    /// JEF-297 presentation verdict
+    /// [`SigningEnforcement::for_image`](crate::engine::dashboard::view_model::props::SigningEnforcement::for_image)
+    /// projects (block here == its `WouldBlock`), so the "if enforced" column can never disagree
+    /// with what admission actually blocks.
+    ///
+    /// Blocks on (a) a **genuinely-invalid** signature — the loud channel, inadmissible independent
+    /// of any baseline, so an attacker cannot dodge the block by keeping a repo's baseline cold; and
+    /// (b) a regression against an **established** baseline. A cold/freshly-learned regression is
+    /// UNCERTAIN — never a hard block (cold-start NEVER denies; TOFU is the weakest evidence);
+    /// [`Continuous`](Self::Continuous)/[`NewRepo`](Self::NewRepo) admit.
+    pub fn would_block(&self, posture: &SigningPosture) -> bool {
+        if matches!(posture, SigningPosture::InvalidSignature) {
+            return true;
+        }
+        matches!(
+            self,
+            SigningDrift::Regression {
+                established: true,
+                ..
+            }
+        )
     }
 }
 

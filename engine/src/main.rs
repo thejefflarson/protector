@@ -11,9 +11,12 @@ use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::policy_log::PolicyDecisionLog;
 use protector::engine::respond::ProposedAction;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
+use protector::engine::state::SharedSigningBaseline;
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
-use protector::policies::signature::{CosignChecker, SignaturePolicy};
+use protector::policies::signature::{
+    ContinuityGate, CosignChecker, SignaturePolicy, SigningExceptions, SigningObserver, SigningPin,
+};
 use protector::policy::{EnforceScope, Engine};
 use protector::server;
 use sigstore::registry::Auth;
@@ -174,6 +177,77 @@ fn docker_config_basic(path: &str, registry: &str) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+/// The scoped "exception accepted" config (JEF-265, ADR-0020 Stage 3): a mounted file
+/// (`PROTECTOR_SIGNING_EXCEPTIONS_FILE`) merged with an env spec (`PROTECTOR_SIGNING_EXCEPTIONS`).
+/// Each entry is `<scope> <fingerprint>` where scope is `repo:<registry/repo>` or `image:<ref>`.
+/// Empty (neither set) ⇒ nothing is excepted — every repo stays enforced. Reversible: remove the
+/// file/env and the exception is gone.
+fn signing_exceptions() -> SigningExceptions {
+    let file = env::var("PROTECTOR_SIGNING_EXCEPTIONS_FILE").ok();
+    let env_spec = env_or("PROTECTOR_SIGNING_EXCEPTIONS", "");
+    SigningExceptions::from_sources(file.as_deref(), &env_spec)
+}
+
+/// The back-compat identity PINs (JEF-265, ADR-0020): `PROTECTOR_SIGNING_PINS`, a `;`-separated list
+/// of `prefix=identity_regexp`. Each is "every image under `prefix` must always be signed by an
+/// identity matching `identity_regexp`" — the pinned special case of the pre-ADR-0020 prefix gate.
+///
+/// MIGRATION NOTE: the legacy `PROTECTOR_GATED_PREFIXES` + `PROTECTOR_IDENTITY_REGEXP` gate is
+/// preserved unchanged (its own path) and is *equivalent* to the pin
+/// `PROTECTOR_SIGNING_PINS=<prefix>=<identity_regexp>`. Operators may migrate to the pin spelling;
+/// nothing is auto-mapped, so today's behavior is byte-identical.
+fn signing_pins() -> Vec<SigningPin> {
+    env_or("PROTECTOR_SIGNING_PINS", "")
+        .split(';')
+        .filter_map(|entry| {
+            let (prefix, regexp) = entry.split_once('=')?;
+            let prefix = prefix.trim();
+            let regexp = regexp.trim();
+            if prefix.is_empty() || regexp.is_empty() {
+                return None;
+            }
+            match SigningPin::new(prefix, regexp) {
+                Some(pin) => Some(pin),
+                None => {
+                    tracing::warn!(%prefix, "PROTECTOR_SIGNING_PINS entry has an invalid regexp; skipping");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Build the webhook's signing-posture OBSERVER for the continuity gate (JEF-265) — the same
+/// sanctioned cosign/Rekor observation path ADR-0020 §1 defines for admitted images. It needs no
+/// trusted-identity config (the Fulcio/Rekor chain is the anchor), so a match-nothing regexp keeps
+/// the constructor happy. Bounded by the same `max_images` + TTL the gate honors. `None` (continuity
+/// unavailable ⇒ the policy stays byte-identical to the legacy gate) if the TUF cache can't be built.
+fn build_webhook_signing_observer(
+    oidc_issuer: &str,
+    tuf_cache: &std::path::Path,
+    verify_timeout: Duration,
+    cache_ttl: Duration,
+    max_images: usize,
+) -> Option<Arc<SigningObserver>> {
+    match CosignChecker::new(
+        "$^",
+        oidc_issuer.to_string(),
+        registry_auth(),
+        tuf_cache.to_path_buf(),
+        verify_timeout,
+    ) {
+        Ok(checker) => Some(Arc::new(SigningObserver::new(
+            Arc::new(checker),
+            max_images,
+            cache_ttl,
+        ))),
+        Err(error) => {
+            tracing::warn!(%error, "signing-continuity observer unavailable (TUF cache dir?); admission continuity disabled");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Logging + (when OTEL_EXPORTER_OTLP_ENDPOINT is set) OTLP export of traces and
@@ -245,19 +319,57 @@ async fn main() -> Result<()> {
 
     let checker = CosignChecker::new(
         &identity_regexp,
-        oidc_issuer,
+        oidc_issuer.clone(),
         registry_auth(),
-        tuf_cache,
+        tuf_cache.clone(),
         verify_timeout,
     )
     .context("building cosign checker")?;
-    let signature = SignaturePolicy::new(
+    let mut signature = SignaturePolicy::new(
         Arc::new(checker),
         gated_prefixes,
         signature_enforce,
         max_images,
         cache_ttl,
     );
+
+    // The read-only, cross-task signing-baseline snapshot (JEF-265, ADR-0020 Stage 3): shared with
+    // the analysis engine, which is its SOLE writer (it publishes after each sweep). The webhook only
+    // ever reads it, so admission can consult signature continuity but can never poison the baseline.
+    let shared_baseline = SharedSigningBaseline::new();
+    // The scoped, recorded "exception accepted" config — read by BOTH the webhook block predicate and
+    // the engine sweep's render, so the gate and the inventory can never disagree.
+    let engine_exceptions = signing_exceptions();
+
+    // Arm the admission-time signing-CONTINUITY gate (JEF-265) ONLY under `mode: enforce`. This
+    // keeps invariant #1 exact: an unconfigured / audit-mode deploy adds NO webhook observation and
+    // can NEVER deny — byte-identical shadow. Enforcement (and its ADR-0020 §1 observation) is
+    // strictly opt-in via `mode: enforce` + `enforceScope`; even then a deny fires only for an
+    // image IN scope with an established-baseline regression.
+    if posture.enforce
+        && let Some(observer) = build_webhook_signing_observer(
+            &oidc_issuer,
+            &tuf_cache,
+            verify_timeout,
+            cache_ttl,
+            max_images,
+        )
+    {
+        let pins = signing_pins();
+        tracing::info!(
+            pins = pins.len(),
+            exceptions = !engine_exceptions.is_empty(),
+            "admission signing-continuity gate armed (enforce mode): deny on established-baseline \
+             regression in enforceScope; scoped exceptions + pins honored; baseline read-only"
+        );
+        signature = signature.with_continuity(ContinuityGate::new(
+            observer,
+            shared_baseline.clone(),
+            engine_exceptions.clone(),
+            pins,
+            max_images,
+        ));
+    }
 
     let mesh = MeshInjectionPolicy::new(mesh_enforce);
 
@@ -324,6 +436,9 @@ async fn main() -> Result<()> {
         // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
         // the durable journal on boot — the same `Arc` the webhook engine writes to.
         let engine_policy_log = policy_log.clone();
+        // The engine is the SOLE writer of the shared signing baseline (JEF-265): move the handle
+        // into the engine task, which publishes a snapshot each sweep pass for the webhook to read.
+        let engine_shared_baseline = shared_baseline.clone();
         match kube::Client::try_default().await {
             Ok(client) => {
                 tracing::info!("starting mitigation engine (event-driven observer)");
@@ -337,6 +452,8 @@ async fn main() -> Result<()> {
                         kev,
                         epss,
                         engine_policy_log,
+                        engine_shared_baseline,
+                        engine_exceptions,
                     )
                     .await
                     {

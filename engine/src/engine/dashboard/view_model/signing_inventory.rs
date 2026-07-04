@@ -21,10 +21,12 @@ use std::collections::HashMap;
 
 use crate::engine::policy_log::PolicyDecisionRecord;
 
+use std::collections::HashSet;
+
 use super::props::{
-    ProvenanceChangeProps, ProvenancePosture, ProvenanceProps, RegressionKind, RepoStrength,
-    SignerProps, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
-    SigningRowProps,
+    ExceptionAcceptedProps, ProvenanceChangeProps, ProvenancePosture, ProvenanceProps,
+    RegressionKind, RepoStrength, SignerProps, SigningEnforcement, SigningPosture,
+    SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
 
 /// The DOM-id prefix for an image summary/detail row (`si-<slug>-<hash>`).
@@ -47,6 +49,21 @@ const IMAGE_SUBJECT_PREFIX: &str = "Image/";
 /// <repo>`, JEF-264) — one row per repo. Also a signing row (not a webhook decision), so it is
 /// partitioned out of the decision tallies and feeds the repo group's regression banner.
 const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
+
+/// The subject prefix the sweep keys an **"exception accepted"** finding under
+/// (`SigningException/<repo>`, JEF-265) — a regression the operator has scoped-out via a recorded
+/// exception. A signing row (not a webhook decision), partitioned out of the tallies; it feeds the
+/// repo group's CALM "exception accepted" banner and marks its image's enforcement chip, and it is
+/// NOT a regression row so it never counts toward breach.
+const EXCEPTION_SUBJECT_PREFIX: &str = "SigningException/";
+
+/// The signature-column prefix marking an exception row's token (`exception-<kind>-<strength>`),
+/// written by `engine::signing_sweep::exception_record`.
+const EXCEPTION_STATUS_PREFIX: &str = "exception-";
+
+/// The DOM-id prefix for an exception-accepted summary/detail row (`ex-<slug>-<hash>`) — a distinct
+/// namespace from image / regression / provenance rows.
+const EXCEPTION_ID_PREFIX: &str = "ex";
 
 /// The subject prefix the sweep keys a per-repo baseline-**strength** row under (`SigningStrength/
 /// <repo>`, JEF-266) — one row per repo, log-corroborated vs local-only. A signing row (not a
@@ -81,9 +98,15 @@ const BEFORE_SEP: &str = " | before: ";
 pub(super) fn is_inventory_row(r: &PolicyDecisionRecord) -> bool {
     is_observation_row(r)
         || is_regression_row(r)
+        || is_exception_row(r)
         || is_strength_row(r)
         || is_provenance_row(r)
         || is_provenance_change_row(r)
+}
+
+/// Whether a record is an "exception accepted" finding row (`SigningException/<repo>`, JEF-265).
+fn is_exception_row(r: &PolicyDecisionRecord) -> bool {
+    r.subject.starts_with(EXCEPTION_SUBJECT_PREFIX)
 }
 
 /// Whether a record is a per-image provenance observation row (`Provenance/<ref>`, JEF-275).
@@ -301,6 +324,7 @@ fn signing_row(
     r: &PolicyDecisionRecord,
     provenance: &HashMap<String, (ProvenancePosture, Option<ProvenanceProps>)>,
     regressing: &HashMap<String, bool>,
+    excepted: &HashSet<String>,
 ) -> SigningRowProps {
     let posture = SigningPosture::parse(&r.signature);
     let (_, remainder) = split_ref(&r.image);
@@ -318,7 +342,13 @@ fn signing_row(
     // The baseline-relative continuity verdict (JEF-297): a standing signing-regression for THIS
     // image (`Some(established)`) drives would-block (established) / uncertain (cold); no regression
     // is continuous (would-admit). A genuinely-invalid posture blocks outright (the loud channel).
-    let enforcement = SigningEnforcement::for_image(posture, regressing.get(&r.image).copied());
+    // An image the operator has scoped-out via a recorded exception (JEF-265) overrides to the
+    // DISTINCT "exception accepted" chip — calm, but never a green would-admit.
+    let enforcement = if excepted.contains(&r.image) {
+        SigningEnforcement::ExceptionAccepted
+    } else {
+        SigningEnforcement::for_image(posture, regressing.get(&r.image).copied())
+    };
     SigningRowProps {
         dom_id: signing_dom_id(IMAGE_ID_PREFIX, &r.image),
         image: r.image.clone(),
@@ -489,6 +519,73 @@ fn regressions_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, SigningReg
     out
 }
 
+/// Parse an "exception accepted" row (`SigningException/<repo>`, JEF-265) into `(repo, props)`, or
+/// `None` when malformed. Self-describing exactly like a regression row but with the
+/// `exception-<kind>-<strength>` token, so it reuses the same before→after parsing. Every identity
+/// is UNTRUSTED — escaped at render.
+fn parse_exception(r: &PolicyDecisionRecord) -> Option<(String, ExceptionAcceptedProps)> {
+    let repo = r
+        .subject
+        .strip_prefix(EXCEPTION_SUBJECT_PREFIX)?
+        .to_string();
+    let token = r.signature.strip_prefix(EXCEPTION_STATUS_PREFIX)?;
+    let (kind_word, strength) = token.rsplit_once('-')?;
+    let established = match strength {
+        "established" => true,
+        "cold" => false,
+        _ => return None,
+    };
+    let kind = RegressionKind::parse(kind_word);
+
+    let (after_clause, before) = r.reason.split_once(BEFORE_SEP).unwrap_or((&r.reason, ""));
+    let before_identities: Vec<String> = before
+        .split(", ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let after_identity = match kind {
+        RegressionKind::IdentityChange => {
+            parse_signer_reason(after_clause).map(|(identity, _)| identity.to_string())
+        }
+        _ => None,
+    };
+
+    Some((
+        repo.clone(),
+        ExceptionAcceptedProps {
+            dom_id: signing_dom_id(EXCEPTION_ID_PREFIX, &repo),
+            kind,
+            established,
+            before_identities,
+            after_identity,
+            image: r.image.clone(),
+        },
+    ))
+}
+
+/// The standing accepted exceptions, one per repo (newest wins), preserving newest-first order.
+fn exceptions_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, ExceptionAcceptedProps)> {
+    let mut out: Vec<(String, ExceptionAcceptedProps)> = Vec::new();
+    for record in rows.iter().filter(|r| is_exception_row(r)) {
+        if let Some((repo, props)) = parse_exception(record)
+            && !out.iter().any(|(existing, _)| *existing == repo)
+        {
+            out.push((repo, props));
+        }
+    }
+    out
+}
+
+/// The set of image refs covered by a standing accepted exception (JEF-265), so [`signing_row`] can
+/// mark their enforcement chip as "exception accepted" rather than a would-block / would-admit.
+fn excepted_images(rows: &[PolicyDecisionRecord]) -> HashSet<String> {
+    rows.iter()
+        .filter(|r| is_exception_row(r))
+        .map(|r| r.image.clone())
+        .collect()
+}
+
 /// The standing signing-regression counts for the status strip (JEF-264): `(established, cold)` —
 /// established-baseline regressions count toward breach, cold-baseline ones toward uncertain. Both
 /// forbid the green all-clear. Counted per repo (a repo is one standing regression regardless of how
@@ -531,16 +628,18 @@ fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength
 pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
     let provenance = provenance_by_image(rows);
     let regressing = regressing_images(rows);
+    let excepted = excepted_images(rows);
     let mut groups: Vec<SigningRepoProps> = Vec::new();
     for record in rows.iter().filter(|r| is_observation_row(r)) {
         let (repo, _) = split_ref(&record.image);
-        let row = signing_row(record, &provenance, &regressing);
+        let row = signing_row(record, &provenance, &regressing, &excepted);
         match groups.iter_mut().find(|g| g.repo == repo) {
             Some(group) => group.images.push(row),
             None => groups.push(SigningRepoProps {
                 repo: repo.to_string(),
                 images: vec![row],
                 regression: None,
+                exception: None,
                 provenance_change: None,
                 strength: RepoStrength::Unknown,
             }),
@@ -555,6 +654,23 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
                 repo,
                 images: Vec::new(),
                 regression: Some(regression),
+                exception: None,
+                provenance_change: None,
+                strength: RepoStrength::Unknown,
+            }),
+        }
+    }
+    // Attach the standing "exception accepted" (JEF-265) to its repo group — calm + distinctly
+    // labelled, kept visible, never counted toward breach — creating the group if the excepted
+    // image has aged out of the observation window.
+    for (repo, exception) in exceptions_by_repo(rows) {
+        match groups.iter_mut().find(|g| g.repo == repo) {
+            Some(group) => group.exception = Some(exception),
+            None => groups.push(SigningRepoProps {
+                repo,
+                images: Vec::new(),
+                regression: None,
+                exception: Some(exception),
                 provenance_change: None,
                 strength: RepoStrength::Unknown,
             }),
@@ -569,6 +685,7 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
                 repo,
                 images: Vec::new(),
                 regression: None,
+                exception: None,
                 provenance_change: Some(change),
                 strength: RepoStrength::Unknown,
             }),

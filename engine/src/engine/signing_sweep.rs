@@ -35,7 +35,7 @@ use super::signing_baseline_strength::strength_record;
 use super::signing_drift::{RegressionKind, SigningDrift, classify};
 use super::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::{
-    PostureMap, PostureRank, SigningObserver, SigningPosture, repo_key,
+    PostureMap, PostureRank, SigningExceptions, SigningObserver, SigningPosture, repo_key,
 };
 
 /// The subject prefix a signing-**regression** finding is keyed under (`SigningRegression/<repo>`),
@@ -43,6 +43,14 @@ use crate::policies::signature::{
 /// `Image/<ref>` observation rows) by the Admission view_model — a regression is a signing finding,
 /// not a webhook admission decision, and must not inflate the admitted/audited/denied tallies.
 pub const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
+
+/// The subject prefix an **"exception accepted"** finding is keyed under (`SigningException/<repo>`,
+/// JEF-265). A drift the operator has opted out of via a scoped, recorded exception is recorded
+/// HERE instead of the loud `SigningRegression/` channel: it stays visible in the inventory,
+/// renders calm + distinctly labelled "exception accepted", and is NOT counted toward breach (it
+/// isn't a regression row). Both the webhook block predicate and this render read the SAME
+/// [`SigningExceptions`] config, so a repo that admits at the gate reads "exception accepted" here.
+pub const EXCEPTION_SUBJECT_PREFIX: &str = "SigningException/";
 
 /// Collect every distinct container image a running Pod references — regular, init, and
 /// ephemeral containers — across the snapshot. Deduping is left to the observer's sweep (it
@@ -196,23 +204,67 @@ fn regression_record(
     )
 }
 
+/// Encode an **"exception accepted"** finding (JEF-265) — a signing regression the operator has
+/// opted out of via a scoped, recorded exception. Keyed `SigningException/<repo>` (its OWN channel,
+/// distinct from the loud `SigningRegression/`), so the view renders it calm + labelled "exception
+/// accepted", keeps it visible, and never counts it toward breach. Self-describing exactly like a
+/// regression row (`exception-<kind>-<strength>` token + before→after prose) so the render reuses
+/// the same parser. Decision stays `allow` (it admits — that's the whole point of the exception).
+fn exception_record(
+    repo: &str,
+    image: &str,
+    kind: &RegressionKind,
+    established: bool,
+    baseline: Option<&SigningBaseline>,
+) -> PolicyDecisionRecord {
+    // Reuse the regression row's shape, swapping only the leading token so it partitions into the
+    // exception channel. The strength/kind/before-after semantics are identical.
+    let base = regression_record(repo, image, kind, established, baseline);
+    let signature = base.signature.replacen("regression-", "exception-", 1);
+    PolicyDecisionRecord::now(
+        "signing-exception",
+        "allow",
+        format!("{EXCEPTION_SUBJECT_PREFIX}{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        base.reason,
+    )
+}
+
 /// Classify each observed posture against the repo's CURRENT baseline (JEF-264) and record a
 /// signing-regression finding for any drift against prior signed history. Runs BEFORE
 /// [`learn_baselines`] so a new signer is still visible as not-yet-in the identity set (learning
 /// would fold it in and hide the change). Pure classification + append-only recording — never a
 /// gate; the store is read, not mutated.
-fn detect_regressions(store: &SigningBaselineStore, log: &PolicyDecisionLog, map: &PostureMap) {
+///
+/// A regression covered by a scoped, recorded [`SigningExceptions`] entry (JEF-265) is recorded on
+/// the calm `SigningException/<repo>` channel instead of the loud regression channel — the same
+/// scoped/fingerprinted decision the webhook block predicate makes, so the inventory and the gate
+/// never disagree. Every OTHER repo still records its regression loudly (an exception never silences
+/// drift elsewhere).
+fn detect_regressions(
+    store: &SigningBaselineStore,
+    log: &PolicyDecisionLog,
+    map: &PostureMap,
+    exceptions: &SigningExceptions,
+) {
     for (image, posture) in map.entries() {
         let repo = repo_key(image);
         let baseline = store.get(&repo);
         if let SigningDrift::Regression { kind, established } = classify(baseline, posture) {
-            log.record(regression_record(
-                &repo,
-                image,
-                &kind,
-                established,
-                baseline,
-            ));
+            if exceptions.accepts(image, &kind) {
+                log.record(exception_record(&repo, image, &kind, established, baseline));
+            } else {
+                log.record(regression_record(
+                    &repo,
+                    image,
+                    &kind,
+                    established,
+                    baseline,
+                ));
+            }
         }
     }
 }
@@ -271,6 +323,7 @@ pub async fn sweep(
     log: &Arc<PolicyDecisionLog>,
     baseline: Option<&mut SigningBaselineStore>,
     journal: &DecisionJournal,
+    exceptions: &SigningExceptions,
 ) -> PostureMap {
     let Some(observer) = observer else {
         return PostureMap::new();
@@ -284,7 +337,7 @@ pub async fn sweep(
     if let Some(store) = baseline {
         // Classify against the baseline as it stands BEFORE this pass's learning, then learn — so
         // a regression / new signer is detected before the observation folds into the baseline.
-        detect_regressions(store, log, &map);
+        detect_regressions(store, log, &map, exceptions);
         learn_baselines(store, journal, &map);
         // Surface each repo's baseline strength (JEF-266) — log-corroborated vs local-only. Written
         // after learning so the row reflects the freshly-updated baseline.
@@ -394,6 +447,7 @@ mod tests {
             &log,
             None,
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         let rows = log.snapshot();
@@ -434,6 +488,7 @@ mod tests {
             &log,
             None,
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         let rows = log.snapshot();
@@ -452,7 +507,15 @@ mod tests {
             ..Default::default()
         };
         let log = Arc::new(PolicyDecisionLog::new());
-        sweep(None, &snapshot, &log, None, &DecisionJournal::disabled()).await;
+        sweep(
+            None,
+            &snapshot,
+            &log,
+            None,
+            &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
+        )
+        .await;
         assert!(log.snapshot().is_empty());
     }
 
@@ -473,6 +536,7 @@ mod tests {
             &log,
             None,
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         sweep(
@@ -481,6 +545,7 @@ mod tests {
             &log,
             None,
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         assert_eq!(
@@ -510,6 +575,7 @@ mod tests {
             &log,
             Some(&mut baseline),
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         let learned = baseline
@@ -542,6 +608,7 @@ mod tests {
             &log,
             Some(&mut baseline),
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         assert!(baseline.is_empty(), "an unsigned image learns no baseline");
@@ -594,9 +661,58 @@ mod tests {
             &log,
             Some(store),
             &DecisionJournal::disabled(),
+            &SigningExceptions::default(),
         )
         .await;
         log
+    }
+
+    /// The exception-accepted row recorded for `repo`, if any.
+    fn exception_row(log: &PolicyDecisionLog, repo: &str) -> Option<PolicyDecisionRecord> {
+        log.snapshot()
+            .into_iter()
+            .find(|r| r.subject == format!("{EXCEPTION_SUBJECT_PREFIX}{repo}"))
+    }
+
+    #[tokio::test]
+    async fn accepted_exception_records_the_calm_channel_not_the_loud_regression() {
+        // JEF-265 render: a regression covered by a scoped exception is recorded on the calm
+        // `SigningException/` channel (not the loud `SigningRegression/`), so the inventory renders
+        // "exception accepted" and it never counts toward breach — while a DIFFERENT repo still
+        // records its regression loudly.
+        let (obs, _c) = observer(vec![]); // both repos ⇒ NotSigned (both regress)
+        let mut store = established_store(); // establishes ghcr.io/org/app
+        // Also establish a second repo so it, too, regresses.
+        store.observe("ghcr.io/org/other@sha256:seed", &signed(CI), 0);
+        store.observe("ghcr.io/org/other@sha256:seed", &signed(CI), 3 * DAY_MS);
+        let snapshot = Snapshot {
+            pods: vec![pod(&["ghcr.io/org/app:2", "ghcr.io/org/other:2"], &[])],
+            ..Default::default()
+        };
+        let log = Arc::new(PolicyDecisionLog::new());
+        sweep(
+            Some(&obs),
+            &snapshot,
+            &log,
+            Some(&mut store),
+            &DecisionJournal::disabled(),
+            &SigningExceptions::parse("repo:ghcr.io/org/app unsigned"),
+        )
+        .await;
+        // The excepted repo: calm exception row, NO loud regression row.
+        let ex = exception_row(&log, "ghcr.io/org/app").expect("an exception-accepted row");
+        assert_eq!(ex.signature, "exception-unsigned-established");
+        assert_eq!(ex.decision, "allow", "an accepted exception still admits");
+        assert!(
+            regression_row(&log, "ghcr.io/org/app").is_none(),
+            "an accepted exception is NOT recorded on the loud regression channel"
+        );
+        // The other repo is untouched — still loud (an exception never silences another repo).
+        assert!(
+            regression_row(&log, "ghcr.io/org/other").is_some(),
+            "a different repo still records its regression loudly"
+        );
+        assert!(exception_row(&log, "ghcr.io/org/other").is_none());
     }
 
     #[tokio::test]
