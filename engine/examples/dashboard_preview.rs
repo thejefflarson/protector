@@ -441,6 +441,25 @@ fn record_signing_inventory(log: &PolicyDecisionLog) {
          via https://token.actions.githubusercontent.com | before: \
          https://github.com/acme/api-gateway/.github/workflows/release.yaml@refs/tags/v1.8.2",
     ));
+    // An "exception accepted" (JEF-265): the export repo legitimately rotated its signer, and the
+    // operator opted THAT drift out via a scoped, recorded exception. Rendered CALM + distinctly
+    // labelled "exception accepted" (never green-cleared), kept visible, never counted as breach.
+    sweep(
+        "ghcr.io/acme/export:3.1.0",
+        "signed",
+        "signed by releng-ci@acme.example via https://accounts.google.com",
+    );
+    log.record(PolicyDecisionRecord::now(
+        "signing-exception",
+        "allow",
+        "SigningException/ghcr.io/acme/export",
+        "ghcr.io/acme/export:3.1.0",
+        "exception-identity-established",
+        "",
+        "",
+        "signed by releng-ci@acme.example via https://accounts.google.com | before: \
+         releng@acme.example",
+    ));
 }
 
 /// A representative bake/coverage summary used by the covered scenarios.

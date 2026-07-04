@@ -9,6 +9,7 @@
 //!   * this file — the gated [`SignaturePolicy`] (behavior-identical to before the split)
 //!     and the shared image-extraction / host-normalization helpers.
 
+pub mod continuity;
 mod cosign;
 pub mod posture;
 pub mod provenance;
@@ -29,6 +30,7 @@ use tokio::sync::Mutex;
 
 use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
+pub use continuity::{ContinuityGate, SigningExceptions, SigningPin};
 pub use cosign::CosignChecker;
 pub use posture::{
     PostureMap, PostureRank, SignatureObserver, Signer, SigningObserver, SigningPosture,
@@ -76,6 +78,11 @@ pub struct SignaturePolicy {
     /// image ref → (verified, when-cached). Avoids re-hitting the registry/Rekor
     /// for an image we recently judged.
     cache: Mutex<HashMap<String, (bool, Instant)>>,
+    /// The ADR-0020 Stage-3 signing-CONTINUITY gate (JEF-265): denies (in enforced scope) on a
+    /// signing regression against the engine-learned, read-only baseline, with a scoped
+    /// "exception accepted" opt-out + back-compat pins. `None` ⇒ continuity is unwired, so the
+    /// policy behaves EXACTLY as the pre-JEF-265 gated gate (unconfigured = byte-identical shadow).
+    continuity: Option<ContinuityGate>,
 }
 
 impl SignaturePolicy {
@@ -93,7 +100,16 @@ impl SignaturePolicy {
             max_images,
             cache_ttl,
             cache: Mutex::new(HashMap::new()),
+            continuity: None,
         }
+    }
+
+    /// Attach the ADR-0020 Stage-3 signing-continuity gate (JEF-265). Builder-style so `new` stays
+    /// the minimal constructor the existing tests + the pre-JEF-265 gated deploy use unchanged.
+    /// Without this, `continuity` is `None` and the policy is byte-identical shadow.
+    pub fn with_continuity(mut self, continuity: ContinuityGate) -> Self {
+        self.continuity = Some(continuity);
+        self
     }
 
     /// Whether this image is in scope for signature enforcement. The registry
@@ -122,23 +138,16 @@ impl SignaturePolicy {
             .insert(image.to_string(), (verified, Instant::now()));
         Ok(verified)
     }
-}
 
-#[async_trait]
-impl Policy for SignaturePolicy {
-    fn name(&self) -> &'static str {
-        "image-signature"
-    }
-
-    fn applies(&self, req: &AdmissionRequest<DynamicObject>) -> bool {
-        req.kind.kind == "Pod"
-    }
-
-    async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
-        let Some(obj) = req.object.as_ref() else {
-            return Decision::Allow;
-        };
-
+    /// The legacy gated single-identity gate's decision for `req` (the pre-JEF-265 behavior,
+    /// unchanged): every distinct gated image must be signed by the trusted identity, else deny
+    /// (in scope) / audit (out of scope). Extracted so [`evaluate`](Policy::evaluate) can combine
+    /// it with the continuity gate without duplicating the gating logic.
+    async fn gated_decision(
+        &self,
+        req: &AdmissionRequest<DynamicObject>,
+        obj: &DynamicObject,
+    ) -> Decision {
         // Collect the distinct gated images once, so duplicates don't double the
         // work and the count can be bounded.
         let mut gated: Vec<String> = Vec::new();
@@ -186,6 +195,60 @@ impl Policy for SignaturePolicy {
             format!("unsigned or untrusted image(s): {}", unsigned.join(", ")),
         )
     }
+}
+
+/// Combine two outcomes from the same policy (the legacy gated gate + the continuity gate) into the
+/// single most-severe one: `Deny` beats `Audit` beats `Allow`. A `Deny` is already short-circuited
+/// before this is reached; this resolves the `Audit`/`Allow` cases so an out-of-scope block still
+/// records as an audit and a clean pass stays `Allow`.
+fn more_severe(a: Decision, b: Decision) -> Decision {
+    fn rank(d: &Decision) -> u8 {
+        match d {
+            Decision::Deny { .. } => 2,
+            Decision::Audit { .. } => 1,
+            Decision::Allow => 0,
+        }
+    }
+    if rank(&b) > rank(&a) { b } else { a }
+}
+
+#[async_trait]
+impl Policy for SignaturePolicy {
+    fn name(&self) -> &'static str {
+        "image-signature"
+    }
+
+    fn applies(&self, req: &AdmissionRequest<DynamicObject>) -> bool {
+        req.kind.kind == "Pod"
+    }
+
+    async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision {
+        let Some(obj) = req.object.as_ref() else {
+            return Decision::Allow;
+        };
+
+        // The legacy gated single-identity gate (now understood as the ADR-0020 pinned special
+        // case). Its decision is authoritative on a hard deny — a gated-image failure short-circuits
+        // exactly as before, so back-compat is byte-identical when continuity is unwired.
+        let gated = self.gated_decision(req, obj).await;
+        if matches!(gated, Decision::Deny { .. }) {
+            return gated;
+        }
+
+        // The ADR-0020 Stage-3 continuity gate (JEF-265): deny (in enforced scope) on a signing
+        // regression against the read-only, engine-learned baseline. Unwired ⇒ nothing added, so an
+        // unconfigured deploy is byte-identical shadow. Consults ALL container images (continuity is
+        // per-repo, not gated-prefix scoped), classified against the shared baseline.
+        let continuity = match &self.continuity {
+            Some(gate) => match gate.evaluate(&pod_images(obj)).await {
+                Some(reason) => self.enforce.decide(req, reason),
+                None => Decision::Allow,
+            },
+            None => Decision::Allow,
+        };
+
+        more_severe(gated, continuity)
+    }
 
     async fn shadow_evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
         // The counterfactual (JEF-246): what this gate WOULD do for `req` if it were in scope and
@@ -205,8 +268,14 @@ impl Policy for SignaturePolicy {
                 gated.push(image);
             }
         }
-        // No gated images ⇒ the signature gate has no opinion about this Pod.
+        // No gated images ⇒ the legacy gate has no opinion. The continuity gate (JEF-265) still
+        // might — a would-block regression on ANY repo is an honest would-fail even out of gated
+        // scope — so consult it before reporting NotApplicable. This escalates only (a continuity
+        // block becomes would-fail); it never fabricates a green pass for an ungated Pod.
         if gated.is_empty() {
+            if let Some(reason) = self.continuity_block(obj).await {
+                return ShadowVerdict::fail(enforced, reason);
+            }
             return ShadowVerdict::NotApplicable;
         }
         if gated.len() > self.max_images {
@@ -230,13 +299,29 @@ impl Policy for SignaturePolicy {
                 Err(_) => failed.push(image.clone()),
             }
         }
-        if failed.is_empty() {
-            ShadowVerdict::pass(enforced)
-        } else {
-            ShadowVerdict::fail(
+        if !failed.is_empty() {
+            return ShadowVerdict::fail(
                 enforced,
                 format!("unsigned or untrusted image(s): {}", failed.join(", ")),
-            )
+            );
+        }
+        // The gated images all pass; a continuity regression on any image is still a would-fail.
+        if let Some(reason) = self.continuity_block(obj).await {
+            return ShadowVerdict::fail(enforced, reason);
+        }
+        ShadowVerdict::pass(enforced)
+    }
+}
+
+impl SignaturePolicy {
+    /// The continuity gate's would-block reason for `obj`'s images, or `None` when continuity is
+    /// unwired or nothing blocks. Shares the gate's `observe` cache with [`evaluate`](Policy::evaluate)
+    /// (no extra egress). Used by the shadow what-if so the recorded signature column honestly reads
+    /// would-fail for a regression even out of enforced scope.
+    async fn continuity_block(&self, obj: &DynamicObject) -> Option<String> {
+        match &self.continuity {
+            Some(gate) => gate.evaluate(&pod_images(obj)).await,
+            None => None,
         }
     }
 }
@@ -252,7 +337,7 @@ impl Policy for SignaturePolicy {
 ///
 /// A bare Docker Hub shorthand (`postgres:16`, `library/postgres`) has no host
 /// segment and is left untouched.
-fn normalize_registry_host(image: &str) -> String {
+pub(crate) fn normalize_registry_host(image: &str) -> String {
     match image.split_once('/') {
         // A registry host has a dot (domain) or a colon (port); a leading path
         // segment without either is a Docker Hub repo, not a host.

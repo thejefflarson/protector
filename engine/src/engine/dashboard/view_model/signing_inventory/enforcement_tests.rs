@@ -215,3 +215,65 @@ fn enforcement_verdict_covers_the_continuity_matrix() {
         assert_eq!(SigningEnforcement::for_image(p, Some(false)), Uncertain);
     }
 }
+
+/// An "exception accepted" finding row (`SigningException/<repo>` subject, the `exception-<kind>-
+/// <strength>` token), as `engine::signing_sweep::exception_record` writes it.
+fn exception(repo: &str, image: &str, signature: &str, reason: &str) -> PolicyDecisionRecord {
+    PolicyDecisionRecord::now(
+        "signing-exception",
+        "allow",
+        format!("SigningException/{repo}"),
+        image,
+        signature,
+        "",
+        "",
+        reason,
+    )
+}
+
+#[test]
+fn an_accepted_exception_renders_calm_distinct_and_uncounted() {
+    // JEF-265 render: a regression the operator opted out of shows the DISTINCT "exception accepted"
+    // enforcement chip (never would-admit/would-block/green), carries a visible calm banner, and does
+    // NOT count toward breach.
+    let rows = vec![
+        exception(
+            "ghcr.io/acme/app",
+            "ghcr.io/acme/app:2",
+            "exception-unsigned-established",
+            "now not signed (was signed) | before: https://github.com/acme/app/.github/workflows/r.yml@refs/tags/v1",
+        ),
+        observed("ghcr.io/acme/app:2", "not-signed", ""),
+    ];
+    let groups = build(&rows);
+    let group = groups
+        .iter()
+        .find(|g| g.repo == "ghcr.io/acme/app")
+        .expect("the excepted repo group is present (visible)");
+    assert!(group.exception.is_some(), "a calm exception banner stands");
+    assert!(
+        group.regression.is_none(),
+        "an accepted exception is NOT the loud regression channel"
+    );
+    let img = group
+        .images
+        .iter()
+        .find(|i| i.image == "ghcr.io/acme/app:2")
+        .expect("the excepted image row is visible");
+    assert_eq!(
+        img.enforcement,
+        SigningEnforcement::ExceptionAccepted,
+        "the image's if-enforced chip is the distinct exception-accepted state"
+    );
+    assert_eq!(
+        img.enforcement.word(),
+        "exception accepted",
+        "the label is a distinct word, never 'signed'/'would admit'"
+    );
+    // Not counted toward breach (it isn't a regression row).
+    assert_eq!(
+        counts(&rows),
+        (0, 0),
+        "an accepted exception never counts toward breach"
+    );
+}

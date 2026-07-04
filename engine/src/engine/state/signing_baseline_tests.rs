@@ -592,3 +592,65 @@ fn provenance_identity_survives_a_restart_round_trip() {
     assert!(b.provenance_sources.contains("github.com/org/app"));
     cleanup(&path);
 }
+
+// ---- SharedSigningBaseline (JEF-265): the read-only cross-task snapshot handle ----
+
+#[test]
+fn shared_baseline_publishes_a_snapshot_the_reader_sees() {
+    let shared = SharedSigningBaseline::new();
+    assert!(
+        shared.is_empty(),
+        "a fresh shared baseline is empty (cold everywhere)"
+    );
+    assert!(shared.get("ghcr.io/org/app").is_none());
+
+    let mut store = SigningBaselineStore::new();
+    store.observe("ghcr.io/org/app@sha256:seed", &signed("ci@org", None), 0);
+    shared.publish(&store);
+
+    let read = shared
+        .get("ghcr.io/org/app")
+        .expect("the published baseline is readable");
+    assert!(read.identities.contains("ci@org"));
+    assert_eq!(shared.len(), 1);
+}
+
+#[test]
+fn shared_baseline_republish_replaces_the_snapshot() {
+    // Each publish is a whole-snapshot replace, so the reader always sees a consistent pass —
+    // and a repo dropped from the store is gone from the reader's view too.
+    let shared = SharedSigningBaseline::new();
+    let mut store = SigningBaselineStore::new();
+    store.observe("ghcr.io/org/a@sha256:x", &signed("ci@org", None), 0);
+    shared.publish(&store);
+    assert!(shared.get("ghcr.io/org/a").is_some());
+
+    let fresh = SigningBaselineStore::new(); // empty
+    shared.publish(&fresh);
+    assert!(
+        shared.get("ghcr.io/org/a").is_none(),
+        "republishing an empty store replaces the whole snapshot"
+    );
+}
+
+#[test]
+fn shared_baseline_reader_holds_no_mutator() {
+    // Structural guarantee (JEF-265): the reader clones values OUT — it cannot mutate the
+    // authoritative store, so admission can never poison the baseline. Mutating the clone is a
+    // no-op on the shared snapshot.
+    let shared = SharedSigningBaseline::new();
+    let mut store = SigningBaselineStore::new();
+    store.observe("ghcr.io/org/a@sha256:x", &signed("ci@org", None), 0);
+    shared.publish(&store);
+
+    let mut read = shared.get("ghcr.io/org/a").unwrap();
+    read.identities.insert("attacker".to_string());
+    assert!(
+        !shared
+            .get("ghcr.io/org/a")
+            .unwrap()
+            .identities
+            .contains("attacker"),
+        "mutating a read-out clone never touches the shared snapshot"
+    );
+}

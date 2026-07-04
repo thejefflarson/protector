@@ -346,3 +346,60 @@ drift classification, no enforcement, no egress changes.
    strength, so an attacker cannot downgrade a genuine failure to *uncertain* by keeping
    the repo's baseline cold. Cold-baseline regressions read *uncertain* (non-green), never
    silent and never a fabricated green admit.
+
+## Addenda (JEF-265 — Stage 3 ENFORCE: deny on regression in enforced scope; "exception accepted")
+
+Stages 1–2 (and the addenda above) observe, learn, and *surface* signing drift — audit-only, the
+shadow invariant (ADR-0016). This addendum ratifies Stage 3: the FIRST code that makes protector
+actually **BLOCK admission** on a signing signal. It changes the admission **decision** in enforced
+scope only; observation, learning, drift classification, and the render are unchanged.
+
+1. **Deny on a REGRESSION, in enforced scope only, and nowhere else.** The admission webhook's
+   `SignaturePolicy` gains an opt-in continuity gate. In enforced scope (the one `enforceScope` of
+   ADR-0021 — namespace or Pod label; `mode: enforce`), a signing **regression** against a repo's
+   **established** baseline is a `Deny`; out of scope it is an `Audit` (recorded, still admitted).
+   The block predicate is the DOMAIN verdict `SigningDrift::would_block` — the exact semantic
+   JEF-297's presentation `SigningEnforcement::WouldBlock` projects, so the inventory's "would block"
+   column and what admission actually blocks are the same fact. The audit-everywhere default is
+   unchanged: with no `enforceScope`, **nothing is denied** — byte-identical shadow.
+
+2. **Cold-start never denies.** A freshly-learned / not-yet-`established` baseline (JEF-263's 24h
+   maturation) is the weakest evidence (TOFU). `would_block` returns `false` for a cold-baseline
+   regression → admit (audit). Only an established-baseline regression, or a genuinely-`InvalidSignature`
+   posture (the loud channel, inadmissible independent of any baseline so it can't be dodged by keeping
+   a repo cold), denies.
+
+3. **The webhook is READ-ONLY on the baseline.** The analysis engine's full-cluster sweep is the
+   SOLE writer of the per-repo baseline; after each pass it *publishes* a snapshot into a shared,
+   read-only `SharedSigningBaseline` handle the webhook consults. The webhook has no learn/observe
+   path into the store, so admission cannot become its own baseline-poisoning oracle (an attacker who
+   gets a Pod admitted could otherwise TOFU-establish an identity and then never "regress" against
+   it). The webhook observes only the *arriving* image's posture (the sanctioned ADR-0020 §1 path) and
+   classifies it against the published baseline — pure, side-effect-free.
+
+4. **"exception accepted" — scoped, recorded CONFIG, never a global mute.** A known-benign drift (a
+   publisher that legitimately stopped signing, a deliberate signer rotation) is opted out by a
+   mounted-file / env config (`PROTECTOR_SIGNING_EXCEPTIONS[_FILE]`) keyed by `repo:` OR exact
+   `image:` ref AND pinned to the drift **fingerprint** it accepts. It admits ONLY that key's CURRENT
+   drift; every other repo stays enforced, and a DIFFERENT subsequent change re-flags loud (the
+   fingerprint no longer matches — the acceptance is scoped, not a blanket mute). There is
+   deliberately **no** global "disable signature continuity" switch and **no** dashboard write path
+   (ADR-0016: presentation is a view, never a gate). The render surfaces an accepted exception CALM
+   but with a DISTINCT word ("exception accepted", never "signed"/cleared-green), keeps it VISIBLE,
+   and never counts it toward breach.
+
+5. **The old prefix gate becomes one pinned special case.** `PROTECTOR_SIGNING_PINS`
+   (`prefix=identity_regexp`) asserts "every image under `prefix` must always be signed by an identity
+   matching `identity_regexp`" — a manually-declared established baseline, the exact semantic of the
+   pre-ADR-0020 `PROTECTOR_GATED_PREFIXES` + `PROTECTOR_IDENTITY_REGEXP` gate. **Migration:** the
+   legacy env is preserved unchanged (its own path, byte-identical) and is *equivalent* to the pin
+   `PROTECTOR_SIGNING_PINS=<gated-prefix>=<identity-regexp>`; operators may migrate to the pin
+   spelling. A pin violation is a would-block regardless of any learned baseline, and (like a learned
+   regression) can be opted out by the same scoped, fingerprinted exception.
+
+6. **Fail-safe preserved.** Continuity denies only where the enforcing webhook is already gated to
+   `enforcedNamespaceSelector` (a webhook outage never blocks writes outside enforced scope); zero
+   egress is unchanged (the webhook reuses the sanctioned cosign/Rekor observation path, bounded by
+   the existing cache + `PROTECTOR_MAX_IMAGES`). A missing/unreadable exception file, an un-compilable
+   pin regexp, an unavailable observer, or an empty/poisoned baseline snapshot all degrade in the safe
+   direction: MORE enforced or NOT denying — never a silent widen of what is admitted.

@@ -10,9 +10,9 @@
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    AdmissionViewProps, DecisionRowProps, GateStatus, ProvenanceChangeProps, ProvenancePosture,
-    RepoStrength, SigningEnforcement, SigningPosture, SigningRegressionProps, SigningRepoProps,
-    SigningRowProps,
+    AdmissionViewProps, DecisionRowProps, ExceptionAcceptedProps, GateStatus,
+    ProvenanceChangeProps, ProvenancePosture, RepoStrength, SigningEnforcement, SigningPosture,
+    SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
 
 /// Render the Admission view: the tallies header, then the per-image signing inventory, then the
@@ -118,6 +118,9 @@ fn signing_group(g: &SigningRepoProps) -> Markup {
         }
         @if let Some(regression) = &g.regression {
             (signing_regression_row(regression))
+        }
+        @if let Some(exception) = &g.exception {
+            (signing_exception_row(exception))
         }
         @if let Some(change) = &g.provenance_change {
             (provenance_change_row(change))
@@ -469,11 +472,97 @@ fn provenance_change_detail(r: &ProvenanceChangeProps) -> Markup {
 /// signature, a continuity gate would reject); uncertain is the honest non-green weak lead for a
 /// cold-baseline regression — never a hard block. The `enforced-{token}` class is a fixed
 /// low-cardinality token, never untrusted text.
+/// The CALM "exception accepted" row (JEF-265, ADR-0020 Stage 3): a signing regression the operator
+/// has opted out of via a scoped, recorded exception. Deliberately NOT the loud breach-rail
+/// regression channel — a muted expander row with a distinct glyph + the distinct word "exception
+/// accepted" (never "signed"/cleared-green) — yet it stays VISIBLE so the opt-out is never hidden,
+/// and it does not count toward breach. The FULL before→after identities live in its pulldown.
+///
+/// Security: every identity is UNTRUSTED Fulcio SAN, emitted ONLY via maud interpolation
+/// (auto-escaped) — never `PreEscaped`, never a `class=`/CSS value (`data-exception` is the fixed
+/// low-cardinality kind token, not identity text).
+fn signing_exception_row(r: &ExceptionAcceptedProps) -> Markup {
+    let strength = if r.established {
+        "established baseline"
+    } else {
+        "weak baseline \u{2014} treat as a lead"
+    };
+    let detail_id = format!("detail-{}", r.dom_id);
+    html! {
+        tr.row.signing-row id=(r.dom_id) data-signing=(r.dom_id)
+            data-exception=(r.kind.token()) {
+            td.cell.cell-expand {
+                button.expander
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls=(detail_id)
+                    aria-label="expand exception-accepted detail" {
+                    span.expander-glyph aria-hidden="true" { "+" }
+                }
+            }
+            td.cell.cell-regression colspan="6" {
+                span.signing-exception-head {
+                    span.glyph aria-hidden="true" { "\u{25C8}" }
+                    span.signing-exception-word.t-data-strong { "exception accepted \u{2014} " (r.kind.word()) }
+                    span.signing-exception-strength.t-micro.muted { "(" (strength) ")" }
+                }
+                span.signing-exception-image.t-data { " image: " span.mono { (r.image) } }
+            }
+        }
+        tr.row-detail id=(detail_id) data-detail-for=(r.dom_id) {
+            td.detail-host colspan="7" {
+                (signing_exception_detail(r))
+            }
+        }
+    }
+}
+
+/// The expand-in-place detail for an exception-accepted row: what was accepted, with BOTH the
+/// before baseline signer(s) and (for an identity change) the accepted new identity in FULL. Every
+/// identity is UNTRUSTED — emitted only via maud interpolation (auto-escaped, never `PreEscaped`).
+fn signing_exception_detail(r: &ExceptionAcceptedProps) -> Markup {
+    html! {
+        div.detail {
+            section.detail-section {
+                h3.detail-h { "accepted exception" }
+                p.t-data { "image: " span.mono { (r.image) } }
+                p.t-data.muted {
+                    "a scoped, recorded exception admits this drift for THIS repo/image only; a \
+                     different subsequent change re-flags."
+                }
+            }
+            section.detail-section {
+                @if r.before_identities.is_empty() {
+                    h3.detail-h { "before \u{2014} baseline signer" }
+                    p.t-data.muted { "baseline signer not recorded" }
+                } @else {
+                    h3.detail-h {
+                        "before \u{2014} baseline signer"
+                        @if r.before_identities.len() != 1 { "s" }
+                    }
+                    ul.signing-regression-before {
+                        @for identity in &r.before_identities {
+                            li.t-data { span.mono { (identity) } }
+                        }
+                    }
+                }
+            }
+            @if let Some(after) = &r.after_identity {
+                section.detail-section {
+                    h3.detail-h { "accepted \u{2014} new signer" }
+                    p.t-data { span.mono { (after) } }
+                }
+            }
+        }
+    }
+}
+
 fn if_enforced_signing(v: SigningEnforcement) -> Markup {
     let class = match v {
         SigningEnforcement::WouldAdmit => "enforced-chip enforced-admit",
         SigningEnforcement::WouldBlock => "enforced-chip enforced-block",
         SigningEnforcement::Uncertain => "enforced-chip enforced-uncertain",
+        SigningEnforcement::ExceptionAccepted => "enforced-chip enforced-exception",
     };
     html! {
         span class=(class) {

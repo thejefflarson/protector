@@ -133,6 +133,11 @@ pub enum SigningEnforcement {
     WouldBlock,
     /// A regression against a cold/freshly-learned baseline — a weak lead: non-green, not a block.
     Uncertain,
+    /// A regression the operator has explicitly opted out of via a scoped, recorded "exception
+    /// accepted" (JEF-265): the continuity gate ADMITS this image (only this repo/image, only this
+    /// drift), so it is calm — but DISTINCTLY labelled (never "signed"/cleared-green), stays visible,
+    /// and does not count toward breach. A DIFFERENT subsequent change re-flags as a loud block.
+    ExceptionAccepted,
 }
 
 impl SigningEnforcement {
@@ -168,15 +173,19 @@ impl SigningEnforcement {
             SigningEnforcement::WouldAdmit => "admit",
             SigningEnforcement::WouldBlock => "block",
             SigningEnforcement::Uncertain => "uncertain",
+            SigningEnforcement::ExceptionAccepted => "exception",
         }
     }
 
-    /// The word shown alongside colour + glyph, lexically distinct per verdict.
+    /// The word shown alongside colour + glyph, lexically distinct per verdict. The exception word is
+    /// deliberately its OWN phrase — never "signed" / "admit" — so an opted-out drift never reads as
+    /// a clean pass.
     pub fn word(self) -> &'static str {
         match self {
             SigningEnforcement::WouldAdmit => "would admit",
             SigningEnforcement::WouldBlock => "would block",
             SigningEnforcement::Uncertain => "uncertain",
+            SigningEnforcement::ExceptionAccepted => "exception accepted",
         }
     }
 
@@ -186,6 +195,7 @@ impl SigningEnforcement {
             SigningEnforcement::WouldAdmit => "\u{2713}", // ✓ admit
             SigningEnforcement::WouldBlock => "\u{2715}", // ✕ block — the loud channel
             SigningEnforcement::Uncertain => "\u{25D0}",  // ◐ half — weak lead, non-green
+            SigningEnforcement::ExceptionAccepted => "\u{25C8}", // ◈ distinct — scoped opt-out
         }
     }
 }
@@ -408,6 +418,11 @@ pub struct SigningRepoProps {
     /// A standing signing regression against this repo's baseline (JEF-264), rendered as the LOUD
     /// channel above the image rows; `None` when the repo is continuous.
     pub regression: Option<SigningRegressionProps>,
+    /// A standing "exception accepted" (JEF-265): a regression the operator has opted out of via a
+    /// scoped, recorded exception. Rendered CALM + distinctly labelled "exception accepted" (never
+    /// the loud regression channel, never green-cleared), kept visible, and NOT counted toward
+    /// breach. `None` when no accepted exception stands for this repo.
+    pub exception: Option<ExceptionAcceptedProps>,
     /// A standing build-provenance change against this repo's provenance baseline (JEF-275), rendered
     /// as the LOUD channel above the image rows (distinct from a signing regression — a repo can have
     /// both); `None` when the repo's provenance is continuous.
@@ -439,6 +454,35 @@ pub struct ProvenanceChangeProps {
     /// The new (deviating) source repo in FULL (the "after"), UNTRUSTED — escaped at render.
     pub after_source: String,
     /// The image ref that drifted (the "after" image), UNTRUSTED — escaped at render.
+    pub image: String,
+}
+
+/// A standing "exception accepted" banner for a repo group (JEF-265, ADR-0020 Stage 3): a signing
+/// regression the operator has explicitly opted out of via a scoped, recorded exception. It is
+/// deliberately CALM (not the loud breach-rail regression channel) yet DISTINCTLY labelled
+/// "exception accepted" — never "signed"/cleared-green — and stays VISIBLE so the opt-out is never
+/// hidden. It does not count toward breach. A DIFFERENT subsequent change re-flags loud (that is a
+/// fresh regression the exception's fingerprint no longer covers).
+///
+/// Every identity string is UNTRUSTED Fulcio SAN text — the component escapes it via maud
+/// interpolation (NEVER `PreEscaped`, never a `class=`/CSS value). The before→after is shown so the
+/// operator sees EXACTLY what was accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionAcceptedProps {
+    /// A stable, collision-free DOM/fragment id (a distinct prefix from image + regression rows).
+    /// `[a-z0-9-]` only — safe as an `id`/`data-*`/`aria-controls` value.
+    pub dom_id: String,
+    /// What drifted (the accepted change) — reuses the regression kind vocabulary.
+    pub kind: RegressionKind,
+    /// Whether the accepted regression's baseline was established (a strong signal, accepted) or
+    /// cold (a weak lead). Shown so the operator knows the weight of what they accepted.
+    pub established: bool,
+    /// The baseline signer identities in FULL (the "before"), UNTRUSTED — escaped at render.
+    pub before_identities: Vec<String>,
+    /// The new (accepted) signer identity in FULL, for an identity-change; `None` otherwise.
+    /// UNTRUSTED — escaped at render.
+    pub after_identity: Option<String>,
+    /// The image ref the accepted exception covers (the "after" image), UNTRUSTED — escaped.
     pub image: String,
 }
 
