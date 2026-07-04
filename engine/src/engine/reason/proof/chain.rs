@@ -140,8 +140,10 @@ pub(super) const MAX_PROVEN_PATHS: usize = 6;
 const PATH_ENUM_BUDGET: usize = 50_000;
 
 /// The mutable state of a single [`proven_paths`] depth-first enumeration, kept in one
-/// struct so the recursive walk stays a method (not a free function with a long argument
-/// list). `graph`/`entry`/`objective`/`cap` are fixed; the rest track the DFS.
+/// struct so the walk stays a method (not a free function with a long argument list).
+/// `graph`/`entry`/`objective`/`cap` are fixed; the rest track the DFS, which runs on an
+/// explicit work-stack (see [`PathEnum::walk`]) rather than the call stack — so an
+/// adversarially deep chain can never overflow.
 struct PathEnum<'g> {
     graph: &'g SecurityGraph,
     entry: NodeIndex,
@@ -160,53 +162,127 @@ struct PathEnum<'g> {
     truncated: bool,
 }
 
+/// One in-progress `walk(node)` on the explicit DFS stack: the node being expanded and
+/// its outgoing edges (precomputed, in `g.edges(node)` order) with a cursor. `valid` is
+/// the proof-grade ∧ movement predicate the recursive form tested inline per edge; caching
+/// it changes nothing about ordering or budget (the budget is still spent one relaxation
+/// per edge visited, in order, in [`PathEnum::walk`]).
+struct Frame {
+    node: NodeIndex,
+    edges: Vec<(NodeIndex, EdgeIndex, bool)>,
+    idx: usize,
+}
+
 impl PathEnum<'_> {
-    /// One DFS step from `u`. Records a path on reaching the objective; otherwise expands
-    /// over proof-grade movement edges, honouring the SAME compromise gate as
-    /// [`movement_tree`] (you may only move *out of* a workload you control — the entry or a
-    /// compromisable one), so every enumerated path is as proof-grounded as the shortest one.
-    fn walk(&mut self, u: NodeIndex) {
+    /// The bounded simple-path DFS from `start`, run on an **explicit work-stack** rather
+    /// than the call stack (JEF-298 — stack-safe for adversarially deep chains). It records
+    /// a path on reaching the objective; otherwise it expands over proof-grade movement
+    /// edges, honouring the SAME compromise gate as [`movement_tree`] (you may only move
+    /// *out of* a workload you control — the entry or a compromisable one), so every
+    /// enumerated path is as proof-grounded as the shortest one.
+    ///
+    /// This is a byte-for-byte faithful transcription of the former recursion: same paths in
+    /// the same order, the same per-edge budget decrement and exhaustion behaviour, the same
+    /// `cap + 1` early stop, and the same simple-path (no repeated node) property. Each stack
+    /// [`Frame`] is one former `walk` invocation; descending pushes a frame, and a frame that
+    /// runs out of edges (or is skipped by the entry gate) is unwound with the exact
+    /// `steps.pop()` / `on_path.remove()` backtracking the recursion did on return.
+    fn walk(&mut self, start: NodeIndex) {
+        // `open` applies the same entry checks the recursion did at the top of `walk`:
+        // the `cap` early-out, the objective record, and the compromise gate. When it
+        // returns `None` the call would have returned immediately (nothing to descend
+        // into); when it returns a frame we push it and expand its edges.
+        let Some(root) = self.open(start) else {
+            return;
+        };
+        let mut stack = vec![root];
+
+        while let Some(top) = stack.len().checked_sub(1) {
+            if stack[top].idx < stack[top].edges.len() {
+                // Budget is spent one relaxation per edge visited — including edges that
+                // are non-movement or lead to an on-path node — exactly as the recursion did.
+                if self.budget == 0 {
+                    self.truncated = true;
+                    return;
+                }
+                self.budget -= 1;
+                let u = stack[top].node;
+                let (v, edge, valid) = stack[top].edges[stack[top].idx];
+                stack[top].idx += 1;
+                if !valid {
+                    continue;
+                }
+                // Skip a node already on this path (keep the path simple — no cycles).
+                if !self.on_path.insert(v) {
+                    continue;
+                }
+                self.steps.push((u, v, edge));
+                match self.open(v) {
+                    // Descend into `v` (the recursive `self.walk(v)` call).
+                    Some(child) => stack.push(child),
+                    // `walk(v)` would have returned at once (cap/objective/gate); backtrack
+                    // the step we just pushed, then honour the `cap + 1` early stop.
+                    None => {
+                        self.steps.pop();
+                        self.on_path.remove(&v);
+                        if self.found.len() > self.cap {
+                            return; // collected cap + 1 — the set is truncated
+                        }
+                    }
+                }
+            } else {
+                // This frame's edges are exhausted: the `walk(node)` call returns. Unwind it,
+                // and — for every non-root frame — do the parent's post-recursion backtrack
+                // (`steps.pop()` / `on_path.remove()`) and its `cap + 1` early stop.
+                let done = stack.pop().expect("top frame exists");
+                if !stack.is_empty() {
+                    self.steps.pop();
+                    self.on_path.remove(&done.node);
+                    if self.found.len() > self.cap {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply the recursion's top-of-`walk` entry checks for `u` and, if the call would have
+    /// proceeded into the edge loop, return its [`Frame`]. Returns `None` when the recursive
+    /// `walk(u)` would have returned immediately: the `cap + 1` cap is already met, `u` is the
+    /// objective (the path is recorded here), or `u` is a merely-reached, uncompromised
+    /// workload the compromise gate blocks (a dead end — mirrors [`movement_tree`]).
+    fn open(&mut self, u: NodeIndex) -> Option<Frame> {
         // We only need `cap + 1` paths: one extra proves there are "more" than we show.
         if self.found.len() > self.cap {
-            return;
+            return None;
         }
         if u == self.objective {
             self.found.push(self.steps.clone());
-            return;
+            return None;
         }
-        // Copy the reference out so the graph borrow does not alias the `&mut self` below.
+        // Copy the reference out so the graph borrow does not alias the `&mut self` above.
         let graph = self.graph;
         let g = graph.inner();
-        // Compromise gate: a merely-reached, uncompromised workload is a dead end — you
-        // cannot pivot onward from it (mirrors `movement_tree`).
         let blocked = matches!(g.node_weight(u), Some(Node::Workload(_)))
             && u != self.entry
             && !compromisable(graph, u);
         if blocked {
-            return;
+            return None;
         }
-        for edge in g.edges(u) {
-            if self.budget == 0 {
-                self.truncated = true;
-                return;
-            }
-            self.budget -= 1;
-            if !edge.weight().is_proof_grade() || !is_movement(&edge.weight().relation) {
-                continue;
-            }
-            let v = edge.target();
-            // Skip a node already on this path (keep the path simple — no cycles).
-            if !self.on_path.insert(v) {
-                continue;
-            }
-            self.steps.push((u, v, edge.id()));
-            self.walk(v);
-            self.steps.pop();
-            self.on_path.remove(&v);
-            if self.found.len() > self.cap {
-                return; // collected cap + 1 — we now know the set is truncated
-            }
-        }
+        // Precompute the outgoing edges in `g.edges(u)` order so the traversal enumerates
+        // exactly what the recursion did; the budget is untouched here (spent per edge in `walk`).
+        let edges = g
+            .edges(u)
+            .map(|edge| {
+                let valid = edge.weight().is_proof_grade() && is_movement(&edge.weight().relation);
+                (edge.target(), edge.id(), valid)
+            })
+            .collect();
+        Some(Frame {
+            node: u,
+            edges,
+            idx: 0,
+        })
     }
 }
 

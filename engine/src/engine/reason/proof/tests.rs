@@ -859,6 +859,61 @@ fn library_load_does_not_corroborate_without_foothold() {
     );
 }
 
+/// JEF-298: the path enumeration runs on an explicit work-stack, so a very deep linear
+/// chain enumerates correctly and cannot overflow the call stack. We build a single long
+/// path of ~20k proof-grade movement edges (well under the [`PATH_ENUM_BUDGET`] relaxation
+/// ceiling) between non-workload endpoint nodes — non-workloads bypass the compromise gate,
+/// isolating the traversal itself — and confirm exactly one simple path is found, in order,
+/// not truncated. The former recursion would have descended ~20k frames deep here.
+#[test]
+fn deep_chain_enumerates_on_explicit_stack() {
+    use super::chain::{MAX_PROVEN_PATHS, proven_paths};
+    use crate::engine::graph::{
+        Edge, Endpoint, Grade, Node, Protocol, Provenance, Relation, SecurityGraph,
+    };
+    use std::time::SystemTime;
+
+    const DEPTH: usize = 20_000;
+
+    let mut graph = SecurityGraph::new();
+    let nodes: Vec<_> = (0..DEPTH)
+        .map(|i| {
+            graph.upsert_node(Node::Endpoint(Endpoint {
+                address: format!("hop-{i}"),
+            }))
+        })
+        .collect();
+    for pair in nodes.windows(2) {
+        graph.add_edge(
+            pair[0],
+            pair[1],
+            Edge {
+                relation: Relation::Reaches {
+                    port: None,
+                    protocol: Protocol::Tcp,
+                },
+                provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+                grade: Grade::Proof,
+            },
+        );
+    }
+
+    let (paths, truncated) = proven_paths(&graph, nodes[0], nodes[DEPTH - 1], MAX_PROVEN_PATHS);
+
+    assert_eq!(paths.len(), 1, "one simple path down the linear chain");
+    assert!(!truncated, "one path, well under the cap and budget");
+    let path = &paths[0];
+    assert_eq!(path.len(), DEPTH - 1, "every hop is enumerated in order");
+    // The single path is exactly nodes[0] → nodes[1] → … → nodes[DEPTH-1], each step's
+    // target the next step's source — the simple path down the chain, no node repeated.
+    assert_eq!(path.first().map(|s| s.0), Some(nodes[0]));
+    assert_eq!(path.last().map(|s| s.1), Some(nodes[DEPTH - 1]));
+    for (i, step) in path.iter().enumerate() {
+        assert_eq!(step.0, nodes[i]);
+        assert_eq!(step.1, nodes[i + 1]);
+    }
+}
+
 /// JEF-284: the two quarantine-reason dispositions are distinct, fixed labels — the
 /// dashboard names remotely-exploitable vs actively-exploited separately (and both apart
 /// from the entry-foothold quarantine).
