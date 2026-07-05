@@ -4,10 +4,13 @@
 //! the env var to enable it. Rows that WEAKEN decisions when absent float to the top so the gaps
 //! that demote the model's call are seen first. Data layer: touches `state::`; components never do.
 
-use crate::engine::state::{InputState, NodeCoverageState, Readiness, ReadinessRow};
+use crate::engine::state::{
+    InputState, NodeCoverageState, ParityReport, ParityState, Readiness, ReadinessRow,
+};
 
 use super::props::{
-    InputStateProps, NodeCoverageStateProps, NodeRowProps, ReadinessRowProps, ReadinessViewProps,
+    InputStateProps, NodeCoverageStateProps, NodeRowProps, ParityReportProps, ParityStateProps,
+    ReadinessRowProps, ReadinessViewProps,
 };
 
 /// Map the engine's [`InputState`] into the presentation enum (the honesty stays: Absent and
@@ -72,7 +75,33 @@ fn is_attention_gap(r: &ReadinessRowProps) -> bool {
     r.weakens_decisions && !r.state.is_present()
 }
 
-/// Build the whole Readiness view's props (rows + the persistent strip the caller supplies).
+/// Map the engine's [`ParityState`] into its presentation enum (the honesty stays: "nothing to
+/// compare" never collapses into a reassuring green).
+fn parity_state(state: ParityState) -> ParityStateProps {
+    match state {
+        ParityState::NothingToCompare => ParityStateProps::NothingToCompare,
+        ParityState::Uncovered => ParityStateProps::Uncovered,
+        ParityState::Parity => ParityStateProps::Parity,
+    }
+}
+
+/// Project the engine's corroboration-parity report (JEF-310) into its panel props. Owned
+/// strings + counts only; the uncovered workload names ride through verbatim and are auto-escaped
+/// by the component at render.
+fn parity_props(parity: &ParityReport) -> ParityReportProps {
+    ParityReportProps {
+        state: parity_state(parity.state),
+        summary: parity.summary.clone(),
+        falco_corroborated: parity.falco_corroborated,
+        agent_corroborated: parity.agent_corroborated,
+        both: parity.both,
+        agent_uncovered: parity.agent_uncovered,
+        uncovered_entries: parity.uncovered_entries.clone(),
+    }
+}
+
+/// Build the whole Readiness view's props (rows + the parity panel + the persistent strip the
+/// caller supplies).
 pub(super) fn build(
     strip: super::props::StatusStripProps,
     readiness: &Readiness,
@@ -80,6 +109,7 @@ pub(super) fn build(
     ReadinessViewProps {
         strip,
         rows: map_readiness(readiness),
+        parity: parity_props(&readiness.parity),
     }
 }
 

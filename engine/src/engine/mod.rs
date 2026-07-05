@@ -427,6 +427,24 @@ impl Engine {
         bake.corroborations = corroborations;
         self.findings.set_bake(bake);
 
+        // Corroboration-parity report (JEF-310, Falco-retirement F6): fold the pass's breach
+        // chains by their corroboration SOURCE — Falco `Alert` vs first-party agent behavior —
+        // and publish the agent-uncovered (Falco-only) count. Read-only measurement over the same
+        // chains (ADR-0016): it drives no decision, it only tells us whether the agent has parity
+        // with Falco yet (the F7 retire-Falco gate consumes it). Mirrored to OTLP below.
+        let parity = state::derive_parity(&chains);
+        self.metrics
+            .parity_agent_uncovered
+            .record(parity.agent_uncovered, &[]);
+        self.metrics
+            .parity_falco_corroborated
+            .record(parity.falco_corroborated, &[]);
+        self.metrics
+            .parity_agent_corroborated
+            .record(parity.agent_corroborated, &[]);
+        self.metrics.parity_both.record(parity.both, &[]);
+        self.findings.set_parity(parity);
+
         // Runtime-corroboration coverage per node (JEF-308) for the readiness row.
         if let Some(liveness) = &self.agent_liveness {
             self.findings

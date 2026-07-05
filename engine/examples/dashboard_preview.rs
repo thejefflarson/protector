@@ -42,8 +42,9 @@ use protector::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage};
 use protector::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use protector::engine::reason::adjudicate::Verdict;
 use protector::engine::state::{
-    BakeStats, CveEvidence, EntryEvidence, Finding, Findings, Judgement, JudgementLog, ModelHealth,
-    PathStep, ReadinessConfig, ReversionLog, ReversionRecord, StoredPosture,
+    BakeStats, CorroborationParity, CveEvidence, EntryEvidence, Finding, Findings, Judgement,
+    JudgementLog, ModelHealth, PathStep, ReadinessConfig, ReversionLog, ReversionRecord,
+    StoredPosture,
 };
 use protector_behavior::Behavior;
 
@@ -565,6 +566,16 @@ fn build_clear() -> DashboardState {
     findings.set_bake(covered_bake());
     findings.set_readiness_config(covered_config(true));
     findings.set_model_health(ModelHealth::Ok);
+    // The Falco-retirement corroboration-parity report (JEF-310) at parity: the agent matched every
+    // Falco-corroborated breach chain this pass (0 agent-uncovered) — the retire-Falco go-signal.
+    findings.set_parity(CorroborationParity {
+        falco_corroborated: 3,
+        agent_corroborated: 3,
+        both: 3,
+        agent_uncovered: 0,
+        agent_only: 0,
+        uncovered_entries: vec![],
+    });
     findings.mark_pass(SystemTime::now());
 
     DashboardState {

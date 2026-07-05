@@ -103,10 +103,65 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
     }
 }
 
-/// Whether `entry` has a live runtime signal that corroborates a chain whose objective
-/// has technique `attack` and whose entry is the proven foothold `foothold` — the
-/// `corroborated-now` predicate. See [`corroborates`]. The signal is read from the entry
-/// workload (where the sensor attributed it), matching the prior entry-scoped semantics.
+/// Which SENSOR a corroborating behavior came from (JEF-310), derived from the behavior
+/// itself: a Falco rule fires as [`Behavior::Alert`]; every other behavior is emitted by the
+/// first-party eBPF agent. This is the attribution the F6 corroboration-parity report keys on
+/// — while both sensors run we measure Falco-only (agent-uncovered) corroboration, and that
+/// count trending to ≈0 over a bake is the go signal for retiring Falco (JEF-56).
+///
+/// Attribution is by the behavior, NOT by the observation's `source` string: the source is a
+/// free-text provenance hint any sensor sets, whereas the behavior is the typed fact the
+/// corroboration actually rests on (an `Alert` is Falco's rule-fired signal; a
+/// connection/read/exec/write is the agent's). Deriving from the behavior keeps the parity
+/// measurement honest even if a sensor mislabels its `source`.
+///
+/// [`Behavior::Alert`]: crate::engine::graph::Behavior::Alert
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CorroborationSource {
+    /// A Falco `Alert` behavior — the third-party rule engine via its adapter.
+    Falco,
+    /// Any first-party eBPF-agent behavior (connection / secret-read / library-load /
+    /// exec / privilege-change / file-write).
+    Agent,
+}
+
+impl CorroborationSource {
+    /// The sensor a behavior is attributed to (JEF-310) — `Alert` ⇒ Falco, everything else ⇒
+    /// agent. The single owner of the source-attribution rule so the parity report and any
+    /// future consumer can't drift.
+    pub(crate) fn of(behavior: &crate::engine::graph::Behavior) -> Self {
+        match behavior {
+            crate::engine::graph::Behavior::Alert { .. } => CorroborationSource::Falco,
+            _ => CorroborationSource::Agent,
+        }
+    }
+}
+
+/// The per-SOURCE corroboration breakdown for one chain (JEF-310): whether a Falco `Alert`
+/// signal and/or a first-party agent behavior on the entry corroborates it. Both `false` when
+/// the chain isn't corroborated at all. This is the raw material the corroboration-parity
+/// report folds into its Falco-only (agent-uncovered) count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CorroborationSources {
+    /// A Falco `Alert` on the entry corroborates this chain.
+    pub(crate) by_falco: bool,
+    /// A first-party agent behavior on the entry corroborates this chain.
+    pub(crate) by_agent: bool,
+}
+
+impl CorroborationSources {
+    /// Whether ANY source corroborates — the `corroborated-now` predicate (ADR-0009). Exactly
+    /// the old boolean; the per-source split is additive.
+    pub(crate) fn any(self) -> bool {
+        self.by_falco || self.by_agent
+    }
+}
+
+/// Which sensor sources have a live signal on `entry` that corroborates a chain whose
+/// objective has technique `attack` and whose entry is the proven foothold `foothold` — the
+/// per-source refinement of the `corroborated-now` predicate (JEF-310). See [`corroborates`]
+/// for the underlying relation; [`CorroborationSources::any`] collapses this back to the plain
+/// `corroborated` boolean (ADR-0009).
 ///
 /// A behavior corroborates if it evidences **either** the objective's tactic **or** the
 /// foothold's tactic (JEF-77). The objective side is the per-objective seam (a SecretRead
@@ -115,19 +170,28 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// dormant — a vuln-matched library load (already pruned by JEF-75) on an internet-facing
 /// entry evidences the *entry* foothold (T1190), never an objective's `attack`. With no
 /// foothold (`None`) only the objective side applies, so an assume-breach chain is
-/// unaffected. This stays shadow-gated like the rest: it only sets `corroborated`.
-pub(super) fn corroborated_for(
+/// unaffected. Read-only measurement, never a gate (ADR-0016).
+pub(super) fn corroborating_sources(
     runtime: &[crate::engine::graph::RuntimeSignal],
     attack: &AttackRef,
     foothold: Option<&AttackRef>,
-) -> bool {
-    runtime.iter().any(|s| {
-        corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
-    })
+) -> CorroborationSources {
+    let mut sources = CorroborationSources::default();
+    for s in runtime {
+        let hits = corroborates(&s.behavior, attack)
+            || foothold.is_some_and(|f| corroborates(&s.behavior, f));
+        if hits {
+            match CorroborationSource::of(&s.behavior) {
+                CorroborationSource::Falco => sources.by_falco = true,
+                CorroborationSource::Agent => sources.by_agent = true,
+            }
+        }
+    }
+    sources
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
-/// per entry so [`corroborated_for`] doesn't re-look-up the constant entry node on every
+/// per entry so [`corroborating_sources`] doesn't re-look-up the constant entry node on every
 /// objective in the per-objective loop.
 pub(super) fn entry_runtime(
     graph: &SecurityGraph,

@@ -27,6 +27,8 @@ async fn null_adjudicator_confirms() {
         attack: EXPLOIT_PUBLIC_FACING,
         foothold: Some(EXPLOIT_PUBLIC_FACING),
         corroborated: true,
+        corroborated_by_falco: true,
+        corroborated_by_agent: false,
         adjudicated: true,
         promoted: false,
         exposed_entry: true,

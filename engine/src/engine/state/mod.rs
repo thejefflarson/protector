@@ -15,6 +15,7 @@ mod agent_liveness;
 mod evidence;
 mod findings;
 mod judgement;
+mod parity;
 mod readiness;
 mod recency;
 mod report;
@@ -29,7 +30,13 @@ pub use agent_liveness::{
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 pub use findings::{Finding, Findings, PathStep};
 pub use judgement::{Judgement, JudgementLog};
-pub use readiness::{InputState, NodeCoverageRow, NodeCoverageState, Readiness, ReadinessRow};
+pub use parity::{CorroborationParity, ParityReadiness};
+// The corroboration-parity fold (JEF-310) — read-only measurement over the pass's chains.
+pub(crate) use parity::derive_parity;
+pub use readiness::{
+    InputState, NodeCoverageRow, NodeCoverageState, ParityReport, ParityState, Readiness,
+    ReadinessRow,
+};
 // The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's
 // config + per-pass health, the same pure aggregation the OTLP mirror reads.
 pub(crate) use readiness::derive_readiness;
