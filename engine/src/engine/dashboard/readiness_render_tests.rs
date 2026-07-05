@@ -52,7 +52,7 @@ fn per_node_breakdown_is_a_server_table_and_escapes_node_names() {
     let html = page::readiness_page(&v).into_string();
 
     assert!(
-        html.contains("Runtime corroboration"),
+        html.contains("Runtime monitoring"),
         "the collapsed row label"
     );
     assert!(
