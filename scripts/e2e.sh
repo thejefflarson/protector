@@ -156,6 +156,27 @@ managed_np_name() {
 managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
+# Hard mode can apply MORE than one managed policy at once (ADR-0022 / JEF-284), so an
+# assertion must name the workload ROLE it means, never assume a single policy or grab
+# "the first one" (that races). Two distinct controls coexist on the web→store→secret
+# scenario:
+#   - the ENTRY cut (role=web): the internet-facing entry is isolated once its chain
+#     meets the asymmetric action bar — live corroboration (ADR-0009) or a model
+#     "exploitable" verdict (ADR-0011). It is gated: no cut on mere CVE presence.
+#   - the PIVOT quarantine (role=store): a *remotely-exploitable* pod — a non-entry
+#     workload reachable from the internet-exposed entry that runs a critical/KEV CVE —
+#     is quarantined DETERMINISTICALLY (JEF-284), needing neither a model nor a live
+#     alert. This is a separate high bar (reachable + critical CVE), not the model-gated
+#     entry path, and it is applied first (it waits on nothing).
+# The two race, and store's policy-name can sort either side of web's, so the old
+# `managed_np_name | head -n1`-selects-web check was inherently flaky.
+managed_np_roles() {
+  kubectl -n "$APP_NS" get networkpolicy -l app.kubernetes.io/managed-by=protector \
+    -o jsonpath='{range .items[*]}{.spec.podSelector.matchLabels.role}{"\n"}{end}' 2>/dev/null
+}
+managed_np_for()        { managed_np_roles | grep -qx "$1"; }
+managed_np_for_absent() { ! managed_np_for "$1"; }
+
 # cert-manager's Deployment going Available does NOT mean its admission webhook is
 # actually serving (CA injection + endpoints lag), and deploy_protector creates a
 # Certificate immediately — against a half-ready webhook that Certificate is never
@@ -480,22 +501,30 @@ sleep 10
 managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only was violated"
 pass "shadow mode applied nothing (propose-only honored) — corroboration would meet the asymmetric action bar, but shadow only proposes"
 
-step "7/11  HARD MODE: enable=network + actuation RBAC; engine quarantines web"
+step "7/11  HARD MODE: enable=network + actuation RBAC; engine cuts the corroborated entry (web) AND quarantines the remotely-exploitable pivot (store)"
 deploy_protector network true "" ""
 kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
-# The pod was replaced, so its runtime-evidence store reset — re-send the alert.
+# The pod was replaced, so its runtime-evidence store reset — re-send the alert that
+# corroborates web (the internet-facing entry), which is what flips its chain to
+# auto-eligible under the asymmetric action bar.
 post_falco
-wait_until "engine applies a managed isolation NetworkPolicy" 120 managed_np_present
-np="$(managed_np_name)"
-selector="$(kubectl -n "$APP_NS" get "$np" -o jsonpath='{.spec.podSelector.matchLabels.role}')"
-[ "$selector" = "web" ] || fail "managed NetworkPolicy selects role='$selector', expected 'web'"
-pass "engine applied $np quarantining role=web"
+# Wait for the ENTRY cut specifically (role=web) — the corroboration-driven control this
+# step exists to prove — not "the first managed policy". The engine also applies a SECOND,
+# deterministic quarantine on the remotely-exploitable pivot `store` (JEF-284: reachable
+# from the internet-exposed entry + a critical CVE), which lands first (it waits on no
+# corroboration); the two race, so naming the role is the only stable assertion.
+wait_until "engine cuts the corroborated entry web" 120 managed_np_for web
+pass "engine quarantined role=web — live corroboration met the asymmetric action bar (ADR-0009)"
+# The pivot is ALSO isolated, on the independent deterministic bar (no model/alert needed).
+managed_np_for store \
+  || fail "engine did not quarantine the remotely-exploitable pivot role=store (JEF-284)"
+pass "engine also quarantined role=store — a remotely-exploitable pivot (reachable + critical CVE)"
 
-step "8/11  SELF-REVERT: remove the durable allow; the chain is no longer provable, so the engine reverts"
+step "8/11  SELF-REVERT: remove the durable allow; web is no longer provable AND store is no longer reachable-from-internet, so the engine reverts BOTH controls"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
-wait_until "engine deletes its managed NetworkPolicy" 120 managed_np_absent
-pass "engine reverted its compensating control once the chain stopped being proven (Q5 invariant)"
+wait_until "engine deletes every managed NetworkPolicy" 120 managed_np_absent
+pass "engine reverted both compensating controls once the chain stopped being proven (Q5 invariant)"
 
 step "9/11  LOG4J PRESENT, NO MODEL: a critical CVE on the exposed image is PROVEN reachable — but presence ≠ exploitability, so with no analyst to judge it, the engine only PROPOSES (no auto-cut)"
 # The VulnerabilityReport CRD was created in phase 5. Now a CRITICAL log4shell finding
@@ -515,15 +544,24 @@ report:
     - { vulnerabilityID: CVE-2021-44228, severity: CRITICAL }
 YAML
 # Hard mode + judgement, but NO model endpoint. The proof winnows the candidate;
-# without an analyst to make the exploitability call, the engine must NOT auto-cut
-# on mere CVE presence — the foothold stays a propose-only latent finding.
+# without an analyst to make the exploitability call, the engine must NOT auto-cut the
+# ENTRY foothold (web) on mere CVE presence — it stays a propose-only latent finding.
 #
-# The redeploy replaces the pod, resetting its in-memory runtime store — so the
-# Falco corroboration from steps 6-7 is cleared. We recreate the `reaches` edge only
-# AFTER the fresh, uncorroborated pod is up, so the chain it proves carries ONLY the
-# CVE foothold (no lingering runtime signal that would auto-cut via the veto lane).
+# We must genuinely RESET the pod here. `deploy_protector "network,judgement"` renders a
+# byte-identical manifest to step 7's `deploy_protector "network"` (any non-empty enable →
+# mode=enforce / enforceScope=app; the "judgement" token is dropped and never reaches the
+# engine), so `kubectl apply` is a no-op — the pod is NOT replaced. But the pod still holds
+# the step-7 Falco corroboration of web in its in-memory runtime store (300s TTL); left
+# there, web would auto-cut on that STALE live signal, not on the (absent) model, defeating
+# this step's whole point. So force an explicit rollout restart to clear the runtime store,
+# then recreate the `reaches` edge AFTER the fresh, uncorroborated pod is up.
 deploy_protector "network,judgement" true "" ""
-kubectl -n "$NS" rollout status deploy/protector --timeout=180s
+kubectl -n "$NS" rollout restart deploy/protector
+# Fresh pod ⇒ cold TUF cache ⇒ the first proof pass sits behind the same slow per-image
+# signing sweep step 6 gets 300s for (ADR-0020). Give the rollout + the re-prove that same
+# generous envelope — this supersedes #174, which widened step 9's budget to 300s but never
+# reset the pod, so it fixed neither the stale corroboration nor the never-a-fresh-re-prove.
+kubectl -n "$NS" rollout status deploy/protector --timeout=300s
 pf_reset
 # Recreate the reaches edge (step 8 deleted it) so web → store → secret is provable.
 kubectl -n "$APP_NS" apply -f - <<'YAML'
@@ -536,12 +574,25 @@ spec:
   ingress:
     - from: [{ podSelector: { matchLabels: { role: web } } }]
 YAML
-wait_until "log4j foothold proven (no model to judge it)" 150 chains_proven
-pass "CVE present + exposed, foothold proven; with no model the engine PROPOSES — it does not cut"
-# Give the reconcile a few cycles; assert it never cuts on mere presence.
+# On the fresh pod the log is empty, so this is a genuine RE-PROVE assertion, not a match
+# of a stale line from an earlier step. Dump diagnostics on timeout (step 6 does; step 9
+# never did — an opaque timeout here is exactly what made JEF-300 undebuggable in CI).
+wait_until "log4j foothold re-proven on the fresh pod (no model to judge it)" 300 chains_proven \
+  || { diagnose_chain; fail "web→session-key never re-proved within 300s after the step-9 pod reset"; }
+pass "CVE present + exposed, foothold re-proven on a fresh, uncorroborated pod"
+# Give the reconcile a few cycles, then assert the ENTRY foothold (web) is NOT auto-cut:
+# with no model to judge exploitability, mere CVE presence must stay propose-only (ADR-0011).
 sleep 10
-managed_np_absent || fail "engine auto-cut on mere CVE presence with no model — the positive-gate is violated"
-pass "no NetworkPolicy applied: the model, not a rule, must decide to cut"
+managed_np_for_absent web \
+  || fail "engine auto-cut the web foothold on mere CVE presence with no model — the positive-gate is violated"
+pass "web foothold left uncut: the model, not a rule, must decide to promote+cut the entry"
+# The remotely-exploitable PIVOT (store) IS quarantined here (JEF-284, deterministic:
+# reachable + critical CVE) — a separate high-bar control, independent of the model that
+# gates the entry foothold. Its presence is expected and correct, not a thesis violation;
+# assert it so the two lanes stay legible and a regression in either is caught.
+managed_np_for store \
+  || fail "engine did not quarantine the remotely-exploitable pivot role=store (JEF-284)"
+pass "pivot store quarantined deterministically — the model gates the entry, not the remotely-exploitable pivot"
 
 if model_available; then
   step "10/11  LOG4J + MODEL: the model examines the proven path, judges log4shell EXPLOITABLE, and the engine cuts — the determination is the model's"
@@ -553,11 +604,14 @@ if model_available; then
     -H 'content-type: application/json' \
     -d "$(jq -n --arg m "$MODEL_NAME" '{model:$m,messages:[{role:"user",content:"ready? reply ok"}],stream:false}')" \
     >/dev/null 2>&1 || true
+  # Adding the model endpoint DOES change the manifest (model env vars), so this apply is a
+  # real rollout — a fresh, uncorroborated pod, same as step 9. The ONLY new input vs step 9
+  # is the model, so a cut of web here is attributable to the model's verdict, nothing else.
   deploy_protector "network,judgement" true "$MODEL_ENDPOINT" "$MODEL_NAME"
   kubectl -n "$NS" rollout status deploy/protector --timeout=180s
   pf_reset
-  wait_until "model promotes the exploitable log4shell foothold → engine quarantines web" 180 managed_np_present
-  pass "the MODEL decided to cut — its 'exploitable' verdict promoted the foothold (ADR-0011)"
+  wait_until "model promotes the exploitable log4shell foothold → engine cuts the entry web" 180 managed_np_for web
+  pass "the MODEL decided to cut role=web — its 'exploitable' verdict promoted the entry foothold (ADR-0011)"
   # The cut itself (managed NetworkPolicy present) is the authoritative proof the model
   # promoted the foothold. Corroborate that the engine's own logs record an exploitable
   # verdict for the entry — the model's reasoning behind the cut.
