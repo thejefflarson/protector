@@ -27,7 +27,9 @@ use crate::engine::graph::{Behavior, Node, SecurityGraph};
 /// Matching on `attack.tactic` (not the precise technique) is the stable key: the
 /// recognizers tag a Secret-read chain CREDENTIAL_ACCESS (T1552), an internet-egress
 /// chain EXFILTRATION (T1041), and a proven foothold INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING
-/// (T1190).
+/// (T1190). A connection to a **high-signal foothold peer** — a cloud-metadata/IMDS
+/// endpoint or the Kubernetes API server — also corroborates INITIAL_ACCESS (JEF-307), the
+/// engine-side restoration of Falco's cloud-metadata / API-server criticals.
 ///
 /// **Shadow-gated (ADR-0014):** these arms only set `corroborated=true`; they are inert
 /// for *actuation*, which stays gated behind `engine.enable` (empty = shadow). They
@@ -40,9 +42,21 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         Behavior::Alert { .. } => true,
         // Actual internet egress corroborates an EXFILTRATION objective (T1041): a
         // compromised workload shipping data out of the cluster. An in-cluster
-        // connection (`internet: false`) is normal traffic and corroborates nothing.
+        // connection (`internet: false`) to an ordinary peer is normal traffic and
+        // corroborates nothing.
+        //
+        // JEF-307: a connection to a **high-signal foothold peer** — a cloud-metadata /
+        // IMDS credential endpoint or the Kubernetes API server — corroborates a FOOTHOLD
+        // (Initial Access, T1190) instead. These are the Falco "Contact cloud metadata
+        // service" / "Contact K8S API Server From Container" criticals, restored
+        // ENGINE-SIDE: the node-local agent has no cluster creds to know what a peer is, so
+        // the engine classifies it from the JEF-131-resolved peer (`observe::peer_class`,
+        // zero-egress, no wire change). Conservative on purpose (ADR-0011): only these
+        // specific peers promote — ordinary in-cluster and ordinary internet egress do NOT.
         Behavior::NetworkConnection { internet, .. } => {
-            *internet && attack.tactic == Tactic::Exfiltration
+            (*internet && attack.tactic == Tactic::Exfiltration)
+                || (attack.tactic == Tactic::InitialAccess
+                    && crate::engine::observe::peer_class::foothold_peer(behavior).is_some())
         }
         // A read of a mounted secret corroborates a CREDENTIAL_ACCESS objective (T1552):
         // the workload is actually touching the credential the chain reaches.

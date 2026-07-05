@@ -15,6 +15,7 @@ pub mod health;
 pub mod ingest_guard;
 pub mod ip_index;
 pub mod linkerd;
+pub mod peer_class;
 pub mod runtime;
 pub mod trivy;
 pub mod trivy_config;

@@ -585,6 +585,63 @@ fn behavior_does_not_corroborate_unrelated_objective() {
     ));
 }
 
+// ── JEF-307: high-signal foothold peers corroborate a FOOTHOLD (Initial Access) ──
+// A connection to a cloud-metadata/IMDS endpoint or the Kubernetes API server is the
+// engine-side restoration of Falco's cloud-metadata / API-server criticals — it
+// corroborates the entry foothold (T1190) and NOTHING else. Ordinary in-cluster and
+// ordinary internet egress must NOT (ADR-0011 conservatism).
+
+/// A connection to a cloud-metadata/IMDS endpoint corroborates a FOOTHOLD (T1190).
+#[test]
+fn imds_peer_corroborates_foothold() {
+    let imds = Behavior::NetworkConnection {
+        peer: "169.254.169.254:80".into(),
+        internet: true,
+    };
+    assert!(corroborates(&imds, &EXPLOIT_PUBLIC_FACING));
+}
+
+/// A connection to the resolved Kubernetes API server corroborates a FOOTHOLD (T1190).
+#[test]
+fn api_server_peer_corroborates_foothold() {
+    // JEF-131 resolves the apiserver ClusterIP to the `default/kubernetes` label.
+    let apiserver = Behavior::NetworkConnection {
+        peer: "default/kubernetes:443 (10.96.0.1)".into(),
+        internet: false,
+    };
+    assert!(corroborates(&apiserver, &EXPLOIT_PUBLIC_FACING));
+}
+
+/// NEGATIVE: benign in-cluster traffic and ordinary internet egress do NOT corroborate a
+/// foothold — a benign app talking to its own DB / the internet must never read as one.
+#[test]
+fn ordinary_connections_do_not_corroborate_foothold() {
+    // A resolved in-cluster DB peer.
+    assert!(!corroborates(
+        &Behavior::NetworkConnection {
+            peer: "analytics/influxdb:8086 (10.42.1.159)".into(),
+            internet: false,
+        },
+        &EXPLOIT_PUBLIC_FACING,
+    ));
+    // Ordinary internet egress corroborates EXFILTRATION, never the foothold objective.
+    assert!(!corroborates(
+        &Behavior::NetworkConnection {
+            peer: "203.0.113.7:443".into(),
+            internet: true,
+        },
+        &EXPLOIT_PUBLIC_FACING,
+    ));
+    // A link-local peer that is NOT IMDS (e.g. NodeLocal DNSCache) does NOT corroborate.
+    assert!(!corroborates(
+        &Behavior::NetworkConnection {
+            peer: "169.254.20.10:53".into(),
+            internet: false,
+        },
+        &EXPLOIT_PUBLIC_FACING,
+    ));
+}
+
 /// An *alert* still corroborates ANY objective — the broad gate must not regress.
 #[test]
 fn alert_still_corroborates_any_objective() {
