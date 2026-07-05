@@ -12,12 +12,16 @@ name: e2e (k3d)
 permissions:
   contents: read
 on:
-  # Gate on every merge to main: each commit that could be tagged for release is
-  # integration-tested before you cut the tag. Not per-PR — it builds an image and
-  # stands up k3d (minutes, GitHub-hosted), too heavy for every push. Still runnable
-  # on demand. The model-decides phase (E/F) needs an Ollama, which CI has none of,
-  # so it self-skips; the deterministic phases (structural → cut → self-revert,
-  # log4j-propose) all run.
+  # Gate PRs AND every merge to main (JEF-303): e2e is a REQUIRED check via branch
+  # protection, so it must run on PRs to block a red merge — not just post-merge (the
+  # old post-merge-only signal let a red e2e land silently). It builds an image and
+  # stands up k3d (minutes) on a GitHub-hosted runner (it needs a local Docker daemon,
+  # which the self-hosted protector-runners lack), so it does NOT compete with the
+  # self-hosted lint/test/build queue. The model-decides phase (E/F) needs an Ollama,
+  # which CI has none of, so it self-skips; the deterministic phases (structural → cut
+  # → self-revert, log4j-propose) all run.
+  pull_request:
+    branches: ["main"]
   push:
     branches: ["main"]
   workflow_dispatch:
