@@ -7,8 +7,8 @@ use std::time::SystemTime;
 use crate::engine::dashboard::page;
 use crate::engine::dashboard::view_model::{build_readiness_view, build_status_strip};
 use crate::engine::state::{
-    BakeStats, BlindReason, ModelHealth, NodeCoverage, NodeState, ReadinessConfig, RuntimeCoverage,
-    derive_readiness,
+    BakeStats, BlindReason, CorroborationParity, ModelHealth, NodeCoverage, NodeState,
+    ReadinessConfig, RuntimeCoverage, derive_readiness,
 };
 
 fn covered() -> ReadinessConfig {
@@ -72,4 +72,68 @@ fn per_node_breakdown_is_a_server_table_and_escapes_node_names() {
     );
     // A blind node is surfaced loudly, never quietly reassuring.
     assert!(html.contains("BLIND"));
+}
+
+/// Render the corroboration-parity panel (JEF-310) and render `page` once, returning the HTML.
+fn render_with_parity(parity: CorroborationParity) -> String {
+    let readiness = derive_readiness(
+        &covered(),
+        ModelHealth::Ok,
+        &BakeStats::default(),
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    )
+    .with_parity(&parity);
+    let strip = build_status_strip("prod".into(), &[], &[], &readiness, Some(SystemTime::now()));
+    let v = build_readiness_view(strip, &readiness);
+    page::readiness_page(&v).into_string()
+}
+
+#[test]
+fn parity_panel_reads_nothing_to_compare_not_a_go_signal_when_falco_is_silent() {
+    // An empty fold: no Falco corroboration this pass. The panel must read "nothing to compare",
+    // NOT a reassuring "0 uncovered = safe to retire" (ADR-0016 honesty).
+    let html = render_with_parity(CorroborationParity::default());
+    assert!(
+        html.contains("Falco-retirement corroboration parity"),
+        "the parity panel is present"
+    );
+    assert!(
+        html.contains("nothing to compare"),
+        "a Falco-silent window reads 'nothing to compare'"
+    );
+    // It must NOT read as a cleared/parity go-signal.
+    assert!(
+        !html.contains("parity this pass"),
+        "no Falco corroboration is not parity"
+    );
+}
+
+#[test]
+fn parity_panel_surfaces_agent_uncovered_count_and_escapes_workload_names() {
+    // Falco corroborated two chains, the agent matched one → one agent-uncovered, on a workload
+    // whose (untrusted-adjacent) name must be ESCAPED at render, never injected.
+    let parity = CorroborationParity {
+        falco_corroborated: 2,
+        agent_corroborated: 1,
+        both: 1,
+        agent_uncovered: 1,
+        agent_only: 0,
+        uncovered_entries: vec!["workload/app/Pod/<script>alert(1)</script>".into()],
+    };
+    let html = render_with_parity(parity);
+    assert!(
+        html.contains("AGENT-UNCOVERED"),
+        "the agent-uncovered state is surfaced loudly"
+    );
+    assert!(
+        html.contains("NOT yet safe to retire Falco"),
+        "the honest retirement caveat is shown"
+    );
+    // The untrusted workload name is ESCAPED — the raw <script> tag never reaches the HTML.
+    assert!(
+        !html.contains("<script>alert(1)</script>"),
+        "an untrusted workload name must be escaped, not injected"
+    );
+    assert!(html.contains("&lt;script&gt;"), "it appears escaped");
 }

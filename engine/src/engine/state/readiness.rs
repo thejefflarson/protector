@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use super::agent_liveness::{BlindReason, NodeState, RuntimeCoverage};
+use super::parity::{CorroborationParity, ParityReadiness};
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig};
 use crate::engine::signing_trust::TUF_STALE_AFTER_SECS;
 
@@ -104,9 +105,61 @@ pub struct Readiness {
     /// been exercised this run. A calm/green posture is only honest while the model is live;
     /// otherwise exposed paths are unjudged, not cleared (ADR-0016).
     pub model_judging: bool,
+    /// The corroboration-parity report (JEF-310, Falco-retirement F6): this pass's Falco-vs-agent
+    /// corroboration split and the honest retirement reading. Read-only measurement — it drives no
+    /// decision (ADR-0016); its headline "agent-uncovered" count trending to ≈0 over a bake is the
+    /// signal that Falco can be retired.
+    pub parity: ParityReport,
+}
+
+/// The rendered corroboration-parity report (JEF-310): the raw per-source counts plus the coarse
+/// [`ParityState`] and the honest one-line summary the readiness view shows. Kept as its own shape
+/// (not inlined into a `ReadinessRow`) because it is a retirement MEASUREMENT, not a decision input
+/// with an enable env var. JSON-serializable so a consumer reads the same numbers the OTLP mirror does.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParityReport {
+    /// The coarse retirement reading — the honest state that must never read green off missing data.
+    pub state: ParityState,
+    /// The one-line human summary (counts + honesty caveat). Carries no untrusted text.
+    pub summary: String,
+    /// Breach chains corroborated by Falco this pass.
+    pub falco_corroborated: u64,
+    /// Breach chains corroborated by the first-party agent this pass.
+    pub agent_corroborated: u64,
+    /// Breach chains corroborated by BOTH (the parity we want).
+    pub both: u64,
+    /// Breach chains Falco corroborated with no agent-equivalent signal — the headline gap.
+    pub agent_uncovered: u64,
+    /// The distinct front-door workloads behind [`agent_uncovered`](Self::agent_uncovered) —
+    /// UNTRUSTED-adjacent cluster names, escaped at render (maud default), never `PreEscaped`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncovered_entries: Vec<String>,
+}
+
+/// The coarse corroboration-parity state (JEF-310), the presentation mirror of
+/// [`ParityReadiness`]. Distinct from [`InputState`] because "nothing to compare" is a real
+/// epistemic state, not an absent decision input — it must not render as a reassuring green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParityState {
+    /// Falco corroborated nothing this window — nothing to compare (NOT "safe to retire").
+    NothingToCompare,
+    /// Falco corroborated chains the agent did not — agent-uncovered gap remains.
+    Uncovered,
+    /// Every Falco-corroborated chain was also agent-corroborated — parity this window.
+    Parity,
 }
 
 impl Readiness {
+    /// Attach the corroboration-parity report (JEF-310) folded from this pass's proven chains.
+    /// Kept separate from [`derive_readiness`] because the parity comes from the chains, not the
+    /// config/health/coverage inputs the rest of the snapshot reads. Read-only (ADR-0016).
+    #[allow(dead_code)]
+    pub(crate) fn with_parity(mut self, parity: &CorroborationParity) -> Self {
+        self.parity = parity_report(parity);
+        self
+    }
+
     /// How many enrichment/decision inputs are absent or degraded — the count the
     /// first-run discrimination keys on. Arm-state is posture, not an input gap, so it
     /// never counts here.
@@ -294,6 +347,52 @@ pub(crate) fn derive_readiness(
         inputs,
         warming_up,
         model_judging,
+        // The parity report defaults to "nothing to compare" (an empty fold) and is attached from
+        // the pass's chains via [`Readiness::with_parity`] — it is folded from the proven chains,
+        // not the config/health inputs the rest of this snapshot reads.
+        parity: parity_report(&CorroborationParity::default()),
+    }
+}
+
+/// Build the corroboration-parity report (JEF-310) for the readiness view from this pass's
+/// per-source counts. The summary line is honest above all: a Falco-silent window reads
+/// "nothing to compare", explicitly NOT "0 uncovered = safe to retire" (ADR-0016). Carries only
+/// counts and (already-bounded) cluster names — no untrusted free-text of its own.
+fn parity_report(parity: &CorroborationParity) -> ParityReport {
+    let (state, summary) = match parity.readiness() {
+        ParityReadiness::NothingToCompare => (
+            ParityState::NothingToCompare,
+            "nothing to compare this pass — no Falco alert corroborated a breach chain, so agent \
+             parity cannot be measured (absence of Falco activity is not evidence the agent has \
+             parity)"
+                .to_string(),
+        ),
+        ParityReadiness::Uncovered { count } => (
+            ParityState::Uncovered,
+            format!(
+                "agent-uncovered: {count} breach chain{} corroborated by Falco with no agent signal on the same workload ({} of {} Falco corroborations matched by the agent) — NOT yet safe to retire Falco",
+                plural(count),
+                parity.both,
+                parity.falco_corroborated,
+            ),
+        ),
+        ParityReadiness::Parity => (
+            ParityState::Parity,
+            format!(
+                "parity this pass — the agent corroborated all {} Falco-corroborated breach chain{} (0 agent-uncovered)",
+                parity.falco_corroborated,
+                plural(parity.falco_corroborated),
+            ),
+        ),
+    };
+    ParityReport {
+        state,
+        summary,
+        falco_corroborated: parity.falco_corroborated,
+        agent_corroborated: parity.agent_corroborated,
+        both: parity.both,
+        agent_uncovered: parity.agent_uncovered,
+        uncovered_entries: parity.uncovered_entries.clone(),
     }
 }
 

@@ -68,6 +68,21 @@ pub(super) struct EngineMetrics {
     /// Shadow report headline: would-acts made during an enrichment-coverage gap (no CVE
     /// backing) — the ones to scrutinize first.
     pub(super) report_coverage_gap: opentelemetry::metrics::Gauge<u64>,
+    /// Corroboration-parity report (JEF-310, Falco-retirement F6): breach chains a Falco `Alert`
+    /// corroborated this pass with NO agent-equivalent signal on the same workload —
+    /// "agent-uncovered". THE retirement metric: a gauge whose per-pass value trending to ≈0 over
+    /// a bake is the go signal for retiring Falco (JEF-56). Honesty caveat (ADR-0016): read this
+    /// ALONGSIDE [`parity_falco_corroborated`](Self::parity_falco_corroborated) — a `0` when Falco
+    /// corroborated nothing is "nothing to compare", not "safe to retire".
+    pub(super) parity_agent_uncovered: opentelemetry::metrics::Gauge<u64>,
+    /// Corroboration-parity report: breach chains Falco corroborated this pass — the DENOMINATOR
+    /// for the parity reading. When this is `0`, agent-uncovered being `0` means nothing.
+    pub(super) parity_falco_corroborated: opentelemetry::metrics::Gauge<u64>,
+    /// Corroboration-parity report: breach chains the first-party agent corroborated this pass.
+    pub(super) parity_agent_corroborated: opentelemetry::metrics::Gauge<u64>,
+    /// Corroboration-parity report: breach chains corroborated by BOTH sensors this pass (the
+    /// parity we want — the agent already covers what Falco saw).
+    pub(super) parity_both: opentelemetry::metrics::Gauge<u64>,
 }
 
 impl EngineMetrics {
@@ -153,6 +168,30 @@ impl EngineMetrics {
             report_coverage_gap: m
                 .u64_gauge("protector.engine.report_coverage_gap")
                 .with_description("Shadow report: would-acts during an enrichment-coverage gap.")
+                .build(),
+            parity_agent_uncovered: m
+                .u64_gauge("protector.engine.parity_agent_uncovered")
+                .with_description(
+                    "Corroboration parity: breach chains Falco corroborated with no agent signal \
+                     (agent-uncovered) — read alongside parity_falco_corroborated.",
+                )
+                .build(),
+            parity_falco_corroborated: m
+                .u64_gauge("protector.engine.parity_falco_corroborated")
+                .with_description(
+                    "Corroboration parity: breach chains Falco corroborated this pass (the parity \
+                     denominator).",
+                )
+                .build(),
+            parity_agent_corroborated: m
+                .u64_gauge("protector.engine.parity_agent_corroborated")
+                .with_description("Corroboration parity: breach chains the agent corroborated.")
+                .build(),
+            parity_both: m
+                .u64_gauge("protector.engine.parity_both")
+                .with_description(
+                    "Corroboration parity: breach chains corroborated by both sensors.",
+                )
                 .build(),
         }
     }

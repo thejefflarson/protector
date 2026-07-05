@@ -583,6 +583,64 @@ impl NodeCoverageStateProps {
     }
 }
 
+/// The corroboration-parity report panel (JEF-310, Falco-retirement F6): the Falco-vs-agent
+/// corroboration split and the honest retirement reading. Counts only, plus the (bounded,
+/// untrusted-adjacent) uncovered workload names the component auto-escapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityReportProps {
+    pub state: ParityStateProps,
+    /// The one-line honest summary (counts + caveat). No untrusted text.
+    pub summary: String,
+    pub falco_corroborated: u64,
+    pub agent_corroborated: u64,
+    pub both: u64,
+    pub agent_uncovered: u64,
+    /// The distinct front-door workloads Falco corroborated but the agent didn't — UNTRUSTED at
+    /// render (cluster names), the component auto-escapes them (never `PreEscaped`).
+    pub uncovered_entries: Vec<String>,
+}
+
+/// The coarse corroboration-parity state (JEF-310) — colour + glyph + word, never colour alone.
+/// "Nothing to compare" is its own state so missing Falco data never renders as a reassuring green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParityStateProps {
+    /// Falco corroborated nothing this pass — nothing to compare (NOT "safe to retire").
+    NothingToCompare,
+    /// Falco corroborated chains the agent did not — the agent-uncovered gap.
+    Uncovered,
+    /// Every Falco-corroborated chain was also agent-corroborated — parity this pass.
+    Parity,
+}
+
+impl ParityStateProps {
+    /// The CSS token / `data-state` value.
+    pub fn token(self) -> &'static str {
+        match self {
+            ParityStateProps::NothingToCompare => "nothing-to-compare",
+            ParityStateProps::Uncovered => "uncovered",
+            ParityStateProps::Parity => "parity",
+        }
+    }
+
+    /// The glyph carrying the state without colour.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            ParityStateProps::NothingToCompare => "\u{2014}", // —
+            ParityStateProps::Uncovered => "\u{25CF}",        // ●
+            ParityStateProps::Parity => "\u{2713}",           // ✓
+        }
+    }
+
+    /// The word — always present alongside colour + glyph.
+    pub fn word(self) -> &'static str {
+        match self {
+            ParityStateProps::NothingToCompare => "nothing to compare",
+            ParityStateProps::Uncovered => "AGENT-UNCOVERED",
+            ParityStateProps::Parity => "parity",
+        }
+    }
+}
+
 /// The whole Readiness view's props: the persistent strip + the coverage rows, weakening-inputs
 /// first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +648,9 @@ pub struct ReadinessViewProps {
     pub strip: StatusStripProps,
     /// Coverage rows — weakening-when-absent inputs float to the top (brief §6).
     pub rows: Vec<ReadinessRowProps>,
+    /// The corroboration-parity report (JEF-310) — the Falco-retirement measurement, shown as its
+    /// own panel below the decision inputs (it is a measurement, not a decision input).
+    pub parity: ParityReportProps,
 }
 
 // ---------------------------------------------------------------------------

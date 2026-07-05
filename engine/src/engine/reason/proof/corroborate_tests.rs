@@ -4,9 +4,11 @@
 //! `pub(super)` seam directly (`corroborate::corroborates`) plus the full `prove` path.
 
 use serde_json::json;
+use std::time::SystemTime;
 
-use super::corroborate::corroborates;
+use super::corroborate::{CorroborationSource, corroborates, corroborating_sources};
 use super::{ProvenChain, QuarantineReason, prove};
+use crate::engine::graph::RuntimeSignal;
 use crate::engine::graph::attack::{
     CREDENTIAL_ACCESS, ESCAPE_TO_HOST, EXFILTRATION, EXPLOIT_PUBLIC_FACING,
 };
@@ -155,4 +157,160 @@ fn benign_write_neither_corroborates_nor_quarantines() {
         None,
         "a benign write must NOT mark the entry actively exploited"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Source attribution (JEF-310, Falco-retirement F6): a corroboration is attributed to its
+// SENSOR by the corroborating behavior — a Falco `Alert` ⇒ Falco, every agent behavior ⇒ agent.
+// ---------------------------------------------------------------------------
+
+/// A runtime signal carrying `behavior` — the source-attribution input.
+fn signal(behavior: Behavior) -> RuntimeSignal {
+    RuntimeSignal {
+        behavior,
+        provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+    }
+}
+
+/// The attribution rule itself: a Falco `Alert` is Falco; EVERY other behavior is agent-emitted.
+#[test]
+fn source_is_falco_for_alert_and_agent_for_every_other_behavior() {
+    assert_eq!(
+        CorroborationSource::of(&Behavior::Alert { rule: "x".into() }),
+        CorroborationSource::Falco
+    );
+    // Each agent-emitted behavior variant attributes to the agent — Alert is the ONLY Falco one.
+    let agent_behaviors = [
+        Behavior::NetworkConnection {
+            peer: "1.2.3.4:443".into(),
+            internet: true,
+        },
+        Behavior::SecretRead {
+            secret: "app/s".into(),
+            source: crate::engine::graph::SecretReadSource::Mounted,
+        },
+        Behavior::LibraryLoaded {
+            name: "log4j".into(),
+        },
+        Behavior::PrivilegeChange {
+            from_uid: 1000,
+            to_uid: 0,
+        },
+        Behavior::ProcessExec {
+            path: "/bin/bash".into(),
+        },
+        Behavior::FileWrite {
+            path: "/usr/bin/dropper".into(),
+        },
+        Behavior::FileRead { path: "/p".into() },
+    ];
+    for b in agent_behaviors {
+        assert_eq!(
+            CorroborationSource::of(&b),
+            CorroborationSource::Agent,
+            "{b:?} must attribute to the agent"
+        );
+    }
+}
+
+/// A Falco `Alert` and an agent SecretRead on the same workload both corroborate a
+/// credential-access chain → BOTH sources fire (the parity we want — not agent-uncovered).
+#[test]
+fn both_sensors_corroborating_sets_both_sources() {
+    let runtime = [
+        signal(Behavior::Alert {
+            rule: "Read sensitive file untrusted".into(),
+        }),
+        signal(Behavior::SecretRead {
+            secret: "app/session-key".into(),
+            source: crate::engine::graph::SecretReadSource::Mounted,
+        }),
+    ];
+    let sources = corroborating_sources(&runtime, &CREDENTIAL_ACCESS, None);
+    assert!(sources.by_falco);
+    assert!(sources.by_agent);
+    assert!(sources.any());
+}
+
+/// Only a Falco `Alert` corroborates → Falco-only (this is the agent-uncovered condition: Falco
+/// saw it, the agent has no equivalent signal on the workload).
+#[test]
+fn falco_only_alert_is_falco_source_without_agent() {
+    let runtime = [signal(Behavior::Alert {
+        rule: "shell".into(),
+    })];
+    let sources = corroborating_sources(&runtime, &CREDENTIAL_ACCESS, None);
+    assert!(sources.by_falco);
+    assert!(
+        !sources.by_agent,
+        "no agent-equivalent signal → agent-uncovered"
+    );
+}
+
+/// Only an agent behavior corroborates → agent-only (already covered; never agent-uncovered).
+#[test]
+fn agent_only_signal_is_agent_source_without_falco() {
+    let runtime = [signal(Behavior::SecretRead {
+        secret: "app/session-key".into(),
+        source: crate::engine::graph::SecretReadSource::Mounted,
+    })];
+    let sources = corroborating_sources(&runtime, &CREDENTIAL_ACCESS, None);
+    assert!(!sources.by_falco);
+    assert!(sources.by_agent);
+}
+
+/// A signal that does NOT corroborate the tactic contributes no source — attribution counts only
+/// signals that actually corroborate (an in-cluster connection is not credential access).
+#[test]
+fn non_corroborating_signal_contributes_no_source() {
+    let runtime = [signal(Behavior::NetworkConnection {
+        peer: "10.0.0.1:5432".into(),
+        internet: false,
+    })];
+    let sources = corroborating_sources(&runtime, &CREDENTIAL_ACCESS, None);
+    assert!(!sources.by_falco);
+    assert!(!sources.by_agent);
+    assert!(!sources.any());
+}
+
+/// End-to-end through `prove`: the exposed, exploitable `web` entry corroborated by a Falco
+/// `Alert` marks the chain `corroborated_by_falco` (and NOT `_by_agent`) — the per-chain split
+/// the corroboration-parity report folds into its agent-uncovered count.
+#[test]
+fn prove_stamps_falco_source_on_an_alert_corroborated_chain() {
+    let chains = web_entry_with_signal(Behavior::Alert {
+        rule: "Terminal shell in container".into(),
+    });
+    let chain = chains
+        .iter()
+        .find(|c| c.entry.0 == "workload/app/Pod/web" && c.objective.0 == "secret/app/session-key")
+        .expect("web → secret chain");
+    assert!(chain.corroborated);
+    assert!(
+        chain.corroborated_by_falco,
+        "an Alert is a Falco corroboration"
+    );
+    assert!(
+        !chain.corroborated_by_agent,
+        "no agent signal on the workload → agent-uncovered"
+    );
+}
+
+/// End-to-end through `prove`: the same entry corroborated by an AGENT behavior (a drop-and-execute
+/// write) marks `corroborated_by_agent` and NOT `_by_falco`.
+#[test]
+fn prove_stamps_agent_source_on_an_agent_corroborated_chain() {
+    let chains = web_entry_with_signal(Behavior::FileWrite {
+        path: "/usr/bin/dropper".into(),
+    });
+    let chain = chains
+        .iter()
+        .find(|c| c.entry.0 == "workload/app/Pod/web" && c.objective.0 == "secret/app/session-key")
+        .expect("web → secret chain");
+    assert!(chain.corroborated);
+    assert!(
+        chain.corroborated_by_agent,
+        "a drop-and-execute is an agent corroboration"
+    );
+    assert!(!chain.corroborated_by_falco);
 }

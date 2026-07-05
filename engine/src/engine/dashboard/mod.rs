@@ -82,7 +82,8 @@ impl DashboardState {
         let bake: BakeStats = self.findings.bake();
         let last_pass: Option<SystemTime> = self.findings.last_pass();
         let runtime = self.findings.runtime_coverage();
-        derive_readiness(&config, health, &bake, last_pass, &runtime)
+        let parity = self.findings.parity();
+        derive_readiness(&config, health, &bake, last_pass, &runtime).with_parity(&parity)
     }
 
     /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The
