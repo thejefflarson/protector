@@ -28,8 +28,9 @@ use tokio::sync::mpsc::Sender;
 use super::ingest_guard::{
     DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
 };
-use super::{Attribution, RuntimeObservation};
+use super::{AgentReport, Attribution, RuntimeObservation};
 use crate::engine::graph::Behavior;
+use crate::engine::state::AgentLivenessStore;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
 /// ingest task and the engine loop can share it.
@@ -140,18 +141,20 @@ pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
         // Falco's wall-clock `time` could be parsed here; until then the adapter
         // stamps ingest-time. Falco is the low-volume sensor, so the lag is minor.
         observed_at_ms: None,
+        node: None,
         behavior: Behavior::Alert { rule },
     })
 }
 
-/// Shared state for the ingest handler: the event store and a wake channel.
-type IngestState = (Arc<RuntimeEvents>, Sender<()>);
+/// Shared state for the ingest handlers: the event store, a wake channel, and the per-node
+/// agent-liveness store (JEF-308) the `/agent-liveness` beacon feeds.
+type IngestState = (Arc<RuntimeEvents>, Sender<()>, Arc<AgentLivenessStore>);
 
 /// Receive one Falco alert, record it, and wake the engine. Unparseable or
 /// non-pod alerts are accepted and ignored (we still 200 so falcosidekick doesn't
 /// retry-storm).
 async fn ingest(
-    State((events, notify)): State<IngestState>,
+    State((events, notify, _liveness)): State<IngestState>,
     Json(event): Json<Value>,
 ) -> StatusCode {
     if let Some(observation) = parse_falco_event(&event) {
@@ -172,11 +175,26 @@ async fn ingest(
 /// connections continuously, so most batches are pure repeats — those refresh TTLs but
 /// must not churn a process pass, which is the whole point of gating the wake here.
 async fn ingest_behavior(
-    State((events, notify)): State<IngestState>,
+    State((events, notify, _liveness)): State<IngestState>,
     Json(observations): Json<Vec<RuntimeObservation>>,
 ) -> StatusCode {
     if record_batch(&events, observations) {
         let _ = notify.try_send(());
+    }
+    StatusCode::OK
+}
+
+/// Receive a batch of per-node [`AgentReport`] liveness beacons (JEF-308) and record them into the
+/// liveness store. Unlike a behavior, a beacon does NOT wake the engine — liveness is read at pass
+/// time; a beacon only refreshes freshness. A beacon arrives every window even when the node saw
+/// nothing, which is exactly what lets a quiet node read HEALTHY-quiet instead of blind. Same body
+/// cap / authn / rate limit as the sibling routes; over-cap batches are truncated defensively.
+async fn ingest_agent_liveness(
+    State((_events, _notify, liveness)): State<IngestState>,
+    Json(reports): Json<Vec<AgentReport>>,
+) -> StatusCode {
+    for report in reports.into_iter().take(MAX_BATCH) {
+        liveness.record(report);
     }
     StatusCode::OK
 }
@@ -219,6 +237,7 @@ pub async fn serve_runtime(
     addr: SocketAddr,
     events: Arc<RuntimeEvents>,
     notify: Sender<()>,
+    liveness: Arc<AgentLivenessStore>,
 ) -> anyhow::Result<()> {
     // App-layer authn (Fix A): require `Authorization: Bearer <token>` matching a
     // configured shared secret, rejected 401 BEFORE deserialization. Resolved once at
@@ -234,11 +253,13 @@ pub async fn serve_runtime(
     let mut app = Router::new()
         .route("/", post(ingest))
         .route("/behavior", post(ingest_behavior))
+        // The per-node agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
+        .route("/agent-liveness", post(ingest_agent_liveness))
         // A real alert/batch is small; cap the body so a client can't OOM the engine
         // with a giant POST (mirrors the webhook server). The body cap, MAX_EVENTS, and
         // the per-batch MAX_BATCH all remain in force alongside authn + rate limiting.
         .layer(DefaultBodyLimit::max(256 * 1024))
-        .with_state((events, notify));
+        .with_state((events, notify, liveness));
 
     // Rate limit runs on every request, authenticated or not.
     app = app.layer(axum::middleware::from_fn_with_state(limiter, rate_limit));
@@ -246,7 +267,7 @@ pub async fn serve_runtime(
     match token {
         Some(token) => {
             app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
-            tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior) — bearer-authenticated");
+            tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior, /agent-liveness) — bearer-authenticated");
         }
         None => {
             tracing::warn!(
@@ -278,6 +299,7 @@ mod tests {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::Alert { rule: rule.into() },
         }
     }

@@ -319,6 +319,7 @@ async fn corroboration_predicate_fires_on_a_live_alert() {
         attribution: Attribution::by_namespaced_name("app", "web"),
         source: Some("falco".into()),
         observed_at_ms: None,
+        node: None,
         behavior: Behavior::Alert {
             rule: "Terminal shell in container".into(),
         },
@@ -352,6 +353,7 @@ async fn process_publishes_the_behavioral_bake_snapshot() {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: Some("falco".into()),
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::Alert {
                 rule: "Terminal shell in container".into(),
             },
@@ -361,6 +363,7 @@ async fn process_publishes_the_behavioral_bake_snapshot() {
             attribution: Attribution::by_pod_uid("uid-not-in-snapshot"),
             source: Some("agent".into()),
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::NetworkConnection {
                 peer: "10.0.0.9:443".into(),
                 internet: false,

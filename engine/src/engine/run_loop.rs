@@ -290,6 +290,13 @@ pub async fn run_watch(
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
     // written by the adjudicator for later inspection.
     let journal = std::sync::Arc::new(state::JudgementLog::new());
+    // Per-node agent-liveness (JEF-308): the TTL'd store the `/agent-liveness` beacon feeds and
+    // the engine reads each pass to classify runtime-corroboration coverage per node. Same 300s
+    // freshness window as the runtime feed — a node whose agent stopped beaconing goes stale and
+    // reads blind. Shared (`Arc`) between the ingest task and the engine loop.
+    let agent_liveness = std::sync::Arc::new(state::AgentLivenessStore::new(
+        std::time::Duration::from_secs(300),
+    ));
     // The durable decision journal (JEF-141): reload pre-restart decisions onto the
     // in-memory state so the output state isn't blank while the caches + CPU model warm.
     // Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no
@@ -305,7 +312,10 @@ pub async fn run_watch(
     // The one sanctioned outbound path (JEF-144, ADR-0018): operator-configured via
     // `PROTECTOR_ENGINE_NOTIFY_URL`, off (zero outbound calls) when unset, redacted by
     // default.
-    .with_notifier(notify::BreachNotifier::from_env());
+    .with_notifier(notify::BreachNotifier::from_env())
+    // The per-node agent-liveness store (JEF-308): read each pass to stamp the runtime-corroboration
+    // coverage into the findings handle the readiness aggregation reads.
+    .with_agent_liveness(agent_liveness.clone());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
     // (JEF-237), so the admission-decision log isn't blank after a restart — parallel to how
@@ -433,8 +443,11 @@ pub async fn run_watch(
     let (runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
     if let Some(addr) = runtime_addr {
         let events = runtime_events.clone();
+        let liveness = agent_liveness.clone();
         tokio::spawn(async move {
-            if let Err(error) = observe::runtime::serve_runtime(addr, events, runtime_tx).await {
+            if let Err(error) =
+                observe::runtime::serve_runtime(addr, events, runtime_tx, liveness).await
+            {
                 tracing::error!(%error, "runtime-evidence ingest stopped");
             }
         });

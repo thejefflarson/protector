@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::engine::dashboard::view_model::props::InputStateProps;
-use crate::engine::state::{BakeStats, ModelHealth, ReadinessConfig, derive_readiness};
+use crate::engine::state::{
+    BakeStats, ModelHealth, ReadinessConfig, RuntimeCoverage, derive_readiness,
+};
 use std::time::SystemTime;
 
 fn covered() -> ReadinessConfig {
@@ -22,10 +24,17 @@ fn covered() -> ReadinessConfig {
 fn every_input_becomes_a_row_with_state_word_and_why() {
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
-    let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+    let r = derive_readiness(
+        &covered(),
+        ModelHealth::Ok,
+        &bake,
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    );
     let rows = map_readiness(&r);
-    // model / kev / epss / falco / ebpf-agent / journal / tuf-root / arm-state == 8 inputs.
-    assert_eq!(rows.len(), 8);
+    // model / kev / epss / runtime-corroboration / journal / tuf-root / arm-state == 7 inputs
+    // (the former falco + ebpf-agent rows are collapsed into one runtime-corroboration row, JEF-308).
+    assert_eq!(rows.len(), 7);
     // Every row carries a non-empty label + why + state word (meaning never by colour alone).
     for row in &rows {
         assert!(!row.label.is_empty());
@@ -42,7 +51,13 @@ fn an_absent_weakening_input_floats_to_the_top() {
     config.kev_count = 0;
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
-    let r = derive_readiness(&config, ModelHealth::Ok, &bake, Some(SystemTime::now()));
+    let r = derive_readiness(
+        &config,
+        ModelHealth::Ok,
+        &bake,
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    );
     let rows = map_readiness(&r);
     let kev_pos = rows.iter().position(|row| row.id == "kev").unwrap();
     let model_pos = rows.iter().position(|row| row.id == "model").unwrap();
@@ -65,6 +80,7 @@ fn a_degraded_model_reads_degraded_not_absent_or_present() {
         ModelHealth::Timeout,
         &BakeStats::default(),
         Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
     );
     let rows = map_readiness(&r);
     let model = rows.iter().find(|row| row.id == "model").unwrap();
@@ -79,6 +95,7 @@ fn arm_state_is_present_and_never_weakens() {
         ModelHealth::Ok,
         &BakeStats::default(),
         Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
     );
     let rows = map_readiness(&r);
     let arm = rows.iter().find(|row| row.id == "arm-state").unwrap();

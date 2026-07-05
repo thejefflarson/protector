@@ -528,6 +528,7 @@ fn prompt_includes_the_chain_evidence() {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: crate::engine::graph::Behavior::Alert {
                 rule: "Terminal shell in container".into(),
             },

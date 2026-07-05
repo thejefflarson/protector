@@ -13,11 +13,13 @@ use super::props::{CoverageChip, StatusStripProps};
 
 /// The enrichment feeds shown as coverage chips in the strip, in a stable order. Arm-state and
 /// journal are reported elsewhere (the mode pill / Readiness tab), not as coverage chips.
-const COVERAGE_FEEDS: [(&str, &str); 4] = [
+const COVERAGE_FEEDS: [(&str, &str); 3] = [
     ("kev", "KEV"),
     ("epss", "EPSS"),
-    ("falco", "Falco"),
-    ("ebpf-agent", "eBPF"),
+    // ONE agent-sourced runtime-corroboration chip (JEF-308), replacing the former Falco + eBPF
+    // pair. It goes degraded the moment any expected node is blind (the collapsed readiness row's
+    // Degraded state), and reads as a gap (not present) when corroboration is wholly blind.
+    ("runtime-corroboration", "Runtime"),
 ];
 
 /// Build the coverage chips from the readiness rows. A `Present` row is covered; a `Degraded`
@@ -94,7 +96,10 @@ fn last_pass_age(at: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::state::{BakeStats, ModelHealth, ReadinessConfig, derive_readiness};
+    use crate::engine::state::{
+        BakeStats, BlindReason, ModelHealth, NodeCoverage, NodeState, ReadinessConfig,
+        RuntimeCoverage, derive_readiness,
+    };
 
     fn covered() -> ReadinessConfig {
         ReadinessConfig {
@@ -108,22 +113,83 @@ mod tests {
         }
     }
 
+    /// A coverage snapshot from `(node, state)` pairs.
+    fn coverage(nodes: &[(&str, NodeState)]) -> RuntimeCoverage {
+        RuntimeCoverage {
+            nodes: nodes
+                .iter()
+                .map(|(n, s)| NodeCoverage {
+                    node: (*n).to_string(),
+                    state: *s,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn judging_model_strip_is_honest_calm() {
         let mut bake = BakeStats::default();
         bake.signals_by_variant.insert("alert".into(), 1);
-        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        // One healthy agent node → the Runtime chip is present.
+        let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
+        let r = derive_readiness(
+            &covered(),
+            ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+            &cov,
+        );
         // Judging + covered + nothing breach/awaiting/uncertain (3 cleared) ⇒ honest all-clear.
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0);
         assert!(strip.model_is_up());
         assert!(strip.all_clear());
         assert!(!strip.watching());
         assert!(!strip.armed);
-        // KEV/EPSS present; Falco present (alert signal); eBPF absent.
-        let falco = strip.coverage.iter().find(|c| c.label == "Falco").unwrap();
-        assert!(falco.present);
-        let ebpf = strip.coverage.iter().find(|c| c.label == "eBPF").unwrap();
-        assert!(!ebpf.present);
+        // The former Falco + eBPF chips are collapsed into ONE agent-sourced Runtime chip.
+        assert!(strip.coverage.iter().all(|c| c.label != "Falco"));
+        assert!(strip.coverage.iter().all(|c| c.label != "eBPF"));
+        let runtime = strip
+            .coverage
+            .iter()
+            .find(|c| c.label == "Runtime")
+            .unwrap();
+        assert!(runtime.present);
+        assert!(!runtime.degraded);
+    }
+
+    /// JEF-308: the Runtime chip goes degraded the moment any expected node is blind.
+    #[test]
+    fn a_blind_node_degrades_the_runtime_chip() {
+        let cov = coverage(&[
+            ("node-a", NodeState::Healthy { signals: 1 }),
+            (
+                "node-b",
+                NodeState::Blind {
+                    reason: BlindReason::NotReporting,
+                },
+            ),
+        ]);
+        let r = derive_readiness(
+            &covered(),
+            ModelHealth::Ok,
+            &BakeStats::default(),
+            Some(SystemTime::now()),
+            &cov,
+        );
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0);
+        let runtime = strip
+            .coverage
+            .iter()
+            .find(|c| c.label == "Runtime")
+            .unwrap();
+        assert!(
+            runtime.degraded,
+            "a blind node degrades the corroboration chip"
+        );
+        assert!(
+            !strip.all_clear(),
+            "a degraded feed forbids the green all-clear"
+        );
     }
 
     #[test]
@@ -133,6 +199,7 @@ mod tests {
             ModelHealth::Timeout,
             &BakeStats::default(),
             Some(SystemTime::now()),
+            &RuntimeCoverage::default(),
         );
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 0, 0);
         assert!(!strip.model_is_up());
@@ -148,6 +215,7 @@ mod tests {
             ModelHealth::Unknown,
             &BakeStats::default(),
             None,
+            &RuntimeCoverage::default(),
         );
         let strip = status_strip("prod".into(), &r, None, 0, 0, 0, 0, 0);
         assert!(!strip.model_is_up());
@@ -162,7 +230,13 @@ mod tests {
     fn established_signing_regression_forbids_green_and_watching() {
         let mut bake = BakeStats::default();
         bake.signals_by_variant.insert("alert".into(), 1);
-        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        let r = derive_readiness(
+            &covered(),
+            ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+            &RuntimeCoverage::default(),
+        );
         // Everything else is clear (would be all-clear) — but one established regression stands.
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
             .with_signing_regressions(1, 0);
@@ -183,7 +257,13 @@ mod tests {
     fn cold_signing_regression_is_watching_not_green() {
         let mut bake = BakeStats::default();
         bake.signals_by_variant.insert("alert".into(), 1);
-        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        let r = derive_readiness(
+            &covered(),
+            ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+            &RuntimeCoverage::default(),
+        );
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
             .with_signing_regressions(0, 1);
         assert!(!strip.all_clear(), "a cold regression still forbids green");
@@ -199,7 +279,13 @@ mod tests {
     fn judging_with_pending_entries_is_watching_not_all_clear() {
         let mut bake = BakeStats::default();
         bake.signals_by_variant.insert("alert".into(), 1);
-        let r = derive_readiness(&covered(), ModelHealth::Ok, &bake, Some(SystemTime::now()));
+        let r = derive_readiness(
+            &covered(),
+            ModelHealth::Ok,
+            &bake,
+            Some(SystemTime::now()),
+            &RuntimeCoverage::default(),
+        );
         // One entry still awaiting, one still uncertain — model hasn't cleared everything.
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 1, 1, 4, 0);
         assert!(strip.model_is_up());

@@ -287,6 +287,12 @@ pub struct FindingProps {
     pub cut: Option<String>,
     pub evidence: EvidenceProps,
     pub judgement: JudgementProps,
+    /// The blind-node caveat (JEF-308): set when this finding sits on a node with NO live runtime
+    /// sensor and its disposition is latent / propose-only (uncorroborated). Its calm propose-only
+    /// reading would be dishonest there — absence of a corroborating signal is not evidence of
+    /// safety — so the detail renders this caveat. `None` when the node has a live sensor, the
+    /// finding is corroborated, or the node isn't known.
+    pub blind_node_caveat: Option<String>,
 }
 
 /// The three honesty axes the status strip carries (brief §3): decided/judging/covered. Never
@@ -514,6 +520,67 @@ pub struct ReadinessRowProps {
     pub detail: String,
     /// Whether this input being absent WEAKENS the model's decision.
     pub weakens_decisions: bool,
+    /// The per-node runtime-corroboration breakdown (JEF-308) — populated ONLY for the
+    /// `runtime-corroboration` row, empty otherwise. Rendered as a server-side `<table>` inside
+    /// `<details>` (no JS) so an operator can see exactly which node is blind.
+    pub nodes: Vec<NodeRowProps>,
+}
+
+/// One node's line in the runtime-corroboration per-node breakdown (JEF-308). Every string is
+/// UNTRUSTED at render (the node name can be attacker-influenced) — the component auto-escapes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRowProps {
+    /// The node name (untrusted).
+    pub node: String,
+    pub state: NodeCoverageStateProps,
+    /// A short live detail (signal count, "quiet", probe fraction, or the blind reason).
+    pub detail: String,
+}
+
+/// One expected node's honest liveness state (JEF-308) — colour + glyph + word, never colour alone.
+/// "Quiet" and "blind" never collapse into one word: a quiet-but-healthy node is not a down sensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeCoverageStateProps {
+    /// Reporting with probes loaded (quiet counts).
+    Healthy,
+    /// Reporting but only some probes attached.
+    Degraded,
+    /// No live sensor on this expected node — the attention case.
+    Blind,
+    /// A node the agent isn't scheduled on — out-of-scope, not blind.
+    OutOfScope,
+}
+
+impl NodeCoverageStateProps {
+    /// The CSS token suffix (`--node-{kind}`) / `data-state` value.
+    pub fn token(self) -> &'static str {
+        match self {
+            NodeCoverageStateProps::Healthy => "healthy",
+            NodeCoverageStateProps::Degraded => "degraded",
+            NodeCoverageStateProps::Blind => "blind",
+            NodeCoverageStateProps::OutOfScope => "out-of-scope",
+        }
+    }
+
+    /// The glyph carrying the state without colour.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            NodeCoverageStateProps::Healthy => "\u{2713}",    // ✓
+            NodeCoverageStateProps::Degraded => "\u{25D0}",   // ◐
+            NodeCoverageStateProps::Blind => "\u{25CF}",      // ●
+            NodeCoverageStateProps::OutOfScope => "\u{2014}", // —
+        }
+    }
+
+    /// The word — always present alongside colour + glyph.
+    pub fn word(self) -> &'static str {
+        match self {
+            NodeCoverageStateProps::Healthy => "healthy",
+            NodeCoverageStateProps::Degraded => "degraded",
+            NodeCoverageStateProps::Blind => "BLIND",
+            NodeCoverageStateProps::OutOfScope => "out-of-scope",
+        }
+    }
 }
 
 /// The whole Readiness view's props: the persistent strip + the coverage rows, weakening-inputs

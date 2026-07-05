@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::state::{
     BakeStats, EntryEvidence, Finding, Judgement, LeftAloneEntry, ModelHealth, PathStep, Readiness,
-    ReadinessConfig, Report, ReversionRecord, WouldActEntry, derive_readiness,
+    ReadinessConfig, Report, ReversionRecord, RuntimeCoverage, WouldActEntry, derive_readiness,
 };
 
 use super::page;
@@ -28,7 +28,13 @@ pub(super) fn judging_readiness() -> Readiness {
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
-    derive_readiness(&config, ModelHealth::Ok, &bake, Some(SystemTime::now()))
+    derive_readiness(
+        &config,
+        ModelHealth::Ok,
+        &bake,
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    )
 }
 
 /// A readiness snapshot for a warming (no pass yet) engine — not honestly calm.
@@ -38,6 +44,7 @@ fn warming_readiness() -> Readiness {
         ModelHealth::Unknown,
         &BakeStats::default(),
         None,
+        &RuntimeCoverage::default(),
     )
 }
 
@@ -57,6 +64,7 @@ fn timed_out_readiness() -> Readiness {
         ModelHealth::Timeout,
         &BakeStats::default(),
         Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
     )
 }
 
@@ -79,6 +87,7 @@ pub(super) fn breach_finding(entry: &str, verdict: Verdict) -> Finding {
         paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
+        node: None,
     }
 }
 
@@ -829,7 +838,13 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
-    let readiness = derive_readiness(&config, ModelHealth::Ok, &bake, Some(SystemTime::now()));
+    let readiness = derive_readiness(
+        &config,
+        ModelHealth::Ok,
+        &bake,
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    );
     let v = build_readiness_view(strip_from(&[]), &readiness);
     let html = page::readiness_page(&v).into_string();
     assert!(html.contains("decision inputs"), "the section heading");

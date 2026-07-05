@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use protector_behavior::RuntimeObservation;
+use protector_behavior::{AgentReport, RuntimeObservation};
 
 /// Re-resolve the token after this many consecutive 401s. Small so a genuine skew heals
 /// fast, but >1 so a single transient 401 (e.g. an engine mid-restart that hasn't loaded
@@ -39,10 +39,13 @@ const ERROR_EVERY_N_REJECTIONS: u64 = 20;
 /// (a stale-then-fresh token) without touching the filesystem or sleeping.
 type TokenSource = Box<dyn FnMut() -> Option<String> + Send>;
 
-/// POSTs batches of [`RuntimeObservation`]s to `{base}/behavior`.
+/// POSTs batches of [`RuntimeObservation`]s to `{base}/behavior`, and per-node liveness beacons
+/// (JEF-308) to `{base}/agent-liveness`.
 pub struct Reporter {
     client: reqwest::Client,
     url: String,
+    /// The per-node agent-liveness beacon endpoint (`{base}/agent-liveness`, JEF-308).
+    liveness_url: String,
     /// Shared-secret bearer for the engine's ingest authn (Fix A). `None` = send no
     /// `Authorization` header (the engine then runs the ingest unauthenticated, which
     /// it warns about); set it once the Secret has rolled out.
@@ -115,9 +118,11 @@ impl Reporter {
                  without an Authorization header"
             );
         }
+        let base = base.trim_end_matches('/');
         Self {
             client,
-            url: format!("{}/behavior", base.trim_end_matches('/')),
+            url: format!("{base}/behavior"),
+            liveness_url: format!("{base}/agent-liveness"),
             token,
             token_source: source,
             consecutive_401s: 0,
@@ -134,6 +139,36 @@ impl Reporter {
             req = req.bearer_auth(token);
         }
         req
+    }
+
+    /// Build the POST for a per-node liveness beacon (JEF-308), attaching the same bearer as the
+    /// observation path. Split out so the header/URL wiring is unit-testable without a server.
+    fn build_report_request(&self, report: &AgentReport) -> reqwest::RequestBuilder {
+        let mut req = self.client.post(&self.liveness_url).json(report);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        req
+    }
+
+    /// POST one per-node liveness beacon (JEF-308) to `{base}/agent-liveness`. Best-effort like
+    /// [`send`](Self::send): a failed beacon is logged and dropped — a missed beacon costs a little
+    /// freshness, and the engine's TTL means a node that genuinely stops beaconing reads blind,
+    /// which is the honest outcome. Sent every window even when the node is quiet, so a quiet node
+    /// reads healthy-quiet, not blind. `&mut self` (like [`send`](Self::send)) so the future stays
+    /// `Send` for `tokio::spawn` — the boxed token source makes a shared `&Reporter` non-`Send`.
+    pub async fn send_report(&mut self, report: &AgentReport) {
+        match self.build_report_request(report).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!(node = %report.node, "reported agent liveness");
+            }
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "agent-liveness ingest rejected beacon");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "agent-liveness ingest unreachable");
+            }
+        }
     }
 
     /// Cumulative (delivered, rejected) tallies for the periodic heartbeat (JEF-240).
@@ -241,6 +276,7 @@ mod tests {
         Reporter {
             client: reqwest::Client::new(),
             url: "http://engine.svc:9999/behavior".to_string(),
+            liveness_url: "http://engine.svc:9999/agent-liveness".to_string(),
             token: owned,
             token_source: Box::new(move || for_source.clone()),
             consecutive_401s: 0,
@@ -254,6 +290,7 @@ mod tests {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: Some("agent".into()),
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::SecretRead {
                 secret: "app/session-key".into(),
                 source: SecretReadSource::Mounted,
@@ -274,6 +311,28 @@ mod tests {
             .get(reqwest::header::AUTHORIZATION)
             .expect("Authorization header present");
         assert_eq!(auth, "Bearer s3cr3t");
+    }
+
+    /// JEF-308: a liveness beacon POSTs to `{base}/agent-liveness` carrying the same bearer.
+    #[test]
+    fn liveness_beacon_targets_agent_liveness_with_bearer() {
+        let reporter = reporter_with(Some("s3cr3t"));
+        let report = AgentReport {
+            node: "node-a".into(),
+            probes_loaded: 6,
+            probes_total: 6,
+            signals_emitted: 3,
+            observed_at_ms: None,
+        };
+        let req = reporter
+            .build_report_request(&report)
+            .build()
+            .expect("request builds");
+        assert_eq!(req.url().as_str(), "http://engine.svc:9999/agent-liveness");
+        assert_eq!(
+            req.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer s3cr3t"
+        );
     }
 
     /// Without a token, no Authorization header is sent (the engine warns + accepts,

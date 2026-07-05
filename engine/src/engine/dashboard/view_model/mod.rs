@@ -40,7 +40,10 @@ fn strip_from_findings(
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
 ) -> (StatusStripProps, Vec<FindingProps>) {
-    let rows = findings::map_findings(findings, judgements);
+    // Blind nodes (JEF-308) come from the readiness runtime-corroboration breakdown, so a finding
+    // on a node with no live sensor carries its caveat.
+    let blind_nodes = findings::blind_nodes_of(readiness);
+    let rows = findings::map_findings(findings, judgements, &blind_nodes);
     let breach = rows.iter().filter(|r| r.posture == Posture::Breach).count();
     let awaiting = rows
         .iter()

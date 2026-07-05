@@ -68,6 +68,15 @@ spec:
                 {{- toYaml .Values.agent.capabilities | nindent 16 }}
               {{- end }}
           env:
+            # The node this agent runs on (JEF-308), via the downward API. The agent stamps it
+            # onto every observation AND onto its per-node liveness beacon (/agent-liveness), so
+            # the engine can report runtime-corroboration coverage PER NODE ("blind on node X")
+            # rather than fleet-aggregate — and a Ready-but-blind agent (probes failed to load)
+            # still reads blind. Signal-flow liveness, not pod-Ready.
+            - name: K8S_NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             # The engine's behavioral ingest base — the agent appends /behavior.
             - name: PROTECTOR_AGENT_ENDPOINT
               value: "http://{{ include "protector.fullname" . }}-falco-ingest.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.engine.falco.port }}"
