@@ -536,7 +536,12 @@ spec:
   ingress:
     - from: [{ podSelector: { matchLabels: { role: web } } }]
 YAML
-wait_until "log4j foothold proven (no model to judge it)" 150 chains_proven
+# Same cold-prove as step 6 (line ~472): the redeploy above replaced the pod, so the
+# engine must re-boot, run the signing sweep, and rebuild the graph from scratch before
+# it can re-prove. Give it the SAME 300s budget as the initial prove — 150s was a
+# leftover under-budget (#163 widened step 6 but not this one), the real reason e2e
+# stayed red after #166 fixed the log-window grep (JEF-300).
+wait_until "log4j foothold proven (no model to judge it)" 300 chains_proven
 pass "CVE present + exposed, foothold proven; with no model the engine PROPOSES — it does not cut"
 # Give the reconcile a few cycles; assert it never cuts on mere presence.
 sleep 10
