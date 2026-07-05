@@ -354,7 +354,10 @@ engine:
 #
 # OFF by default: it needs the protector-agent image and the eBPF probes load-tested on
 # your kernel (see agent/README.md). When enabled it runs in SHADOW — the signals enrich
-# the model + the engine's output state; only an `alert` behavior corroborates the action bar.
+# the model + the engine's output state. Corroboration is per-objective (ADR-0014): an
+# alerting signal corroborates any chain, and the agent's own behaviors each corroborate
+# the objective class whose ATT&CK tactic they evidence (internet egress → exfil, secret
+# read → credential-access, vuln-library load / notable exec → foothold).
 agent:
   enabled: false
   image:

@@ -85,16 +85,24 @@ telemetry without requiring any third-party sensor.
   *promotes* toward action behind the existing reversible, self-reverting cut — never a
   new kind of action.
 
-  *Status (phase 1, shadow):* per-objective corroboration — the
-  `corroborates(behavior, objective)` relation described above (egress→exfil,
-  lib-load→foothold) — is **deferred**. What ships today is the flat,
-  `is_alert()`-gated corroboration: only an *alerting* signal (a Falco critical)
-  corroborates, and it does so for any chain on the workload. Mundane behaviors
-  (connections, secret reads, library loads) flow to the model as evidence but do **not**
-  yet promote the action bar — widening the flat predicate to admit them would corroborate
-  everything (every workload connects). The per-objective relation belongs at
-  objective/action-bar matching, not in that predicate; see the `entry_corroborated` NB in
-  `engine/src/engine/proof.rs`. It lands only after the shadow bake (rollout step 3 below).
+  *Status (landed, shadow):* per-objective corroboration — the
+  `corroborates(behavior, objective)` relation described above — **has shipped**. It lives
+  in [`engine/src/engine/reason/proof/corroborate.rs`](../../engine/src/engine/reason/proof/corroborate.rs)
+  (`corroborates` / `corroborated_for`) and is wired into chain proof at
+  [`reason/proof/mod.rs`](../../engine/src/engine/reason/proof/mod.rs). Each behavior
+  corroborates only the objective class whose ATT&CK *tactic* it evidences: internet
+  egress → EXFILTRATION (T1041), secret read → CREDENTIAL_ACCESS (T1552), vuln-library
+  load → the INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING foothold (T1190, matched against the
+  entry's foothold tactic per JEF-77 as well as the objective's). An *alerting* signal
+  (`Behavior::Alert`) still corroborates **any** chain — "an attack is happening now"
+  regardless of which objective — and a *notable* exec (interactive shell / package
+  manager, JEF-55/JEF-117) corroborates broadly the same way, as the agent-side
+  equivalent of Falco's shell/pkg-mgr criticals. A *bare* `ProcessExec` and mundane
+  in-cluster connections remain model-evidence only, so the predicate never becomes the
+  "everything corroborates everything" blanket. This is entirely **shadow-gated**: the
+  arms only set `corroborated`; actuation stays behind `mode: enforce` / `enforceScope`
+  (ADR-0021). The earlier "flat, `is_alert()`-gated, deferred until a shadow bake"
+  framing is obsolete — it is superseded by the per-objective relation now in the tree.
 
 Behavioral signals are **never graph structure**: they don't mint edges or nodes, so
 the proof layer's "reach is proven, not guessed" invariant is untouched. They are TTL'd
@@ -156,5 +164,57 @@ Shadow-first, mirroring the engine's posture ([ADR-0001](0001-async-mitigation-e
 2. **The agent.** Build `protector-agent` (aya) — network connections first, then secret
    reads and library loads — emitting normalized signals. Graceful degradation per hook.
 3. **Deploy.** Add the DaemonSet to the chart with the scoped capabilities, **in shadow**
-   — signals only enrich the engine's output state and the model's prompt. Only after a bake does any
-   behavioral signal feed the action-bar corroboration that can promote a cut.
+   — signals enrich the engine's output state and the model's prompt, and feed the
+   per-objective action-bar corroboration relation (now landed; see *Status* above).
+   Every corroboration path is shadow-gated: it can only ever *promote a cut* under
+   `mode: enforce` within `enforceScope` (ADR-0021), never by the mere presence of a
+   signal.
+
+## Addendum — retiring Falco: the corroboration-parity bar (JEF-305, 2026-07-04)
+
+Falco 0.44.1 crash-loops on the cluster's `7.0.0-1014-raspi` arm64 kernel (a libsinsp
+ABI mismatch against the syscall tracepoints it parses), leaving live corroboration down
+on half the nodes; the first-party agent runs healthy on the same kernel because it
+attaches to LSM fentry + kprobes, not those tracepoints. The "Retire Falco" epic
+therefore moves live corroboration fully to the agent. This addendum records the four
+decisions the rest of that epic builds on. **It is a decision/documentation change only —
+no behavior changes with it.**
+
+1. **Per-objective corroboration is landed, not deferred.** The original *Consumers →
+   action bar* status note called the `corroborates(behavior, objective)` relation a
+   deferred phase-1 item to fill after a shadow bake. That is stale: the relation shipped
+   and lives in
+   [`corroborate.rs`](../../engine/src/engine/reason/proof/corroborate.rs), wired at
+   [`reason/proof/mod.rs`](../../engine/src/engine/reason/proof/mod.rs). The *Status*
+   block above has been corrected to match the tree.
+
+2. **The parity bar is measured decision-path coverage, not Falco rule-replication.**
+   Retiring Falco does **not** mean porting its YAML ruleset — doing so would re-create
+   exactly the upstream coupling ADR-0003 removes. The agent must cover what protector's
+   *decision path* actually consumes: the corroboration signal that reaches
+   `corroborates` (today `Behavior::Alert` / the `is_alert`-style broad signal, plus the
+   notable-exec equivalent of Falco's shell/pkg-mgr criticals). Parity is that
+   decision-path corroboration coverage, **measured** — the later F6/F7 gate in this epic
+   proves the agent reproduces the corroboration the deployed Falco was contributing
+   before the adapter and external workload retire. Rule-for-rule fidelity is a non-goal.
+
+3. **"Retire Falco" = retire the Falco *adapter* + external deploy — keep the
+   tool-agnostic port.** What retires is the Falco-specific ingest adapter (the legacy
+   `/` alert shape) and the external Falco / falcosidekick workload. What **stays** is the
+   normalized `Behavior::Alert` variant and the `/behavior` ingest port: they are
+   tool-agnostic (ADR-0003), so any sensor — Tetragon, a future collector, the
+   first-party agent — can still POST an alerting corroboration signal. Retiring one
+   sensor's adapter must never remove the contract other sensors depend on.
+
+4. **"Alarming-now → blanket corroboration" is an engine-side classifier policy.** The
+   decision that an *alerting* signal corroborates any chain (and that a notable exec does
+   the same) is **classification policy that lives engine-side**, following the JEF-113
+   pattern: the wire behavior type stays pure data, and the "is this alarming now?"
+   judgement is made in the engine (as `observe::exec_class` already does for
+   shell/pkg-mgr execs). A new sensor does not encode the blanket-corroboration policy on
+   the wire; it emits data, and the engine classifies. This keeps the port honest and the
+   policy in one place we can audit.
+
+None of these four touch the honesty, zero-egress, or shadow-by-default framing: the
+agent stays observe-only, the graph and evidence stay in-cluster, and corroboration only
+ever promotes a cut behind the existing reversible, self-reverting, `enforce`-gated bar.

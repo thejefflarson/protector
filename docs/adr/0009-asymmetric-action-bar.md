@@ -3,6 +3,15 @@
 - Status: Accepted
 - Date: 2026-06-12
 
+> **Amendment (JEF-305, 2026-07-04):** this ADR describes the live-corroboration signal
+> as "a live Falco signal" because Falco was the only sensor when it was written. That
+> `corroborated-now` predicate is now **tool-agnostic and per-objective**
+> ([ADR-0014](0014-behavioral-telemetry-ebpf.md)): any sensor (Falco, Tetragon, the
+> first-party eBPF agent) feeds a normalized behavioral port, an *alerting* signal
+> corroborates any chain, and the agent's own behaviors corroborate the objective class
+> whose ATT&CK tactic they evidence. Read every "Falco" below as "a live corroboration
+> signal from whichever sensor is present." The asymmetry decided here is unchanged.
+
 ## Context
 
 [ADR-0001](0001-async-mitigation-engine.md) set the bar for automated response as
