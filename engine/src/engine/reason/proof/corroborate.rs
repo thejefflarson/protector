@@ -85,6 +85,12 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
         // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
         Behavior::PrivilegeChange { .. } => false,
+        // FileWrite is NON-corroborating here (JEF-306): it ships as PURE DATA and this
+        // ticket adds no corroboration meaning. Deciding a write is *sensitive* — container
+        // drift / drop-and-execute / config tampering worth corroborating a chain — is a
+        // separate classifier (JEF-306 F3), engine policy following the JEF-113 pattern, not
+        // wired here. Model evidence only today.
+        Behavior::FileWrite { .. } => false,
     }
 }
 

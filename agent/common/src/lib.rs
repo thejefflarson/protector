@@ -29,6 +29,12 @@ pub const KIND_EXEC: u32 = 4;
 /// privilege gain; the [`PrivEvent`] body carries the old and new real UIDs. Userspace
 /// emits a [`Behavior::PrivilegeChange`].
 pub const KIND_PRIV_CHANGE: u32 = 5;
+/// A file was written (fentry on `security_file_open`, filtered in-kernel to write-intent
+/// open flags — JEF-306). Carries the written file's path (`bpf_d_path`); userspace emits
+/// a `Behavior::FileWrite`. The runtime signal for container drift: drop-and-execute /
+/// config tampering (Falco file-write-critical parity, ADR-0014). Reuses [`FileEvent`]
+/// (the `kind` discriminates it from the read/exec/library file events).
+pub const KIND_FILE_WRITE: u32 = 6;
 
 /// Max path bytes carried per [`FileEvent`]. Secret-mount paths are well under this; a
 /// longer path is truncated (the secret name still lands). Sized to keep the eBPF stack
@@ -108,11 +114,12 @@ pub struct PrivEvent {
 /// once a second — the additive-evidence model needs presence, not every packet.
 pub const DEDUP_WINDOW_NS: u64 = 1_000_000_000;
 
-/// Max entries in the connect dedup map (JEF-65). One slot per live `(pid, dest)` tuple;
-/// an LRU map evicts the coldest when full, so a churn of distinct destinations can't
-/// exhaust it (eviction just means the evicted key re-emits once — safe, never a crash).
-/// Sized to cover a busy node's working set of concurrent flows while bounding kernel
-/// memory (16Ki * sizeof(ConnKey+u64) ≈ a few hundred KiB).
+/// Max entries in an in-kernel dedup map (JEF-65 connect, JEF-306 file-write). One slot
+/// per live dedup key — `(pid, dest)` for connect, `(pid, inode)` for writes; an LRU map
+/// evicts the coldest when full, so a churn of distinct keys can't exhaust it (eviction
+/// just means the evicted key re-emits once — safe, never a crash). Sized to cover a busy
+/// node's working set while bounding kernel memory (16Ki * a small key+u64 ≈ a few hundred
+/// KiB per map).
 pub const DEDUP_MAP_CAP: u32 = 16384;
 
 /// Dedup key for the connect probe: the `(pid, destination)` tuple the ticket names.
@@ -131,6 +138,28 @@ impl ConnKey {
     /// Build the dedup key for a connect to `(pid, daddr, dport)`.
     pub fn new(pid: u32, daddr: u32, dport: u16) -> Self {
         Self { pid, daddr, dport }
+    }
+}
+
+/// Dedup key for the file-write probe (JEF-306): the `(pid, inode)` tuple. Coalescing on
+/// the inode collapses the high-frequency case — a process writing the SAME file
+/// repeatedly (appending a log, rewriting a state file) — at the source, so a suppressed
+/// write never costs a ring-buffer slot. The inode number (not the path) is the cheap
+/// in-kernel key: a single `u64` read, no variable-length path hash for the verifier to
+/// bound. Userspace/engine coarsen further to the dirname for the verdict-cache
+/// fingerprint. `repr(C)` so the in-kernel BPF-map key layout is fixed (it never crosses
+/// to userspace, same as [`ConnKey`]).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct WriteKey {
+    pub pid: u32,
+    pub ino: u64,
+}
+
+impl WriteKey {
+    /// Build the dedup key for a write by `pid` to the file with inode `ino`.
+    pub fn new(pid: u32, ino: u64) -> Self {
+        Self { pid, ino }
     }
 }
 
@@ -195,5 +224,15 @@ mod tests {
             base,
             ConnKey::new(1234, u32::from_ne_bytes([10, 0, 0, 1]), 8443)
         );
+    }
+
+    #[test]
+    fn write_key_distinguishes_pid_and_inode() {
+        // The file-write dedup key (JEF-306) collapses repeat writes to the SAME (pid,
+        // inode) — so it must compare equal for the same pair and differ on either field.
+        let base = WriteKey::new(1234, 42);
+        assert_eq!(base, WriteKey::new(1234, 42));
+        assert_ne!(base, WriteKey::new(9999, 42));
+        assert_ne!(base, WriteKey::new(1234, 43));
     }
 }
