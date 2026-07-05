@@ -73,7 +73,7 @@ mod ebpf {
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
         ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
-        KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
+        KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
     };
     use protector_behavior::{Attribution, Behavior};
 
@@ -142,6 +142,10 @@ mod ebpf {
         },
         /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed.
         Exec { attr: EventAttr, path: String },
+        /// File write: the written file's path (e.g. `/etc/cron.d/x`), NUL-trimmed. The
+        /// eBPF side already filtered to write-intent opens and deduped repeats to the same
+        /// `(pid, inode)`; this just carries the path through (JEF-306).
+        FileWrite { attr: EventAttr, path: String },
     }
 
     /// The pair of identities every event carries for attribution (JEF-158): the in-kernel
@@ -171,7 +175,8 @@ mod ebpf {
                 | RawEvent::FileRead { attr, .. }
                 | RawEvent::LibraryLoad { attr, .. }
                 | RawEvent::PrivChange { attr, .. }
-                | RawEvent::Exec { attr, .. } => *attr,
+                | RawEvent::Exec { attr, .. }
+                | RawEvent::FileWrite { attr, .. } => *attr,
             }
         }
 
@@ -197,6 +202,7 @@ mod ebpf {
                     to_uid: new_uid,
                 },
                 RawEvent::Exec { path, .. } => Behavior::ProcessExec { path },
+                RawEvent::FileWrite { path, .. } => Behavior::FileWrite { path },
             }
         }
     }
@@ -503,6 +509,7 @@ mod ebpf {
         fn attach_fentry(ebpf: &mut Ebpf) {
             const FENTRY_PROBES: &[(&str, &str)] = &[
                 ("file_open", "security_file_open"),
+                ("file_write", "security_file_open"),
                 ("mmap_file", "security_mmap_file"),
                 ("fix_setuid", "security_task_fix_setuid"),
                 ("bprm_check", "security_bprm_check"),
@@ -592,6 +599,14 @@ mod ebpf {
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
                     Self::exec(&ev)
                 }
+                KIND_FILE_WRITE => {
+                    if data.len() < std::mem::size_of::<FileEvent>() {
+                        return None;
+                    }
+                    // SAFETY: kind says this is a FileEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
+                    Self::file_write(&ev)
+                }
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
         }
@@ -664,6 +679,26 @@ mod ebpf {
                 return None;
             }
             Some(RawEvent::Exec {
+                attr: EventAttr::from_header(&ev.header),
+                path,
+            })
+        }
+
+        /// Parse a file-write event into a raw FileWrite. `path` is the written file's path
+        /// as the kernel saw it (`bpf_d_path`), NUL-trimmed; the behavior crate coarsens it
+        /// to the dirname for the fingerprint. The eBPF side already filtered to write-intent
+        /// opens and deduped repeats to the same `(pid, inode)`, so this just carries the
+        /// path through. Drops empty paths. Pure (no `/proc`). PURE DATA (JEF-306): the
+        /// container-drift / tamper *classification* is engine policy (F3), not done here.
+        fn file_write(ev: &FileEvent) -> Option<RawEvent> {
+            let len = (ev.len as usize).min(PATH_CAP);
+            let path = String::from_utf8_lossy(&ev.path[..len])
+                .trim_end_matches('\0')
+                .to_string();
+            if path.is_empty() {
+                return None;
+            }
+            Some(RawEvent::FileWrite {
                 attr: EventAttr::from_header(&ev.header),
                 path,
             })
@@ -868,6 +903,51 @@ mod ebpf {
                     );
                 }
                 other => panic!("expected ProcessExec, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn decode_file_write_parses_path_and_maps_to_file_write() {
+            // A KIND_FILE_WRITE FileEvent carrying a NUL-terminated path must decode to a
+            // RawEvent::FileWrite with attribution, and into_behavior must map it to
+            // Behavior::FileWrite whose fingerprint coarsens to the dirname (JEF-306).
+            let mut path = [0u8; PATH_CAP];
+            let file = b"/etc/cron.d/dropper\0";
+            path[..file.len()].copy_from_slice(file);
+            let ev = FileEvent {
+                header: EventHeader {
+                    kind: KIND_FILE_WRITE,
+                    pid: 555,
+                    cgroup_id: 4242,
+                },
+                len: file.len() as u32,
+                path,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&ev as *const FileEvent).cast::<u8>(),
+                    std::mem::size_of::<FileEvent>(),
+                )
+            };
+            let raw = EbpfObserver::decode(bytes).expect("KIND_FILE_WRITE should decode");
+            match &raw {
+                RawEvent::FileWrite { attr, path } => {
+                    assert_eq!(attr.pid, 555);
+                    assert_eq!(attr.cgroup_id, 4242);
+                    assert_eq!(path, "/etc/cron.d/dropper");
+                }
+                _ => panic!("expected RawEvent::FileWrite"),
+            }
+            assert_eq!(raw.attr().cgroup_id, 4242);
+            match raw.into_behavior() {
+                Behavior::FileWrite { path } => {
+                    assert_eq!(path, "/etc/cron.d/dropper");
+                    assert_eq!(
+                        Behavior::FileWrite { path }.fingerprint_key(),
+                        "write:/etc/cron.d"
+                    );
+                }
+                other => panic!("expected FileWrite, got {other:?}"),
             }
         }
     }

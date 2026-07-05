@@ -55,6 +55,15 @@ pub enum Behavior {
     /// kernel saw it (`linux_binprm->filename`). Evidence for the model only today;
     /// wiring exec → corroboration is JEF-49.
     ProcessExec { path: String },
+    /// A **write** to a file — the runtime signal for container drift: drop-and-execute
+    /// (a new file created then run) and config tampering (an existing file overwritten).
+    /// The eBPF agent's file-write probe (fentry on `security_file_open` filtered to
+    /// write-intent open flags; Falco file-write-critical parity, ADR-0014). `path` is the
+    /// written file's path as the kernel saw it (`bpf_d_path`). PURE DATA (JEF-306): whether
+    /// the path is *sensitive* — the container-drift / tamper judgement — is engine
+    /// corroboration policy (JEF-306 F3), not a property of this shared wire type. The agent
+    /// emits the path; the engine classifies. Model evidence only today.
+    FileWrite { path: String },
 }
 
 /// How a [`Behavior::SecretRead`] was observed — a type distinction, not a string
@@ -94,6 +103,20 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// The directory portion of a path (`/etc/cron.d/x` -> `/etc/cron.d`) — the last `/` and
+/// everything after it removed. Used by [`Behavior::fingerprint_key`] to coarsen a file
+/// *write* path to a stable, low-cardinality cache token: per-file churn within a
+/// directory (drop-and-execute dropping many temp files, a config dir rewritten
+/// file-by-file) collapses to one key so a burst of writes never busts the verdict cache.
+/// A top-level path (`/foo`) or a bare filename (no `/`) coarsens to `/`.
+fn dirname(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) => "/",
+        Some(i) => &path[..i],
+        None => "/",
+    }
+}
+
 impl Behavior {
     /// Whether this behavior **corroborates** the action bar (ADR-0009): only an
     /// alerting signal means "an attack is happening now." Mundane behaviors
@@ -119,6 +142,7 @@ impl Behavior {
             Behavior::FileRead { .. } => "file-read",
             Behavior::PrivilegeChange { .. } => "priv-change",
             Behavior::ProcessExec { .. } => "exec",
+            Behavior::FileWrite { .. } => "file-write",
         }
     }
 
@@ -149,6 +173,10 @@ impl Behavior {
             // (`engine::observe::exec_class`), applied by the engine when it builds the
             // prompt/output line — this shared wire type stays pure data (JEF-113).
             Behavior::ProcessExec { path } => format!("executed {path}"),
+            // Just the written path. Whether the write is *sensitive* (container drift /
+            // config tampering) is engine corroboration policy (JEF-306 F3), not a property
+            // of this shared wire type — the agent emits the path, the engine classifies.
+            Behavior::FileWrite { path } => format!("wrote file {path}"),
         }
     }
 
@@ -184,6 +212,12 @@ impl Behavior {
             // absolute paths collapse to one stable key (mirrors how LibraryLoaded keys on
             // the lib name, not the full path) — keeps exec churn from busting the cache.
             Behavior::ProcessExec { path } => format!("exec:{}", basename(path)),
+            // Coarsen to the DIRNAME so per-file write churn within a directory
+            // (drop-and-execute writing many files, a config dir rewritten file-by-file)
+            // collapses to one stable key — writes are high-frequency, so keying on the
+            // full path would thrash the verdict cache (mirrors the exec/library basename
+            // coarsening, one level up the tree for the higher write volume).
+            Behavior::FileWrite { path } => format!("write:{}", dirname(path)),
         }
     }
 }
@@ -420,7 +454,7 @@ mod tests {
     fn variant_label_is_a_stable_low_cardinality_token() {
         // Each variant maps to a fixed token carrying NO per-instance payload (no peer,
         // path, or secret name) — so it's safe as a metric label without cardinality blow-up.
-        let cases: [(Behavior, &str); 7] = [
+        let cases: [(Behavior, &str); 8] = [
             (Behavior::Alert { rule: "x".into() }, "alert"),
             (
                 Behavior::NetworkConnection {
@@ -451,10 +485,72 @@ mod tests {
                 },
                 "exec",
             ),
+            (
+                Behavior::FileWrite {
+                    path: "/etc/cron.d/x".into(),
+                },
+                "file-write",
+            ),
         ];
         for (behavior, want) in cases {
             assert_eq!(behavior.variant_label(), want, "{behavior:?}");
         }
+    }
+
+    #[test]
+    fn file_write_fingerprint_coarsens_to_the_dirname() {
+        // Per-file write churn within a directory must collapse to one stable key so a
+        // burst of writes (drop-and-execute, a config dir rewritten file-by-file) doesn't
+        // bust the verdict cache — the write signal is high-frequency (JEF-306).
+        let a = Behavior::FileWrite {
+            path: "/etc/cron.d/dropper".into(),
+        };
+        let b = Behavior::FileWrite {
+            path: "/etc/cron.d/other".into(),
+        };
+        assert_eq!(a.fingerprint_key(), "write:/etc/cron.d");
+        assert_eq!(a.fingerprint_key(), b.fingerprint_key());
+        // A top-level path and a bare filename coarsen to `/` (low cardinality, never panics).
+        assert_eq!(
+            Behavior::FileWrite {
+                path: "/passwd".into()
+            }
+            .fingerprint_key(),
+            "write:/"
+        );
+        assert_eq!(
+            Behavior::FileWrite {
+                path: "relative".into()
+            }
+            .fingerprint_key(),
+            "write:/"
+        );
+    }
+
+    #[test]
+    fn file_write_summary_is_the_bare_path_and_never_corroborates() {
+        // The shared wire type emits only the path — whether the write is *sensitive*
+        // (container drift / config tampering) is engine corroboration policy (JEF-306 F3),
+        // so it's pure data here and, like other mundane behaviors, never an alert.
+        let w = Behavior::FileWrite {
+            path: "/etc/ssh/sshd_config".into(),
+        };
+        assert_eq!(w.summary(), "wrote file /etc/ssh/sshd_config");
+        assert!(!w.is_alert());
+    }
+
+    #[test]
+    fn file_write_serializes_to_the_kind_tagged_contract() {
+        // Pure-data wire shape: `{"kind":"file_write","path":"..."}`, round-trips (JEF-306).
+        let w = Behavior::FileWrite {
+            path: "/etc/cron.d/x".into(),
+        };
+        let v = serde_json::to_value(&w).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind": "file_write", "path": "/etc/cron.d/x"})
+        );
+        assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), w);
     }
 
     #[test]

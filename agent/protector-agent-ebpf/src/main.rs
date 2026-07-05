@@ -33,9 +33,9 @@ use aya_ebpf::{
 // dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
 // tests share one definition and can't drift.
 use protector_agent_common::{
-    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, DEDUP_MAP_CAP,
-    DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE,
-    PATH_CAP,
+    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, WriteKey,
+    DEDUP_MAP_CAP, DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_FILE_WRITE,
+    KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -90,10 +90,11 @@ fn make_header(kind: u32) -> EventHeader {
 #[map]
 static CONN_SEEN: LruHashMap<ConnKey, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
 
-/// Count of connect events coalesced (suppressed in-kernel) by [`CONN_SEEN`] dedup
-/// (JEF-65). Same per-CPU, one-slot shape as [`DROPS`]: each CPU bumps its own slot, no
-/// atomics; userspace sums across CPUs and surfaces the cumulative total in the heartbeat,
-/// so the volume cut is observable rather than invisible. Bumped only in [`record_coalesced`].
+/// Count of events coalesced (suppressed in-kernel) by a dedup map — connect repeats via
+/// [`CONN_SEEN`] (JEF-65) and file-write repeats via [`WRITE_SEEN`] (JEF-306). Same
+/// per-CPU, one-slot shape as [`DROPS`]: each CPU bumps its own slot, no atomics; userspace
+/// sums across CPUs and surfaces the cumulative total in the heartbeat, so the volume cut is
+/// observable rather than invisible. Bumped only in [`record_coalesced`].
 #[map]
 static COALESCED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -125,6 +126,38 @@ fn allow_connect(key: &ConnKey) -> bool {
     }
     // First time we've seen this key (or it was LRU-evicted): record and emit.
     let _ = CONN_SEEN.insert(key, &now, 0);
+    true
+}
+
+/// In-kernel file-write dedup map (JEF-306): `(pid, inode)` → last-emit time (ns).
+/// File writes are high-frequency — a process appending to a log or rewriting a state file
+/// hammers the SAME file — so coalescing repeats to the same `(pid, inode)` at the source
+/// keeps a suppressed write from ever costing a ring-buffer slot (the volume problem the
+/// ticket names). LRU, so a churn of distinct files can't exhaust it: the coldest key is
+/// evicted and simply re-emits once. Same shape and window as the connect dedup.
+#[map]
+static WRITE_SEEN: LruHashMap<WriteKey, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
+
+/// The file-write dedup gate (JEF-306), mirroring [`allow_connect`]. Returns `true` if this
+/// write to `key` should be emitted, `false` if it's a repeat inside [`DEDUP_WINDOW_NS`] and
+/// was coalesced (the shared [`COALESCED`] counter is bumped here). On emit, stamps `now` so
+/// the next repeat is measured from it. Fail open: an insert that never fails falls through
+/// to emit, so a bookkeeping error never silently loses a real signal. The first sighting of
+/// a key (no entry) always emits.
+fn allow_write(key: &WriteKey) -> bool {
+    let now = unsafe { bpf_ktime_get_ns() };
+    if let Some(last) = WRITE_SEEN.get_ptr_mut(key) {
+        // SAFETY: `last` points at this key's live slot; we read then overwrite it.
+        let last_ns = unsafe { *last };
+        if should_coalesce(last_ns, now, DEDUP_WINDOW_NS) {
+            record_coalesced();
+            return false;
+        }
+        unsafe { *last = now };
+        return true;
+    }
+    // First time we've seen this key (or it was LRU-evicted): record and emit.
+    let _ = WRITE_SEEN.insert(key, &now, 0);
     true
 }
 
@@ -217,6 +250,24 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 /// (and the main binary) executable, so this distinguishes a code load from a data mmap.
 const PROT_EXEC: u64 = 0x4;
 
+/// open(2) access-mode mask and the read-only mode. `f_flags & O_ACCMODE != O_RDONLY` is a
+/// write-intent open.
+const O_ACCMODE: u64 = 0o3;
+const O_RDONLY: u64 = 0o0;
+/// `O_CREAT` (a new file) and `O_TRUNC` (an existing file truncated): both are write intent
+/// even when the access mode alone wouldn't say so — drop-and-execute *creates* a file,
+/// config tampering *truncates* one. Filtering to write intent keeps the read firehose off
+/// the ring (the file-open volume is dominated by reads).
+const O_CREAT: u64 = 0o100;
+const O_TRUNC: u64 = 0o1000;
+
+/// Whether an `open` with these `f_flags` is a **write** (JEF-306): a non-read-only access
+/// mode, or a create/truncate. This is the in-kernel filter that keeps the (very high)
+/// read-open volume off the ring buffer — only write-intent opens become FileWrite events.
+fn is_write_open(flags: u64) -> bool {
+    (flags & O_ACCMODE) != O_RDONLY || (flags & (O_CREAT | O_TRUNC)) != 0
+}
+
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
 /// For a tmpfs read, emits a [`FileEvent`] with the container-relative path via
 /// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
@@ -234,6 +285,51 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
         return Ok(());
     }
     emit_file_path(file, KIND_FILE_OPEN);
+    Ok(())
+}
+
+/// fentry on `security_file_open(struct file *file)` — the file-write probe (JEF-306,
+/// ADR-0014). A SECOND program on the same LSM hook as the secret-read probe (aya loads
+/// each program independently), filtered IN-KERNEL to write-intent opens so the read
+/// firehose never reaches the ring. For a write it emits a [`FileEvent`] (kind
+/// [`KIND_FILE_WRITE`]) with the file's path via `bpf_d_path` (allowed here — same hook the
+/// secret-read probe d_paths from). Repeats to the same `(pid, inode)` inside the dedup
+/// window are coalesced in-kernel ([`allow_write`]) so a chatty writer can't flood the ring.
+/// Observe-only; a failed read drops the event, never errors the probe. NOTE: attaches to
+/// the BTF-exported `security_file_open` (the `security_*` LSM symbol) — not a syscall
+/// tracepoint — which is exactly why the agent survives the arm64 kernel that kills Falco.
+#[fentry(function = "security_file_open")]
+pub fn file_write(ctx: FEntryContext) -> u32 {
+    let _ = try_file_write(&ctx);
+    0
+}
+
+fn try_file_write(ctx: &FEntryContext) -> Result<(), i64> {
+    // security_file_open's first argument is `struct file *file`.
+    let file: *const vmlinux::file = unsafe { ctx.arg(0) };
+    if file.is_null() {
+        return Ok(());
+    }
+    // Filter to write-intent opens in-kernel — the read firehose never reaches the ring.
+    let mut flags: u32 = 0;
+    unsafe {
+        if read_kernel(&mut flags, core::ptr::addr_of!((*file).f_flags)) != 0 {
+            return Ok(());
+        }
+    }
+    if !is_write_open(flags as u64) {
+        return Ok(());
+    }
+    // Coalesce repeat writes to the same (pid, inode) in-kernel (JEF-306). A write whose
+    // inode is unreadable still emits (fail open) — the dedup is a volume optimization, not
+    // a correctness gate, so a missing inode must never silently drop a real write.
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    if let Some(ino) = inode_ino(file) {
+        if !allow_write(&WriteKey::new(pid, ino)) {
+            return Ok(());
+        }
+    }
+    emit_file_path(file, KIND_FILE_WRITE);
     Ok(())
 }
 
@@ -483,6 +579,24 @@ fn is_tmpfs(file: *const vmlinux::file) -> bool {
             return false;
         }
         magic == TMPFS_MAGIC
+    }
+}
+
+/// Read `file->f_inode->i_ino` — the inode number, the file-write dedup key's identity
+/// (JEF-306). The pointer chase uses bpf_probe_read_kernel (fixed offsets from the node-BTF
+/// vmlinux), the same safe pattern as [`is_tmpfs`]. `None` on any failed read — the caller
+/// then emits without deduping (fail open), never dropping a real write for a bookkeeping miss.
+fn inode_ino(file: *const vmlinux::file) -> Option<u64> {
+    unsafe {
+        let mut inode: *mut vmlinux::inode = core::ptr::null_mut();
+        if read_kernel(&mut inode, core::ptr::addr_of!((*file).f_inode)) != 0 || inode.is_null() {
+            return None;
+        }
+        let mut ino: u64 = 0;
+        if read_kernel(&mut ino, core::ptr::addr_of!((*inode).i_ino).cast()) != 0 {
+            return None;
+        }
+        Some(ino)
     }
 }
 
