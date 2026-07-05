@@ -25,9 +25,12 @@
 //! ## Rules (audit-only; never a gate)
 //!
 //! Against a repo's baseline (the entry BEFORE this observation is folded in):
-//!   * signed by a **known** identity — even a brand-new digest — ⇒ [`Continuous`] (no finding: a
-//!     normal deploy must never false-positive).
-//!   * signed by an identity **not** in the baseline ⇒ [`Regression`] with
+//!   * signed by a **known** identity — even a brand-new digest, or a new release **tag** of the
+//!     same workflow (JEF-325: identities are compared on the tag-agnostic
+//!     [`canonical_identity`](crate::policies::signature::canonical_identity), so a version bump is
+//!     not a new signer) — ⇒ [`Continuous`] (no finding: a normal deploy must never false-positive).
+//!   * signed by a **continuity identity** not in the baseline (a different repo/fork, workflow, ref
+//!     TYPE — a branch/PR build — or issuer; NOT merely a different tag value) ⇒ [`Regression`] with
 //!     [`IdentityChange`](RegressionKind::IdentityChange).
 //!   * now **unsigned** / **invalid** ⇒ [`Regression`] with
 //!     [`Unsigned`](RegressionKind::Unsigned) / [`Invalid`](RegressionKind::Invalid).
@@ -56,7 +59,7 @@
 //! [`Regression`]: SigningDrift::Regression
 
 use crate::engine::state::SigningBaseline;
-use crate::policies::signature::{PostureRank, SigningPosture};
+use crate::policies::signature::{PostureRank, SigningPosture, canonical_identity};
 
 /// Which kind of regression a fresh posture represents against a repo's baseline (JEF-264). The
 /// identity strings are UNTRUSTED Fulcio cert text — every consumer MUST escape them at render.
@@ -212,8 +215,19 @@ pub fn classify(baseline: Option<&SigningBaseline>, posture: &SigningPosture) ->
             _ => SigningDrift::Continuous,
         },
         SigningPosture::Signed(signer) => {
-            if baseline.identities.contains(&signer.identity) {
-                // A known signer — a normal redeploy, even to a brand-new digest. No finding.
+            // Compare on the tag-agnostic CONTINUITY identity (JEF-325), canonicalizing BOTH sides:
+            // a fresh baseline already stores canonical identities, but a legacy line (persisted
+            // before this fix) may still carry raw per-version SANs, so canonicalizing the stored
+            // set too keeps the match migration-safe. Only the release-tag VALUE is collapsed — a
+            // different repo/fork, workflow, ref TYPE (branch/PR), or issuer still fails to match and
+            // surfaces as an IdentityChange. The raw SAN is carried on the finding for display.
+            let current = signer.canonical_identity();
+            if baseline
+                .identities
+                .iter()
+                .any(|known| canonical_identity(known) == current)
+            {
+                // A known signer — a normal redeploy or a new release tag. No finding.
                 SigningDrift::Continuous
             } else {
                 SigningDrift::Regression {

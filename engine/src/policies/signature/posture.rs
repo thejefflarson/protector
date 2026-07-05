@@ -80,11 +80,63 @@ impl Default for PostureRank {
 pub struct Signer {
     /// The signer identity from the cert SAN: a workflow URI (GitHub Actions keyless) or an
     /// email (a human who authenticated via GitHub/Google). The org gate rejects `Email`;
-    /// observation records it as a legitimate signer (ADR-0020 §1).
+    /// observation records it as a legitimate signer (ADR-0020 §1). This is the RAW SAN,
+    /// kept verbatim for display; continuity compares on [`canonical_identity`](Self::canonical_identity).
     pub identity: String,
     /// The OIDC issuer from the cert (`https://token.actions.githubusercontent.com`,
     /// `https://accounts.google.com`, …). `None` if the cert carried no issuer extension.
     pub issuer: Option<String>,
+}
+
+impl Signer {
+    /// This signer's tag-agnostic **continuity identity** (JEF-325): [`canonical_identity`] applied
+    /// to the raw [`identity`](Self::identity) SAN. The signing baseline stores this and the drift
+    /// classifier compares on it, so two releases of the SAME workflow under different version tags
+    /// are the same signer (continuous, no regression). The raw SAN is retained on
+    /// [`identity`](Self::identity) for the human-readable render.
+    pub fn canonical_identity(&self) -> String {
+        canonical_identity(&self.identity)
+    }
+}
+
+/// The marker separating a keyless GitHub Actions workflow SAN from the git ref that triggered the
+/// build. ONLY a release-**tag** ref value is collapsed by [`canonical_identity`].
+const TAG_REF_MARKER: &str = "@refs/tags/";
+
+/// Canonicalize a signer SAN into its **tag-agnostic continuity identity** (JEF-325).
+///
+/// Keyless (Fulcio) signing embeds the exact triggering git ref in the cert SAN, so a build from
+/// release tag `v0.3.80` and one from `v0.3.81` produce SANs that differ ONLY in the tag value:
+///
+/// ```text
+/// https://github.com/org/repo/.github/workflows/release.yml@refs/tags/v0.3.80
+/// https://github.com/org/repo/.github/workflows/release.yml@refs/tags/v0.3.81
+/// ```
+///
+/// The trusted signer for *continuity* is repo + workflow path + ref TYPE + issuer — NOT the
+/// specific version — so comparing raw SANs by exact string treats every release as a brand-new
+/// identity (an `IdentityChange` regression, and a baseline that accretes one identity per version:
+/// the JEF-325 bug). This collapses ONLY the tag VALUE to `*`, leaving every discriminating part
+/// intact:
+///
+/// ```text
+/// https://github.com/org/repo/.github/workflows/release.yml@refs/tags/*
+/// ```
+///
+/// SECURITY — what is deliberately KEPT distinct (never over-normalized): the org/repo, the workflow
+/// path, and the ref TYPE. Only `refs/tags/<value>` is wildcarded; a branch ref (`refs/heads/...`),
+/// a PR ref (`refs/pull/...`), a different workflow, or a different repo/fork are left untouched — so
+/// a branch/PR build, a rotated workflow, or an attacker's fork is STILL a new identity that flags.
+/// An email SAN, or any SAN without a tag ref, is returned unchanged. Total, deterministic, and
+/// idempotent (`canonical_identity(canonical_identity(x)) == canonical_identity(x)`).
+pub fn canonical_identity(identity: &str) -> String {
+    match identity.rfind(TAG_REF_MARKER) {
+        Some(pos) => {
+            let keep = &identity[..pos + TAG_REF_MARKER.len()];
+            format!("{keep}*")
+        }
+        None => identity.to_string(),
+    }
 }
 
 /// An image's observed signing posture (ADR-0020 Stage 1; JEF-276 honest split). Five definitive
@@ -309,3 +361,7 @@ impl SigningObserver {
         map
     }
 }
+
+#[cfg(test)]
+#[path = "posture_tests.rs"]
+mod tests;

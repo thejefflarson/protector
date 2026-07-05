@@ -584,7 +584,7 @@ mod tests {
         assert!(
             learned
                 .identities
-                .contains("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1")
+                .contains("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/*")
         );
         assert!(
             !learned.established,
@@ -618,6 +618,9 @@ mod tests {
 
     const DAY_MS: u64 = 24 * 60 * 60 * 1000;
     const CI: &str = "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/v1";
+    /// The tag-agnostic continuity identity the baseline STORES for [`CI`] (JEF-325): the release-tag
+    /// value is collapsed to `*`, so the "before:" prose names this canonical form, not the raw tag.
+    const CI_CANON: &str = "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/*";
     const ATTACKER: &str = "https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main";
 
     /// A store carrying an ESTABLISHED signed baseline for `ghcr.io/org/app` (signer `CI`). Seeded
@@ -727,7 +730,7 @@ mod tests {
             "audit-only — the image is still admitted"
         );
         assert!(row.reason.contains("now not signed"));
-        assert!(row.reason.contains(&format!("before: {CI}")));
+        assert!(row.reason.contains(&format!("before: {CI_CANON}")));
     }
 
     #[tokio::test]
@@ -752,7 +755,7 @@ mod tests {
         assert_eq!(row.signature, "regression-identity-established");
         assert!(row.reason.contains(&format!("signed by {ATTACKER}")));
         assert!(
-            row.reason.contains(&format!("before: {CI}")),
+            row.reason.contains(&format!("before: {CI_CANON}")),
             "the before signer is stated in full"
         );
     }
@@ -808,7 +811,7 @@ mod tests {
         assert_eq!(row.signature, "regression-downgrade-key-based-established");
         assert_eq!(row.decision, "allow", "audit-only — still admitted");
         assert!(row.reason.contains("now key-based"));
-        assert!(row.reason.contains(&format!("before: {CI}")));
+        assert!(row.reason.contains(&format!("before: {CI_CANON}")));
         assert!(
             !store
                 .get("ghcr.io/org/app")
