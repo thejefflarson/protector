@@ -69,9 +69,10 @@ pub enum QuarantineReason {
     /// critical/KEV CVE actually running on it (the [`compromisable`] predicate). A
     /// popped app two hops in counts; a merely-reached clean objective does not.
     RemotelyExploitable,
-    /// **Actively exploited** — the pod has direct live on-pod runtime evidence (a
-    /// Falco-grade `Alert` or a hands-on-keyboard `notable_exec`) — exploitation
-    /// *now* — regardless of its network position (internal pods included).
+    /// **Actively exploited** — the pod has direct live on-pod runtime evidence (any
+    /// "alarming-now" signal: a Falco-grade `Alert`, a hands-on-keyboard `notable_exec`, or
+    /// an alarming file write — sensitive-path drop-and-execute / config tamper, JEF-309) —
+    /// exploitation *now* — regardless of its network position (internal pods included).
     ActivelyExploited,
 }
 
@@ -424,5 +425,7 @@ pub fn prove_with(
     chains
 }
 
+#[cfg(test)]
+mod corroborate_tests;
 #[cfg(test)]
 mod tests;
