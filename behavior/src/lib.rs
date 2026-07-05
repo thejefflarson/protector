@@ -301,8 +301,61 @@ pub struct RuntimeObservation {
     /// batch interval + a judging pass). Defaulted → adapter uses now().
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at_ms: Option<u64>,
+    /// The Kubernetes NODE the sensor observed this on (JEF-308) — the eBPF agent reports its
+    /// own node (from the downward API, `spec.nodeName`), so the engine can reason about
+    /// runtime-corroboration coverage PER NODE ("blind on node X"), not just fleet-aggregate.
+    /// Defaulted (older agents / Falco, which is node-agnostic, omit it) — an absent node is
+    /// honestly node-unattributed, never guessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     /// What the workload actually did.
     pub behavior: Behavior,
+}
+
+/// A per-node **agent-liveness beacon** (JEF-308): the eBPF agent's own self-report, one per
+/// report window, distinct from a workload [`RuntimeObservation`]. It is what makes
+/// runtime-corroboration coverage honestly derivable per node: liveness is **signal-flow**, not
+/// pod-Ready — a Ready agent whose eBPF probes failed to attach is still BLIND (the exact Falco
+/// failure mode), so it reports `probes_loaded = 0`, and the engine reads it as blind despite the
+/// pod being up.
+///
+/// Critically, the agent emits this **every window even when it saw nothing**, so a quiet node
+/// (`signals_emitted = 0`, probes loaded) reads HEALTHY-quiet — NOT blind. Only a node that never
+/// reports, or reports `probes_loaded = 0`, reads blind. Sent over the same in-cluster ingest the
+/// observations already use (zero egress) — never the agent's OTLP/metrics endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentReport {
+    /// The node this agent runs on (downward API `spec.nodeName`). Untrusted-adjacent at
+    /// render — the engine escapes it like any cluster name (never `PreEscaped`).
+    pub node: String,
+    /// How many eBPF probes ACTUALLY attached this window. `0` ⇒ the agent is Ready but blind
+    /// (nothing is being observed); `< probes_total` ⇒ partial coverage (degraded).
+    pub probes_loaded: u32,
+    /// How many probes the agent tried to load — the denominator for "partial". `0` only for a
+    /// build with no collection (the default no-eBPF image), which is also honestly blind.
+    pub probes_total: u32,
+    /// Signals the agent emitted this window. `0` is HEALTHY-quiet when probes are loaded — a
+    /// quiet node is not a down sensor (the JEF-308 quiet≠blind invariant).
+    pub signals_emitted: u64,
+    /// When the window closed, as Unix epoch millis. Defaulted → the engine stamps ingest time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<u64>,
+}
+
+impl AgentReport {
+    /// Whether this report means the node is **blind** despite the agent being up: no probe
+    /// attached, so nothing is being observed. This is the Ready-but-blind failure mode
+    /// liveness-as-signal-flow catches (a pod-Ready check never would).
+    pub fn is_blind(&self) -> bool {
+        self.probes_loaded == 0
+    }
+
+    /// Whether the agent loaded only SOME of its probes — partial coverage (degraded, not blind).
+    /// False when fully loaded, or when blind (`probes_loaded == 0`, which reads as blind, not
+    /// partial), or when the build declares no probes at all (`probes_total == 0`).
+    pub fn is_partial(&self) -> bool {
+        self.probes_loaded > 0 && self.probes_total > 0 && self.probes_loaded < self.probes_total
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +392,7 @@ mod tests {
             attribution: Attribution::by_pod_uid("uid"),
             source: Some("protector-agent".into()),
             observed_at_ms: Some(1_710_000_000_000),
+            node: None,
             behavior: Behavior::SecretRead {
                 secret: "app/session-key".into(),
                 source: SecretReadSource::Mounted,
@@ -551,6 +605,101 @@ mod tests {
             serde_json::json!({"kind": "file_write", "path": "/etc/cron.d/x"})
         );
         assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), w);
+    }
+
+    #[test]
+    fn observation_carries_the_node_and_omits_it_when_absent() {
+        // JEF-308: the agent stamps its node so coverage is derivable PER NODE. When present it
+        // rides the wire; when absent (Falco, older agents) it is omitted — never guessed.
+        let with_node = RuntimeObservation {
+            attribution: Attribution::by_pod_uid("uid"),
+            source: Some("protector-agent".into()),
+            observed_at_ms: None,
+            node: Some("node-a".into()),
+            behavior: Behavior::ProcessExec {
+                path: "/bin/sh".into(),
+            },
+        };
+        let v = serde_json::to_value(&with_node).unwrap();
+        assert_eq!(v["node"], serde_json::json!("node-a"));
+        assert_eq!(
+            serde_json::from_value::<RuntimeObservation>(v).unwrap(),
+            with_node
+        );
+
+        // Absent node ⇒ the key is omitted (byte-stable for node-agnostic sensors), and a legacy
+        // observation with no `node` deserializes back to `None`.
+        let no_node: RuntimeObservation = serde_json::from_value(serde_json::json!({
+            "namespace": "app", "pod": "web",
+            "behavior": {"kind": "alert", "rule": "shell"}
+        }))
+        .unwrap();
+        assert_eq!(no_node.node, None);
+        let reser = serde_json::to_value(&no_node).unwrap();
+        assert!(
+            reser.get("node").is_none(),
+            "absent node is omitted on the wire"
+        );
+    }
+
+    #[test]
+    fn agent_report_round_trips_and_classifies_blind_vs_partial() {
+        // A healthy report: all probes loaded, some signals — round-trips.
+        let healthy = AgentReport {
+            node: "node-a".into(),
+            probes_loaded: 6,
+            probes_total: 6,
+            signals_emitted: 12,
+            observed_at_ms: Some(1_710_000_000_000),
+        };
+        let v = serde_json::to_value(&healthy).unwrap();
+        assert_eq!(serde_json::from_value::<AgentReport>(v).unwrap(), healthy);
+        assert!(!healthy.is_blind());
+        assert!(!healthy.is_partial());
+
+        // Quiet but healthy: probes loaded, zero signals — NOT blind, NOT partial (quiet≠blind).
+        let quiet = AgentReport {
+            signals_emitted: 0,
+            ..healthy.clone()
+        };
+        assert!(
+            !quiet.is_blind(),
+            "a quiet node with probes loaded is not blind"
+        );
+        assert!(!quiet.is_partial());
+
+        // Ready but blind: the agent is up but no probe attached — blind despite pod-Ready.
+        let blind = AgentReport {
+            probes_loaded: 0,
+            ..healthy.clone()
+        };
+        assert!(blind.is_blind());
+        assert!(
+            !blind.is_partial(),
+            "zero probes reads as blind, not partial"
+        );
+
+        // Partial: some but not all probes attached — degraded coverage.
+        let partial = AgentReport {
+            probes_loaded: 4,
+            ..healthy
+        };
+        assert!(!partial.is_blind());
+        assert!(partial.is_partial());
+    }
+
+    #[test]
+    fn agent_report_observed_at_ms_is_omitted_when_absent() {
+        let report = AgentReport {
+            node: "n".into(),
+            probes_loaded: 1,
+            probes_total: 1,
+            signals_emitted: 0,
+            observed_at_ms: None,
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v.get("observed_at_ms").is_none());
+        assert_eq!(serde_json::from_value::<AgentReport>(v).unwrap(), report);
     }
 
     #[test]

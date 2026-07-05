@@ -7,7 +7,9 @@
 
 use maud::{Markup, html};
 
-use crate::engine::dashboard::view_model::props::{ReadinessRowProps, ReadinessViewProps};
+use crate::engine::dashboard::view_model::props::{
+    NodeRowProps, ReadinessRowProps, ReadinessViewProps,
+};
 
 /// Render the Readiness view: the coverage rows under the persistent strip (composed by `page`).
 pub fn readiness_view(v: &ReadinessViewProps) -> Markup {
@@ -57,6 +59,12 @@ fn coverage_row(r: &ReadinessRowProps) -> Markup {
             }
             p.cov-detail.t-data { (r.detail) }
             p.cov-why.t-body.muted { (r.why) }
+            // The per-node runtime-corroboration breakdown (JEF-308) — a server-rendered table
+            // inside <details> (NO JS, per the maud/server-render convention). Only the
+            // runtime-corroboration row carries nodes; every other row skips this.
+            @if !r.nodes.is_empty() {
+                (node_breakdown(&r.nodes))
+            }
             // The how-to-enable instruction: always shown when there is an env var/mount, and read
             // as an action ("enable with …") when the input is an absent weakening gap.
             @if !r.enable.is_empty() {
@@ -66,6 +74,42 @@ fn coverage_row(r: &ReadinessRowProps) -> Markup {
                     }
                     " "
                     code.cov-enable-var { (r.enable) }
+                }
+            }
+        }
+    }
+}
+
+/// The per-node runtime-corroboration breakdown (JEF-308): a server-rendered `<table>` inside a
+/// `<details>` disclosure — NO client JS (the maud/server-render convention). Each row is a node,
+/// its honest state (colour + glyph + word, never colour alone), and a live detail. Node names are
+/// UNTRUSTED — maud auto-escapes them (never `PreEscaped`).
+fn node_breakdown(nodes: &[NodeRowProps]) -> Markup {
+    let blind = nodes.iter().filter(|n| n.state.token() == "blind").count();
+    html! {
+        details.cov-nodes {
+            summary.cov-nodes-summary.t-micro {
+                (nodes.len()) " node" (if nodes.len() == 1 { "" } else { "s" })
+                @if blind > 0 { " \u{2014} " (blind) " blind" }
+            }
+            table.cov-nodes-table {
+                thead {
+                    tr { th { "node" } th { "state" } th { "detail" } }
+                }
+                tbody {
+                    @for n in nodes {
+                        tr data-state=(n.state.token()) {
+                            td.cov-node-name { (n.node) }
+                            td {
+                                span class={ "node-state node-" (n.state.token()) } {
+                                    span.node-state-glyph aria-hidden="true" { (n.state.glyph()) }
+                                    " "
+                                    span.node-state-word { (n.state.word()) }
+                                }
+                            }
+                            td.cov-node-detail { (n.detail) }
+                        }
+                    }
                 }
             }
         }

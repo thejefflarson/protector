@@ -9,7 +9,9 @@
 use std::time::SystemTime;
 
 use crate::engine::policy_log::PolicyDecisionRecord;
-use crate::engine::state::{BakeStats, Finding, ModelHealth, ReadinessConfig, derive_readiness};
+use crate::engine::state::{
+    BakeStats, Finding, ModelHealth, ReadinessConfig, RuntimeCoverage, derive_readiness,
+};
 
 use super::page;
 use super::view_model::{build_admission_view, build_status_strip};
@@ -27,7 +29,13 @@ fn judging_readiness() -> crate::engine::state::Readiness {
     };
     let mut bake = BakeStats::default();
     bake.signals_by_variant.insert("alert".into(), 1);
-    derive_readiness(&config, ModelHealth::Ok, &bake, Some(SystemTime::now()))
+    derive_readiness(
+        &config,
+        ModelHealth::Ok,
+        &bake,
+        Some(SystemTime::now()),
+        &RuntimeCoverage::default(),
+    )
 }
 
 /// Build the persistent strip from a given findings snapshot (the strip the Admission view carries).

@@ -120,6 +120,7 @@ fn breach_finding() -> Finding {
         paths_truncated: false,
         evidence,
         recency: None,
+        node: None,
     }
 }
 
@@ -140,6 +141,7 @@ fn simple_finding(entry: &str, objective: &str) -> Finding {
         paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
+        node: None,
     }
 }
 
@@ -172,6 +174,7 @@ fn redundant_finding() -> Finding {
         paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
+        node: None,
     }
 }
 

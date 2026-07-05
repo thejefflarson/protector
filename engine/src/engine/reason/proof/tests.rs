@@ -478,6 +478,7 @@ fn runtime_signal_completes_the_action_bar() {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: crate::engine::graph::Behavior::Alert {
                 rule: "Outbound connection to C2".into(),
             },
@@ -760,6 +761,7 @@ fn secret_read_signal_corroborates_credential_chain_end_to_end() {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::SecretRead {
                 secret: "session-key".into(),
                 source: crate::engine::graph::SecretReadSource::Mounted,
@@ -830,6 +832,7 @@ fn library_load_signal_corroborates_through_foothold_end_to_end() {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::LibraryLoaded {
                 name: "libssl.so.1.1".into(),
             },
@@ -898,6 +901,7 @@ fn library_load_does_not_corroborate_without_foothold() {
             attribution: Attribution::by_namespaced_name("app", "app"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::LibraryLoaded {
                 name: "libssl.so.1.1".into(),
             },

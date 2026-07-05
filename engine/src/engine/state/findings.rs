@@ -9,10 +9,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+use k8s_openapi::api::core::v1::Pod;
+
 use crate::engine::graph::SecurityGraph;
+use crate::engine::observe::Snapshot;
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::reason::proof::ProvenChain;
 
+use super::agent_liveness::{
+    AgentLivenessStore, RuntimeCoverage, derive_runtime_coverage, expected_agent_nodes,
+};
 use super::evidence::EntryEvidence;
 use super::recency::RecencyInfo;
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictStore};
@@ -72,6 +78,12 @@ pub struct Finding {
     /// `None` on a row published before any recency update. Pure presentation metadata
     /// (ADR-0016).
     pub recency: Option<RecencyInfo>,
+    /// The Kubernetes node the entry workload runs on (JEF-308), stamped by the engine from the
+    /// snapshot when it builds the pass's findings. `None` when the entry isn't a single pod (a
+    /// multi-replica workload or a non-pod entry) or its node isn't known. Used ONLY to add the
+    /// blind-node caveat: a latent/propose-only finding on a node with no live sensor must not
+    /// render as reassuringly calm — absence of a signal there is not evidence of safety.
+    pub node: Option<String>,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
@@ -132,7 +144,17 @@ impl Finding {
             },
             paths_truncated: chain.paths_truncated,
             recency: None,
+            // Stamped by the engine after construction (it has the snapshot); the chain/graph
+            // alone don't carry the entry's node.
+            node: None,
         }
+    }
+
+    /// Stamp the entry's node (JEF-308) — builder-style, called by the engine when it has the
+    /// snapshot to resolve the entry pod's `spec.nodeName`.
+    pub fn with_node(mut self, node: Option<String>) -> Self {
+        self.node = node;
+        self
     }
 }
 
@@ -214,6 +236,11 @@ pub struct Findings {
     /// adjudication outcome — `0`/`1`/`2` per [`ModelHealth::as_u8`]. Cheap: no extra model
     /// call, just the result of the call the engine already makes.
     model_health: std::sync::atomic::AtomicU8,
+    /// The per-node runtime-corroboration coverage (JEF-308), replaced each pass alongside the
+    /// findings rows: the expected-node set classified healthy/degraded/blind against the live
+    /// agent-liveness beacons. The readiness aggregation reads it to build the collapsed
+    /// "Runtime corroboration" row. Defaults to empty (no expected nodes) until the first pass.
+    runtime_coverage: Mutex<RuntimeCoverage>,
 }
 
 impl Findings {
@@ -231,6 +258,34 @@ impl Findings {
     /// Replace the snapshot with this pass's findings.
     pub fn replace(&self, findings: Vec<Finding>) {
         *self.rows.lock().expect("findings mutex poisoned") = findings;
+    }
+
+    /// Build and publish this pass's findings from the proven chains, stamping each finding's entry
+    /// node (JEF-308) from the snapshot so a latent finding on a blind node can carry its "no live
+    /// sensor here" caveat. Keeps the engine's `process` free of the per-finding node resolution.
+    pub fn publish_chains(
+        &self,
+        chains: &[ProvenChain],
+        graph: &SecurityGraph,
+        snapshot: &Snapshot,
+    ) {
+        self.replace(
+            chains
+                .iter()
+                .map(|c| {
+                    Finding::from_chain(c, graph).with_node(entry_node(&snapshot.pods, &c.entry.0))
+                })
+                .collect(),
+        );
+    }
+
+    /// Classify the expected-node set against the live agent-liveness beacons (JEF-308) and stamp
+    /// the resulting runtime-corroboration coverage. The expected set is exactly the agent
+    /// DaemonSet's pods in `pods` — the scheduler already honoured the agent's nodeSelector/
+    /// tolerations, so a node the agent isn't scheduled on is out-of-scope, never blind.
+    pub fn stamp_runtime_coverage(&self, liveness: &AgentLivenessStore, pods: &[Pod]) {
+        let expected = expected_agent_nodes(pods);
+        self.set_runtime_coverage(derive_runtime_coverage(&expected, &liveness.snapshot()));
     }
 
     /// The current findings, each with its verdict resolved from the shared verdict
@@ -316,6 +371,44 @@ impl Findings {
     pub fn model_health(&self) -> ModelHealth {
         ModelHealth::from_u8(self.model_health.load(std::sync::atomic::Ordering::Relaxed))
     }
+
+    /// Replace the per-node runtime-corroboration coverage (JEF-308) with this pass's classification.
+    pub fn set_runtime_coverage(&self, coverage: RuntimeCoverage) {
+        *self
+            .runtime_coverage
+            .lock()
+            .expect("runtime-coverage mutex poisoned") = coverage;
+    }
+
+    /// The most recent runtime-corroboration coverage. Defaults to empty (no expected nodes)
+    /// until the first pass stamps one.
+    pub fn runtime_coverage(&self) -> RuntimeCoverage {
+        self.runtime_coverage
+            .lock()
+            .expect("runtime-coverage mutex poisoned")
+            .clone()
+    }
+}
+
+/// Resolve an entry key's node (JEF-308). Only a single **Pod** entry
+/// (`workload/<ns>/Pod/<name>`) maps to one node — its `spec.nodeName`. A controller workload
+/// (a Deployment / DaemonSet entry, whose replicas may span nodes) or a non-pod entry stays
+/// node-unattributed (`None`), so the blind-node caveat is never applied to an ambiguous row.
+pub(crate) fn entry_node(pods: &[Pod], entry: &str) -> Option<String> {
+    let parts: Vec<&str> = entry.split('/').collect();
+    let [prefix, ns, kind, name] = parts.as_slice() else {
+        return None;
+    };
+    if *prefix != "workload" || *kind != "Pod" {
+        return None;
+    }
+    pods.iter()
+        .find(|p| {
+            p.metadata.namespace.as_deref() == Some(*ns)
+                && p.metadata.name.as_deref() == Some(*name)
+        })
+        .and_then(|p| p.spec.as_ref().and_then(|s| s.node_name.clone()))
+        .filter(|n| !n.is_empty())
 }
 
 #[cfg(test)]
@@ -325,6 +418,26 @@ mod tests {
     use crate::engine::observe::adapter::{build_graph, default_adapters};
     use crate::engine::reason::proof::prove;
     use serde_json::json;
+
+    #[test]
+    fn entry_node_resolves_a_pod_entry_and_none_for_ambiguous_entries() {
+        // JEF-308: a single-Pod entry resolves to its node; a controller / non-pod entry doesn't.
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web-1", "namespace": "app"},
+            "spec": {"nodeName": "node-a", "containers": [{"name": "c", "image": "web:1"}]}
+        }))
+        .unwrap();
+        let pods = vec![pod];
+        assert_eq!(
+            entry_node(&pods, "workload/app/Pod/web-1"),
+            Some("node-a".to_string())
+        );
+        // A Deployment entry (replicas may span nodes) is node-unattributed.
+        assert_eq!(entry_node(&pods, "workload/app/Deployment/web"), None);
+        // An unknown pod resolves to nothing (never guessed).
+        assert_eq!(entry_node(&pods, "workload/app/Pod/missing"), None);
+    }
 
     /// A direct breach chain: an internet-facing pod that itself mounts the secret. Its
     /// only cut is subtractive, so the default containment quarantines the entry — and the
@@ -392,6 +505,7 @@ mod tests {
                 attribution: Attribution::by_namespaced_name("app", "watcher"),
                 source: Some("falco".into()),
                 observed_at_ms: None,
+                node: None,
                 behavior: Behavior::Alert {
                     rule: "Terminal shell in container".into(),
                 },

@@ -665,6 +665,7 @@ mod tests {
                     attribution: Attribution::by_namespaced_name("app", "web"),
                     source: None,
                     observed_at_ms: None,
+                    node: None,
                     behavior: Behavior::LibraryLoaded { name: name.into() },
                 }]
             })
@@ -707,6 +708,7 @@ mod tests {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::LibraryLoaded { name: name.into() },
         }
     }
@@ -907,6 +909,7 @@ mod tests {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::NetworkConnection {
                 peer: peer.into(),
                 internet,
@@ -958,6 +961,7 @@ mod tests {
                 attribution: Attribution::by_namespaced_name("app", "web"),
                 source: None,
                 observed_at_ms: None,
+                node: None,
                 behavior: Behavior::LibraryLoaded {
                     name: "anything.so".into(),
                 },

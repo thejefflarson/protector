@@ -102,6 +102,7 @@ fn web_entry_with_signal(behavior: Behavior) -> Vec<ProvenChain> {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: None,
             observed_at_ms: None,
+            node: None,
             behavior,
         }],
         ..Default::default()

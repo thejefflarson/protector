@@ -9,6 +9,7 @@ fn obs(pod_uid: &str, behavior: Behavior, at_ms: u64) -> RuntimeObservation {
         attribution: Attribution::by_pod_uid(pod_uid),
         source: Some("protector-agent".into()),
         observed_at_ms: Some(at_ms),
+        node: None,
         behavior,
     }
 }

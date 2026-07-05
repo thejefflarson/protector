@@ -3,9 +3,12 @@
 //! brief §5) — corroborated-live → model-promoted → escalations → awaiting → cleared. This is
 //! the data layer: it touches `state::`/`graph::` domain types; the components never do.
 
+use std::collections::HashSet;
+
 use crate::engine::graph::{Behavior, NodeKey};
 use crate::engine::state::{
-    CveEvidence, EntryEvidence, Finding, FindingEvidence, Judgement, PathStep,
+    CveEvidence, EntryEvidence, Finding, FindingEvidence, Judgement, NodeCoverageState, PathStep,
+    Readiness,
 };
 
 use super::posture::{delta_of, live_tag_of, posture_of};
@@ -241,9 +244,33 @@ fn judgement_props(entry: &str, judgements: &[Judgement]) -> JudgementProps {
     }
 }
 
+/// The set of blind node names from the readiness snapshot (JEF-308) — the runtime-corroboration
+/// row's per-node breakdown, filtered to the `Blind` state. Used to add the blind-node caveat to a
+/// finding whose node has no live sensor.
+pub(super) fn blind_nodes_of(readiness: &Readiness) -> HashSet<String> {
+    readiness
+        .inputs
+        .iter()
+        .find(|r| r.id == "runtime-corroboration")
+        .map(|r| {
+            r.nodes
+                .iter()
+                .filter(|n| n.state == NodeCoverageState::Blind)
+                .map(|n| n.node.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Map one [`Finding`] into its presentation props. `judgements` is the newest-first judgement
 /// snapshot, used to attach the verbatim prompt/reply for the "show model prompt" disclosure.
-pub(super) fn finding_props(f: &Finding, judgements: &[Judgement]) -> FindingProps {
+/// `blind_nodes` is the set of nodes with no live runtime sensor (JEF-308) — a finding on a blind
+/// node that isn't corroborated carries a caveat so its calm propose-only reading isn't dishonest.
+pub(super) fn finding_props(
+    f: &Finding,
+    judgements: &[Judgement],
+    blind_nodes: &HashSet<String>,
+) -> FindingProps {
     let posture = posture_of(f.verdict.as_ref());
     let live_tag = live_tag_of(f.verdict.as_ref());
     FindingProps {
@@ -266,7 +293,26 @@ pub(super) fn finding_props(f: &Finding, judgements: &[Judgement]) -> FindingPro
         cut: f.cut.clone(),
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),
+        blind_node_caveat: blind_node_caveat(f, blind_nodes),
     }
+}
+
+/// The blind-node caveat for a finding (JEF-308), or `None`. Applies when the finding is NOT
+/// live-corroborated AND runs on a node with no live sensor: its calm propose-only reading would be
+/// dishonest there, because we can't see whether the path is being exploited — absence of a signal
+/// is not evidence of safety. A corroborated finding already has a live signal, and a finding whose
+/// node is unknown or sensored gets no caveat.
+fn blind_node_caveat(f: &Finding, blind_nodes: &HashSet<String>) -> Option<String> {
+    if f.corroborated {
+        return None;
+    }
+    let node = f.node.as_ref()?;
+    if !blind_nodes.contains(node) {
+        return None;
+    }
+    Some(format!(
+        "no live runtime sensor on node {node} \u{2014} absence of a signal here is not evidence of safety"
+    ))
 }
 
 /// The urgency rank for the sort (lower = MORE urgent). Urgency is NOT severity (ADR-0016): a
@@ -488,11 +534,15 @@ fn collapse_pod_replicas(mut rows: Vec<FindingProps>) -> Vec<FindingProps> {
 /// findings are surfaced — the caller passes the breach-relevant set. Pod-replica collapse and
 /// fan-out collapse run first, then the urgency sort (stable within a rank, by entry for
 /// determinism).
-pub(super) fn map_findings(findings: &[Finding], judgements: &[Judgement]) -> Vec<FindingProps> {
+pub(super) fn map_findings(
+    findings: &[Finding],
+    judgements: &[Judgement],
+    blind_nodes: &HashSet<String>,
+) -> Vec<FindingProps> {
     let mut rows: Vec<FindingProps> = findings
         .iter()
         .filter(|f| f.breach_relevant)
-        .map(|f| finding_props(f, judgements))
+        .map(|f| finding_props(f, judgements, blind_nodes))
         .collect();
     rows = collapse_pod_replicas(rows);
     rows = collapse_fanout(rows);

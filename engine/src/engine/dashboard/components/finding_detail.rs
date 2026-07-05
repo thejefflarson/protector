@@ -23,6 +23,9 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
 }
 
 /// The verbatim model verdict — the model's own words first (brief: "why" is one click away).
+/// A blind-node caveat (JEF-308), when present, is rendered LOUD (not muted): a propose-only
+/// finding on a node with no live sensor must not read as reassuringly calm. The node name is
+/// auto-escaped by maud (never `PreEscaped`).
 fn verdict_block(f: &FindingProps) -> Markup {
     html! {
         section.detail-section.verdict-block {
@@ -30,6 +33,12 @@ fn verdict_block(f: &FindingProps) -> Markup {
             @match &f.verdict_summary {
                 Some(v) => p.verdict-prose { (v) }
                 None => p.verdict-prose.muted { "awaiting judgement \u{2014} the model has not judged this entry yet" }
+            }
+            @if let Some(caveat) = &f.blind_node_caveat {
+                p.verdict-caveat.blind-node-caveat role="note" {
+                    span.caveat-glyph aria-hidden="true" { "\u{26A0} " } // ⚠
+                    (caveat)
+                }
             }
         }
     }

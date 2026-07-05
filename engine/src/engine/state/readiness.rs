@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use super::agent_liveness::{BlindReason, NodeState, RuntimeCoverage};
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig};
 use crate::engine::signing_trust::TUF_STALE_AFTER_SECS;
 
@@ -53,6 +54,39 @@ pub struct ReadinessRow {
     /// Whether this input being absent WEAKENS the model's decision (the enrichment /
     /// adjudication inputs — ADR-0016).
     pub weakens_decisions: bool,
+    /// The per-node runtime-corroboration breakdown (JEF-308) — populated ONLY for the
+    /// `runtime-corroboration` row, empty for every other input. Rendered as a server-side
+    /// `<table>` inside `<details>` (no JS) so an operator can see exactly which node is blind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeCoverageRow>,
+}
+
+/// One node's line in the runtime-corroboration per-node breakdown (JEF-308) — the node name,
+/// its honest state, and a short live detail. Node names are UNTRUSTED-adjacent: the render
+/// escapes them (maud default), never `PreEscaped`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeCoverageRow {
+    /// The node name (untrusted-adjacent at render).
+    pub node: String,
+    /// The node's honest liveness state.
+    pub state: NodeCoverageState,
+    /// A short live detail — signal count, "quiet", probe fraction, or the blind reason.
+    pub detail: String,
+}
+
+/// One expected node's honest liveness reading (JEF-308) — the per-node mirror of the coarse
+/// [`InputState`], kept distinct so "quiet" and "blind" never collapse into one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeCoverageState {
+    /// Reporting with probes loaded — contributing corroboration (signals may be 0 = quiet).
+    Healthy,
+    /// Reporting but only some probes attached — partial coverage.
+    Degraded,
+    /// No live corroboration on this expected node — the agent is down or its probes failed.
+    Blind,
+    /// A node reporting that the agent isn't scheduled on — out-of-scope, explicitly not blind.
+    OutOfScope,
 }
 
 /// The whole readiness snapshot (JEF-160): every decision input's LIVE state plus the
@@ -112,19 +146,14 @@ pub(crate) fn derive_readiness(
     model_health: ModelHealth,
     bake: &BakeStats,
     last_pass: Option<SystemTime>,
+    runtime: &RuntimeCoverage,
 ) -> Readiness {
     let warming_up = last_pass.is_none();
 
-    // The behavioral split (JEF-48 variant labels): Falco arrives as the `alert` variant;
-    // every other variant is an eBPF-agent signal. We report each feed's "signals last
-    // pass" from the per-variant counts the bake already holds.
+    // The behavioral split (JEF-48 variant labels): Falco arrives as the `alert` variant. During
+    // the Falco→agent cutover (F5..F8) it may still feed, so the collapsed row tolerates it as the
+    // "both-sources" ladder rung — but the row is now agent-SOURCED (per-node, signal-flow).
     let falco_signals: u64 = bake.signals_by_variant.get("alert").copied().unwrap_or(0);
-    let ebpf_signals: u64 = bake
-        .signals_by_variant
-        .iter()
-        .filter(|(variant, _)| variant.as_str() != "alert")
-        .map(|(_, n)| n)
-        .sum();
 
     // The model is "judging" — giving live verdicts a consumer can lean on — only when it
     // is attached AND its last fresh call was decisive. A timeout, a cold start, or no model
@@ -159,11 +188,12 @@ pub(crate) fn derive_readiness(
     let kev_state = present_if(config.kev_count > 0);
     let epss_state = present_if(config.epss_count > 0);
 
-    // A behavioral feed is Present iff it delivered >=1 signal this pass, else Absent. (A
-    // genuinely quiet cluster reads as Absent for the pass — the "signals last pass" detail
-    // and the cold-start note keep that honest rather than alarming.)
-    let falco_state = present_if(falco_signals > 0);
-    let ebpf_state = present_if(ebpf_signals > 0);
+    // Runtime corroboration (JEF-308): ONE agent-sourced, per-node row replacing the old
+    // `falco` + `ebpf-agent` split. The honesty ladder — healthy / degraded (blind on N,
+    // named) / blind (no live signal) / both-sources (Falco still feeding during cutover) —
+    // and the per-node breakdown come from the derived coverage + this pass's Falco volume.
+    let (runtime_state, runtime_detail, runtime_nodes) =
+        runtime_corroboration_row(runtime, falco_signals);
 
     let journal_state = present_if(config.journal_durable);
 
@@ -181,6 +211,7 @@ pub(crate) fn derive_readiness(
             enable: "PROTECTOR_ENGINE_MODEL",
             detail: model_detail,
             weakens_decisions: true,
+            nodes: Vec::new(),
         },
         ReadinessRow {
             id: "kev",
@@ -190,6 +221,7 @@ pub(crate) fn derive_readiness(
             enable: "PROTECTOR_KEV_FILE",
             detail: coverage_detail(config.kev_count, "known-exploited CVE id"),
             weakens_decisions: true,
+            nodes: Vec::new(),
         },
         ReadinessRow {
             id: "epss",
@@ -199,24 +231,20 @@ pub(crate) fn derive_readiness(
             enable: "PROTECTOR_EPSS_FILE",
             detail: coverage_detail(config.epss_count, "EPSS score"),
             weakens_decisions: true,
+            nodes: Vec::new(),
         },
+        // ONE agent-sourced runtime-corroboration row (JEF-308), replacing the former
+        // `falco` + `ebpf-agent` split. Its state IS the honesty ladder; its `nodes` carry the
+        // per-node breakdown the view renders as a `<details>`/`<table>`.
         ReadinessRow {
-            id: "falco",
-            label: "Falco feed",
-            state: falco_state,
-            why: "live rule-fired alerts confirm a path is being exploited right now",
-            enable: "runtime ingest (falcosidekick -> /alert)",
-            detail: signals_detail(falco_state, falco_signals),
-            weakens_decisions: true,
-        },
-        ReadinessRow {
-            id: "ebpf-agent",
-            label: "eBPF agent",
-            state: ebpf_state,
-            why: "in-kernel behavioral signals (exec, secret reads, connections) show live activity",
+            id: "runtime-corroboration",
+            label: "Runtime corroboration",
+            state: runtime_state,
+            why: "live per-node behavioral signals (exec, secret reads, connections, alerts) confirm a path is being exploited right now — a blind node cannot corroborate",
             enable: "deploy the agent DaemonSet (-> /behavior)",
-            detail: signals_detail(ebpf_state, ebpf_signals),
+            detail: runtime_detail,
             weakens_decisions: true,
+            nodes: runtime_nodes,
         },
         ReadinessRow {
             id: "journal",
@@ -230,6 +258,7 @@ pub(crate) fn derive_readiness(
                 "in-memory only — resets on restart".to_string()
             },
             weakens_decisions: false,
+            nodes: Vec::new(),
         },
         ReadinessRow {
             id: "tuf-root",
@@ -241,6 +270,7 @@ pub(crate) fn derive_readiness(
             // Signing-detection trust, not a model-adjudication enrichment input — its absence
             // doesn't weaken the model's exploitability call (ADR-0016), so this stays false.
             weakens_decisions: false,
+            nodes: Vec::new(),
         },
         ReadinessRow {
             id: "arm-state",
@@ -256,6 +286,7 @@ pub(crate) fn derive_readiness(
                 "shadow (proposing only)".to_string()
             },
             weakens_decisions: false,
+            nodes: Vec::new(),
         },
     ];
 
@@ -339,144 +370,169 @@ fn coverage_detail(count: usize, noun: &str) -> String {
     }
 }
 
-/// The live detail for a behavioral feed: "N signals last pass", or an honest "none this
-/// pass" when absent (no sensor reporting, or a quiet cluster).
-fn signals_detail(state: InputState, signals: u64) -> String {
-    match state {
-        InputState::Present => format!(
-            "{signals} signal{} last pass",
-            if signals == 1 { "" } else { "s" }
-        ),
-        _ => "no signals last pass (no sensor reporting, or a quiet cluster)".to_string(),
+/// Build the collapsed **Runtime corroboration** row (JEF-308) — its coarse [`InputState`], the
+/// honest ladder detail, and the per-node breakdown — from the derived coverage and this pass's
+/// Falco alert volume. The ladder, in order of increasing coverage:
+///
+///   * **blind** (`Absent`) — no live signal at all: the agent is deployed nowhere in scope and
+///     Falco is silent, OR every expected node is dark. Named honestly; absence of a signal is
+///     never reassuring.
+///   * **degraded** (`Degraded`) — SOME expected nodes are blind (named) or only partially
+///     probing, while others are healthy (and/or Falco still feeds).
+///   * **healthy** (`Present`) — every expected node is reporting with its probes loaded (quiet
+///     counts). Falco still feeding is noted as the cutover "both-sources" rung.
+///
+/// A node the agent isn't scheduled on is out-of-scope (not in the expected set), so it never
+/// pushes the row off green.
+fn runtime_corroboration_row(
+    runtime: &RuntimeCoverage,
+    falco_signals: u64,
+) -> (InputState, String, Vec<NodeCoverageRow>) {
+    let nodes = node_rows(runtime);
+    let falco_active = falco_signals > 0;
+    let expected = runtime.expected_count();
+    let blind = runtime.blind_nodes();
+    let degraded = runtime.degraded_nodes();
+    let healthy = runtime.healthy_count();
+    let agent_signals = runtime.agent_signals();
+
+    let falco_note = if falco_active {
+        format!(
+            " (+ Falco corroborating: {falco_signals} alert{} this pass, cutover)",
+            plural(falco_signals)
+        )
+    } else {
+        String::new()
+    };
+
+    // No expected nodes: the agent isn't scheduled anywhere in scope this pass.
+    if expected == 0 {
+        return if falco_active {
+            (
+                InputState::Present,
+                format!(
+                    "Falco corroborating ({falco_signals} alert{} this pass) — eBPF agent not reporting on any node (cutover)",
+                    plural(falco_signals)
+                ),
+                nodes,
+            )
+        } else {
+            (
+                InputState::Absent,
+                "BLIND: no runtime sensor reporting — absence of a signal is not evidence of safety"
+                    .to_string(),
+                nodes,
+            )
+        };
     }
+
+    // Every expected node is dark AND Falco is silent → wholly blind.
+    if blind.len() == expected && !falco_active {
+        return (
+            InputState::Absent,
+            format!(
+                "BLIND: all {expected} expected node{} dark ({}) — corroboration has no live sensor",
+                plural(expected as u64),
+                blind.join(", ")
+            ),
+            nodes,
+        );
+    }
+
+    // Some expected nodes blind → degraded, naming them.
+    if !blind.is_empty() {
+        return (
+            InputState::Degraded,
+            format!(
+                "degraded — blind on {} of {expected} node{}: {} ({healthy} healthy){falco_note}",
+                blind.len(),
+                plural(expected as u64),
+                blind.join(", ")
+            ),
+            nodes,
+        );
+    }
+
+    // Only partial-probe degradation remains.
+    if !degraded.is_empty() {
+        return (
+            InputState::Degraded,
+            format!(
+                "degraded — probes partial on {}: {}{falco_note}",
+                degraded.len(),
+                degraded.join(", ")
+            ),
+            nodes,
+        );
+    }
+
+    // Every expected node healthy (quiet counts).
+    (
+        InputState::Present,
+        format!(
+            "healthy — all {expected} node{} reporting, probes loaded ({agent_signals} signal{} this pass){falco_note}",
+            plural(expected as u64),
+            plural(agent_signals)
+        ),
+        nodes,
+    )
+}
+
+/// Project the derived coverage into the per-node display rows (JEF-308). Each line names the
+/// node, its honest state, and a short live detail — quiet is spelled out as quiet, blind names
+/// its reason, so the two never collapse into one word.
+fn node_rows(runtime: &RuntimeCoverage) -> Vec<NodeCoverageRow> {
+    runtime
+        .nodes
+        .iter()
+        .map(|n| {
+            let (state, detail) = match n.state {
+                NodeState::Healthy { signals: 0 } => (
+                    NodeCoverageState::Healthy,
+                    "quiet — probes loaded, 0 signals this pass".to_string(),
+                ),
+                NodeState::Healthy { signals } => (
+                    NodeCoverageState::Healthy,
+                    format!(
+                        "{signals} signal{} this pass, probes loaded",
+                        plural(signals)
+                    ),
+                ),
+                NodeState::DegradedProbes { loaded, total } => (
+                    NodeCoverageState::Degraded,
+                    format!("partial — {loaded}/{total} probes loaded"),
+                ),
+                NodeState::Blind {
+                    reason: BlindReason::NotReporting,
+                } => (
+                    NodeCoverageState::Blind,
+                    "not reporting — no live sensor on this node".to_string(),
+                ),
+                NodeState::Blind {
+                    reason: BlindReason::ProbesFailed,
+                } => (
+                    NodeCoverageState::Blind,
+                    "probes failed to load — agent up but blind".to_string(),
+                ),
+                NodeState::OutOfScope => (
+                    NodeCoverageState::OutOfScope,
+                    "agent not scheduled here".to_string(),
+                ),
+            };
+            NodeCoverageRow {
+                node: n.node.clone(),
+                state,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// `"s"` unless `n == 1` — the pluralization for the honest count lines.
+fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn covered_config() -> ReadinessConfig {
-        ReadinessConfig {
-            model_attached: true,
-            kev_count: 5,
-            epss_count: 5,
-            journal_durable: true,
-            armed: false,
-            // A fresh trust root, no fleet-wide unverifiable spike ⇒ the TUF row is Present.
-            tuf_cache_age_secs: Some(60),
-            unverifiable_spike: false,
-        }
-    }
-
-    #[test]
-    fn fully_covered_model_judging_has_no_unmet_inputs() {
-        let mut bake = BakeStats::default();
-        bake.signals_by_variant.insert("alert".into(), 1);
-        bake.signals_by_variant.insert("connection".into(), 1);
-        let readiness = derive_readiness(
-            &covered_config(),
-            ModelHealth::Ok,
-            &bake,
-            Some(SystemTime::now()),
-        );
-        assert!(readiness.model_judging);
-        assert!(readiness.model_attached());
-        assert!(!readiness.has_unmet());
-        assert_eq!(readiness.unmet_count(), 0);
-        assert!(!readiness.warming_up);
-    }
-
-    #[test]
-    fn a_timed_out_model_is_degraded_not_judging() {
-        let readiness = derive_readiness(
-            &covered_config(),
-            ModelHealth::Timeout,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-        );
-        assert!(!readiness.model_judging);
-        // The model is still CONFIGURED — attached, just not answering.
-        assert!(readiness.model_attached());
-        // The model row is degraded and the (quiet) behavioral feeds are absent ⇒ unmet.
-        assert!(readiness.has_unmet());
-    }
-
-    /// The TUF-root row from a readiness snapshot.
-    fn tuf(readiness: &Readiness) -> &ReadinessRow {
-        readiness
-            .inputs
-            .iter()
-            .find(|r| r.id == "tuf-root")
-            .expect("a TUF-root row is present")
-    }
-
-    #[test]
-    fn a_fresh_trust_root_reads_present() {
-        let readiness = derive_readiness(
-            &covered_config(),
-            ModelHealth::Ok,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-        );
-        assert_eq!(tuf(&readiness).state, InputState::Present);
-        assert!(tuf(&readiness).detail.contains("fresh"));
-    }
-
-    #[test]
-    fn a_stale_trust_root_is_degraded_and_surfaced_non_green() {
-        let mut config = covered_config();
-        config.tuf_cache_age_secs = Some(TUF_STALE_AFTER_SECS + 1);
-        let readiness = derive_readiness(
-            &config,
-            ModelHealth::Ok,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-        );
-        assert_eq!(tuf(&readiness).state, InputState::Degraded);
-        assert!(tuf(&readiness).detail.contains("stale"));
-        // Non-green: a stale trust root counts as an unmet input.
-        assert!(readiness.has_unmet());
-    }
-
-    #[test]
-    fn a_never_fetched_trust_root_reads_absent() {
-        let mut config = covered_config();
-        config.tuf_cache_age_secs = None;
-        let readiness = derive_readiness(
-            &config,
-            ModelHealth::Ok,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-        );
-        assert_eq!(tuf(&readiness).state, InputState::Absent);
-    }
-
-    #[test]
-    fn a_fleet_wide_unverifiable_spike_is_surfaced_even_on_a_fresh_root() {
-        let mut config = covered_config();
-        config.tuf_cache_age_secs = Some(60); // fresh mtime …
-        config.unverifiable_spike = true; // … but a mass unverifiable spike this pass
-        let readiness = derive_readiness(
-            &config,
-            ModelHealth::Ok,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-        );
-        assert_eq!(tuf(&readiness).state, InputState::Degraded);
-        assert!(tuf(&readiness).detail.contains("spike"));
-        assert!(readiness.has_unmet());
-    }
-
-    #[test]
-    fn an_unconfigured_model_reads_absent_and_warming_before_first_pass() {
-        let readiness = derive_readiness(
-            &ReadinessConfig::default(),
-            ModelHealth::Unknown,
-            &BakeStats::default(),
-            None,
-        );
-        assert!(!readiness.model_attached());
-        assert!(!readiness.model_judging);
-        assert!(readiness.warming_up);
-    }
-}
+#[path = "readiness_tests.rs"]
+mod tests;

@@ -530,6 +530,7 @@ fn internal_active_snapshot(with_alert: bool) -> Snapshot {
             attribution: Attribution::by_namespaced_name("app", "watcher"),
             source: Some("falco".into()),
             observed_at_ms: None,
+            node: None,
             behavior: Behavior::Alert {
                 rule: "Terminal shell in container".into(),
             },

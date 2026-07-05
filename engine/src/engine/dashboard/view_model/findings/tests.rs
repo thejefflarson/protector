@@ -4,9 +4,16 @@
 use super::*;
 use crate::engine::dashboard::view_model::props::DeltaProps;
 use crate::engine::reason::adjudicate::Verdict;
+use std::collections::HashSet;
+
 use crate::engine::state::{
     CveEvidence, Delta, EntryEvidence, Finding, Judgement, PathStep, RecencyInfo,
 };
+
+/// An empty blind-node set — most mapping tests aren't exercising the JEF-308 caveat path.
+fn no_blind() -> HashSet<String> {
+    HashSet::new()
+}
 
 /// A minimal breach-relevant finding with a typed verdict, for the mapping tests.
 fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
@@ -28,7 +35,43 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
         paths_truncated: false,
         evidence: EntryEvidence::default(),
         recency: None,
+        node: None,
     }
+}
+
+/// JEF-308: a latent / propose-only finding on a BLIND node carries the "no live sensor" caveat —
+/// its calm propose-only reading would be dishonest, so the detail says absence of a signal isn't
+/// evidence of safety. A corroborated finding, or one on a sensored node, gets no caveat.
+#[test]
+fn latent_finding_on_a_blind_node_carries_the_caveat() {
+    let mut latent = finding("workload/app/Pod/web-1", "secret/app/db", None);
+    latent.disposition = "latent foothold — propose".into();
+    latent.corroborated = false;
+    latent.node = Some("node-b".into());
+    let blind: HashSet<String> = ["node-b".to_string()].into_iter().collect();
+
+    let props = finding_props(&latent, &[], &blind);
+    let caveat = props
+        .blind_node_caveat
+        .expect("a latent finding on a blind node carries the caveat");
+    assert!(caveat.contains("node-b"));
+    assert!(caveat.contains("not evidence of safety"));
+
+    // The SAME finding on a sensored node (not in the blind set) gets no caveat.
+    assert!(
+        finding_props(&latent, &[], &no_blind())
+            .blind_node_caveat
+            .is_none()
+    );
+
+    // A live-corroborated finding on the same blind node gets no caveat (it has a live signal).
+    let mut corroborated = latent.clone();
+    corroborated.corroborated = true;
+    assert!(
+        finding_props(&corroborated, &[], &blind)
+            .blind_node_caveat
+            .is_none()
+    );
 }
 
 #[test]
@@ -41,7 +84,7 @@ fn only_breach_relevant_rows_are_surfaced() {
     keep.foothold = true;
     let mut drop = finding("workload/app/Pod/x", "secret/app/y", None);
     drop.breach_relevant = false;
-    let rows = map_findings(&[keep, drop], &[]);
+    let rows = map_findings(&[keep, drop], &[], &no_blind());
     assert_eq!(rows.len(), 1);
 }
 
@@ -59,7 +102,7 @@ fn urgency_sort_puts_live_breach_first_cleared_last() {
         Some(Verdict::Refuted("internal".into())),
     );
     let awaiting = finding("endpoint/d", "secret/x", None);
-    let rows = map_findings(&[cleared, awaiting, promoted, live], &[]);
+    let rows = map_findings(&[cleared, awaiting, promoted, live], &[], &no_blind());
     let order: Vec<Posture> = rows.iter().map(|r| r.posture).collect();
     assert_eq!(
         order,
@@ -87,7 +130,7 @@ fn escalation_outranks_awaiting() {
         age_secs: Some(5),
     });
     let awaiting = finding("endpoint/a", "secret/x", None);
-    let rows = map_findings(&[awaiting, escalated], &[]);
+    let rows = map_findings(&[awaiting, escalated], &[], &no_blind());
     // The escalation (rank 2) sorts before the awaiting row (rank 4).
     assert!(matches!(rows[0].delta, DeltaProps::Escalated));
 }
@@ -117,7 +160,7 @@ fn evidence_summary_counts_and_kev() {
             title: None,
         },
     ];
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert_eq!(rows[0].evidence_summary.cve_count, 2);
     assert!(rows[0].evidence_summary.kev);
     assert!(!rows[0].evidence.is_empty());
@@ -126,7 +169,7 @@ fn evidence_summary_counts_and_kev() {
 #[test]
 fn empty_evidence_is_flagged_empty() {
     let f = finding("endpoint/a", "secret/x", None);
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert!(rows[0].evidence.is_empty());
     assert!(rows[0].evidence_summary.is_empty());
 }
@@ -142,7 +185,7 @@ fn fanout_collapses_a_high_objective_entry() {
             Some(Verdict::Refuted("cleared".into())),
         ));
     }
-    let mapped = map_findings(&rows, &[]);
+    let mapped = map_findings(&rows, &[], &no_blind());
     let argo: Vec<_> = mapped.iter().filter(|r| r.entry == "argocd").collect();
     assert_eq!(argo.len(), 1, "fan-out collapses to one row");
     assert_eq!(argo[0].fanout, Some(20));
@@ -158,7 +201,7 @@ fn judgement_prompt_is_attached_by_entry() {
         prompt: Some("the prompt".into()),
         reply: Some("the reply".into()),
     }];
-    let rows = map_findings(&[f], &judgements);
+    let rows = map_findings(&[f], &judgements, &no_blind());
     assert_eq!(rows[0].judgement.prompt.as_deref(), Some("the prompt"));
     assert_eq!(rows[0].judgement.reply.as_deref(), Some("the reply"));
 }
@@ -185,7 +228,7 @@ fn path_props_carry_node_glyphs_and_mark_the_cut() {
         },
     ];
     f.cut = Some("deployment/edge/api -[reaches/Tcp/5432]-> statefulset/app/db".into());
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     let path = &rows[0].path;
     assert_eq!(path.len(), 2);
     // The foothold entry node reads as the internet front door (🌐), not its bare kind.
@@ -230,7 +273,7 @@ fn multi_path_marks_edges_shared_across_all_paths() {
         },
     ];
     f.paths = vec![path_a, path_b];
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     let paths = &rows[0].paths;
     assert_eq!(paths.len(), 2, "both proven paths are mapped, not just one");
     // The common first hop is a shared bottleneck in both routes...
@@ -252,7 +295,7 @@ fn single_path_finding_falls_back_and_marks_no_shared_edge() {
     // A lone-path finding (the common case) sets no `paths`; the mapper falls back to the
     // representative path so a chain always renders, and nothing is marked shared.
     let f = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert_eq!(
         rows[0].paths.len(),
         1,
@@ -268,7 +311,7 @@ fn verdict_summary_is_the_models_verbatim_words() {
         "secret/x",
         Some(Verdict::Exploitable("CVE reachable".into())),
     );
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert_eq!(
         rows[0].verdict_summary.as_deref(),
         Some("exploitable — CVE reachable")
@@ -287,7 +330,7 @@ fn distinct_entries_that_slugify_alike_get_distinct_ids() {
     // non-alphanumeric → `-` rule, so the old finding_id collided. The hash suffix separates them.
     let a = finding("secret/app/db", "secret/x", Some(Verdict::Confirmed));
     let b = finding("secret-app-db", "secret/x", Some(Verdict::Confirmed));
-    let rows = map_findings(&[a, b], &[]);
+    let rows = map_findings(&[a, b], &[], &no_blind());
     assert_eq!(rows.len(), 2, "two distinct entries stay two rows");
     assert_ne!(
         rows[0].id, rows[1].id,
@@ -300,8 +343,8 @@ fn finding_id_is_stable_across_renders() {
     // The id must be deterministic so the JS's persisted open-state keying survives a poll swap.
     let f1 = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
     let f2 = finding("endpoint/a", "secret/x", Some(Verdict::Confirmed));
-    let r1 = map_findings(&[f1], &[]);
-    let r2 = map_findings(&[f2], &[]);
+    let r1 = map_findings(&[f1], &[], &no_blind());
+    let r2 = map_findings(&[f2], &[], &no_blind());
     assert_eq!(
         r1[0].id, r2[0].id,
         "the same entry always yields the same id"
@@ -332,7 +375,7 @@ fn statefulset_replicas_collapse_to_one_row_with_worst_posture() {
         "secret/analytics/db",
         Some(Verdict::Refuted("internal".into())),
     );
-    let rows = map_findings(&[r0, r1, r2], &[]);
+    let rows = map_findings(&[r0, r1, r2], &[], &no_blind());
     assert_eq!(rows.len(), 1, "three replicas collapse to one row");
     assert_eq!(rows[0].replicas, Some(3), "the row carries the ×3 count");
     assert_eq!(
@@ -359,7 +402,7 @@ fn deployment_replicas_collapse_by_owning_workload() {
         "secret/web/session",
         Some(Verdict::Refuted("internal".into())),
     );
-    let rows = map_findings(&[a, b], &[]);
+    let rows = map_findings(&[a, b], &[], &no_blind());
     assert_eq!(rows.len(), 1, "two deployment replicas collapse to one row");
     assert_eq!(rows[0].replicas, Some(2));
     assert_eq!(rows[0].entry, "web/storefront");
@@ -378,7 +421,7 @@ fn unrelated_pods_do_not_merge() {
         "secret/web/cart",
         Some(Verdict::Confirmed),
     );
-    let rows = map_findings(&[a, b], &[]);
+    let rows = map_findings(&[a, b], &[], &no_blind());
     assert_eq!(rows.len(), 2, "unrelated pods are never merged");
     assert!(rows.iter().all(|r| r.replicas.is_none()));
 }
@@ -391,7 +434,7 @@ fn standalone_pod_stays_a_single_row() {
         "secret/ops/kubeconfig",
         Some(Verdict::Confirmed),
     );
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].replicas, None,
@@ -408,7 +451,7 @@ fn a_single_replica_named_pod_is_not_collapsed() {
         "secret/web/x",
         Some(Verdict::Confirmed),
     );
-    let rows = map_findings(&[f], &[]);
+    let rows = map_findings(&[f], &[], &no_blind());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].replicas, None, "a lone pod is not a replica set");
 }

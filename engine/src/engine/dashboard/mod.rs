@@ -81,7 +81,8 @@ impl DashboardState {
         let health: ModelHealth = self.findings.model_health();
         let bake: BakeStats = self.findings.bake();
         let last_pass: Option<SystemTime> = self.findings.last_pass();
-        derive_readiness(&config, health, &bake, last_pass)
+        let runtime = self.findings.runtime_coverage();
+        derive_readiness(&config, health, &bake, last_pass, &runtime)
     }
 
     /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The
@@ -271,3 +272,8 @@ mod path_view_tests;
 
 #[cfg(test)]
 mod admission_tests;
+
+// JEF-308: the runtime-corroboration per-node breakdown render + node-name escaping, in its own
+// file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod readiness_render_tests;

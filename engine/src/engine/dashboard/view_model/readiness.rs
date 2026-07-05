@@ -4,9 +4,11 @@
 //! the env var to enable it. Rows that WEAKEN decisions when absent float to the top so the gaps
 //! that demote the model's call are seen first. Data layer: touches `state::`; components never do.
 
-use crate::engine::state::{InputState, Readiness, ReadinessRow};
+use crate::engine::state::{InputState, NodeCoverageState, Readiness, ReadinessRow};
 
-use super::props::{InputStateProps, ReadinessRowProps, ReadinessViewProps};
+use super::props::{
+    InputStateProps, NodeCoverageStateProps, NodeRowProps, ReadinessRowProps, ReadinessViewProps,
+};
 
 /// Map the engine's [`InputState`] into the presentation enum (the honesty stays: Absent and
 /// Degraded never read as covered).
@@ -18,7 +20,17 @@ fn input_state(state: InputState) -> InputStateProps {
     }
 }
 
-/// Project one engine readiness row into its props.
+/// Map an engine node-coverage state into its presentation enum (JEF-308).
+fn node_state(state: NodeCoverageState) -> NodeCoverageStateProps {
+    match state {
+        NodeCoverageState::Healthy => NodeCoverageStateProps::Healthy,
+        NodeCoverageState::Degraded => NodeCoverageStateProps::Degraded,
+        NodeCoverageState::Blind => NodeCoverageStateProps::Blind,
+        NodeCoverageState::OutOfScope => NodeCoverageStateProps::OutOfScope,
+    }
+}
+
+/// Project one engine readiness row into its props, carrying any per-node breakdown (JEF-308).
 fn row_props(row: &ReadinessRow) -> ReadinessRowProps {
     ReadinessRowProps {
         id: row.id.to_string(),
@@ -28,6 +40,15 @@ fn row_props(row: &ReadinessRow) -> ReadinessRowProps {
         enable: row.enable.to_string(),
         detail: row.detail.clone(),
         weakens_decisions: row.weakens_decisions,
+        nodes: row
+            .nodes
+            .iter()
+            .map(|n| NodeRowProps {
+                node: n.node.clone(),
+                state: node_state(n.state),
+                detail: n.detail.clone(),
+            })
+            .collect(),
     }
 }
 

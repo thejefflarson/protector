@@ -11,6 +11,7 @@
 //! verbatim and is the consumer's responsibility to escape wherever it is later spliced into a
 //! sink (the zero-egress invariant: this state never leaves the cluster).
 
+mod agent_liveness;
 mod evidence;
 mod findings;
 mod judgement;
@@ -21,10 +22,14 @@ mod reversion;
 mod signing_baseline;
 mod verdict_store;
 
+pub use agent_liveness::{
+    AgentLivenessStore, BlindReason, NodeCoverage, NodeState, RuntimeCoverage,
+    derive_runtime_coverage, expected_agent_nodes,
+};
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 pub use findings::{Finding, Findings, PathStep};
 pub use judgement::{Judgement, JudgementLog};
-pub use readiness::{InputState, Readiness, ReadinessRow};
+pub use readiness::{InputState, NodeCoverageRow, NodeCoverageState, Readiness, ReadinessRow};
 // The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's
 // config + per-pass health, the same pure aggregation the OTLP mirror reads.
 pub(crate) use readiness::derive_readiness;
