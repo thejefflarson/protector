@@ -48,10 +48,12 @@ fn observing_a_signed_image_creates_a_repo_keyed_baseline() {
     );
     assert_eq!(changed.as_deref(), Some("ghcr.io/org/app"));
     let baseline = store.get("ghcr.io/org/app").expect("baseline learned");
+    // The baseline stores the tag-agnostic continuity identity (JEF-325): the raw SAN's tag value
+    // is collapsed to `*`, so a later version tag folds to the same identity rather than accreting.
     assert!(
         baseline
             .identities
-            .contains("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/v1")
+            .contains("https://github.com/org/app/.github/workflows/r.yaml@refs/tags/*")
     );
     assert!(
         baseline
@@ -93,6 +95,32 @@ fn a_new_tag_or_digest_under_a_known_repo_is_not_a_new_baseline() {
         store.get("ghcr.io/org/app").unwrap().first_seen_ms,
         1_000,
         "first_seen is unchanged by later tags"
+    );
+}
+
+#[test]
+fn successive_release_tags_of_the_same_workflow_collapse_to_one_identity() {
+    // JEF-325: keyless signing embeds the triggering tag in the SAN, so each release produces a SAN
+    // that differs only in the version. The baseline must store ONE canonical continuity identity
+    // across all of them — never one entry per version (which made continuity meaningless).
+    let mut store = SigningBaselineStore::new();
+    let base = "https://github.com/thejefflarson/protector/.github/workflows/agent.yml@refs/tags";
+    for (i, tag) in ["v0.3.76", "v0.3.77", "v0.3.78", "v0.3.79", "v0.3.80"]
+        .iter()
+        .enumerate()
+    {
+        let san = format!("{base}/{tag}");
+        store.observe("ghcr.io/org/app:1", &signed(&san, None), (i as u64) * 1_000);
+    }
+    let baseline = store.get("ghcr.io/org/app").unwrap();
+    assert_eq!(
+        baseline.identities.len(),
+        1,
+        "five release tags fold to one canonical continuity identity, not five"
+    );
+    assert!(
+        baseline.identities.contains(&format!("{base}/*")),
+        "the stored identity is the tag-agnostic canonical form"
     );
 }
 

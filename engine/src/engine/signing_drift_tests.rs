@@ -101,6 +101,130 @@ fn one_of_several_known_identities_is_continuous() {
     );
 }
 
+// ---- JEF-325: tag-agnostic continuity — a new release TAG is not a new signer -------------------
+
+const WF: &str = "https://github.com/thejefflarson/protector/.github/workflows/agent.yml";
+
+#[test]
+fn a_new_release_tag_of_the_same_workflow_is_continuous_not_an_identity_change() {
+    // THE BUG: two SANs differing ONLY in the release-tag version (same repo/workflow/ref-type) are
+    // the SAME continuity identity ⇒ Continuous, never a regression, never a block.
+    let b = baseline(&[&format!("{WF}@refs/tags/v0.3.79")], true);
+    let drift = classify(Some(&b), &signed(&format!("{WF}@refs/tags/v0.3.80")));
+    assert_eq!(
+        drift,
+        SigningDrift::Continuous,
+        "a version bump under the same workflow must not false-positive"
+    );
+    assert!(!drift.is_regression());
+}
+
+#[test]
+fn a_new_release_tag_matches_a_canonical_baseline_identity() {
+    // The baseline stores the canonical (`@refs/tags/*`) form; a concrete version tag still matches.
+    let b = baseline(&[&format!("{WF}@refs/tags/*")], true);
+    assert_eq!(
+        classify(Some(&b), &signed(&format!("{WF}@refs/tags/v9.9.9"))),
+        SigningDrift::Continuous
+    );
+}
+
+#[test]
+fn a_different_workflow_under_the_same_repo_is_still_an_identity_change() {
+    // SECURITY: only the tag VALUE is wildcarded — the workflow PATH still discriminates.
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let attacker =
+        "https://github.com/thejefflarson/protector/.github/workflows/pwn.yml@refs/tags/v1";
+    let drift = classify(Some(&b), &signed(attacker));
+    assert_eq!(
+        drift,
+        SigningDrift::Regression {
+            kind: RegressionKind::IdentityChange {
+                new_identity: attacker.to_string(),
+                new_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+            },
+            established: true,
+        },
+        "a different workflow is a new signer, even at the same tag"
+    );
+    assert!(drift.would_block(&signed(attacker)), "and it would block");
+}
+
+#[test]
+fn a_fork_or_different_repo_is_still_an_identity_change() {
+    // SECURITY: the org/repo still discriminates — an attacker's fork is a new identity.
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let fork = "https://github.com/evil/protector/.github/workflows/agent.yml@refs/tags/v1";
+    assert!(matches!(
+        classify(Some(&b), &signed(fork)),
+        SigningDrift::Regression {
+            kind: RegressionKind::IdentityChange { .. },
+            established: true,
+        }
+    ));
+}
+
+#[test]
+fn a_branch_ref_is_still_an_identity_change_ref_type_is_never_wildcarded() {
+    // SECURITY: ref TYPE stays distinct — a `refs/heads/main` build is NOT a release-tag identity.
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let branch = format!("{WF}@refs/heads/main");
+    let drift = classify(Some(&b), &signed(&branch));
+    assert!(matches!(
+        drift,
+        SigningDrift::Regression {
+            kind: RegressionKind::IdentityChange { .. },
+            established: true,
+        }
+    ));
+    assert!(drift.would_block(&signed(&branch)));
+}
+
+#[test]
+fn a_pull_request_ref_is_still_an_identity_change() {
+    // SECURITY: a PR ref is a distinct ref type — not a trusted release identity.
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let pr = format!("{WF}@refs/pull/42/merge");
+    assert!(matches!(
+        classify(Some(&b), &signed(&pr)),
+        SigningDrift::Regression {
+            kind: RegressionKind::IdentityChange { .. },
+            established: true,
+        }
+    ));
+}
+
+#[test]
+fn a_wholly_rotated_identity_is_still_an_identity_change() {
+    // A rotated signer (different issuer flow / email SAN) has no tag ref to collapse ⇒ still flags.
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let rotated = "attacker@evil.example";
+    assert!(matches!(
+        classify(Some(&b), &signed(rotated)),
+        SigningDrift::Regression {
+            kind: RegressionKind::IdentityChange { .. },
+            established: true,
+        }
+    ));
+}
+
+#[test]
+fn identity_change_finding_carries_the_full_raw_san_for_display() {
+    // The canonical form is used for COMPARISON only; the finding retains the raw SAN so the render
+    // shows exactly which identity signed (including the concrete tag/ref).
+    let b = baseline(&[&format!("{WF}@refs/tags/v1")], true);
+    let raw = format!("{WF}@refs/heads/main");
+    if let SigningDrift::Regression {
+        kind: RegressionKind::IdentityChange { new_identity, .. },
+        ..
+    } = classify(Some(&b), &signed(&raw))
+    {
+        assert_eq!(new_identity, raw, "the raw SAN is preserved for display");
+    } else {
+        panic!("expected an IdentityChange regression");
+    }
+}
+
 #[test]
 fn first_sight_of_a_never_seen_signed_repo_is_new_repo_not_a_regression() {
     // Cold start is TOFU: the first signed observation establishes trust, it is never drift.

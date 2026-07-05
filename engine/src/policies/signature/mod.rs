@@ -34,6 +34,7 @@ pub use continuity::{ContinuityGate, SigningExceptions, SigningPin};
 pub use cosign::CosignChecker;
 pub use posture::{
     PostureMap, PostureRank, SignatureObserver, Signer, SigningObserver, SigningPosture,
+    canonical_identity,
 };
 pub use provenance::{
     Provenance, ProvenanceMap, ProvenanceObserver, ProvenancePosture, ProvenanceScanner,

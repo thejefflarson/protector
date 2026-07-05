@@ -204,7 +204,10 @@ impl SigningBaselineStore {
 
         if let Some(existing) = self.baselines.get_mut(&repo) {
             let mut changed = false;
-            changed |= existing.identities.insert(signer.identity.clone());
+            // Store the tag-agnostic continuity identity (JEF-325), not the raw per-version SAN, so
+            // successive release tags of the same workflow fold to ONE baseline identity instead of
+            // accreting one entry per version.
+            changed |= existing.identities.insert(signer.canonical_identity());
             if let Some(issuer) = signer.issuer.as_ref() {
                 changed |= existing.issuers.insert(issuer.clone());
             }
@@ -229,7 +232,8 @@ impl SigningBaselineStore {
 
         // First time we've seen this repo signed: establish the baseline (cold-start, weak).
         let mut identities = BTreeSet::new();
-        identities.insert(signer.identity.clone());
+        // The tag-agnostic continuity identity (JEF-325), not the raw per-version SAN.
+        identities.insert(signer.canonical_identity());
         let mut issuers = BTreeSet::new();
         if let Some(issuer) = signer.issuer.as_ref() {
             issuers.insert(issuer.clone());
