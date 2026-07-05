@@ -12,7 +12,7 @@ use petgraph::visit::EdgeRef;
 use super::{Link, QuarantineReason, QuarantineTarget};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{Exposure, Node, Relation, SecurityGraph, Severity};
-use crate::engine::observe::exec_class::notable_exec;
+use crate::engine::observe::alarm_class::is_alarming_now;
 
 /// Whether an edge is a valid attacker-movement edge for chain traversal.
 pub(super) fn is_movement(relation: &Relation) -> bool {
@@ -351,16 +351,18 @@ pub(super) fn path_steps(
 }
 
 /// Whether a workload node carries **direct live on-pod runtime evidence** of
-/// exploitation right now — a Falco-grade `Alert` or a hands-on-keyboard notable exec
-/// (interactive shell / package manager, JEF-117). This is the "actively exploited"
-/// predicate (JEF-284 condition 2): unlike [`compromisable`] (a static CVE), it is a
-/// *live* signal, so it warrants quarantine regardless of the pod's network position.
-/// Non-workload nodes have no runtime and are never actively exploited.
+/// exploitation right now — any "alarming-now" signal ([`is_alarming_now`]): a Falco-grade
+/// `Alert`, a hands-on-keyboard notable exec (interactive shell / package manager, JEF-117),
+/// or an alarming file write (sensitive-path drop-and-execute / config tamper, JEF-309). This
+/// is the "actively exploited" predicate (JEF-284 condition 2): unlike [`compromisable`] (a
+/// static CVE), it is a *live* signal, so it warrants quarantine regardless of the pod's
+/// network position — a drop-and-execute on an internal pod counts. Non-workload nodes have no
+/// runtime and are never actively exploited. Shares the single [`is_alarming_now`] definition
+/// with the corroboration and guard paths so a new alarm source can't drift between them.
 fn actively_exploited(graph: &SecurityGraph, node: NodeIndex) -> bool {
     matches!(
         graph.inner().node_weight(node),
-        Some(Node::Workload(w)) if w.runtime.iter().any(|s|
-            s.behavior.is_alert() || notable_exec(&s.behavior).is_some())
+        Some(Node::Workload(w)) if w.runtime.iter().any(|s| is_alarming_now(&s.behavior))
     )
 }
 
@@ -389,8 +391,9 @@ fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
 ///    containment is owned by the ADR-0022 precedence (`respond::containment_for`:
 ///    surgical edge-cut → entry quarantine), which we must not duplicate or widen.
 /// 2. **Actively exploited** ([`QuarantineReason::ActivelyExploited`]) — any pod on the
-///    chain (entry included) with [`actively_exploited`] live evidence, regardless of
-///    network position. This is the internal hands-on-keyboard case.
+///    chain (entry included) with [`actively_exploited`] live evidence (alert / notable exec /
+///    alarming write), regardless of network position. This is the internal
+///    hands-on-keyboard / drop-and-execute case.
 ///
 /// The merely-reached objective never qualifies: an objective is a non-workload node
 /// (a Secret) or, if a workload, one with neither a CVE nor a live signal — reached ≠

@@ -18,8 +18,11 @@ use crate::engine::graph::{Behavior, Node, SecurityGraph};
 /// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): it is the
 /// agent-side equivalent of Falco's "terminal shell in container" / "package management
 /// in container" criticals — a hands-on-keyboard / tamper-now signal that, like the alert,
-/// evidences active intrusion irrespective of which chain it lands on. This is the seam
-/// that lets us retire Falco (JEF-56). The agent's own mundane behaviors
+/// evidences active intrusion irrespective of which chain it lands on. An *alarming* file
+/// write (JEF-309) — a write to a sensitive path (drop-and-execute / config tamper) — is the
+/// third such blanket source: the agent-side restoration of Falco's "Write below etc / binary
+/// dir" and drop-and-execute criticals (`observe::alarm_class::alarming_write`). This is the
+/// seam that lets us retire Falco (JEF-56). The agent's own mundane behaviors
 /// (connection / secret-read / library-load) corroborate per objective — each only for
 /// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
 /// "everything corroborates everything" blanket the alert gate intentionally is.
@@ -85,12 +88,18 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
         // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
         Behavior::PrivilegeChange { .. } => false,
-        // FileWrite is NON-corroborating here (JEF-306): it ships as PURE DATA and this
-        // ticket adds no corroboration meaning. Deciding a write is *sensitive* — container
-        // drift / drop-and-execute / config tampering worth corroborating a chain — is a
-        // separate classifier (JEF-306 F3), engine policy following the JEF-113 pattern, not
-        // wired here. Model evidence only today.
-        Behavior::FileWrite { .. } => false,
+        // An *alarming* FileWrite — a sensitive-path / drop-and-execute / config-tamper drift
+        // write (JEF-309) — corroborates ANY objective like an Alert / notable exec does: it is
+        // the agent-side replacement for Falco's "Write below etc / binary dir" and
+        // drop-and-execute criticals, a tamper-now signal that evidences active intrusion
+        // regardless of chain. Conservative on purpose (ADR-0011): a *benign* write (an app
+        // writing its own `/data`/`/tmp`/logs — the common case) stays NON-corroborating and
+        // remains model evidence only. `alarming_write` is `Some` exactly for the sensitive
+        // subset (JEF-113: the path judgement is engine policy in `observe::alarm_class`, not on
+        // the wire type — a policy change rebuilds only the engine).
+        Behavior::FileWrite { .. } => {
+            crate::engine::observe::alarm_class::alarming_write(behavior).is_some()
+        }
     }
 }
 

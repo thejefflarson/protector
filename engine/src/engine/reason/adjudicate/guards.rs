@@ -107,15 +107,18 @@ pub(crate) fn guard_fabricated_cve(
     })
 }
 
-/// Whether a runtime behavior CORROBORATES an exploit — the engine's existing definition,
-/// reused verbatim, NOT a new one: a critical Falco alert ([`Behavior::is_alert`]) OR a
-/// notable shell/package-manager exec ([`crate::engine::observe::exec_class::notable_exec`],
-/// JEF-117). Benign `NetworkConnection`/`FileRead`/`LibraryLoaded`/`SecretRead` — a
-/// workload's own observed activity — are NOT corroborating and so must never anchor an
-/// `exploitable` (the watcher-server false breach: three benign connections to its own
-/// DB/metrics were read as a live signal).
+/// Whether a runtime behavior CORROBORATES an exploit — the engine's single shared
+/// "alarming-now" definition ([`crate::engine::observe::alarm_class::is_alarming_now`]), NOT a
+/// new one: a critical Falco alert ([`Behavior::is_alert`]), a notable shell/package-manager
+/// exec (JEF-117), OR an alarming file write (sensitive-path drop-and-execute / config tamper,
+/// JEF-309). Sharing that one predicate with the corroboration and quarantine paths keeps the
+/// alarm sources from drifting apart. Benign
+/// `NetworkConnection`/`FileRead`/`LibraryLoaded`/`SecretRead` and benign writes (an app's own
+/// `/data`/`/tmp`/logs) — a workload's own observed activity — are NOT corroborating and so
+/// must never anchor an `exploitable` (the watcher-server false breach: three benign
+/// connections to its own DB/metrics were read as a live signal).
 fn corroborating_behavior(behavior: &Behavior) -> bool {
-    behavior.is_alert() || crate::engine::observe::exec_class::notable_exec(behavior).is_some()
+    crate::engine::observe::alarm_class::is_alarming_now(behavior)
 }
 
 /// Zero-anchor safety net (the symmetric backstop to [`guard_fabricated_cve`]): a 1B judge

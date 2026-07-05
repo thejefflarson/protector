@@ -7,6 +7,7 @@
 //! source of truth, so it is the honest v0.
 
 pub mod adapter;
+pub mod alarm_class;
 pub mod audit;
 pub mod epss;
 pub mod exec_class;

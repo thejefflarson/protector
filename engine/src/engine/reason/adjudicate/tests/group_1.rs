@@ -360,7 +360,10 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
         "zero-anchor exploitable must downgrade to refuted, got {v:?}"
     );
 
-    // Other benign behaviors (file read, library load, secret read) are likewise no anchor.
+    // Other benign behaviors (file read, library load, secret read, a benign own-data write)
+    // are likewise no anchor. A benign write (an app's own log — NOT a sensitive path) must not
+    // anchor the verdict any more than the notable-exec/alert anchors would falsely trip
+    // (JEF-309 conservatism, ADR-0011).
     let benign_misc = vec![
         Behavior::FileRead {
             path: "/etc/config".into(),
@@ -371,6 +374,9 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
         Behavior::SecretRead {
             secret: "app/own-creds".into(),
             source: crate::engine::graph::SecretReadSource::Mounted,
+        },
+        Behavior::FileWrite {
+            path: "/var/log/app.log".into(),
         },
     ];
     assert!(matches!(
@@ -438,6 +444,22 @@ fn unsupported_exploitable_guard_preserves_each_anchored_case() {
             Verdict::Exploitable("interactive shell spawned".into()),
             &[],
             &notable,
+            false,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // Anchor 3c — a corroborating runtime behavior: an alarming file write (a sensitive-path
+    // drop-and-execute, JEF-309). The guard must see the SAME alarm the corroboration/quarantine
+    // paths do, so a drop-and-execute anchors the model's Exploitable call.
+    let alarming_write = vec![Behavior::FileWrite {
+        path: "/usr/bin/dropper".into(),
+    }];
+    assert!(matches!(
+        guard_unsupported_exploitable(
+            Verdict::Exploitable("binary dropped into PATH".into()),
+            &[],
+            &alarming_write,
             false,
         ),
         Verdict::Exploitable(_)
