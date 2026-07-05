@@ -20,13 +20,24 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake curl ca-certificates zstd \
     && rm -rf /var/lib/apt/lists/*
 ENV CFLAGS=-std=gnu17
-# Prebuilt bpf-linker (aarch64-musl, sha256-pinned) + nightly/rust-src for the bpf
-# target's build-std. Prebuilt so the image build stays light (no LLVM source build).
+# Prebuilt bpf-linker (sha256-pinned, per-arch) + nightly/rust-src for the bpf target's
+# build-std. Prebuilt so the image build stays light (no LLVM source build).
+# ARCH-AWARE: with native multi-arch builders (JEF-295/#161) this builder stage runs on
+# the TARGET arch, so a hardcoded aarch64 bpf-linker Syntax-errors when run on the amd64
+# build leg ("bpf-linker: 1: Syntax error"). Pick the musl build by TARGETARCH
+# (arm64->aarch64, amd64->x86_64), keeping the per-arch SHA-256 pin.
 ARG BPF_LINKER_VERSION=0.10.4
-ARG BPF_LINKER_SHA256=c3638cd3cb735ff85705905a07e0df61c0f9426480334c8e2efe5cb92fd9d3de
+ARG BPF_LINKER_SHA256_ARM64=c3638cd3cb735ff85705905a07e0df61c0f9426480334c8e2efe5cb92fd9d3de
+ARG BPF_LINKER_SHA256_AMD64=4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015
+ARG TARGETARCH
 RUN set -eux; \
-    curl -fsSL -o /tmp/bl.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-aarch64-unknown-linux-musl.tar.zst"; \
-    echo "${BPF_LINKER_SHA256}  /tmp/bl.tar.zst" | sha256sum -c -; \
+    case "$TARGETARCH" in \
+      arm64) bl_arch=aarch64; bl_sum="$BPF_LINKER_SHA256_ARM64" ;; \
+      amd64) bl_arch=x86_64;  bl_sum="$BPF_LINKER_SHA256_AMD64" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/bl.tar.zst "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-${bl_arch}-unknown-linux-musl.tar.zst"; \
+    echo "${bl_sum}  /tmp/bl.tar.zst" | sha256sum -c -; \
     tar --zstd -xf /tmp/bl.tar.zst -C /tmp; \
     install -m 0755 "$(find /tmp -maxdepth 2 -name bpf-linker -type f | head -1)" /usr/local/bin/bpf-linker; \
     rm /tmp/bl.tar.zst
