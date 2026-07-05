@@ -19,7 +19,7 @@
 //! dry-run actuator, every decision is propose/forbid and nothing reaches the
 //! cluster. What's left is integration behind ports that already exist and are
 //! tested — the cluster/model I/O glue (watch streams, kube apply/delete, the
-//! Falco receiver, the model call).
+//! behavioral-ingest receiver, the model call).
 
 // Modules are grouped by domain (see each group's mod.rs):
 //   graph/   — the stable vocabulary + its diff (ADR-0003/0004)
@@ -307,7 +307,7 @@ impl Engine {
     /// Proof, ledger reconciliation, and the action decision run **every pass** —
     /// not only on a structural delta — because corroboration, vulnerability, and
     /// health facts can change a chain's status without changing the graph's shape
-    /// (a Falco event is the motivating case: it flips a chain to fully
+    /// (a runtime alert is the motivating case: it flips a chain to fully
     /// corroborated without adding a node or edge). The structural delta only gates
     /// the *verbose reporting* (the Q1 threat-delta and per-chain logs), to keep a
     /// quiet cluster quiet.
@@ -426,24 +426,6 @@ impl Engine {
         // the bake snapshot must reflect the current pass even while the model is judging.
         bake.corroborations = corroborations;
         self.findings.set_bake(bake);
-
-        // Corroboration-parity report (JEF-310, Falco-retirement F6): fold the pass's breach
-        // chains by their corroboration SOURCE — Falco `Alert` vs first-party agent behavior —
-        // and publish the agent-uncovered (Falco-only) count. Read-only measurement over the same
-        // chains (ADR-0016): it drives no decision, it only tells us whether the agent has parity
-        // with Falco yet (the F7 retire-Falco gate consumes it). Mirrored to OTLP below.
-        let parity = state::derive_parity(&chains);
-        self.metrics
-            .parity_agent_uncovered
-            .record(parity.agent_uncovered, &[]);
-        self.metrics
-            .parity_falco_corroborated
-            .record(parity.falco_corroborated, &[]);
-        self.metrics
-            .parity_agent_corroborated
-            .record(parity.agent_corroborated, &[]);
-        self.metrics.parity_both.record(parity.both, &[]);
-        self.findings.set_parity(parity);
 
         // Runtime-corroboration coverage per node (JEF-308) for the readiness row.
         if let Some(liveness) = &self.agent_liveness {

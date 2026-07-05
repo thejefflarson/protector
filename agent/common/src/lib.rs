@@ -22,7 +22,7 @@ pub const KIND_LIBRARY_LOAD: u32 = 3;
 /// A process was exec'd (fentry on `security_bprm_check`). Carries the exec'd binary's
 /// path, read from `linux_binprm->filename`; userspace emits a ProcessExec. Reuses
 /// [`FileEvent`] (kind discriminates) — the runtime signal for "unexpected process
-/// spawned" (Falco-rule parity, ADR-0014).
+/// spawned" (ADR-0014).
 pub const KIND_EXEC: u32 = 4;
 /// A process gained root (fentry on `security_task_fix_setuid`). The eBPF side filters to
 /// the escalation case (`new_uid == 0 && old_uid != 0`) so this is always a real
@@ -32,7 +32,7 @@ pub const KIND_PRIV_CHANGE: u32 = 5;
 /// A file was written (fentry on `security_file_open`, filtered in-kernel to write-intent
 /// open flags — JEF-306). Carries the written file's path (`bpf_d_path`); userspace emits
 /// a `Behavior::FileWrite`. The runtime signal for container drift: drop-and-execute /
-/// config tampering (Falco file-write-critical parity, ADR-0014). Reuses [`FileEvent`]
+/// config tampering (ADR-0014). Reuses [`FileEvent`]
 /// (the `kind` discriminates it from the read/exec/library file events).
 pub const KIND_FILE_WRITE: u32 = 6;
 

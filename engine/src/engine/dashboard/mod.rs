@@ -29,7 +29,7 @@ use axum::routing::get;
 use super::journal::DecisionJournal;
 use super::policy_log::PolicyDecisionLog;
 use super::state::{
-    BakeStats, Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
+    Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
     default_window_report, derive_readiness,
 };
 use view_model::props::{
@@ -79,11 +79,9 @@ impl DashboardState {
     pub fn readiness(&self) -> Readiness {
         let config: ReadinessConfig = self.findings.readiness_config();
         let health: ModelHealth = self.findings.model_health();
-        let bake: BakeStats = self.findings.bake();
         let last_pass: Option<SystemTime> = self.findings.last_pass();
         let runtime = self.findings.runtime_coverage();
-        let parity = self.findings.parity();
-        derive_readiness(&config, health, &bake, last_pass, &runtime).with_parity(&parity)
+        derive_readiness(&config, health, last_pass, &runtime)
     }
 
     /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The

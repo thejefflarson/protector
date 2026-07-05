@@ -3,8 +3,8 @@
 //! Surfacing is otherwise pull-only — a breach decision lands in the findings snapshot and the
 //! durable journal ([`super::journal`]), but a solo operator never *learns* of it
 //! unless actively reading that state. This notifier POSTs a breach decision to an
-//! operator-configured URL (`PROTECTOR_ENGINE_NOTIFY_URL`) — the inverse of the
-//! falcosidekick ingest — documented to target an in-cluster sink (Alertmanager /
+//! operator-configured URL (`PROTECTOR_ENGINE_NOTIFY_URL`) — the outbound inverse of the
+//! behavioral ingest — documented to target an in-cluster sink (Alertmanager /
 //! ntfy / gotify).
 //!
 //! Posture, per ADR-0018:

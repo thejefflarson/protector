@@ -59,8 +59,9 @@ impl Adapter for RuntimeAdapter {
         // UID → the Pod from the watch, so events a sensor attributed by cgroup UID (the
         // eBPF agent) resolve to a workload without the agent ever touching the cluster
         // API (ADR-0014). The full Pod (not just ns/name) is needed to refine a raw
-        // FileRead into a SecretRead via its volumeMounts. Falco events carry namespace/
-        // pod directly, so only build the map when something needs UID resolution.
+        // FileRead into a SecretRead via its volumeMounts. Observations attributed by
+        // namespace/pod directly need no UID map, so only build it when something needs
+        // UID resolution.
         let by_uid: std::collections::HashMap<String, &Pod> = if snapshot
             .runtime_events
             .iter()

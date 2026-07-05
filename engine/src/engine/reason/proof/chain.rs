@@ -351,7 +351,7 @@ pub(super) fn path_steps(
 }
 
 /// Whether a workload node carries **direct live on-pod runtime evidence** of
-/// exploitation right now — any "alarming-now" signal ([`is_alarming_now`]): a Falco-grade
+/// exploitation right now — any "alarming-now" signal ([`is_alarming_now`]): an
 /// `Alert`, a hands-on-keyboard notable exec (interactive shell / package manager, JEF-117),
 /// or an alarming file write (sensitive-path drop-and-execute / config tamper, JEF-309). This
 /// is the "actively exploited" predicate (JEF-284 condition 2): unlike [`compromisable`] (a

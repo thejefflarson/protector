@@ -76,6 +76,7 @@ the live proof+enrichment, not a fixed timer.
   self-reverting isolation. A wrong call is at worst a temporary, auto-lifting cut of one
   internet-exposed workload's network.
 - **Enrichment coverage is load-bearing.** The decision is only as good as (2): CVE scan,
-  static reachability (M2), and behavioral telemetry (eBPF agent + Falco). Gaps weaken the
+  static reachability (M2), and behavioral telemetry (the first-party eBPF agent, or any
+  sensor via the tool-agnostic behavioral port). Gaps weaken the
   model's input. Prompt-injection hardening (JEF-106) matters precisely because the model
   decides on (2)'s evidence and acts on it.

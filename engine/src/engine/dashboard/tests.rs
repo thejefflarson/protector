@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::state::{
-    BakeStats, EntryEvidence, Finding, Judgement, LeftAloneEntry, ModelHealth, PathStep, Readiness,
+    EntryEvidence, Finding, Judgement, LeftAloneEntry, ModelHealth, PathStep, Readiness,
     ReadinessConfig, Report, ReversionRecord, RuntimeCoverage, WouldActEntry, derive_readiness,
 };
 
@@ -26,12 +26,9 @@ pub(super) fn judging_readiness() -> Readiness {
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
     };
-    let mut bake = BakeStats::default();
-    bake.signals_by_variant.insert("alert".into(), 1);
     derive_readiness(
         &config,
         ModelHealth::Ok,
-        &bake,
         Some(SystemTime::now()),
         &RuntimeCoverage::default(),
     )
@@ -42,7 +39,6 @@ fn warming_readiness() -> Readiness {
     derive_readiness(
         &ReadinessConfig::default(),
         ModelHealth::Unknown,
-        &BakeStats::default(),
         None,
         &RuntimeCoverage::default(),
     )
@@ -62,7 +58,6 @@ fn timed_out_readiness() -> Readiness {
     derive_readiness(
         &config,
         ModelHealth::Timeout,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &RuntimeCoverage::default(),
     )
@@ -836,12 +831,9 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
     };
-    let mut bake = BakeStats::default();
-    bake.signals_by_variant.insert("alert".into(), 1);
     let readiness = derive_readiness(
         &config,
         ModelHealth::Ok,
-        &bake,
         Some(SystemTime::now()),
         &RuntimeCoverage::default(),
     );

@@ -357,8 +357,9 @@ impl Snapshot {
         let (image_secrets, config_audits, rbac_assessments) = trivy_findings;
         let (linkerd_servers, linkerd_authz_policies, linkerd_mtls_auths) = linkerd;
 
-        // Runtime events come from a runtime sensor (Falco/Tetragon) — typically a
-        // stream, not a list. Wiring that source is the remaining cluster-facing
+        // Runtime events come from a runtime sensor (the first-party eBPF agent, or any
+        // sensor via the behavioral port) — typically a stream, not a list. Wiring that
+        // source is the remaining cluster-facing
         // glue for the RuntimeEvidence port; until it lands this is empty and the
         // RuntimeAdapter contributes nothing. The adapter and the action-bar
         // corroboration it drives are unit-tested against `RuntimeObservation`.

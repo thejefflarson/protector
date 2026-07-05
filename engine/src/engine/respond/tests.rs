@@ -528,7 +528,7 @@ fn internal_active_snapshot(with_alert: bool) -> Snapshot {
     let runtime_events = if with_alert {
         vec![RuntimeObservation {
             attribution: Attribution::by_namespaced_name("app", "watcher"),
-            source: Some("falco".into()),
+            source: Some("alert".into()),
             observed_at_ms: None,
             node: None,
             behavior: Behavior::Alert {

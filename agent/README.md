@@ -7,9 +7,9 @@ secret reads, library loads), resolves each event's cgroup→pod, and POSTs norm
 observations to the engine's ingest (`POST /behavior`). Passive and read-only — it
 observes, it never blocks or rewrites; enforcement stays the engine's reversible cut.
 
-This makes protector self-sufficient (no dependency on Falco/Tetragon), while the
-engine can still ingest those tools through a translation adapter — depend on the
-*signal*, not the source ([ADR-0003](../docs/adr/0003-capability-ports.md)).
+This makes protector self-sufficient (no dependency on a third-party runtime sensor),
+while the engine can still ingest such a tool through a translation adapter — depend on
+the *signal*, not the source ([ADR-0003](../docs/adr/0003-capability-ports.md)).
 
 ## Layout
 

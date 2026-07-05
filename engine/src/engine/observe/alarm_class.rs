@@ -1,14 +1,11 @@
 //! The engine-side **"alarming-now"** classifier (JEF-309): which agent-observed
-//! behaviors are a *tamper-now* signal on par with a Falco critical.
+//! behaviors are a *tamper-now* signal that evidences active intrusion.
 //!
 //! This generalizes [`super::exec_class::notable_exec`] (an interactive shell / package
 //! manager run in a container, JEF-55/JEF-117) into the single predicate the corroboration
 //! and quarantine paths key on. Its new arm is [`alarming_write`]: a
 //! [`Behavior::FileWrite`] to a **sensitive path** — the container-drift / drop-and-execute
-//! / config-tamper subset of the F2 write signal (JEF-306). Falco fires critical on exactly
-//! this ("Write below etc", "Write below binary dir", drop-and-execute drift), and the F0
-//! audit (`docs/falco-parity-audit.md`) found drop-and-execute is THE live critical signal on
-//! this cluster; F3 restores that engine-side.
+//! / config-tamper subset of the F2 write signal (JEF-306), classified engine-side.
 //!
 //! ## Why here (JEF-113 pattern)
 //! The shared [`Behavior`] wire type stays **pure data**: the agent emits the written path,
@@ -32,12 +29,12 @@
 use crate::engine::graph::Behavior;
 
 /// Directories whose contents are **sensitive** — a write at or below one of these is
-/// container drift worth corroborating (Falco "Write below etc / binary dir" parity). Matched
+/// container drift worth corroborating (a "write below etc / binary dir" tamper). Matched
 /// with a segment-aligned prefix ([`under`]), so `/etc` matches `/etc/passwd` but never
 /// `/etcd` or `/etc-backup`. Kept explicit and conservative (ADR-0011): only paths an
 /// immutable container image should never be rewriting at runtime.
 const SENSITIVE_DIRS: &[&str] = &[
-    // System configuration — Falco "Write below etc". Also covers /etc/ssh, /etc/passwd, and
+    // System configuration — "write below etc". Also covers /etc/ssh, /etc/passwd, and
     // /etc/cron* (the latter classified with a more specific label by `is_cron_path`).
     "/etc",
     // Executable directories — writing a binary here is drop-into-PATH / on-disk binary tamper
@@ -103,7 +100,7 @@ fn is_ssh_key_path(path: &str) -> bool {
 /// config-tamper write (JEF-309) — or `None` for a benign write (an app writing its own
 /// `/data`, `/tmp`, or logs). Mirrors [`super::exec_class::notable_exec`]: it promotes a
 /// [`Behavior::FileWrite`] to **blanket** corroboration (any objective) in
-/// `reason::proof::corroborate`, exactly as a Falco critical or a notable exec does. Always
+/// `reason::proof::corroborate`, exactly as an `Alert` or a notable exec does. Always
 /// `None` for any non-write behavior. The label is a fixed internal string (never untrusted
 /// input), safe to embed in the prompt/output.
 pub fn alarming_write(behavior: &Behavior) -> Option<&'static str> {
@@ -126,7 +123,7 @@ pub fn alarming_write(behavior: &Behavior) -> Option<&'static str> {
 }
 
 /// The single **"alarming-now"** predicate (JEF-309) shared by every blanket-corroboration
-/// consumer: whether `behavior` is a tamper-now signal on par with a Falco critical —
+/// consumer: whether `behavior` is a tamper-now signal that evidences active intrusion —
 ///   * an [`Alert`](Behavior::Alert) (a sensor rule fired),
 ///   * a *notable* exec — an interactive shell / package manager in a container
 ///     ([`super::exec_class::notable_exec`], JEF-55/JEF-117), or
@@ -156,7 +153,7 @@ mod tests {
     fn alarming_write_flags_each_sensitive_class() {
         // Each sensitive class the F3 policy promotes, with an absolute path the agent emits.
         let sensitive = [
-            // System config — Falco "Write below etc".
+            // System config — "write below etc".
             "/etc/passwd",
             "/etc/ssh/sshd_config",
             "/etc/ld.so.preload",

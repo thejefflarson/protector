@@ -8,11 +8,10 @@
 use maud::{Markup, html};
 
 use crate::engine::dashboard::view_model::props::{
-    NodeRowProps, ParityReportProps, ReadinessRowProps, ReadinessViewProps,
+    NodeRowProps, ReadinessRowProps, ReadinessViewProps,
 };
 
-/// Render the Readiness view: the coverage rows and the corroboration-parity panel under the
-/// persistent strip (composed by `page`).
+/// Render the Readiness view: the coverage rows under the persistent strip (composed by `page`).
 pub fn readiness_view(v: &ReadinessViewProps) -> Markup {
     html! {
         main.view.view-readiness {
@@ -25,56 +24,6 @@ pub fn readiness_view(v: &ReadinessViewProps) -> Markup {
                 ul.cov-rows {
                     @for row in &v.rows {
                         (coverage_row(row))
-                    }
-                }
-            }
-            (parity_panel(&v.parity))
-        }
-    }
-}
-
-/// The corroboration-parity panel (JEF-310, Falco-retirement F6): the Falco-vs-agent
-/// corroboration split and the HONEST retirement reading. The state chip carries colour + glyph +
-/// word (never colour alone); "nothing to compare" renders as its own non-green state so a
-/// Falco-silent window never reads as a reassuring "0 uncovered = safe to retire" (ADR-0016). The
-/// uncovered workload names are UNTRUSTED — maud auto-escapes them (never `PreEscaped`).
-fn parity_panel(p: &ParityReportProps) -> Markup {
-    html! {
-        section.parity-detail aria-label="Falco-retirement corroboration parity"
-            data-state=(p.state.token())
-        {
-            h2.section-h.t-h2 { "Falco-retirement corroboration parity" }
-            p.section-sub.t-body.muted {
-                "while both sensors run, each breach-chain corroboration is attributed to its source. \
-                 The agent is ready to replace Falco when the agent-uncovered count (Falco saw it, the \
-                 agent didn\u{2019}t) holds at 0 over a bake \u{2014} a window with no Falco alerts is \
-                 \u{201c}nothing to compare\u{201d}, not a go-signal."
-            }
-            div.parity-head {
-                span class={ "parity-state parity-" (p.state.token()) } {
-                    span.parity-state-glyph aria-hidden="true" { (p.state.glyph()) }
-                    " "
-                    span.parity-state-word { (p.state.word()) }
-                }
-            }
-            p.parity-summary.t-data { (p.summary) }
-            ul.parity-counts.t-data {
-                li { span.parity-count-label { "agent-uncovered (Falco-only)" } " " span.parity-count-val { (p.agent_uncovered) } }
-                li { span.parity-count-label { "corroborated by both" } " " span.parity-count-val { (p.both) } }
-                li { span.parity-count-label { "Falco corroborations" } " " span.parity-count-val { (p.falco_corroborated) } }
-                li { span.parity-count-label { "agent corroborations" } " " span.parity-count-val { (p.agent_corroborated) } }
-            }
-            @if !p.uncovered_entries.is_empty() {
-                details.parity-uncovered {
-                    summary.parity-uncovered-summary.t-micro {
-                        (p.uncovered_entries.len())
-                        " agent-uncovered workload"
-                        (if p.uncovered_entries.len() == 1 { "" } else { "s" })
-                    }
-                    ul.parity-uncovered-list.t-data {
-                        @for entry in &p.uncovered_entries {
-                            li.parity-uncovered-item { (entry) }
-                        }
                     }
                 }
             }

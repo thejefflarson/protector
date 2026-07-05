@@ -13,16 +13,14 @@ use crate::engine::graph::{Behavior, Node, SecurityGraph};
 /// `attack` — the `corroborates(behavior, objective)` relation (ADR-0014). This is the
 /// per-objective seam the ADR's non-shadow design is stated in terms of.
 ///
-/// An *alerting* signal corroborates **any** objective: a Falco critical means "an
-/// attack is happening now" regardless of which chain. An interactive-shell or
-/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): it is the
-/// agent-side equivalent of Falco's "terminal shell in container" / "package management
-/// in container" criticals — a hands-on-keyboard / tamper-now signal that, like the alert,
-/// evidences active intrusion irrespective of which chain it lands on. An *alarming* file
-/// write (JEF-309) — a write to a sensitive path (drop-and-execute / config tamper) — is the
-/// third such blanket source: the agent-side restoration of Falco's "Write below etc / binary
-/// dir" and drop-and-execute criticals (`observe::alarm_class::alarming_write`). This is the
-/// seam that lets us retire Falco (JEF-56). The agent's own mundane behaviors
+/// An *alerting* signal corroborates **any** objective: an alert means "an attack is
+/// happening now" regardless of which chain. An alert arrives via the tool-agnostic
+/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell or
+/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): a
+/// hands-on-keyboard / tamper-now signal that, like the alert, evidences active intrusion
+/// irrespective of which chain it lands on. An *alarming* file write (JEF-309) — a write to
+/// a sensitive path (drop-and-execute / config tamper) — is the third such blanket source
+/// (`observe::alarm_class::alarming_write`). The agent's own mundane behaviors
 /// (connection / secret-read / library-load) corroborate per objective — each only for
 /// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
 /// "everything corroborates everything" blanket the alert gate intentionally is.
@@ -32,7 +30,7 @@ use crate::engine::graph::{Behavior, Node, SecurityGraph};
 /// chain EXFILTRATION (T1041), and a proven foothold INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING
 /// (T1190). A connection to a **high-signal foothold peer** — a cloud-metadata/IMDS
 /// endpoint or the Kubernetes API server — also corroborates INITIAL_ACCESS (JEF-307), the
-/// engine-side restoration of Falco's cloud-metadata / API-server criticals.
+/// engine-side classification of a cloud-metadata / API-server contact.
 ///
 /// **Shadow-gated (ADR-0014):** these arms only set `corroborated=true`; they are inert
 /// for *actuation*, which stays gated behind `engine.enable` (empty = shadow). They
@@ -50,12 +48,11 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         //
         // JEF-307: a connection to a **high-signal foothold peer** — a cloud-metadata /
         // IMDS credential endpoint or the Kubernetes API server — corroborates a FOOTHOLD
-        // (Initial Access, T1190) instead. These are the Falco "Contact cloud metadata
-        // service" / "Contact K8S API Server From Container" criticals, restored
-        // ENGINE-SIDE: the node-local agent has no cluster creds to know what a peer is, so
-        // the engine classifies it from the JEF-131-resolved peer (`observe::peer_class`,
-        // zero-egress, no wire change). Conservative on purpose (ADR-0011): only these
-        // specific peers promote — ordinary in-cluster and ordinary internet egress do NOT.
+        // (Initial Access, T1190) instead. Classified ENGINE-SIDE: the node-local agent has
+        // no cluster creds to know what a peer is, so the engine classifies it from the
+        // JEF-131-resolved peer (`observe::peer_class`, zero-egress, no wire change).
+        // Conservative on purpose (ADR-0011): only these specific peers promote — ordinary
+        // in-cluster and ordinary internet egress do NOT.
         Behavior::NetworkConnection { internet, .. } => {
             (*internet && attack.tactic == Tactic::Exfiltration)
                 || (attack.tactic == Tactic::InitialAccess
@@ -73,10 +70,9 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
         // A *notable* exec — an interactive shell or package manager in the container
-        // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): it is the
-        // agent-side replacement for Falco's "terminal shell in container" / "package
-        // management in container" criticals, a tamper-now signal that evidences active
-        // intrusion regardless of chain. Conservative on purpose: a *bare* ProcessExec
+        // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): a tamper-now
+        // signal that evidences active intrusion regardless of chain. Conservative on
+        // purpose: a *bare* ProcessExec
         // (anything else) stays NON-corroborating — legit entrypoints exec constantly
         // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
         // only. `notable_exec` is `Some` exactly for shell/pkg-mgr execs (JEF-113: the
@@ -89,10 +85,9 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
         Behavior::PrivilegeChange { .. } => false,
         // An *alarming* FileWrite — a sensitive-path / drop-and-execute / config-tamper drift
-        // write (JEF-309) — corroborates ANY objective like an Alert / notable exec does: it is
-        // the agent-side replacement for Falco's "Write below etc / binary dir" and
-        // drop-and-execute criticals, a tamper-now signal that evidences active intrusion
-        // regardless of chain. Conservative on purpose (ADR-0011): a *benign* write (an app
+        // write (JEF-309) — corroborates ANY objective like an Alert / notable exec does: a
+        // tamper-now signal that evidences active intrusion regardless of chain. Conservative
+        // on purpose (ADR-0011): a *benign* write (an app
         // writing its own `/data`/`/tmp`/logs — the common case) stays NON-corroborating and
         // remains model evidence only. `alarming_write` is `Some` exactly for the sensitive
         // subset (JEF-113: the path judgement is engine policy in `observe::alarm_class`, not on
@@ -103,65 +98,9 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
     }
 }
 
-/// Which SENSOR a corroborating behavior came from (JEF-310), derived from the behavior
-/// itself: a Falco rule fires as [`Behavior::Alert`]; every other behavior is emitted by the
-/// first-party eBPF agent. This is the attribution the F6 corroboration-parity report keys on
-/// — while both sensors run we measure Falco-only (agent-uncovered) corroboration, and that
-/// count trending to ≈0 over a bake is the go signal for retiring Falco (JEF-56).
-///
-/// Attribution is by the behavior, NOT by the observation's `source` string: the source is a
-/// free-text provenance hint any sensor sets, whereas the behavior is the typed fact the
-/// corroboration actually rests on (an `Alert` is Falco's rule-fired signal; a
-/// connection/read/exec/write is the agent's). Deriving from the behavior keeps the parity
-/// measurement honest even if a sensor mislabels its `source`.
-///
-/// [`Behavior::Alert`]: crate::engine::graph::Behavior::Alert
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CorroborationSource {
-    /// A Falco `Alert` behavior — the third-party rule engine via its adapter.
-    Falco,
-    /// Any first-party eBPF-agent behavior (connection / secret-read / library-load /
-    /// exec / privilege-change / file-write).
-    Agent,
-}
-
-impl CorroborationSource {
-    /// The sensor a behavior is attributed to (JEF-310) — `Alert` ⇒ Falco, everything else ⇒
-    /// agent. The single owner of the source-attribution rule so the parity report and any
-    /// future consumer can't drift.
-    pub(crate) fn of(behavior: &crate::engine::graph::Behavior) -> Self {
-        match behavior {
-            crate::engine::graph::Behavior::Alert { .. } => CorroborationSource::Falco,
-            _ => CorroborationSource::Agent,
-        }
-    }
-}
-
-/// The per-SOURCE corroboration breakdown for one chain (JEF-310): whether a Falco `Alert`
-/// signal and/or a first-party agent behavior on the entry corroborates it. Both `false` when
-/// the chain isn't corroborated at all. This is the raw material the corroboration-parity
-/// report folds into its Falco-only (agent-uncovered) count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct CorroborationSources {
-    /// A Falco `Alert` on the entry corroborates this chain.
-    pub(crate) by_falco: bool,
-    /// A first-party agent behavior on the entry corroborates this chain.
-    pub(crate) by_agent: bool,
-}
-
-impl CorroborationSources {
-    /// Whether ANY source corroborates — the `corroborated-now` predicate (ADR-0009). Exactly
-    /// the old boolean; the per-source split is additive.
-    pub(crate) fn any(self) -> bool {
-        self.by_falco || self.by_agent
-    }
-}
-
-/// Which sensor sources have a live signal on `entry` that corroborates a chain whose
-/// objective has technique `attack` and whose entry is the proven foothold `foothold` — the
-/// per-source refinement of the `corroborated-now` predicate (JEF-310). See [`corroborates`]
-/// for the underlying relation; [`CorroborationSources::any`] collapses this back to the plain
-/// `corroborated` boolean (ADR-0009).
+/// Whether any live signal on `entry` corroborates a chain whose objective has technique
+/// `attack` and whose entry is the proven foothold `foothold` — the `corroborated-now`
+/// predicate (ADR-0009). See [`corroborates`] for the underlying per-behavior relation.
 ///
 /// A behavior corroborates if it evidences **either** the objective's tactic **or** the
 /// foothold's tactic (JEF-77). The objective side is the per-objective seam (a SecretRead
@@ -170,28 +109,19 @@ impl CorroborationSources {
 /// dormant — a vuln-matched library load (already pruned by JEF-75) on an internet-facing
 /// entry evidences the *entry* foothold (T1190), never an objective's `attack`. With no
 /// foothold (`None`) only the objective side applies, so an assume-breach chain is
-/// unaffected. Read-only measurement, never a gate (ADR-0016).
-pub(super) fn corroborating_sources(
+/// unaffected.
+pub(super) fn corroborated_for(
     runtime: &[crate::engine::graph::RuntimeSignal],
     attack: &AttackRef,
     foothold: Option<&AttackRef>,
-) -> CorroborationSources {
-    let mut sources = CorroborationSources::default();
-    for s in runtime {
-        let hits = corroborates(&s.behavior, attack)
-            || foothold.is_some_and(|f| corroborates(&s.behavior, f));
-        if hits {
-            match CorroborationSource::of(&s.behavior) {
-                CorroborationSource::Falco => sources.by_falco = true,
-                CorroborationSource::Agent => sources.by_agent = true,
-            }
-        }
-    }
-    sources
+) -> bool {
+    runtime.iter().any(|s| {
+        corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
+    })
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
-/// per entry so [`corroborating_sources`] doesn't re-look-up the constant entry node on every
+/// per entry so [`corroborated_for`] doesn't re-look-up the constant entry node on every
 /// objective in the per-objective loop.
 pub(super) fn entry_runtime(
     graph: &SecurityGraph,

@@ -9,14 +9,14 @@
 //! classify a [`Behavior`] from the OUTSIDE, mirroring how the rest of the engine treats
 //! `Behavior` as inert evidence.
 //!
-//! Falco-rule parity: an interactive-shell exec is "Terminal shell in container"; a
-//! package-manager exec is "package management launched" — both classic container-tamper
-//! signals, classified ENGINE-SIDE from the path the agent already emits (no wire change).
+//! An interactive-shell exec is a "terminal shell in container"; a package-manager exec is
+//! "package management launched" — both classic container-tamper signals, classified
+//! ENGINE-SIDE from the path the agent already emits (no wire change).
 
 use crate::engine::graph::Behavior;
 
 /// Interactive shells a process-exec might be (matched on the binary's basename).
-/// An exec of one of these inside a container is the classic Falco "Terminal shell in
+/// An exec of one of these inside a container is the classic "terminal shell in
 /// container" runtime signal (JEF-55). Kept deliberately small and conservative —
 /// well-known shell *interpreters*, not every program that can run a script — because a
 /// false "shell" annotation is misleading model evidence.
@@ -29,7 +29,7 @@ const INTERACTIVE_SHELLS: &[&str] = &[
 ];
 
 /// Package managers a process-exec might be (matched on the binary's basename). An exec
-/// of one inside a running container is the classic Falco "package management launched"
+/// of one inside a running container is the classic "package management launched"
 /// runtime signal (JEF-55): images are meant to be immutable, so installing software at
 /// runtime is a strong tamper indicator. Small and explicit on purpose.
 const PACKAGE_MANAGERS: &[&str] = &[
@@ -52,7 +52,7 @@ fn basename(path: &str) -> &str {
 }
 
 /// Whether `behavior` is a [`Behavior::ProcessExec`] of an interactive **shell**
-/// (sh/bash/zsh/ash/dash) — the Falco "Terminal shell in container" rule, classified
+/// (sh/bash/zsh/ash/dash) — the "terminal shell in container" signal, classified
 /// ENGINE-SIDE from the path the agent already emits (JEF-55), so no wire change. The
 /// match is on the binary's basename, so `/bin/bash` and `bash` both count. Always
 /// `false` for any other behavior.
@@ -64,8 +64,8 @@ pub fn is_interactive_shell(behavior: &Behavior) -> bool {
 }
 
 /// Whether `behavior` is a [`Behavior::ProcessExec`] of a **package manager**
-/// (apt/apt-get/apk/yum/dnf/pip/pip3/gem/npm) — the Falco "package management launched"
-/// rule, classified ENGINE-SIDE from the emitted path (JEF-55), no wire change. Matched
+/// (apt/apt-get/apk/yum/dnf/pip/pip3/gem/npm) — the "package management launched"
+/// signal, classified ENGINE-SIDE from the emitted path (JEF-55), no wire change. Matched
 /// on the binary's basename. Always `false` for any other behavior.
 pub fn is_package_manager(behavior: &Behavior) -> bool {
     match behavior {
@@ -119,14 +119,14 @@ mod tests {
         // and bare paths to exercise basename extraction.
         let exec = |p: &str| Behavior::ProcessExec { path: p.into() };
         let cases = [
-            // Interactive shells — Falco "Terminal shell in container".
+            // Interactive shells — "terminal shell in container".
             ("/bin/sh", true, false),
             ("/bin/bash", true, false),
             ("bash", true, false), // bare basename, no directory
             ("/usr/bin/zsh", true, false),
             ("/bin/ash", true, false),
             ("/usr/bin/dash", true, false),
-            // Package managers — Falco "package management launched".
+            // Package managers — "package management launched".
             ("/usr/bin/apt", false, true),
             ("/usr/bin/apt-get", false, true),
             ("apk", false, true),

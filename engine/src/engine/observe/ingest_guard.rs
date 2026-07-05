@@ -199,8 +199,8 @@ pub async fn rate_limit(
 }
 
 /// Default sustained ingest rate per peer (requests/second). The agent batches and
-/// re-reports on an interval, and Falco/falcosidekick is low-volume, so this is far
-/// above legitimate traffic while still bounding a flood.
+/// re-reports on an interval, so this is far above legitimate traffic while still
+/// bounding a flood.
 pub const DEFAULT_RATE_PER_SEC: f64 = 50.0;
 
 /// Default burst allowance per peer — absorbs a normal flush/startup spike.

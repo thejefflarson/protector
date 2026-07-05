@@ -16,9 +16,9 @@ use super::props::{CoverageChip, StatusStripProps};
 const COVERAGE_FEEDS: [(&str, &str); 3] = [
     ("kev", "KEV"),
     ("epss", "EPSS"),
-    // ONE agent-sourced runtime-corroboration chip (JEF-308), replacing the former Falco + eBPF
-    // pair. It goes degraded the moment any expected node is blind (the collapsed readiness row's
-    // Degraded state), and reads as a gap (not present) when corroboration is wholly blind.
+    // ONE agent-sourced runtime-corroboration chip (JEF-308). It goes degraded the moment any
+    // expected node is blind (the collapsed readiness row's Degraded state), and reads as a gap
+    // (not present) when corroboration is wholly blind.
     ("runtime-corroboration", "Runtime"),
 ];
 
@@ -97,8 +97,8 @@ fn last_pass_age(at: SystemTime) -> String {
 mod tests {
     use super::*;
     use crate::engine::state::{
-        BakeStats, BlindReason, ModelHealth, NodeCoverage, NodeState, ReadinessConfig,
-        RuntimeCoverage, derive_readiness,
+        BlindReason, ModelHealth, NodeCoverage, NodeState, ReadinessConfig, RuntimeCoverage,
+        derive_readiness,
     };
 
     fn covered() -> ReadinessConfig {
@@ -128,25 +128,16 @@ mod tests {
 
     #[test]
     fn judging_model_strip_is_honest_calm() {
-        let mut bake = BakeStats::default();
-        bake.signals_by_variant.insert("alert".into(), 1);
         // One healthy agent node → the Runtime chip is present.
         let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
-        let r = derive_readiness(
-            &covered(),
-            ModelHealth::Ok,
-            &bake,
-            Some(SystemTime::now()),
-            &cov,
-        );
+        let r = derive_readiness(&covered(), ModelHealth::Ok, Some(SystemTime::now()), &cov);
         // Judging + covered + nothing breach/awaiting/uncertain (3 cleared) ⇒ honest all-clear.
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0);
         assert!(strip.model_is_up());
         assert!(strip.all_clear());
         assert!(!strip.watching());
         assert!(!strip.armed);
-        // The former Falco + eBPF chips are collapsed into ONE agent-sourced Runtime chip.
-        assert!(strip.coverage.iter().all(|c| c.label != "Falco"));
+        // Runtime corroboration is ONE agent-sourced Runtime chip (JEF-308).
         assert!(strip.coverage.iter().all(|c| c.label != "eBPF"));
         let runtime = strip
             .coverage
@@ -169,13 +160,7 @@ mod tests {
                 },
             ),
         ]);
-        let r = derive_readiness(
-            &covered(),
-            ModelHealth::Ok,
-            &BakeStats::default(),
-            Some(SystemTime::now()),
-            &cov,
-        );
+        let r = derive_readiness(&covered(), ModelHealth::Ok, Some(SystemTime::now()), &cov);
         let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0);
         let runtime = strip
             .coverage
@@ -197,7 +182,6 @@ mod tests {
         let r = derive_readiness(
             &covered(),
             ModelHealth::Timeout,
-            &BakeStats::default(),
             Some(SystemTime::now()),
             &RuntimeCoverage::default(),
         );
@@ -213,7 +197,6 @@ mod tests {
         let r = derive_readiness(
             &covered(),
             ModelHealth::Unknown,
-            &BakeStats::default(),
             None,
             &RuntimeCoverage::default(),
         );
@@ -228,12 +211,9 @@ mod tests {
     /// green all-clear AND the calm "watching" reading (it is louder than watching).
     #[test]
     fn established_signing_regression_forbids_green_and_watching() {
-        let mut bake = BakeStats::default();
-        bake.signals_by_variant.insert("alert".into(), 1);
         let r = derive_readiness(
             &covered(),
             ModelHealth::Ok,
-            &bake,
             Some(SystemTime::now()),
             &RuntimeCoverage::default(),
         );
@@ -255,12 +235,9 @@ mod tests {
     /// as the calmer, non-green "watching" register (a weak lead, not a breach).
     #[test]
     fn cold_signing_regression_is_watching_not_green() {
-        let mut bake = BakeStats::default();
-        bake.signals_by_variant.insert("alert".into(), 1);
         let r = derive_readiness(
             &covered(),
             ModelHealth::Ok,
-            &bake,
             Some(SystemTime::now()),
             &RuntimeCoverage::default(),
         );
@@ -277,12 +254,9 @@ mod tests {
     /// "watching" state (the model hasn't finished — quiet is not clearance). Refinement A.
     #[test]
     fn judging_with_pending_entries_is_watching_not_all_clear() {
-        let mut bake = BakeStats::default();
-        bake.signals_by_variant.insert("alert".into(), 1);
         let r = derive_readiness(
             &covered(),
             ModelHealth::Ok,
-            &bake,
             Some(SystemTime::now()),
             &RuntimeCoverage::default(),
         );

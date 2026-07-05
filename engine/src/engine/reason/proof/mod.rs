@@ -70,7 +70,7 @@ pub enum QuarantineReason {
     /// popped app two hops in counts; a merely-reached clean objective does not.
     RemotelyExploitable,
     /// **Actively exploited** — the pod has direct live on-pod runtime evidence (any
-    /// "alarming-now" signal: a Falco-grade `Alert`, a hands-on-keyboard `notable_exec`, or
+    /// "alarming-now" signal: an `Alert`, a hands-on-keyboard `notable_exec`, or
     /// an alarming file write — sensitive-path drop-and-execute / config tamper, JEF-309) —
     /// exploitation *now* — regardless of its network position (internal pods included).
     ActivelyExploited,
@@ -120,16 +120,6 @@ pub struct ProvenChain {
     /// action bar: the front door is exploitable *and* something is happening on it
     /// right now.
     pub corroborated: bool,
-    /// Whether a **Falco** `Alert` on the entry corroborates this chain (JEF-310) — the
-    /// source-attributed split of [`corroborated`](Self::corroborated). Read-only
-    /// measurement for the corroboration-parity report (Falco-retirement F6), NEVER a gate:
-    /// `corroborated` (either source) is what drives the action bar.
-    pub corroborated_by_falco: bool,
-    /// Whether a first-party **agent** behavior on the entry corroborates this chain
-    /// (JEF-310) — the other half of the source split. A chain corroborated by Falco but NOT
-    /// by the agent is "agent-uncovered": the parity gap the F6 report counts, which must
-    /// trend to ≈0 before Falco can be retired (JEF-56).
-    pub corroborated_by_agent: bool,
     /// Whether the model adjudicator confirmed this is a real, contextually-
     /// exploitable attack (ADR-0013). Defaults `true`; the veto direction of the
     /// model's judgement sets it `false`, demoting an eligible auto-action to a human
@@ -263,7 +253,7 @@ use chain::{
     MAX_PROVEN_PATHS, entry_exposed, entry_foothold, is_cuttable_edge, is_movement, link_of,
     movement_tree, path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
 };
-use corroborate::{corroborating_sources, entry_runtime};
+use corroborate::{corroborated_for, entry_runtime};
 
 /// Confirm a *proposed* chain against the graph — the deterministic gate a
 /// hypothesis (e.g. a model's guess) must pass before it counts (ADR-0001: "a
@@ -326,16 +316,14 @@ pub fn confirm(
     let foothold = entry_foothold(graph, entry_idx);
     let exposed_entry = entry_exposed(graph, entry_idx);
     let quarantine_targets = quarantine_targets_on_path(graph, entry_idx, &edges, exposed_entry);
-    let sources =
-        corroborating_sources(entry_runtime(graph, entry_idx), &attack, foothold.as_ref());
+    let corroborated =
+        corroborated_for(entry_runtime(graph, entry_idx), &attack, foothold.as_ref());
     Some(ProvenChain {
         entry: entry.clone(),
         objective,
         attack,
         foothold,
-        corroborated: sources.any(),
-        corroborated_by_falco: sources.by_falco,
-        corroborated_by_agent: sources.by_agent,
+        corroborated,
         adjudicated: true,
         promoted: false,
         exposed_entry,
@@ -394,7 +382,7 @@ pub fn prove_with(
             // — plus the entry's foothold tactic, when it has one (JEF-77), so a vuln-matched
             // library load on the front door corroborates the foothold even though no
             // objective is ever tagged INITIAL_ACCESS.
-            let sources = corroborating_sources(runtime, &attack, foothold.as_ref());
+            let corroborated = corroborated_for(runtime, &attack, foothold.as_ref());
             let steps = path_steps(&tree, entry, objective);
             let links = steps
                 .iter()
@@ -423,9 +411,7 @@ pub fn prove_with(
                 objective: graph.key_of(objective).expect("objective exists"),
                 attack,
                 foothold,
-                corroborated: sources.any(),
-                corroborated_by_falco: sources.by_falco,
-                corroborated_by_agent: sources.by_agent,
+                corroborated,
                 adjudicated: true,
                 promoted: false,
                 exposed_entry,

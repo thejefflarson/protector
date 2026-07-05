@@ -392,7 +392,7 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
 
 /// The guard is conservative: ANY single anchor — a CVE in the list (even
 /// reachability:not-observed), an exposed-secret finding, or a corroborating runtime
-/// behavior (a critical Falco alert, or a notable shell/package-manager exec, JEF-117) —
+/// behavior (an `Alert`, or a notable shell/package-manager exec, JEF-117) —
 /// leaves the model's `Exploitable` call untouched. Those are the model's (debatable)
 /// calls, not this guard's to override.
 #[test]
@@ -421,7 +421,7 @@ fn unsupported_exploitable_guard_preserves_each_anchored_case() {
         Verdict::Exploitable(_)
     ));
 
-    // Anchor 3a — a corroborating runtime behavior: a critical Falco alert (is_alert()).
+    // Anchor 3a — a corroborating runtime behavior: an Alert (is_alert()).
     let alert = vec![Behavior::Alert {
         rule: "Terminal shell in container".into(),
     }];

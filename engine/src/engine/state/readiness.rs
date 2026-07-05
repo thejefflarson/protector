@@ -11,8 +11,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use super::agent_liveness::{BlindReason, NodeState, RuntimeCoverage};
-use super::parity::{CorroborationParity, ParityReadiness};
-use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig};
+use super::verdict_store::{ModelHealth, ReadinessConfig};
 use crate::engine::signing_trust::TUF_STALE_AFTER_SECS;
 
 /// The LIVE state of one decision input — present, absent, or degraded. Distinct from a
@@ -37,8 +36,8 @@ pub enum InputState {
 /// call (the enrichment inputs of ADR-0016). JSON-serializable so the row is self-contained.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadinessRow {
-    /// A stable, machine-readable id for the input (`model` / `kev` / `falco` /
-    /// `ebpf-agent` / `journal` / `arm-state`).
+    /// A stable, machine-readable id for the input (`model` / `kev` / `epss` /
+    /// `runtime-corroboration` / `journal` / `arm-state`).
     pub id: &'static str,
     /// The human label for the input.
     pub label: &'static str,
@@ -105,61 +104,9 @@ pub struct Readiness {
     /// been exercised this run. A calm/green posture is only honest while the model is live;
     /// otherwise exposed paths are unjudged, not cleared (ADR-0016).
     pub model_judging: bool,
-    /// The corroboration-parity report (JEF-310, Falco-retirement F6): this pass's Falco-vs-agent
-    /// corroboration split and the honest retirement reading. Read-only measurement — it drives no
-    /// decision (ADR-0016); its headline "agent-uncovered" count trending to ≈0 over a bake is the
-    /// signal that Falco can be retired.
-    pub parity: ParityReport,
-}
-
-/// The rendered corroboration-parity report (JEF-310): the raw per-source counts plus the coarse
-/// [`ParityState`] and the honest one-line summary the readiness view shows. Kept as its own shape
-/// (not inlined into a `ReadinessRow`) because it is a retirement MEASUREMENT, not a decision input
-/// with an enable env var. JSON-serializable so a consumer reads the same numbers the OTLP mirror does.
-#[derive(Debug, Clone, Serialize)]
-pub struct ParityReport {
-    /// The coarse retirement reading — the honest state that must never read green off missing data.
-    pub state: ParityState,
-    /// The one-line human summary (counts + honesty caveat). Carries no untrusted text.
-    pub summary: String,
-    /// Breach chains corroborated by Falco this pass.
-    pub falco_corroborated: u64,
-    /// Breach chains corroborated by the first-party agent this pass.
-    pub agent_corroborated: u64,
-    /// Breach chains corroborated by BOTH (the parity we want).
-    pub both: u64,
-    /// Breach chains Falco corroborated with no agent-equivalent signal — the headline gap.
-    pub agent_uncovered: u64,
-    /// The distinct front-door workloads behind [`agent_uncovered`](Self::agent_uncovered) —
-    /// UNTRUSTED-adjacent cluster names, escaped at render (maud default), never `PreEscaped`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub uncovered_entries: Vec<String>,
-}
-
-/// The coarse corroboration-parity state (JEF-310), the presentation mirror of
-/// [`ParityReadiness`]. Distinct from [`InputState`] because "nothing to compare" is a real
-/// epistemic state, not an absent decision input — it must not render as a reassuring green.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ParityState {
-    /// Falco corroborated nothing this window — nothing to compare (NOT "safe to retire").
-    NothingToCompare,
-    /// Falco corroborated chains the agent did not — agent-uncovered gap remains.
-    Uncovered,
-    /// Every Falco-corroborated chain was also agent-corroborated — parity this window.
-    Parity,
 }
 
 impl Readiness {
-    /// Attach the corroboration-parity report (JEF-310) folded from this pass's proven chains.
-    /// Kept separate from [`derive_readiness`] because the parity comes from the chains, not the
-    /// config/health/coverage inputs the rest of the snapshot reads. Read-only (ADR-0016).
-    #[allow(dead_code)]
-    pub(crate) fn with_parity(mut self, parity: &CorroborationParity) -> Self {
-        self.parity = parity_report(parity);
-        self
-    }
-
     /// How many enrichment/decision inputs are absent or degraded — the count the
     /// first-run discrimination keys on. Arm-state is posture, not an input gap, so it
     /// never counts here.
@@ -191,22 +138,16 @@ impl Readiness {
 
 /// Derive the readiness snapshot (JEF-160) from the engine's config summary and LIVE
 /// state. PURE and total — no model call, no I/O: the model row reads the piggybacked
-/// last-adjudication outcome, the behavioral rows read this pass's [`BakeStats`], and the
+/// last-adjudication outcome, the runtime row reads the per-node coverage, and the
 /// cold-start flag reads `last_pass`. This is the tested core.
 #[allow(dead_code)]
 pub(crate) fn derive_readiness(
     config: &ReadinessConfig,
     model_health: ModelHealth,
-    bake: &BakeStats,
     last_pass: Option<SystemTime>,
     runtime: &RuntimeCoverage,
 ) -> Readiness {
     let warming_up = last_pass.is_none();
-
-    // The behavioral split (JEF-48 variant labels): Falco arrives as the `alert` variant. During
-    // the Falco→agent cutover (F5..F8) it may still feed, so the collapsed row tolerates it as the
-    // "both-sources" ladder rung — but the row is now agent-SOURCED (per-node, signal-flow).
-    let falco_signals: u64 = bake.signals_by_variant.get("alert").copied().unwrap_or(0);
 
     // The model is "judging" — giving live verdicts a consumer can lean on — only when it
     // is attached AND its last fresh call was decisive. A timeout, a cold start, or no model
@@ -241,12 +182,10 @@ pub(crate) fn derive_readiness(
     let kev_state = present_if(config.kev_count > 0);
     let epss_state = present_if(config.epss_count > 0);
 
-    // Runtime corroboration (JEF-308): ONE agent-sourced, per-node row replacing the old
-    // `falco` + `ebpf-agent` split. The honesty ladder — healthy / degraded (blind on N,
-    // named) / blind (no live signal) / both-sources (Falco still feeding during cutover) —
-    // and the per-node breakdown come from the derived coverage + this pass's Falco volume.
-    let (runtime_state, runtime_detail, runtime_nodes) =
-        runtime_corroboration_row(runtime, falco_signals);
+    // Runtime corroboration (JEF-308): ONE agent-sourced, per-node row. The honesty ladder —
+    // healthy / degraded (blind on N, named) / blind (no live signal) — and the per-node
+    // breakdown come from the derived per-node coverage.
+    let (runtime_state, runtime_detail, runtime_nodes) = runtime_corroboration_row(runtime);
 
     let journal_state = present_if(config.journal_durable);
 
@@ -286,9 +225,9 @@ pub(crate) fn derive_readiness(
             weakens_decisions: true,
             nodes: Vec::new(),
         },
-        // ONE agent-sourced runtime-corroboration row (JEF-308), replacing the former
-        // `falco` + `ebpf-agent` split. Its state IS the honesty ladder; its `nodes` carry the
-        // per-node breakdown the view renders as a `<details>`/`<table>`.
+        // ONE agent-sourced runtime-corroboration row (JEF-308). Its state IS the honesty
+        // ladder; its `nodes` carry the per-node breakdown the view renders as a
+        // `<details>`/`<table>`.
         ReadinessRow {
             id: "runtime-corroboration",
             label: "Runtime monitoring",
@@ -347,52 +286,6 @@ pub(crate) fn derive_readiness(
         inputs,
         warming_up,
         model_judging,
-        // The parity report defaults to "nothing to compare" (an empty fold) and is attached from
-        // the pass's chains via [`Readiness::with_parity`] — it is folded from the proven chains,
-        // not the config/health inputs the rest of this snapshot reads.
-        parity: parity_report(&CorroborationParity::default()),
-    }
-}
-
-/// Build the corroboration-parity report (JEF-310) for the readiness view from this pass's
-/// per-source counts. The summary line is honest above all: a Falco-silent window reads
-/// "nothing to compare", explicitly NOT "0 uncovered = safe to retire" (ADR-0016). Carries only
-/// counts and (already-bounded) cluster names — no untrusted free-text of its own.
-fn parity_report(parity: &CorroborationParity) -> ParityReport {
-    let (state, summary) = match parity.readiness() {
-        ParityReadiness::NothingToCompare => (
-            ParityState::NothingToCompare,
-            "nothing to compare this pass — no Falco alert corroborated a breach chain, so agent \
-             parity cannot be measured (absence of Falco activity is not evidence the agent has \
-             parity)"
-                .to_string(),
-        ),
-        ParityReadiness::Uncovered { count } => (
-            ParityState::Uncovered,
-            format!(
-                "agent-uncovered: {count} breach chain{} corroborated by Falco with no agent signal on the same workload ({} of {} Falco corroborations matched by the agent) — NOT yet safe to retire Falco",
-                plural(count),
-                parity.both,
-                parity.falco_corroborated,
-            ),
-        ),
-        ParityReadiness::Parity => (
-            ParityState::Parity,
-            format!(
-                "parity this pass — the agent corroborated all {} Falco-corroborated breach chain{} (0 agent-uncovered)",
-                parity.falco_corroborated,
-                plural(parity.falco_corroborated),
-            ),
-        ),
-    };
-    ParityReport {
-        state,
-        summary,
-        falco_corroborated: parity.falco_corroborated,
-        agent_corroborated: parity.agent_corroborated,
-        both: parity.both,
-        agent_uncovered: parity.agent_uncovered,
-        uncovered_entries: parity.uncovered_entries.clone(),
     }
 }
 
@@ -470,63 +363,40 @@ fn coverage_detail(count: usize, noun: &str) -> String {
 }
 
 /// Build the collapsed **Runtime corroboration** row (JEF-308) — its coarse [`InputState`], the
-/// honest ladder detail, and the per-node breakdown — from the derived coverage and this pass's
-/// Falco alert volume. The ladder, in order of increasing coverage:
+/// honest ladder detail, and the per-node breakdown — from the derived per-node coverage. The
+/// ladder, in order of increasing coverage:
 ///
-///   * **blind** (`Absent`) — no live signal at all: the agent is deployed nowhere in scope and
-///     Falco is silent, OR every expected node is dark. Named honestly; absence of a signal is
-///     never reassuring.
+///   * **blind** (`Absent`) — no live signal at all: the agent is deployed nowhere in scope, OR
+///     every expected node is dark. Named honestly; absence of a signal is never reassuring.
 ///   * **degraded** (`Degraded`) — SOME expected nodes are blind (named) or only partially
-///     probing, while others are healthy (and/or Falco still feeds).
+///     probing, while others are healthy.
 ///   * **healthy** (`Present`) — every expected node is reporting with its probes loaded (quiet
-///     counts). Falco still feeding is noted as the cutover "both-sources" rung.
+///     counts).
 ///
 /// A node the agent isn't scheduled on is out-of-scope (not in the expected set), so it never
 /// pushes the row off green.
 fn runtime_corroboration_row(
     runtime: &RuntimeCoverage,
-    falco_signals: u64,
 ) -> (InputState, String, Vec<NodeCoverageRow>) {
     let nodes = node_rows(runtime);
-    let falco_active = falco_signals > 0;
     let expected = runtime.expected_count();
     let blind = runtime.blind_nodes();
     let degraded = runtime.degraded_nodes();
     let healthy = runtime.healthy_count();
     let agent_signals = runtime.agent_signals();
 
-    let falco_note = if falco_active {
-        format!(
-            " (+ Falco corroborating: {falco_signals} alert{} this pass, cutover)",
-            plural(falco_signals)
-        )
-    } else {
-        String::new()
-    };
-
     // No expected nodes: the agent isn't scheduled anywhere in scope this pass.
     if expected == 0 {
-        return if falco_active {
-            (
-                InputState::Present,
-                format!(
-                    "Falco corroborating ({falco_signals} alert{} this pass) — eBPF agent not reporting on any node (cutover)",
-                    plural(falco_signals)
-                ),
-                nodes,
-            )
-        } else {
-            (
-                InputState::Absent,
-                "BLIND: no runtime sensor reporting — absence of a signal is not evidence of safety"
-                    .to_string(),
-                nodes,
-            )
-        };
+        return (
+            InputState::Absent,
+            "BLIND: no runtime sensor reporting — absence of a signal is not evidence of safety"
+                .to_string(),
+            nodes,
+        );
     }
 
-    // Every expected node is dark AND Falco is silent → wholly blind.
-    if blind.len() == expected && !falco_active {
+    // Every expected node is dark → wholly blind.
+    if blind.len() == expected {
         return (
             InputState::Absent,
             format!(
@@ -543,7 +413,7 @@ fn runtime_corroboration_row(
         return (
             InputState::Degraded,
             format!(
-                "degraded — blind on {} of {expected} node{}: {} ({healthy} healthy){falco_note}",
+                "degraded — blind on {} of {expected} node{}: {} ({healthy} healthy)",
                 blind.len(),
                 plural(expected as u64),
                 blind.join(", ")
@@ -557,7 +427,7 @@ fn runtime_corroboration_row(
         return (
             InputState::Degraded,
             format!(
-                "degraded — probes partial on {}: {}{falco_note}",
+                "degraded — probes partial on {}: {}",
                 degraded.len(),
                 degraded.join(", ")
             ),
@@ -569,7 +439,7 @@ fn runtime_corroboration_row(
     (
         InputState::Present,
         format!(
-            "healthy — all {expected} node{} reporting, probes loaded ({agent_signals} signal{} this pass){falco_note}",
+            "healthy — all {expected} node{} reporting, probes loaded ({agent_signals} signal{} this pass)",
             plural(expected as u64),
             plural(agent_signals)
         ),

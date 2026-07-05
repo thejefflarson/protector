@@ -6,7 +6,7 @@
 # (flannel + the embedded kube-router NetworkPolicy controller). That makes it
 # the right place to exercise the engine's cluster-facing glue that unit tests
 # can't reach — the watch/reflector streams, the kube actuator's apply/delete,
-# the Falco ingest HTTP path — and to drive the `networkpolicy` isolation
+# the behavioral-ingest HTTP path — and to drive the `networkpolicy` isolation
 # actuator exactly as it behaves in prod. (Cilium/Calico is only needed for the
 # ANP actuator, which this test does not cover.)
 #
@@ -17,8 +17,8 @@
 #
 #   A. shadow      — the chain proves (store reachable + compromisable), but the
 #                    entry has no foothold and no corroboration yet.
-#   B. corroborate — a simulated falcosidekick alert on `web` flips it to
-#                    "auto-eligible", but nothing is applied (shadow).
+#   B. corroborate — an `Alert` behavior on `web` (posted to the behavioral port)
+#                    flips it to "auto-eligible", but nothing is applied (shadow).
 #   C. hard mode   — enable=network: the engine applies a default-deny
 #                    NetworkPolicy quarantining `web`.
 #   D. self-revert — remove the durable allow (store-ingress); the chain stops
@@ -138,14 +138,16 @@ chains_proven() {
     | grep -qE 'proven chain .*entry=workload/app/Pod/web .*objective=secret/app/session-key'
 }
 
-post_falco() {
-  # Critical: protector only corroborates on critical+ (benign Notice/Warning
-  # activity must not flip a chain live).
-  curl -fsS -XPOST localhost:9999/ -H 'content-type: application/json' -d '{
-    "rule": "Terminal shell in container",
-    "priority": "Critical",
-    "output_fields": { "k8s.ns.name": "app", "k8s.pod.name": "web" }
-  }' >/dev/null
+post_alert() {
+  # POST an `Alert` behavior on `web` to the tool-agnostic behavioral port
+  # (`/behavior`, ADR-0003) — the same corroboration effect any sensor gets. An `Alert`
+  # is the "something alarming, now" signal that flips a proven chain to corroborated.
+  curl -fsS -XPOST localhost:9999/behavior -H 'content-type: application/json' -d '[{
+    "namespace": "app",
+    "pod": "web",
+    "source": "e2e",
+    "behavior": { "kind": "alert", "rule": "Terminal shell in container" }
+  }]' >/dev/null
 }
 
 # The engine's managed isolation NetworkPolicy in the app namespace.
@@ -361,7 +363,7 @@ spec:
             capabilities: { drop: ["ALL"] }
           ports:
             - { name: https, containerPort: 8443 }
-            - { name: falco-ingest, containerPort: 9999 }
+            - { name: behavior-ingest, containerPort: 9999 }
           livenessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS } }
           readinessProbe: { httpGet: { path: /readyz, port: https, scheme: HTTPS } }
           env:
@@ -375,7 +377,7 @@ spec:
             - { name: PROTECTOR_ENFORCE_SCOPE_NAMESPACES, value: "$enforce_scope" }
             - { name: RUST_LOG, value: "protector=info,sigstore=error,warn" }
             - { name: PROTECTOR_ENGINE_ACTUATOR, value: "networkpolicy" }
-            - { name: PROTECTOR_FALCO_ADDR, value: "0.0.0.0:9999" }$model_env
+            - { name: PROTECTOR_BEHAVIOR_ADDR, value: "0.0.0.0:9999" }$model_env
           volumeMounts:
             - { name: tls, mountPath: /etc/protector/tls, readOnly: true }
             - { name: tmp, mountPath: /tmp }
@@ -494,7 +496,7 @@ wait_until "structural chain web→session-key proven" 300 chains_proven \
   || { diagnose_chain; fail "structural chain web→session-key never proved within 300s"; }
 pass "structural chain proven (no foothold, no corroboration)"
 
-post_falco
+post_alert
 # Give the corroborated pass a few cycles to run after the alert lands.
 sleep 10
 
@@ -508,7 +510,7 @@ pf_reset
 # The pod was replaced, so its runtime-evidence store reset — re-send the alert that
 # corroborates web (the internet-facing entry), which is what flips its chain to
 # auto-eligible under the asymmetric action bar.
-post_falco
+post_alert
 # Wait for the ENTRY cut specifically (role=web) — the corroboration-driven control this
 # step exists to prove — not "the first managed policy". The engine also applies a SECOND,
 # deterministic quarantine on the remotely-exploitable pivot `store` (JEF-284: reachable
@@ -551,7 +553,7 @@ YAML
 # byte-identical manifest to step 7's `deploy_protector "network"` (any non-empty enable →
 # mode=enforce / enforceScope=app; the "judgement" token is dropped and never reaches the
 # engine), so `kubectl apply` is a no-op — the pod is NOT replaced. But the pod still holds
-# the step-7 Falco corroboration of web in its in-memory runtime store (300s TTL); left
+# the step-7 alert corroboration of web in its in-memory runtime store (300s TTL); left
 # there, web would auto-cut on that STALE live signal, not on the (absent) model, defeating
 # this step's whole point. So force an explicit rollout restart to clear the runtime store,
 # then recreate the `reaches` edge AFTER the fresh, uncorroborated pod is up.
@@ -635,4 +637,4 @@ else
 fi
 
 echo
-echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, Falco ingest, the runtime-corroborated path, the proof-winnows→model-decides foothold path (presence is propose-only; the model's 'exploitable' verdict is what cuts), the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
+echo "${GREEN}e2e: all phases passed${OFF} — watch loop, graph build, behavioral ingest, the runtime-corroborated path, the proof-winnows→model-decides foothold path (presence is propose-only; the model's 'exploitable' verdict is what cuts), the isolation actuator, and self-revert all verified against a real API server on the prod CNI."
