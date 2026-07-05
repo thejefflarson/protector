@@ -15,8 +15,10 @@
 #![no_std]
 #![no_main]
 
-// Kernel struct bindings (struct file/path/…), generated from the node BTF — needed so
-// bpf_d_path receives a BTF-typed `&file->f_path`. See docs/ebpf-testing-on-nodes.md.
+// Kernel struct bindings (struct file/path/…) — minimal, hand-laid so each read field
+// sits at its running-kernel byte offset. The offset is what the compiler bakes and the
+// verifier checks, so it MUST track the kernel (JEF-324). See vmlinux.rs + docs/ebpf-
+// testing-on-nodes.md.
 mod vmlinux;
 
 use aya_ebpf::{
@@ -484,7 +486,10 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
         len: 0,
         path: [0u8; PATH_CAP],
     };
-    // &file->f_path as a BTF-typed `struct path *` — what bpf_d_path requires.
+    // &file->f_path. bpf_d_path needs the arg to resolve (against kernel BTF, at the baked
+    // offset) to a `struct path`; the verifier walks `file` at `f_path`'s offset and checks
+    // it lands on `path`. So `f_path`'s offset in vmlinux::file MUST match the running kernel
+    // (JEF-324) — a stale offset lands elsewhere and is rejected ("R1 is of type file …").
     let path_ptr = unsafe { core::ptr::addr_of!((*file).f_path) };
     let n = unsafe {
         bpf_d_path(

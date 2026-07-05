@@ -40,10 +40,16 @@ first for this kernel:
 3. **kprobe + manual dentry walk** — no `bpf_d_path` (it's not allowlisted for classic
    kprobes), so you'd walk `dentry`→`d_parent` by hand. Fragile; last resort.
 
-**vmlinux bindings:** generate `struct file`/`struct path` bindings from BTF with
-`aya-tool generate file path` (or `bpftool btf dump`). It must run against the *node's*
-BTF. The `protector-runners` are self-hosted **on the cluster**, so the eBPF CI job can
-generate them from `/sys/kernel/btf/vmlinux` at build time — same kernel, no copying.
+**vmlinux bindings:** `agent/protector-agent-ebpf/src/vmlinux.rs` is a small hand-written
+module declaring only the structs the probes read, each field placed at its running-kernel
+byte offset. It is NOT the full `aya-tool` dump (that exceeded the 1,000-line file cap and
+silently rotted across kernel upgrades). Critically there is **no CO-RE field relocation**
+here — the bpf object bakes each field access as a constant offset — so the offsets in that
+file MUST match the fleet kernel or `bpf_d_path` is verifier-rejected (JEF-324). Re-verify
+on any kernel struct change by dumping BTF from a node (`kubectl` a hostPath-`/sys/kernel/
+btf` pod, then `bpftool btf dump … format c`, or parse the raw BTF) on **every** fleet arch
+and confirming the read fields share one offset. As of 2026-07-05 the fleet is `7.0.0`
+(arm64 raspi + amd64 generic) and all read fields align across both arches.
 
 ## The validation loop (no exec, no SSH)
 
