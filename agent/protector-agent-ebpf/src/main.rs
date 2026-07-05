@@ -297,7 +297,8 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
 /// window are coalesced in-kernel ([`allow_write`]) so a chatty writer can't flood the ring.
 /// Observe-only; a failed read drops the event, never errors the probe. NOTE: attaches to
 /// the BTF-exported `security_file_open` (the `security_*` LSM symbol) — not a syscall
-/// tracepoint — which is exactly why the agent survives the arm64 kernel that kills Falco.
+/// tracepoint — which is why the agent survives the arm64 kernel that a syscall-tracepoint
+/// sensor cannot.
 #[fentry(function = "security_file_open")]
 pub fn file_write(ctx: FEntryContext) -> u32 {
     let _ = try_file_write(&ctx);
@@ -361,7 +362,7 @@ fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
 }
 
 /// fentry on `security_task_fix_setuid(struct cred *new, const struct cred *old, int flags)`
-/// — the privilege-change probe (ADR-0014, Falco privilege-escalation parity). This LSM hook
+/// — the privilege-change probe (ADR-0014). This LSM hook
 /// runs on every credential change (setuid/setresuid/…), so we filter IN-KERNEL to the only
 /// case worth a signal: a process *gaining* root (`new->uid.val == 0 && old->uid.val != 0`).
 /// That keeps ring volume tiny and the signal meaningful — a non-root process becoming root.

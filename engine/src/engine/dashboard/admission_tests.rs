@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use crate::engine::policy_log::PolicyDecisionRecord;
 use crate::engine::state::{
-    BakeStats, Finding, ModelHealth, ReadinessConfig, RuntimeCoverage, derive_readiness,
+    Finding, ModelHealth, ReadinessConfig, RuntimeCoverage, derive_readiness,
 };
 
 use super::page;
@@ -27,12 +27,9 @@ fn judging_readiness() -> crate::engine::state::Readiness {
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
     };
-    let mut bake = BakeStats::default();
-    bake.signals_by_variant.insert("alert".into(), 1);
     derive_readiness(
         &config,
         ModelHealth::Ok,
-        &bake,
         Some(SystemTime::now()),
         &RuntimeCoverage::default(),
     )

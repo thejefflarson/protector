@@ -15,12 +15,12 @@
 //!
 //! We classify from that enriched string — no cluster calls of our own, no new egress.
 //!
-//! Falco-rule parity (the Retire-Falco corroboration gap, JEF-307): Falco fires critical on
-//! "Contact cloud metadata service" and "Contact K8S API Server From Container". The agent
-//! saw those only as a plain `NetworkConnection`, so an outbound IMDS credential-grab /
-//! cluster-API abuse from a compromised entry was dropped on the corroboration path. These
-//! classifiers restore that parity engine-side, feeding the FOOTHOLD corroboration seam in
-//! `reason::proof::corroborate` (Initial Access, T1190) — shadow-gated like the rest.
+//! Foothold-peer corroboration (JEF-307): a cloud-metadata-service contact and a Kubernetes
+//! API-server contact are both high-signal foothold moves. The agent saw those only as a plain
+//! `NetworkConnection`, so an outbound IMDS credential-grab / cluster-API abuse from a
+//! compromised entry was dropped on the corroboration path. These classifiers close that gap
+//! engine-side, feeding the FOOTHOLD corroboration seam in `reason::proof::corroborate`
+//! (Initial Access, T1190) — shadow-gated like the rest.
 //!
 //! ## Conservatism (hard — ADR-0011 false-positive concern)
 //! EVERY workload makes connections, so only these *specific* peers promote; ordinary
@@ -35,8 +35,7 @@ use crate::engine::graph::Behavior;
 /// Azure, OpenStack, DigitalOcean, Oracle — serves instance metadata, and crucially
 /// short-lived cloud credentials, at the link-local IPv4 address `169.254.169.254`; AWS
 /// also exposes an IPv6 IMDS at `fd00:ec2::254`. A workload reaching one of these is the
-/// classic cloud-credential-theft move (SSRF-to-IMDS / Falco "Contact cloud metadata
-/// service").
+/// classic cloud-credential-theft move (SSRF-to-IMDS / "Contact cloud metadata service").
 ///
 /// We match these **specific** addresses, NOT the whole link-local `169.254.0.0/16` block,
 /// on purpose (ADR-0011 conservatism): NodeLocal DNSCache and some CNIs legitimately use
@@ -72,15 +71,15 @@ fn raw_peer_host(peer: &str) -> Option<&str> {
 }
 
 /// Whether an enriched `NetworkConnection` peer is a cloud instance-metadata (IMDS)
-/// endpoint (`169.254.169.254` / `fd00:ec2::254`) — the Falco "Contact cloud metadata
-/// service" signal. Matched on the exact IMDS addresses (see [`CLOUD_METADATA_IPS`]).
+/// endpoint (`169.254.169.254` / `fd00:ec2::254`) — the "Contact cloud metadata service"
+/// signal. Matched on the exact IMDS addresses (see [`CLOUD_METADATA_IPS`]).
 pub fn is_cloud_metadata(peer: &str) -> bool {
     raw_peer_host(peer).is_some_and(|ip| CLOUD_METADATA_IPS.contains(&ip))
 }
 
 /// Whether an enriched `NetworkConnection` peer is the in-cluster Kubernetes API server —
-/// the JEF-131-resolved `default/kubernetes` Service label (Falco "Contact K8S API Server
-/// From Container"). Matches the whole `namespace/name` label so look-alikes don't.
+/// the JEF-131-resolved `default/kubernetes` Service label ("Contact K8S API Server From
+/// Container"). Matches the whole `namespace/name` label so look-alikes don't.
 pub fn is_api_server(peer: &str) -> bool {
     peer.split(':').next() == Some(API_SERVER_LABEL)
 }

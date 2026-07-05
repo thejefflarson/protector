@@ -8,7 +8,7 @@
 //! it must never read missing data as reassuring.
 //!
 //!   * **Signal-flow, not pod-Ready.** A Ready agent whose eBPF probes failed to attach is still
-//!     BLIND (the exact Falco failure mode). The agent reports `probes_loaded`, so an
+//!     BLIND (a Ready-but-blind sensor). The agent reports `probes_loaded`, so an
 //!     agent-up-but-`probes_loaded==0` node reads blind, not healthy.
 //!   * **Quiet ≠ blind.** A node reporting with `signals_emitted == 0` and its probes loaded is
 //!     HEALTHY-quiet — a quiet cluster is not a down sensor.
@@ -162,7 +162,7 @@ fn is_agent_pod(pod: &Pod) -> bool {
 pub enum BlindReason {
     /// No fresh beacon from this expected node — the agent is gone / crashed / never came up.
     NotReporting,
-    /// The agent reported but attached ZERO probes — Ready but blind (the Falco failure mode).
+    /// The agent reported but attached ZERO probes — Ready but blind.
     ProbesFailed,
 }
 

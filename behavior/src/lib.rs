@@ -6,20 +6,20 @@
 //! the engine and protector's first-party eBPF agent so the two can't drift.
 //!
 //! Per ADR-0003 the *contract* is the JSON (`{"kind": "...", ...}`), not this Rust type
-//! — a third-party sensor (Falco via its adapter) speaks the same JSON without depending
+//! — a third-party sensor (via its own adapter) speaks the same JSON without depending
 //! on this crate. The crate is a convenience for the first-party components, nothing the
 //! port requires. The serde shape is pinned by the tests below.
 
 use serde::{Deserialize, Serialize};
 
 /// An observed runtime **behavior** — what a workload actually did, from any sensor
-/// (the first-party eBPF agent, Falco, …) through the tool-agnostic behavioral port
-/// (ADR-0003/0014). Typed so the engine reasons about the *signal*, not the source.
+/// (the first-party eBPF agent, or any sensor with an adapter) through the tool-agnostic
+/// behavioral port (ADR-0003/0014). Typed so the engine reasons about the *signal*, not the source.
 /// Serde-tagged for the normalized ingest contract (`{"kind": "...", ...}`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Behavior {
-    /// A sensor rule fired (e.g. a Falco alert) — "something alarming, now."
+    /// A sensor rule fired (an alert from any sensor) — "something alarming, now."
     Alert { rule: String },
     /// An outbound connection the workload made; `internet` if it left the cluster.
     NetworkConnection { peer: String, internet: bool },
@@ -45,20 +45,20 @@ pub enum Behavior {
     /// see it defensively.
     FileRead { path: String },
     /// A process gained root — its real UID changed to 0 from a non-root UID (the eBPF
-    /// agent's privilege-change probe, fentry on `security_task_fix_setuid`; Falco
-    /// privilege-escalation-rule parity). Model evidence, not blanket corroboration:
+    /// agent's privilege-change probe, fentry on `security_task_fix_setuid`). Model
+    /// evidence, not blanket corroboration:
     /// legitimate workloads sometimes escalate (init/entrypoint), so wiring this to
     /// corroborate a specific attack is JEF-49's job.
     PrivilegeChange { from_uid: u32, to_uid: u32 },
     /// A process was exec'd in the workload — the runtime signal for "unexpected process
-    /// spawned" (Falco-rule parity, ADR-0014). `path` is the exec'd binary's path as the
+    /// spawned" (ADR-0014). `path` is the exec'd binary's path as the
     /// kernel saw it (`linux_binprm->filename`). Evidence for the model only today;
     /// wiring exec → corroboration is JEF-49.
     ProcessExec { path: String },
     /// A **write** to a file — the runtime signal for container drift: drop-and-execute
     /// (a new file created then run) and config tampering (an existing file overwritten).
     /// The eBPF agent's file-write probe (fentry on `security_file_open` filtered to
-    /// write-intent open flags; Falco file-write-critical parity, ADR-0014). `path` is the
+    /// write-intent open flags, ADR-0014). `path` is the
     /// written file's path as the kernel saw it (`bpf_d_path`). PURE DATA (JEF-306): whether
     /// the path is *sensitive* — the container-drift / tamper judgement — is engine
     /// corroboration policy (JEF-306 F3), not a property of this shared wire type. The agent
@@ -151,7 +151,7 @@ impl Behavior {
     /// notable exec (shell / package manager in container) is engine policy
     /// (`engine::observe::exec_class`, JEF-113), not a property of this shared wire type, so
     /// the engine annotates the path when it builds the prompt/output line rather than
-    /// this crate baking a Falco-rule list into the contract.
+    /// this crate baking a rule list into the contract.
     pub fn summary(&self) -> String {
         match self {
             Behavior::Alert { rule } => format!("alert: {rule}"),
@@ -225,7 +225,7 @@ impl Behavior {
 /// How a sensor **attributed** an observation to a workload — a type distinction, not an
 /// empty-string convention (JEF-59). A sensor either knows the pod's cgroup UID (the
 /// first-party eBPF agent, which stays node-local and can't resolve names itself) or it
-/// already has the namespace/name (Falco, which reads k8s metadata). The engine resolves
+/// already has the namespace/name (a sensor that reads k8s metadata). The engine resolves
 /// [`Self::ByPodUid`] → namespace/pod via its own pod watch (ADR-0014); the agent needs no
 /// cluster credentials.
 ///
@@ -238,7 +238,7 @@ impl Behavior {
 pub enum Attribution {
     /// The eBPF agent: a pod UID read from the cgroup; the engine resolves UID → pod.
     ByPodUid { pod_uid: String },
-    /// Falco (and any sensor with cluster metadata): the namespace/name directly.
+    /// Any sensor with cluster metadata: the namespace/name directly.
     ByNamespacedName { namespace: String, pod: String },
 }
 
@@ -250,7 +250,7 @@ impl Attribution {
         }
     }
 
-    /// Attribute by namespace + pod name (Falco's path).
+    /// Attribute by namespace + pod name (a metadata-aware sensor's path).
     pub fn by_namespaced_name(namespace: impl Into<String>, pod: impl Into<String>) -> Self {
         Attribution::ByNamespacedName {
             namespace: namespace.into(),
@@ -260,7 +260,7 @@ impl Attribution {
 
     /// Whether this attribution resolves to a live workload, given a way to ask whether a
     /// pod UID is currently observed. A [`ByNamespacedName`](Self::ByNamespacedName)
-    /// attribution (Falco, which already carries cluster metadata) always resolves; a
+    /// attribution (a sensor that already carries cluster metadata) always resolves; a
     /// [`ByPodUid`](Self::ByPodUid) one (the eBPF agent) resolves only when a pod with that
     /// UID is present — an unknown UID (pod gone / not yet observed) does not resolve and is
     /// dropped rather than guessed (ADR-0014).
@@ -279,17 +279,17 @@ impl Attribution {
 }
 
 /// A normalized live runtime observation about a workload — the behavioral port's input
-/// shape (ADR-0014). Any sensor (the first-party eBPF agent, Falco, Tetragon, …) maps
+/// shape (ADR-0014). Any sensor (the first-party eBPF agent, Tetragon, …) maps
 /// its events into this; the graph sees only the normalized signal, not a vendor type.
 /// `Deserialize` so a sensor can POST it directly to the normalized ingest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeObservation {
     /// How this observation is attributed to a workload — by cgroup UID (eBPF agent) or by
-    /// namespace/name (Falco). Flattened so its fields sit at the JSON top level, preserving
-    /// the original flat wire shape.
+    /// namespace/name (a metadata-aware sensor). Flattened so its fields sit at the JSON top
+    /// level, preserving the original flat wire shape.
     #[serde(flatten)]
     pub attribution: Attribution,
-    /// Which sensor observed this — `"protector-agent"`, `"falco"`, … Carried into the
+    /// Which sensor observed this — `"protector-agent"`, `"alert"`, … Carried into the
     /// signal's provenance so two sensors observing the same activity are corroboration,
     /// not one indistinguishable source (ADR-0003). Defaulted (older agents omit it) →
     /// the adapter falls back to its own name.
@@ -304,7 +304,7 @@ pub struct RuntimeObservation {
     /// The Kubernetes NODE the sensor observed this on (JEF-308) — the eBPF agent reports its
     /// own node (from the downward API, `spec.nodeName`), so the engine can reason about
     /// runtime-corroboration coverage PER NODE ("blind on node X"), not just fleet-aggregate.
-    /// Defaulted (older agents / Falco, which is node-agnostic, omit it) — an absent node is
+    /// Defaulted (older agents, or a node-agnostic sensor, omit it) — an absent node is
     /// honestly node-unattributed, never guessed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
@@ -315,8 +315,8 @@ pub struct RuntimeObservation {
 /// A per-node **agent-liveness beacon** (JEF-308): the eBPF agent's own self-report, one per
 /// report window, distinct from a workload [`RuntimeObservation`]. It is what makes
 /// runtime-corroboration coverage honestly derivable per node: liveness is **signal-flow**, not
-/// pod-Ready — a Ready agent whose eBPF probes failed to attach is still BLIND (the exact Falco
-/// failure mode), so it reports `probes_loaded = 0`, and the engine reads it as blind despite the
+/// pod-Ready — a Ready agent whose eBPF probes failed to attach is still BLIND (a Ready-but-blind
+/// sensor), so it reports `probes_loaded = 0`, and the engine reads it as blind despite the
 /// pod being up.
 ///
 /// Critically, the agent emits this **every window even when it saw nothing**, so a quiet node
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn resolves_in_applies_the_attribution_resolution_rule() {
-        // A namespace/name attribution (Falco) always resolves — even when the lookup
+        // A namespace/name attribution always resolves — even when the lookup
         // would reject everything.
         assert!(Attribution::by_namespaced_name("app", "web").resolves_in(|_| false));
         // A cgroup-UID attribution (the eBPF agent) resolves iff the UID is known.
@@ -455,8 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn falco_style_observation_deserializes_from_namespace_pod() {
-        // A Falco-shaped observation: ns/pod set, no uid/source/time.
+    fn namespaced_observation_deserializes_from_namespace_pod() {
+        // A metadata-attributed observation: ns/pod set, no uid/source/time.
         let obs: RuntimeObservation = serde_json::from_value(serde_json::json!({
             "namespace": "app", "pod": "web",
             "behavior": {"kind": "alert", "rule": "Terminal shell in container"}
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn observation_carries_the_node_and_omits_it_when_absent() {
         // JEF-308: the agent stamps its node so coverage is derivable PER NODE. When present it
-        // rides the wire; when absent (Falco, older agents) it is omitted — never guessed.
+        // rides the wire; when absent (a node-agnostic sensor, older agents) it is omitted — never guessed.
         let with_node = RuntimeObservation {
             attribution: Attribution::by_pod_uid("uid"),
             source: Some("protector-agent".into()),

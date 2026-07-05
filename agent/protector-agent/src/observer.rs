@@ -85,7 +85,7 @@ mod ebpf {
     use protector_behavior::{Attribution, Behavior};
 
     /// This sensor's identity, carried into each observation's provenance so the engine
-    /// can tell agent signals from Falco's (ADR-0003 corroboration).
+    /// can tell one sensor's signals from another's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
 
     /// The probes to load and attach: (program name in the object, kernel hook). Adding

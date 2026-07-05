@@ -37,8 +37,8 @@ use protector_behavior::{Attribution, RuntimeObservation};
 
 /// A stable per-workload token for an [`Attribution`], for the coalescing key. Distinct
 /// from the behavior fingerprint so two workloads doing the same coarse thing never
-/// collapse into one another. The eBPF agent attributes by cgroup pod UID; a Falco-style
-/// namespace/name is handled too for completeness (the agent posts UID attributions today).
+/// collapse into one another. The eBPF agent attributes by cgroup pod UID; a namespace/name
+/// attribution is handled too for completeness (the agent posts UID attributions today).
 fn attribution_token(attribution: &Attribution) -> String {
     match attribution {
         Attribution::ByPodUid { pod_uid } => format!("uid:{pod_uid}"),

@@ -26,8 +26,9 @@ The pieces are mostly already in the cluster, unjoined:
 
 - **SBOMs** built in CI, **trivy** vulnerability reports, optionally **grype** for
   a corroborating second opinion, **semgrep** code scans.
-- **Falco** watching syscalls — the difference between "theoretically vulnerable"
-  and "something is happening right now."
+- **Behavioral telemetry** (protector's first-party eBPF agent, or any sensor via the
+  tool-agnostic behavioral port) watching what workloads actually do — the difference
+  between "theoretically vulnerable" and "something is happening right now."
 - The **Linkerd authorization graph** and **NetworkPolicies** — a precise map of
   who can reach whom.
 - **RBAC** — a precise map of who can do what.

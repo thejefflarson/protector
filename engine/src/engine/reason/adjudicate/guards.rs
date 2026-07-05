@@ -109,7 +109,7 @@ pub(crate) fn guard_fabricated_cve(
 
 /// Whether a runtime behavior CORROBORATES an exploit — the engine's single shared
 /// "alarming-now" definition ([`crate::engine::observe::alarm_class::is_alarming_now`]), NOT a
-/// new one: a critical Falco alert ([`Behavior::is_alert`]), a notable shell/package-manager
+/// new one: an `Alert` ([`Behavior::is_alert`]), a notable shell/package-manager
 /// exec (JEF-117), OR an alarming file write (sensitive-path drop-and-execute / config tamper,
 /// JEF-309). Sharing that one predicate with the corroboration and quarantine paths keeps the
 /// alarm sources from drifting apart. Benign

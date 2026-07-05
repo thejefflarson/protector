@@ -102,7 +102,7 @@ impl FindingEvidence {
 /// - `cves` — the entry image's foothold-relevant CVEs (KEV or critical), the
 ///   SEVERITY/reachability input.
 /// - `runtime` — the runtime [`Behavior`]s observed on the entry, the LIVE-corroboration
-///   signal. The subset that actually *corroborates* (Falco-style `Alert`s) is what flips
+///   signal. The subset that actually *corroborates* (`Alert`s) is what flips
 ///   `corroborated`; non-corroborating agent behaviors (exec/connect/secret-read/library-
 ///   load/privilege-change) ride along as context, exactly as the model sees them.
 ///
@@ -140,7 +140,7 @@ impl EntryEvidence {
         }
     }
 
-    /// The runtime behaviors that actually corroborate the chain (Falco-style alerts) —
+    /// The runtime behaviors that actually corroborate the chain (`Alert`s) —
     /// what flips `ProvenChain::corroborated` (ADR-0009). Separated from context behaviors
     /// in the live-corroboration block.
     #[allow(dead_code)]

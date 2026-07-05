@@ -588,7 +588,7 @@ fn behavior_does_not_corroborate_unrelated_objective() {
 
 // ── JEF-307: high-signal foothold peers corroborate a FOOTHOLD (Initial Access) ──
 // A connection to a cloud-metadata/IMDS endpoint or the Kubernetes API server is the
-// engine-side restoration of Falco's cloud-metadata / API-server criticals — it
+// engine-side classification of a cloud-metadata / API-server contact — it
 // corroborates the entry foothold (T1190) and NOTHING else. Ordinary in-cluster and
 // ordinary internet egress must NOT (ADR-0011 conservatism).
 
@@ -656,7 +656,7 @@ fn alert_still_corroborates_any_objective() {
 }
 
 /// A shell exec (JEF-55 interactive-shell) corroborates ANY objective like an alert
-/// (JEF-117): the agent-side replacement for Falco's "terminal shell in container".
+/// (JEF-117): the "terminal shell in container" tamper-now signal.
 #[test]
 fn shell_exec_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
@@ -672,7 +672,7 @@ fn shell_exec_corroborates_any_objective() {
 }
 
 /// A package-manager exec (JEF-55) corroborates ANY objective like an alert (JEF-117):
-/// the agent-side replacement for Falco's "package management in container".
+/// the "package management in container" tamper-now signal.
 #[test]
 fn package_manager_exec_corroborates_any_objective() {
     let pkg = Behavior::ProcessExec {

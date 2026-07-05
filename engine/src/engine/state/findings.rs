@@ -20,7 +20,6 @@ use super::agent_liveness::{
     AgentLivenessStore, RuntimeCoverage, derive_runtime_coverage, expected_agent_nodes,
 };
 use super::evidence::EntryEvidence;
-use super::parity::CorroborationParity;
 use super::recency::RecencyInfo;
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictStore};
 
@@ -242,11 +241,6 @@ pub struct Findings {
     /// agent-liveness beacons. The readiness aggregation reads it to build the collapsed
     /// "Runtime corroboration" row. Defaults to empty (no expected nodes) until the first pass.
     runtime_coverage: Mutex<RuntimeCoverage>,
-    /// The corroboration-parity report (JEF-310), folded from this pass's proven chains: the
-    /// Falco-vs-agent corroboration split and the agent-uncovered count that gates Falco
-    /// retirement (F6/F7). Replaced each pass; defaults to an empty fold ("nothing to compare")
-    /// until the first pass. Read-only measurement — it drives no decision (ADR-0016).
-    parity: Mutex<CorroborationParity>,
 }
 
 impl Findings {
@@ -386,18 +380,6 @@ impl Findings {
             .expect("runtime-coverage mutex poisoned") = coverage;
     }
 
-    /// Replace the corroboration-parity report (JEF-310) with this pass's fold over the proven
-    /// chains — the Falco-vs-agent corroboration split behind the Falco-retirement measurement.
-    pub fn set_parity(&self, parity: CorroborationParity) {
-        *self.parity.lock().expect("parity mutex poisoned") = parity;
-    }
-
-    /// The most recent corroboration-parity report (JEF-310). Defaults to an empty fold
-    /// ("nothing to compare") until the first pass folds one.
-    pub fn parity(&self) -> CorroborationParity {
-        self.parity.lock().expect("parity mutex poisoned").clone()
-    }
-
     /// The most recent runtime-corroboration coverage. Defaults to empty (no expected nodes)
     /// until the first pass stamps one.
     pub fn runtime_coverage(&self) -> RuntimeCoverage {
@@ -521,7 +503,7 @@ mod tests {
             pods: vec![serde_json::from_value(watcher).unwrap()],
             runtime_events: vec![RuntimeObservation {
                 attribution: Attribution::by_namespaced_name("app", "watcher"),
-                source: Some("falco".into()),
+                source: Some("alert".into()),
                 observed_at_ms: None,
                 node: None,
                 behavior: Behavior::Alert {

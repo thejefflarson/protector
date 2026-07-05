@@ -115,7 +115,7 @@ fn expected_node_not_reporting_is_blind_and_named() {
 
 #[test]
 fn probes_failed_to_load_is_blind_despite_reporting() {
-    // Ready but blind: the agent reports but attached ZERO probes — the exact Falco failure mode.
+    // Ready but blind: the agent reports but attached ZERO probes.
     // Pod-Ready would read healthy; signal-flow reads it blind.
     let expected: BTreeSet<String> = ["node-a".into()].into_iter().collect();
     let store = AgentLivenessStore::new(Duration::from_secs(120));

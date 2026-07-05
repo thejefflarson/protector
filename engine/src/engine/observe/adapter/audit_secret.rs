@@ -16,7 +16,7 @@ use crate::engine::graph::{Behavior, SecretReadSource};
 /// Attaching a [`Behavior::SecretRead`] with [`SecretReadSource::Api`] to the workload lets
 /// the existing corroboration seam (`corroborates` — a SecretRead evidences a
 /// CREDENTIAL_ACCESS objective) flip `corroborated-now` on the RBAC-granted chain, exactly
-/// as a mounted read or a Falco alert does (the JEF-117 pattern). It is shadow-gated like
+/// as a mounted read or an `Alert` does (the JEF-117 pattern). It is shadow-gated like
 /// all corroboration: it only sets `corroborated`, never actuates.
 pub struct AuditSecretReadAdapter;
 

@@ -1,18 +1,18 @@
-//! The RuntimeEvidence ingest: live signals from a runtime sensor (Falco via
-//! falcosidekick) that supply the action bar's `corroborated-now` predicate.
+//! The RuntimeEvidence ingest: live behavioral signals that supply the action bar's
+//! `corroborated-now` predicate. The first-party eBPF agent (and any sensor with a
+//! translation adapter) POSTs normalized [`RuntimeObservation`]s to the tool-agnostic
+//! behavioral port (ADR-0003), the `/behavior` route the engine exposes; [`RuntimeEvents`]
+//! holds the recent ones.
 //!
-//! Falco is a *stream*, not a Kubernetes object, so it can't be reflected like the
-//! rest of the graph. Instead falcosidekick POSTs each alert to an HTTP endpoint
-//! the engine exposes; [`parse_falco_event`] normalizes it into a
-//! [`RuntimeObservation`] and [`RuntimeEvents`] holds the recent ones.
+//! A runtime signal is a *stream*, not a Kubernetes object, so it can't be reflected like
+//! the rest of the graph — hence the HTTP ingest.
 //!
 //! Runtime signals are deliberately **short-lived**: "something is happening now"
 //! is only true for a window, so observations expire after a TTL. A stale alert
 //! must not keep corroborating a chain forever — corroboration is live evidence or
 //! it is nothing.
 //!
-//! The store and the parser are pure and unit-tested; the HTTP receiver is the
-//! cluster-facing glue.
+//! The store is pure and unit-tested; the HTTP receiver is the cluster-facing glue.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -22,14 +22,12 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 
 use super::ingest_guard::{
     DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
 };
-use super::{AgentReport, Attribution, RuntimeObservation};
-use crate::engine::graph::Behavior;
+use super::{AgentReport, RuntimeObservation};
 use crate::engine::state::AgentLivenessStore;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
@@ -106,67 +104,9 @@ fn same_signal(a: &RuntimeObservation, b: &RuntimeObservation) -> bool {
     a.behavior == b.behavior && a.attribution == b.attribution
 }
 
-/// Whether a Falco priority is **critical or higher** (Critical/Alert/Emergency).
-/// protector corroborates only on these: lower priorities (Notice/Warning/…) fire
-/// constantly on benign activity — a postgres health-check shell trips "Run shell
-/// untrusted" at Notice — and corroboration must mean "something genuinely alarming
-/// is happening now," not routine noise. Filtering here (not just at falcosidekick)
-/// makes the policy protector's own, regardless of the sensor's forwarding config.
-fn is_critical_or_higher(priority: &str) -> bool {
-    matches!(
-        priority.trim().to_ascii_lowercase().as_str(),
-        "critical" | "alert" | "emergency"
-    )
-}
-
-/// Normalize a Falco (falcosidekick) alert into a [`RuntimeObservation`]. Returns
-/// `None` if the alert is below critical priority, or isn't attributable to a
-/// specific pod (Falco's k8s metadata fields absent) — neither can corroborate a
-/// chain.
-pub fn parse_falco_event(event: &Value) -> Option<RuntimeObservation> {
-    let priority = event.get("priority").and_then(|v| v.as_str()).unwrap_or("");
-    if !is_critical_or_higher(priority) {
-        return None;
-    }
-    let rule = event.get("rule")?.as_str()?.to_string();
-    let fields = event.get("output_fields")?;
-    let namespace = fields.get("k8s.ns.name")?.as_str()?.to_string();
-    let pod = fields.get("k8s.pod.name")?.as_str()?.to_string();
-    // Falco's rule-fired alert maps to the Alert behavior — the corroborating
-    // "something alarming now" signal. It's one adapter onto the behavioral port
-    // (ADR-0014); the first-party eBPF agent posts the richer behaviors directly.
-    Some(RuntimeObservation {
-        attribution: Attribution::by_namespaced_name(namespace, pod),
-        source: Some("falco".into()),
-        // Falco's wall-clock `time` could be parsed here; until then the adapter
-        // stamps ingest-time. Falco is the low-volume sensor, so the lag is minor.
-        observed_at_ms: None,
-        node: None,
-        behavior: Behavior::Alert { rule },
-    })
-}
-
 /// Shared state for the ingest handlers: the event store, a wake channel, and the per-node
 /// agent-liveness store (JEF-308) the `/agent-liveness` beacon feeds.
 type IngestState = (Arc<RuntimeEvents>, Sender<()>, Arc<AgentLivenessStore>);
-
-/// Receive one Falco alert, record it, and wake the engine. Unparseable or
-/// non-pod alerts are accepted and ignored (we still 200 so falcosidekick doesn't
-/// retry-storm).
-async fn ingest(
-    State((events, notify, _liveness)): State<IngestState>,
-    Json(event): Json<Value>,
-) -> StatusCode {
-    if let Some(observation) = parse_falco_event(&event) {
-        // Only wake the engine if this alert is something we weren't already holding —
-        // a repeat of a still-live alert wouldn't change any verdict.
-        if events.record(observation) {
-            // A full channel already has a pending wake — dropping this one is fine.
-            let _ = notify.try_send(());
-        }
-    }
-    StatusCode::OK
-}
 
 /// Receive a batch of normalized [`RuntimeObservation`]s on the tool-agnostic
 /// behavioral port (ADR-0014) — the shape the first-party eBPF agent (and any sensor
@@ -228,11 +168,10 @@ fn record_batch(events: &RuntimeEvents, observations: Vec<RuntimeObservation>) -
     changed
 }
 
-/// Serve the runtime-evidence ingest. Two routes onto the same behavioral port
-/// (ADR-0014): `/` accepts a single Falco/falcosidekick alert (translated to an
-/// `Alert` behavior), and `/behavior` accepts a batch of normalized observations from
-/// the first-party eBPF agent or any sensor. This is the cluster-facing glue; the
-/// store and parser it drives are what the tests cover.
+/// Serve the runtime-evidence ingest. `/behavior` accepts a batch of normalized observations
+/// on the tool-agnostic behavioral port (ADR-0003) from the first-party eBPF agent or any
+/// sensor with a translation adapter; `/agent-liveness` accepts the per-node liveness beacon.
+/// This is the cluster-facing glue; the store it drives is what the tests cover.
 pub async fn serve_runtime(
     addr: SocketAddr,
     events: Arc<RuntimeEvents>,
@@ -247,11 +186,10 @@ pub async fn serve_runtime(
     // connect) is layered separately in the cluster repo.
     let token = IngestToken::from_env();
     // Per-peer rate limit (Fix B): bound ingest request-rate per source even with a
-    // valid token. In-process token bucket; well above legitimate agent/Falco volume.
+    // valid token. In-process token bucket; well above legitimate agent volume.
     let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
 
     let mut app = Router::new()
-        .route("/", post(ingest))
         .route("/behavior", post(ingest_behavior))
         // The per-node agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
         .route("/agent-liveness", post(ingest_agent_liveness))
@@ -267,7 +205,7 @@ pub async fn serve_runtime(
     match token {
         Some(token) => {
             app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
-            tracing::info!(%addr, "runtime-evidence ingest listening (/, /behavior, /agent-liveness) — bearer-authenticated");
+            tracing::info!(%addr, "runtime-evidence ingest listening (/behavior, /agent-liveness) — bearer-authenticated");
         }
         None => {
             tracing::warn!(
@@ -291,7 +229,9 @@ pub async fn serve_runtime(
 
 #[cfg(test)]
 mod tests {
+    use super::super::Attribution;
     use super::*;
+    use crate::engine::graph::Behavior;
     use serde_json::json;
 
     fn obs(rule: &str) -> RuntimeObservation {
@@ -363,60 +303,6 @@ mod tests {
             MAX_BATCH,
             "only the first MAX_BATCH observations are processed"
         );
-    }
-
-    #[test]
-    fn parses_critical_falco_alert_with_pod_metadata() {
-        let event = json!({
-            "priority": "Critical",
-            "rule": "Terminal shell in container",
-            "output_fields": {
-                "k8s.ns.name": "app",
-                "k8s.pod.name": "web-7d8f",
-                "proc.name": "bash"
-            }
-        });
-        let parsed = parse_falco_event(&event).expect("parses");
-        assert_eq!(
-            parsed.attribution,
-            Attribution::by_namespaced_name("app", "web-7d8f")
-        );
-        assert_eq!(
-            parsed.behavior,
-            Behavior::Alert {
-                rule: "Terminal shell in container".into()
-            }
-        );
-    }
-
-    #[test]
-    fn below_critical_alerts_are_dropped() {
-        // The exact benign case from prod: postgres' health-check shell at Notice.
-        let event = json!({
-            "priority": "Notice",
-            "rule": "Run shell untrusted",
-            "output_fields": {"k8s.ns.name": "watcher", "k8s.pod.name": "watcher-db-0"}
-        });
-        assert!(
-            parse_falco_event(&event).is_none(),
-            "Notice must not corroborate"
-        );
-        // Warning too; only critical/alert/emergency pass.
-        let warn = json!({
-            "priority": "Warning", "rule": "x",
-            "output_fields": {"k8s.ns.name": "a", "k8s.pod.name": "b"}
-        });
-        assert!(parse_falco_event(&warn).is_none());
-    }
-
-    #[test]
-    fn alert_without_pod_metadata_is_dropped() {
-        let event = json!({
-            "priority": "Critical",
-            "rule": "Some host rule",
-            "output_fields": {"proc.name": "bash"}
-        });
-        assert!(parse_falco_event(&event).is_none());
     }
 
     #[test]

@@ -413,9 +413,12 @@ async fn main() -> Result<()> {
         // says what classes are armed; `scope` says where a cut may land — the JEF-104
         // seam, now fed by one source instead of two independent env knobs.
         let (active, scope) = posture.engine_arming();
-        // Falco ingest endpoint (falcosidekick POSTs alerts here) for the
-        // RuntimeEvidence "corroborated-now" signal. Unset = no runtime feed.
-        let falco_addr = env::var("PROTECTOR_FALCO_ADDR")
+        // Runtime-evidence ingest endpoint (the first-party agent, and any sensor, POSTs
+        // behaviors here) for the RuntimeEvidence "corroborated-now" signal. Unset = no runtime
+        // feed. Prefer PROTECTOR_BEHAVIOR_ADDR; fall back to the deprecated PROTECTOR_FALCO_ADDR.
+        // compat: cluster chart still sets PROTECTOR_FALCO_ADDR; remove after the chart migrates.
+        let behavior_addr = env::var("PROTECTOR_BEHAVIOR_ADDR")
+            .or_else(|_| env::var("PROTECTOR_FALCO_ADDR"))
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
         // The k8s audit-log ingest endpoint (JEF-269): the apiserver's audit webhook POSTs
@@ -447,7 +450,7 @@ async fn main() -> Result<()> {
                         client,
                         active,
                         scope,
-                        falco_addr,
+                        behavior_addr,
                         audit_addr,
                         kev,
                         epss,

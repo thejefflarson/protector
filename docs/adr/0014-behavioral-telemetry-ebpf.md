@@ -218,3 +218,36 @@ no behavior changes with it.**
 None of these four touch the honesty, zero-egress, or shadow-by-default framing: the
 agent stays observe-only, the graph and evidence stay in-cluster, and corroboration only
 ever promotes a cut behind the existing reversible, self-reverting, `enforce`-gated bar.
+
+## Addendum — Falco adapter retired; the first-party agent is the sole deployed corroboration source (JEF-312, 2026-07-05)
+
+The retirement is complete. Falco is dead on the cluster's `7.0.0` arm64 kernel
+(crash-loops, zero events forwarded), so there is no live Falco left to compare the agent
+against. Two things follow, and this addendum records them. **It is a decision/documentation
+change plus the code removal it describes — no change to the honesty, zero-egress, or
+shadow-by-default framing.**
+
+1. **The Falco *adapter* is removed; the tool-agnostic port stays (per addendum decision 3).**
+   The in-repo falcosidekick-shaped ingest — the legacy `/` alert route, the
+   `parse_falco_event` normalizer, and its critical-priority filter — has been deleted from
+   [`observe/runtime.rs`](../../engine/src/engine/observe/runtime.rs). What **stays**, exactly
+   as decision 3 committed: the normalized `Behavior::Alert` variant, `Behavior::is_alert()`,
+   the `/behavior` ingest route, and the ingest bearer-auth
+   (`ingestAuth`/`PROTECTOR_INGEST_TOKEN_FILE`). Any sensor — Tetragon, a future collector,
+   the first-party agent — can still POST an alerting corroboration signal to the
+   tool-agnostic port ([ADR-0003](0003-capability-ports.md)). The engine's runtime-ingest
+   address env var is renamed `PROTECTOR_FALCO_ADDR` → `PROTECTOR_BEHAVIOR_ADDR`, with the
+   old name still read as a deprecated compat fallback until the deployed chart migrates.
+
+2. **The corroboration-parity bake (F6/F7) is cancelled, and its machinery removed.** The
+   parity report existed only to *measure* the agent reproducing what a live Falco was
+   contributing before retirement (addendum decision 2). With no live Falco to compare
+   against, that measurement has nothing to compare — so the F6 parity module, its
+   `ProvenChain` source-split fields (`corroborated_by_falco` / `_by_agent`), its OTLP
+   `parity_*` gauges, and its dashboard panel are all removed. The agent's corroboration path
+   and the sensor-neutral "Runtime monitoring" readiness row (F5) stay: they describe live
+   per-node coverage, independent of any bake.
+
+The first-party eBPF agent is now the **sole deployed** corroboration source. The port it
+feeds remains open to any sensor; only the Falco-specific adapter and the cancelled-bake
+measurement are gone.

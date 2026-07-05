@@ -136,8 +136,8 @@ deep-links resolve to **Action** (soft-aliases), so they don't 404.
      cleared (`Report::left_alone`; the trust half).
   3. **Judgement audit (model debug)** — the `Judgement` ring (verbatim prompt/reply per call, as
      collapsed disclosures). Findings' "show model prompt" conceptually deep-links here.
-- **Readiness (coverage)** — one row per input (model / KEV / EPSS / Falco / eBPF / journal /
-  arm-state): state (Present/Absent/Degraded) · live detail · why it matters · the env var to
+- **Readiness (coverage)** — one row per input (model / KEV / EPSS / runtime corroboration /
+  journal / arm-state): state (Present/Absent/Degraded) · live detail · why it matters · the env var to
   enable it. Inputs that `weakens_decisions` when absent float up. A quiet feed reads
   "no signals (quiet, or sensor down)" — the ambiguity preserved, not falsely resolved.
 - **Admission/policy** — the webhook floor: `DecisionTallies` header (admitted/audited/denied,

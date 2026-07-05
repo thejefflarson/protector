@@ -432,10 +432,10 @@ pub async fn run_watch(
     // snapshot until the first sweep completes.
     shared_baseline.publish(&signing_baselines);
 
-    // Runtime evidence (Falco alerts + the eBPF agent's behaviors) is a stream, not a
-    // an HTTP endpoint falcosidekick POSTs to, are held in a TTL'd store, and wake
-    // the loop so a "happening now" signal is acted on immediately (it flips a
-    // chain's corroboration without changing the graph's shape). Signals expire, so
+    // Runtime evidence (the eBPF agent's behaviors, and any sensor's alerts) is a stream,
+    // not a Kubernetes object: behaviors POSTed to the ingest HTTP endpoint are held in a
+    // TTL'd store, and wake the loop so a "happening now" signal is acted on immediately (it
+    // flips a chain's corroboration without changing the graph's shape). Signals expire, so
     // corroboration stays live.
     let runtime_events = std::sync::Arc::new(observe::runtime::RuntimeEvents::new(
         std::time::Duration::from_secs(300),
@@ -583,7 +583,7 @@ pub async fn run_watch(
                 .collect(),
             // Vulnerabilities are listed best-effort on each pass (cheap, only when
             // something changed), then enriched with KEV exploit intel and EPSS
-            // exploit-prediction scores. Runtime events are the live, TTL'd Falco signals.
+            // exploit-prediction scores. Runtime events are the live, TTL'd behavioral signals.
             image_vulns: {
                 let mut v = observe::list_parsed(
                     &client,

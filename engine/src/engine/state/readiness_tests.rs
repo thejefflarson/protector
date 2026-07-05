@@ -47,15 +47,11 @@ fn runtime_row(readiness: &Readiness) -> &ReadinessRow {
 
 #[test]
 fn fully_covered_model_judging_has_no_unmet_inputs() {
-    let mut bake = BakeStats::default();
-    bake.signals_by_variant.insert("alert".into(), 1);
-    bake.signals_by_variant.insert("connection".into(), 1);
     // One healthy expected node → runtime corroboration is Present.
     let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &bake,
         Some(SystemTime::now()),
         &cov,
     );
@@ -71,7 +67,6 @@ fn a_timed_out_model_is_degraded_not_judging() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Timeout,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -96,7 +91,6 @@ fn a_fresh_trust_root_reads_present() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -111,7 +105,6 @@ fn a_stale_trust_root_is_degraded_and_surfaced_non_green() {
     let readiness = derive_readiness(
         &config,
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -128,7 +121,6 @@ fn a_never_fetched_trust_root_reads_absent() {
     let readiness = derive_readiness(
         &config,
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -143,7 +135,6 @@ fn a_fleet_wide_unverifiable_spike_is_surfaced_even_on_a_fresh_root() {
     let readiness = derive_readiness(
         &config,
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -157,7 +148,6 @@ fn an_unconfigured_model_reads_absent_and_warming_before_first_pass() {
     let readiness = derive_readiness(
         &ReadinessConfig::default(),
         ModelHealth::Unknown,
-        &BakeStats::default(),
         None,
         &no_runtime(),
     );
@@ -168,17 +158,15 @@ fn an_unconfigured_model_reads_absent_and_warming_before_first_pass() {
 
 // --- JEF-308: the collapsed runtime-corroboration row + honesty ladder ---
 
-/// There is exactly ONE runtime row now — the former `falco` + `ebpf-agent` split is collapsed.
+/// There is exactly ONE runtime row — the collapsed agent-sourced runtime-corroboration row.
 #[test]
 fn runtime_corroboration_is_a_single_agent_sourced_row() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
-    assert!(readiness.inputs.iter().all(|r| r.id != "falco"));
     assert!(readiness.inputs.iter().all(|r| r.id != "ebpf-agent"));
     assert_eq!(
         readiness
@@ -199,7 +187,6 @@ fn all_nodes_healthy_reads_present() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &cov,
     );
@@ -227,7 +214,6 @@ fn a_blind_node_degrades_the_row_and_is_named() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &cov,
     );
@@ -250,12 +236,11 @@ fn probes_failed_node_reads_blind_despite_reporting() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &cov,
     );
     let row = runtime_row(&readiness);
-    // The single expected node is dark and Falco is silent ⇒ wholly BLIND (Absent).
+    // The single expected node is dark ⇒ wholly BLIND (Absent).
     assert_eq!(row.state, InputState::Absent);
     assert!(row.detail.contains("BLIND"));
     let a = row.nodes.iter().find(|n| n.node == "node-a").unwrap();
@@ -264,12 +249,11 @@ fn probes_failed_node_reads_blind_despite_reporting() {
 
 #[test]
 fn no_sensor_at_all_reads_blind_never_reassuring() {
-    // No expected agent nodes and Falco silent → the row is BLIND, and its detail says absence of
-    // a signal is not evidence of safety (the honesty invariant).
+    // No expected agent nodes → the row is BLIND, and its detail says absence of a signal is not
+    // evidence of safety (the honesty invariant).
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &no_runtime(),
     );
@@ -277,24 +261,6 @@ fn no_sensor_at_all_reads_blind_never_reassuring() {
     assert_eq!(row.state, InputState::Absent);
     assert!(row.detail.contains("not evidence of safety"));
     assert!(readiness.has_unmet());
-}
-
-#[test]
-fn falco_only_during_cutover_reads_present_with_a_cutover_note() {
-    // Falco still feeding but the agent isn't reporting on any node yet — the both-sources rung.
-    let mut bake = BakeStats::default();
-    bake.signals_by_variant.insert("alert".into(), 2);
-    let readiness = derive_readiness(
-        &covered_config(),
-        ModelHealth::Ok,
-        &bake,
-        Some(SystemTime::now()),
-        &no_runtime(),
-    );
-    let row = runtime_row(&readiness);
-    assert_eq!(row.state, InputState::Present);
-    assert!(row.detail.contains("Falco"));
-    assert!(row.detail.contains("cutover"));
 }
 
 #[test]
@@ -309,7 +275,6 @@ fn a_partial_probe_node_is_degraded_not_blind() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &cov,
     );
@@ -332,7 +297,6 @@ fn an_out_of_scope_reporter_does_not_push_the_row_off_green() {
     let readiness = derive_readiness(
         &covered_config(),
         ModelHealth::Ok,
-        &BakeStats::default(),
         Some(SystemTime::now()),
         &cov,
     );

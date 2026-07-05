@@ -292,7 +292,7 @@ fn attribution_resolves_mirrors_the_adapter_rule() {
     let present: HashSet<&str> = present.iter().map(String::as_str).collect();
     let empty: HashSet<&str> = HashSet::new();
 
-    // namespace/name (Falco) always resolves, even against an empty snapshot.
+    // A namespace/name attribution always resolves, even against an empty snapshot.
     assert!(Attribution::by_namespaced_name("app", "web").resolves_in(|uid| present.contains(uid)));
     assert!(
         Attribution::by_namespaced_name("ghost", "nobody").resolves_in(|uid| empty.contains(uid))
@@ -317,7 +317,7 @@ async fn corroboration_predicate_fires_on_a_live_alert() {
     let mut snapshot = exposed_snapshot(true);
     snapshot.runtime_events = vec![RuntimeObservation {
         attribution: Attribution::by_namespaced_name("app", "web"),
-        source: Some("falco".into()),
+        source: Some("alert".into()),
         observed_at_ms: None,
         node: None,
         behavior: Behavior::Alert {
@@ -351,7 +351,7 @@ async fn process_publishes_the_behavioral_bake_snapshot() {
         // corroborates the breach-relevant chain.
         RuntimeObservation {
             attribution: Attribution::by_namespaced_name("app", "web"),
-            source: Some("falco".into()),
+            source: Some("alert".into()),
             observed_at_ms: None,
             node: None,
             behavior: Behavior::Alert {
