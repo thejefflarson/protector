@@ -291,7 +291,7 @@ pub(crate) fn derive_readiness(
         // per-node breakdown the view renders as a `<details>`/`<table>`.
         ReadinessRow {
             id: "runtime-corroboration",
-            label: "Runtime corroboration",
+            label: "Runtime monitoring",
             state: runtime_state,
             why: "live per-node behavioral signals (exec, secret reads, connections, alerts) confirm a path is being exploited right now — a blind node cannot corroborate",
             enable: "deploy the agent DaemonSet (-> /behavior)",
