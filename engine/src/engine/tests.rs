@@ -125,7 +125,6 @@ fn engine_with(counter: Arc<AtomicUsize>) -> Engine {
         EnabledActions::from_names(std::iter::empty::<&str>()),
         ActuationScope::unscoped(),
         Box::new(DryRunActuator),
-        Box::new(reason::hypothesis::NullHypothesizer),
         Box::new(CountingAdjudicator(counter)),
     )
 }
@@ -221,7 +220,6 @@ fn engine_with_adjudicator(adj: Box<dyn reason::adjudicate::Adjudicator>) -> Eng
         EnabledActions::from_names(std::iter::empty::<&str>()),
         ActuationScope::unscoped(),
         Box::new(DryRunActuator),
-        Box::new(reason::hypothesis::NullHypothesizer),
         adj,
     )
 }
@@ -593,7 +591,6 @@ async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
         EnabledActions::from_names(std::iter::empty::<&str>()),
         ActuationScope::unscoped(),
         Box::new(DryRunActuator),
-        Box::new(reason::hypothesis::NullHypothesizer),
         Box::new(CountingAdjudicator(calls.clone())),
     )
     .with_journal(journal::DecisionJournal::open(&path));
@@ -614,7 +611,6 @@ async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
         EnabledActions::from_names(std::iter::empty::<&str>()),
         ActuationScope::unscoped(),
         Box::new(DryRunActuator),
-        Box::new(reason::hypothesis::NullHypothesizer),
         Box::new(CountingAdjudicator(fresh_calls.clone())),
     )
     .with_journal(journal::DecisionJournal::open(&path));
@@ -694,7 +690,6 @@ async fn notifier_fires_once_per_decision_and_redacts() {
         EnabledActions::from_names(std::iter::empty::<&str>()),
         ActuationScope::unscoped(),
         Box::new(DryRunActuator),
-        Box::new(reason::hypothesis::NullHypothesizer),
         Box::new(CountingAdjudicator(calls.clone())),
     )
     .with_notifier(notify::BreachNotifier::new(&url, false));

@@ -146,7 +146,7 @@ pub use evidence::{EntryCoverage, entry_coverage};
 pub use model_call::ModelAdjudicator;
 pub use prompt::{build_judgment_prompt, parse_verdict, prompt_cache_key};
 // The cross-module helpers the rest of the crate imports by the stable
-// `reason::adjudicate::` path (the notify/hypothesis prompt sanitizer). The verdict cache
+// `reason::adjudicate::` path (the prompt sanitizer). The verdict cache
 // keys on `prompt_cache_key` (a hash of the deterministic prompt, JEF-350). The remaining
 // submodule helpers are internal to this module and are imported directly from their
 // submodule (including by the tests).

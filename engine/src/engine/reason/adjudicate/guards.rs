@@ -169,9 +169,8 @@ pub(crate) fn fence(value: &str) -> String {
 }
 
 /// Strip the characters an attacker could use to close a fence or inject prompt
-/// structure (`<>{}`, backtick, CR/LF). Shared with the hypothesis prompt builder,
-/// which sanitizes node keys without the `<<<>>>` wrap (the wrap would break the
-/// propose→confirm round-trip, since the model must echo keys verbatim).
+/// structure (`<>{}`, backtick, CR/LF). Used to neutralize cluster-controlled
+/// names before they enter the adjudication prompt.
 pub(crate) fn sanitize(value: &str) -> String {
     value
         .chars()
