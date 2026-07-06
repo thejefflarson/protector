@@ -358,6 +358,29 @@ impl AgentReport {
     }
 }
 
+/// A per-window **runtime report** (JEF-336): the single envelope every sensor POSTs to the
+/// engine's unified runtime ingest (`/behavior`). It carries the window's normalized
+/// [`RuntimeObservation`]s AND — for a sensor that has one — its per-node liveness
+/// [`AgentReport`], so liveness ALWAYS travels with the report. That is what keeps the JEF-308
+/// "quiet ≠ blind" guarantee honest: a node that saw nothing still POSTs an envelope with empty
+/// `observations` and its `liveness` present, so the engine records it HEALTHY-quiet instead of
+/// reading it blind for want of a beacon.
+///
+/// `liveness` is [`Option`] so the ADR-0003 tool-agnostic port still accepts a third-party sensor
+/// that sends only observations (it has no agent-specific `probes_loaded` to report). Both fields
+/// are defaulted and skip-if-empty on the wire, so an observations-only envelope is just
+/// `{"observations":[...]}` and a quiet liveness-only one is `{"liveness":{...}}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeReport {
+    /// The normalized observations seen this window — possibly empty (a quiet node still reports).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<RuntimeObservation>,
+    /// This sensor's per-node liveness beacon (JEF-308), when it has one. Absent for a
+    /// node-agnostic third-party sensor with no agent-specific liveness to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<AgentReport>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +723,81 @@ mod tests {
         let v = serde_json::to_value(&report).unwrap();
         assert!(v.get("observed_at_ms").is_none());
         assert_eq!(serde_json::from_value::<AgentReport>(v).unwrap(), report);
+    }
+
+    #[test]
+    fn runtime_report_round_trips_with_observations_and_liveness() {
+        // JEF-336: the unified envelope carries the window's observations AND the per-node
+        // liveness beacon in one shape, and round-trips byte-for-byte.
+        let report = RuntimeReport {
+            observations: vec![RuntimeObservation {
+                attribution: Attribution::by_pod_uid("uid"),
+                source: Some("protector-agent".into()),
+                observed_at_ms: None,
+                node: Some("node-a".into()),
+                behavior: Behavior::Alert {
+                    rule: "Terminal shell in container".into(),
+                },
+            }],
+            liveness: Some(AgentReport {
+                node: "node-a".into(),
+                probes_loaded: 6,
+                probes_total: 6,
+                signals_emitted: 1,
+                observed_at_ms: None,
+            }),
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v.get("observations").is_some());
+        assert_eq!(v["liveness"]["node"], serde_json::json!("node-a"));
+        assert_eq!(serde_json::from_value::<RuntimeReport>(v).unwrap(), report);
+    }
+
+    #[test]
+    fn runtime_report_omits_empty_observations_and_absent_liveness() {
+        // A quiet node's envelope: no observations, liveness present — `observations` is omitted
+        // (skip_serializing_if empty) so the wire is just `{"liveness":{...}}`.
+        let quiet = RuntimeReport {
+            observations: Vec::new(),
+            liveness: Some(AgentReport {
+                node: "node-a".into(),
+                probes_loaded: 6,
+                probes_total: 6,
+                signals_emitted: 0,
+                observed_at_ms: None,
+            }),
+        };
+        let v = serde_json::to_value(&quiet).unwrap();
+        assert!(
+            v.get("observations").is_none(),
+            "empty observations omitted from the wire"
+        );
+        assert!(v.get("liveness").is_some());
+        assert_eq!(serde_json::from_value::<RuntimeReport>(v).unwrap(), quiet);
+
+        // A third-party observations-only envelope: liveness absent → `liveness` omitted, and it
+        // deserializes back with `liveness: None` (the ADR-0003 tool-agnostic path).
+        let obs_only = RuntimeReport {
+            observations: vec![RuntimeObservation {
+                attribution: Attribution::by_namespaced_name("app", "web"),
+                source: None,
+                observed_at_ms: None,
+                node: None,
+                behavior: Behavior::LibraryLoaded {
+                    name: "openssl".into(),
+                },
+            }],
+            liveness: None,
+        };
+        let v = serde_json::to_value(&obs_only).unwrap();
+        assert!(
+            v.get("liveness").is_none(),
+            "absent liveness omitted from the wire"
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeReport>(v).unwrap(),
+            obs_only
+        );
     }
 
     #[test]
