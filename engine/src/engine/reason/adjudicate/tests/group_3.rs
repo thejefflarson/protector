@@ -84,7 +84,7 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
 fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
     use crate::engine::graph::Exposure;
     use crate::engine::graph::{
-        Edge, Grade, Image, Node, Provenance, Relation, ScanFinding, SecurityGraph, Trust, Workload,
+        Edge, Image, Node, Provenance, Relation, ScanFinding, SecurityGraph, Trust, Workload,
     };
     use std::time::SystemTime;
 
@@ -136,7 +136,6 @@ fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
         Edge {
             relation: Relation::RunsImage,
             provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-            grade: Grade::Proof,
         },
     );
 

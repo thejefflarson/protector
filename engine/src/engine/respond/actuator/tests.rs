@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::engine::graph::attack::CREDENTIAL_ACCESS;
-use crate::engine::graph::{Edge, Exposure, Grade, Node, NodeKey, Protocol, Provenance, Workload};
+use crate::engine::graph::{Edge, Exposure, Node, NodeKey, Protocol, Provenance, Workload};
 use crate::engine::reason::proof::Link;
 use crate::engine::respond::{Justification, ProposedAction};
 use std::time::SystemTime;
@@ -87,7 +87,6 @@ fn reaches() -> Edge {
             protocol: Protocol::Tcp,
         },
         provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-        grade: Grade::Proof,
     }
 }
 

@@ -1,21 +1,19 @@
 //! Shared client for an OpenAI-compatible chat endpoint (a local Ollama by
-//! default, a frontier gateway for escalations). Both the hypothesis source
-//! (propose) and the adjudicator (judge) call through here. Local-first: point it
-//! at an in-cluster model so the graph never leaves the cluster.
+//! default). The adjudicator (judge) is the sole `chat` consumer — the model-backed
+//! hypothesis stage was removed (JEF-363), so nothing else judges through here.
+//! `keep_warm` is a bypass: a one-token keep-alive ping that never touches a verdict.
+//! Local-first: point it at an in-cluster model so the graph never leaves the cluster.
 //!
-//! This is glue — the one network call the model layers make. The prompt-building
-//! and reply-parsing that wrap it are pure and tested in their own modules.
+//! This is glue — the one network call the model layer makes. The prompt-building
+//! and reply-parsing that wrap it are pure and tested in their own modules. Completion
+//! reuse lives one layer up in the adjudicator's verdict cache (JEF-350), keyed on the
+//! deterministic prompt hash; there is deliberately no cache here (JEF-364 removed the
+//! JEF-362 completion LRU — it was redundant with the verdict cache and pinned transient
+//! `Uncertain` replies, blocking the JEF-234 retry/backoff).
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
-
-/// The bounded in-memory completion cache (JEF-362): the ONE mechanism that keeps every
-/// model consumer off the wire for a repeated request. `chat` routes through it;
-/// `keep_warm` deliberately does not.
-mod cache;
-
-pub use cache::DEFAULT_CACHE_ENTRIES;
 
 /// Default cap on the model calls protector keeps IN FLIGHT at once during an adjudication
 /// pass. Deliberately generous (never 1): this is a connection/timeout fan-out safety bound,
@@ -144,13 +142,12 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// with a [`MAX_RESPONSE_BYTES`] cap so a server that ignores `max_tokens` still
 /// can't make us buffer an unbounded reply.
 ///
-/// JEF-362: every completion is served through the bounded in-memory [`cache`]. An
-/// identical request (same endpoint + body) is returned from memory with NO HTTP; a
-/// miss calls the endpoint and stores ONLY a successful completion. Errors, non-success
-/// statuses, over-cap bodies, and unparseable replies are never cached — they must retry
-/// next pass. The cache lock is never held across the `await` below (it is taken and
-/// released inside `cache::get`/`cache::put`), so it sits in front of the concurrent
-/// dispatch (JEF-337) without reintroducing serialization.
+/// There is no completion cache here (JEF-364): every call hits the endpoint. Reuse
+/// lives in the adjudicator's verdict cache (JEF-350), which keys on the deterministic
+/// prompt hash — a hit there means `chat` is never called, and a miss means the prompt
+/// changed so a completion cache would miss too. A completion cache would only add a
+/// live hazard: it would pin a transient `Uncertain` reply (which the verdict store
+/// deliberately never caches, so JEF-234 backoff can retry) until the evidence changed.
 pub async fn chat(
     client: &reqwest::Client,
     endpoint: &str,
@@ -166,13 +163,6 @@ pub async fn chat(
         "max_tokens": MAX_COMPLETION_TOKENS,
         "messages": [{ "role": "user", "content": prompt }]
     });
-    // Cache hit → return the stored completion, no HTTP. The key is a stable hash of the
-    // full request (endpoint + body), so only a byte-identical request hits.
-    let key = cache::cache_key(endpoint, &body);
-    if let Some(hit) = cache::get(key) {
-        tracing::debug!("model completion served from cache (no HTTP)");
-        return Some(hit);
-    }
     let response = client.post(endpoint).json(&body).send().await.ok()?;
     // JEF-301: a non-success HTTP status (the 500 Ollama returns when it OOM-crashes ingesting
     // a heavy prompt, a 502/503 while it restarts, etc.) is a FAILURE, not an answer. Return
@@ -192,10 +182,6 @@ pub async fn chat(
     let content = json["choices"][0]["message"]["content"]
         .as_str()
         .map(str::to_string)?;
-    // Success only: a completion we actually extracted is cacheable. Everything above that
-    // returned `None` (transport error, non-success status, over-cap body, unparseable or
-    // shapeless reply) short-circuited before here, so it is never stored — it retries.
-    cache::put(key, content.clone());
     Some(content)
 }
 
@@ -746,10 +732,8 @@ mod tests {
         let mut set = tokio::task::JoinSet::new();
         for i in 0..CALLS {
             let endpoint = endpoint.clone();
-            // Distinct prompts so the JEF-362 completion cache can't short-circuit any of
-            // the CALLS requests — this test is about concurrency (the server must see all
-            // CALLS in flight), not caching. Identical prompts would let a fast responder
-            // populate the cache and starve the server's accept loop.
+            // Distinct prompts so every one of the CALLS requests reaches the wire — this
+            // test is about concurrency (the server must see all CALLS in flight).
             let prompt = format!("p{i}");
             set.spawn(async move {
                 let client = timeout_only_client(5).unwrap();
@@ -848,6 +832,82 @@ mod tests {
             endpoint_host("http://evil.com./hook"),
             Some("evil.com".to_string())
         );
+    }
+
+    /// JEF-364: there is no completion cache, so an identical prompt is re-sent to the
+    /// endpoint on every pass — a transient `Uncertain` reply must NOT stick. This is the
+    /// exact hazard the JEF-362 LRU introduced: it cached any 200 (including a reply that
+    /// parses to `Uncertain`, which the verdict store deliberately never caches so JEF-234
+    /// backoff can retry), pinning the entry to that stale completion. A counting localhost
+    /// server proves the second call re-hits the wire (two connections) rather than being
+    /// served a cached completion, and the caller could get a *fresh* answer the next pass.
+    #[tokio::test]
+    async fn identical_prompt_is_resent_no_cached_completion_sticks() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Each connection is answered in order: first an `Uncertain`-shaped verdict (the
+        // transient reply that must not be pinned), then a decided verdict on the retry.
+        let uncertain = json!({ "verdict": "Uncertain", "reason": "model unsure" }).to_string();
+        let decided = json!({ "verdict": "Benign", "reason": "settled" }).to_string();
+        let responses = [uncertain.clone(), decided.clone()];
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let srv_count = count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = srv_count.fetch_add(1, Ordering::SeqCst);
+                let content = responses
+                    .get(n)
+                    .cloned()
+                    .unwrap_or_else(|| responses[responses.len() - 1].clone());
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let payload =
+                        json!({ "choices": [{ "message": { "content": content } }] }).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+
+        let client = timeout_only_client(5).unwrap();
+        let endpoint = format!("http://{addr}/v1/chat/completions");
+
+        // First pass: the transient `Uncertain` completion.
+        let first = chat(&client, &endpoint, "m", "same-prompt").await;
+        assert_eq!(
+            first.as_deref(),
+            Some(uncertain.as_str()),
+            "first pass returns the transient Uncertain reply"
+        );
+
+        // Second pass, byte-identical prompt: must re-hit the wire, NOT replay a cached
+        // completion — so it can pick up the endpoint's now-decided answer.
+        let second = chat(&client, &endpoint, "m", "same-prompt").await;
+        assert_eq!(
+            second.as_deref(),
+            Some(decided.as_str()),
+            "the identical prompt must be re-sent and get the fresh reply — no cached Uncertain sticks"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "both passes must hit the wire — there is no completion cache to short-circuit the retry"
+        );
+        server.abort();
     }
 
     /// The keep-warm residency hint must outlast the ping interval, so the model never

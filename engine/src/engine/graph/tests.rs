@@ -65,7 +65,6 @@ fn proof_edge(relation: Relation, source: &str) -> Edge {
     Edge {
         relation,
         provenance: prov(source),
-        grade: Grade::Proof,
     }
 }
 
@@ -208,16 +207,4 @@ fn relations_map_to_attack_techniques() {
         .technique(),
         None
     );
-}
-
-#[test]
-fn grade_gates_what_may_move_privilege() {
-    let proof = proof_edge(Relation::CanRead, "rbac");
-    let hypo = Edge {
-        relation: Relation::CanRead,
-        provenance: prov("model"),
-        grade: Grade::Hypothesis,
-    };
-    assert!(proof.is_proof_grade());
-    assert!(!hypo.is_proof_grade());
 }

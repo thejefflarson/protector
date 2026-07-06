@@ -8,9 +8,10 @@
 [ADR-0002](0002-change-driven-ir-loop.md) made the cluster security graph core
 infrastructure and decided it tracks *observed* state fed by watch streams.
 [ADR-0003](0003-capability-ports.md) fixed the graph **vocabulary** (typed nodes
-and edges, each edge carrying provenance and a proof-grade/hypothesis-grade tag)
-as the stable contract adapters map into. What neither settled is the concrete
-question: **what do we store the graph in, and does it persist?**
+and edges, each edge carrying provenance; originally also a proof-grade/hypothesis-grade
+tag, removed in JEF-365 — see that ADR's amendment) as the stable contract adapters map
+into. What neither settled is the concrete question: **what do we store the graph in,
+and does it persist?**
 
 The forces are unusually one-sided here, which is why this is a short ADR:
 
@@ -43,9 +44,11 @@ itself.** Specifically:
 - A `petgraph::stable_graph::StableGraph` — stable node/edge indices survive the
   incremental add/remove churn that deltas produce.
 - Strongly-typed node and edge enums implementing the ADR-0003 vocabulary. Every
-  edge carries its **provenance** (which adapter asserted it) and its
-  **proof-grade vs hypothesis-grade** tag, so the action layer can refuse to cut
-  on a hypothesis-grade edge.
+  edge carries its **provenance** (which adapter asserted it) and is a **deterministic
+  observation by construction** — no hypothesis-grade edges exist, so any edge is
+  eligible to move privilege. (The original design tagged each edge proof-grade vs
+  hypothesis-grade; JEF-365 removed the tag once nothing constructed a hypothesis-grade
+  edge — see ADR-0003's amendment.)
 - Reachability and privilege as **explicit predicate-filtered walks**, not a query
   language. The counterfactual cut enumerates edges on a proven path; we do not
   need general max-flow at this scale (`petgraph::algo::ford_fulkerson` is there if

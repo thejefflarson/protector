@@ -3,8 +3,8 @@
 //! [`Snapshot`](super::Snapshot) into the graph vocabulary — and nothing
 //! else. The core never names a product; it iterates [`Adapter`]s.
 //!
-//! Every adapter in this slice is deterministic and therefore emits
-//! [`Grade::Proof`] edges:
+//! Every adapter in this slice is deterministic, so every edge it emits is a
+//! deterministic observation (the only kind that exists):
 //!
 //! - [`WorkloadAdapter`] — Workload, Image, and Identity nodes, with the
 //!   structural `runs-image` / `runs-as` edges.
@@ -32,7 +32,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use super::Snapshot;
 use crate::engine::graph::attack::{self, CAPABILITY_CATALOG};
 use crate::engine::graph::{
-    Capability, Edge, Endpoint, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol,
+    Capability, Edge, Endpoint, Exposure, Host, Identity, Image, Node, NodeKey, Protocol,
     Provenance, Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload,
     canonical_image,
 };
@@ -88,13 +88,21 @@ pub trait Adapter: Send + Sync {
     fn contribute(&self, snapshot: &Snapshot, graph: &mut SecurityGraph);
 }
 
-/// A deterministic, freshly-observed edge: proof-grade, stamped now, attributed to
-/// `source`.
+/// A deterministic, freshly-observed edge: stamped now, attributed to `source`.
+///
+/// SOLE edge-construction path for the observe layer: every edge is a deterministic
+/// observation minted here from trusted cluster topology/RBAC (the adapters above).
+/// The removed `Grade` gate (JEF-365) used to enforce "only deterministic proof moves
+/// privilege" at the type level; with it gone that invariant now rests on this
+/// chokepoint. Any new adapter that maps runtime, LLM, or feed data into a *movement*
+/// edge (`reaches` / `can-do` / `escapes-to` — the proof-walk relations) would break
+/// "only deterministic proof moves privilege" (ADR-0001/0003). Runtime/LLM/feed
+/// evidence must attach node *facts*, never mint a movement edge, unless a `Grade`-style
+/// seam is reintroduced first (ADR-0001's JEF-365 amendment).
 pub(super) fn observed(source: &str, relation: Relation) -> Edge {
     Edge {
         relation,
         provenance: Provenance::new(source, SystemTime::now()),
-        grade: Grade::Proof,
     }
 }
 

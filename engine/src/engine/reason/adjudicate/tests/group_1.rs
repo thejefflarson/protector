@@ -16,8 +16,8 @@ use super::{
 };
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
-    Severity, Trust, Vulnerability, Workload,
+    Behavior, Edge, Exposure, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
+    Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -766,14 +766,13 @@ fn entry_evidence_dedup_prefers_the_instance_with_fix_signal() {
 #[test]
 fn objective_reach_classifies_by_incoming_edge() {
     use crate::engine::graph::{
-        Edge, Grade, Identity, Node, Protocol, Relation, SecretRef, SecurityGraph,
+        Edge, Identity, Node, Protocol, Relation, SecretRef, SecurityGraph,
     };
 
     let mut g = SecurityGraph::new();
     let edge = |relation| Edge {
         relation,
         provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-        grade: Grade::Proof,
     };
     let identity = |ns: &str, name: &str| {
         Node::Identity(Identity {
