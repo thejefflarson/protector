@@ -50,18 +50,19 @@ pub(super) fn build_judgment_prompt_with(
     cves: &[String],
     behaviors: &[Behavior],
 ) -> String {
-    // Each of these lists is capped before going into the prompt: a CVE-heavy image,
-    // a broadly-privileged entry reaching hundreds of objectives, or a chatty workload
-    // can each bloat the prompt past what a CPU-only model answers in time, so the entry
-    // never gets a verdict. A capped sample + a remainder count conveys the posture; the
-    // FULL sets still drive the cache fingerprint (entry_fingerprint), so the cap never
-    // changes a verdict. (Behaviors/CVEs are sorted+deduped first; objectives keep their
-    // order.)
+    // The whole rendered prompt is the verdict-cache key (JEF-350): it is hashed and the
+    // model response cached on that hash, so the cache invalidates exactly when — and only
+    // when — what the model actually sees changes (killing the old fingerprint↔prompt drift,
+    // where a predicted-input fingerprint churned while the model's input was unchanged).
+    // Every list below is therefore rendered DETERMINISTICALLY — sorted + deduped, no
+    // timestamps / pod-UIDs / HashMap iteration order — so the same evidence always produces
+    // a byte-identical prompt and so a byte-identical cache key.
     let mut cves = cves.to_vec();
 
     // Annotate notable execs (shell / package-manager in container, JEF-55) via engine
     // policy — `Behavior::summary` returns the bare path after JEF-113, so without this the
-    // prompt would silently lose the "(interactive shell in container)" signal.
+    // prompt would silently lose the "(interactive shell in container)" signal. Sorted +
+    // deduped so behavior order (HashMap/traversal) never changes the prompt or its hash.
     let mut behavior_lines: Vec<String> = behaviors.iter().map(annotated_summary).collect();
     behavior_lines.sort();
     behavior_lines.dedup();
@@ -166,6 +167,24 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         posture = fence_list(&posture_lines),
         objectives = objectives,
     )
+}
+
+/// The verdict-cache key for a built prompt (JEF-350): the SHA-256 of the prompt string,
+/// hex-encoded. The prompt is the model's COMPLETE, deterministic input (built by
+/// [`build_judgment_prompt`]), so hashing it makes the cache invalidate exactly when — and
+/// only when — what the model sees changes. This replaces the old `entry_fingerprint`,
+/// which tried to PREDICT the salient inputs and drifted from the prompt (re-judging an
+/// entry whose model input was unchanged). Same prompt in ⇒ same key out, every pass; any
+/// material change to the evidence the model sees ⇒ a new key ⇒ a re-judge.
+pub fn prompt_cache_key(prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(prompt.as_bytes());
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 /// Parse a model verdict, tolerating surrounding prose. Anything not clearly

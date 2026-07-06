@@ -1,15 +1,14 @@
-//! The fence/sanitize prompt-injection defenses, the anti-fabrication backstop, and
-//! the verdict-cache fingerprint. Split out of the adjudicate module root purely to
-//! keep every file under the 1,000-line cap (repo CLAUDE.md). These are pure helpers:
-//! `sanitize`/`fence` neutralize untrusted text, `guard_fabricated_cve` is the sole
-//! remaining deterministic backstop (it never decides breach), and `entry_fingerprint`
-//! is what the cross-pass verdict cache keys on.
+//! The fence/sanitize prompt-injection defenses and the anti-fabrication backstop. Split
+//! out of the adjudicate module root purely to keep every file under the 1,000-line cap
+//! (repo CLAUDE.md). These are pure helpers: `sanitize`/`fence` neutralize untrusted text,
+//! and `guard_fabricated_cve` is the sole remaining deterministic backstop (it never
+//! decides breach). The cross-pass verdict cache no longer keys on a predicted-input
+//! fingerprint; it keys on a hash of the deterministic prompt (JEF-350, see
+//! `prompt::prompt_cache_key`).
 
-use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, NodeKey, Relation, SecurityGraph};
 
 use super::Verdict;
-use super::evidence::entry_evidence;
 
 /// Normalize free text before CVE extraction so a model can't dodge the
 /// anti-fabrication guard with a cosmetic spelling of a CVE id. Uppercases ASCII,
@@ -159,60 +158,6 @@ pub(crate) fn guard_unsupported_exploitable(
             )
         })
     })
-}
-
-/// A stable fingerprint of the evidence a verdict depends on — the entry's
-/// exposure, its exploited/critical CVEs, and its runtime behavior. The cross-pass
-/// verdict cache keys on this so an entry is re-judged only when the facts that
-/// would change the model's call change, not on every watch event (one CPU-only
-/// model call per endpoint is dear on a Pi). Behavior contributes only its COARSE
-/// fingerprint keys, so mundane per-peer connection churn doesn't bust the cache.
-///
-/// The CVSS score (JEF-242) rides in through each `cve_evidence` line as a STABLE numeric
-/// field (no timestamps). So when trivy newly reports a score for a CVE the fingerprint
-/// changes ONCE (the entry is re-judged with the new evidence) and is then stable across
-/// passes — it does not thrash the cache per pass (the JEF-63 budget).
-pub(crate) fn entry_fingerprint(
-    graph: &SecurityGraph,
-    entry: &NodeKey,
-    objectives: &[(NodeKey, AttackRef)],
-) -> String {
-    let (mut cves, behaviors) = entry_evidence(graph, entry);
-    cves.sort();
-    cves.dedup();
-    let mut runtime: Vec<String> = behaviors.iter().map(|b| b.fingerprint_key()).collect();
-    runtime.sort();
-    runtime.dedup();
-    // The reachable-objective set is part of the fingerprint: a misconfig that newly
-    // exposes an objective changes it, so the entry is re-judged. Each objective carries
-    // its reach tag (JEF-79) too — a secret flipping from mounted/RBAC-granted to a bare
-    // network path changes the authorization call, so it must re-judge.
-    let mut objs: Vec<String> = objectives
-        .iter()
-        .map(|(k, _)| format!("{}#{}", k.0, objective_reach(graph, k)))
-        .collect();
-    objs.sort_unstable();
-    objs.dedup();
-    // The other trivy report kinds (JEF-244): a newly-baked exposed secret, a new misconfig,
-    // or a new RBAC finding changes the model's call, so it must re-judge the entry. We key
-    // on the STABLE finding ids only (low-cardinality, no untrusted free-text), so the
-    // fingerprint changes ONCE when a finding appears and is then stable across passes.
-    let (secrets, misconfigs, rbac) = graph.entry_findings(entry);
-    let mut findings: Vec<String> = secrets
-        .iter()
-        .map(|f| format!("sec:{}", f.id))
-        .chain(misconfigs.iter().map(|f| format!("cfg:{}", f.id)))
-        .chain(rbac.iter().map(|f| format!("rbac:{}", f.id)))
-        .collect();
-    findings.sort();
-    findings.dedup();
-    format!(
-        "cves={}|rt={}|objs={}|findings={}",
-        cves.join(","),
-        runtime.join(","),
-        objs.join(","),
-        findings.join(",")
-    )
 }
 
 /// Wrap an untrusted value in a fence and strip the characters that could close it

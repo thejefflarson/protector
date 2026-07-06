@@ -8,11 +8,11 @@
 use super::guards::sanitize;
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
 
-/// Cap untrusted free-text to keep the prompt small for the CPU-only model. The
-/// `entry_fingerprint` discipline means the (capped) string is what the cache keys
-/// on — fine, since the cap is deterministic, so the same title always yields the
-/// same string. Trivy's `title` is the only untrusted free-text that still reaches the
-/// prompt (the NVD advisory feed is retired, JEF-242); this cap stays to keep it fenced.
+/// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
+/// prompt is the verdict-cache key (hashed, JEF-350), this cap must be DETERMINISTIC —
+/// which it is: the same title always yields the same capped string, so the cache key is
+/// stable across passes. Trivy's `title` is the only untrusted free-text that still reaches
+/// the prompt (the NVD advisory feed is retired, JEF-242); this cap stays to keep it fenced.
 const TITLE_CAP: usize = 120;
 
 /// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across an

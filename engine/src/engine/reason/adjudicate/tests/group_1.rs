@@ -10,7 +10,10 @@ use super::super::guards::{
     ns_marker, objective_reach,
 };
 use super::super::*;
-use super::{critical_cve, entry_reaching_db, graph_with_vuln, graph_with_vulns, objectives_of};
+use super::{
+    critical_cve, entry_reaching_db, graph_with_behaviors, graph_with_vuln, graph_with_vulns,
+    objectives_of,
+};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
     Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
@@ -192,30 +195,103 @@ fn untrusted_title_cannot_inject_prompt_structure() {
     assert!(!inner.contains(">>>"));
 }
 
-/// JEF-242: a newly-reported CVSS score busts the verdict cache ONCE (the fingerprint
-/// changes when the score enriches a CVE), but the same score is stable across passes —
-/// the score is a stable field (no timestamps), so it does not thrash per pass.
+/// JEF-242 + JEF-350: a newly-reported CVSS score enriches a CVE line, so it changes the
+/// prompt and the prompt-hash verdict-cache key busts ONCE — but the same score renders the
+/// same prompt and so the same hash across passes (the score is a stable field, no
+/// timestamps), so it does not thrash the cache per pass (the JEF-63 budget).
 #[test]
-fn fingerprint_busts_on_new_score_then_is_stable() {
+fn prompt_hash_busts_on_new_score_then_is_stable() {
     let objectives: &[(NodeKey, AttackRef)] = &[];
 
     let (g_bare, e_bare) = graph_with_vuln(critical_cve("CVE-2021-44228"));
-    let fp_bare = entry_fingerprint(&g_bare, &e_bare, objectives);
+    let h_bare = prompt_cache_key(&build_judgment_prompt(&e_bare, objectives, &g_bare));
 
     let mut scored = critical_cve("CVE-2021-44228");
     scored.score = Some(9.8);
     let (g_s, e_s) = graph_with_vuln(scored.clone());
-    let fp_s = entry_fingerprint(&g_s, &e_s, objectives);
+    let h_s = prompt_cache_key(&build_judgment_prompt(&e_s, objectives, &g_s));
 
-    // The score changed the fingerprint → the entry is re-judged once.
-    assert_ne!(fp_bare, fp_s, "new score busts the cache");
+    // The score changed the prompt → its hash changed → the entry is re-judged once.
+    assert_ne!(
+        h_bare, h_s,
+        "a new score changes the prompt, busting the cache"
+    );
 
-    // Re-running on the SAME score yields the SAME fingerprint → no per-pass thrash.
+    // Re-running on the SAME score yields the SAME prompt and so the SAME hash → no thrash.
     let (g_s2, e_s2) = graph_with_vuln(scored);
     assert_eq!(
-        fp_s,
-        entry_fingerprint(&g_s2, &e_s2, objectives),
+        h_s,
+        prompt_cache_key(&build_judgment_prompt(&e_s2, objectives, &g_s2)),
         "same score is stable across passes"
+    );
+}
+
+/// JEF-350 (the core regression guard, in the spirit of the retired
+/// `fingerprint_key_collapses_connection_churn`): the prompt — and so its hash, the
+/// verdict-cache key — is DETERMINISTIC. The same evidence, built repeatedly, produces a
+/// byte-identical prompt and hash; and reordering the runtime behaviors (a volatile,
+/// non-semantic input — HashMap/traversal order) does NOT change either. The cache
+/// therefore invalidates iff what the model actually sees changes.
+#[test]
+fn prompt_hash_is_deterministic_and_order_independent() {
+    use crate::engine::graph::SecretReadSource;
+    let behaviors = vec![
+        Behavior::ProcessExec {
+            path: "/bin/bash".into(),
+        },
+        Behavior::NetworkConnection {
+            peer: "10.0.0.2:5432".into(),
+            internet: false,
+        },
+        Behavior::SecretRead {
+            secret: "app/session-key".into(),
+            source: SecretReadSource::Mounted,
+        },
+        Behavior::FileRead {
+            path: "/etc/config/app.yaml".into(),
+        },
+    ];
+    let (g1, e1) = graph_with_behaviors(behaviors.clone());
+    let p1 = build_judgment_prompt(&e1, &[], &g1);
+
+    // Repeated builds of the SAME evidence are byte-identical (no timestamps, no per-instance
+    // ids, no HashMap iteration order leaking in) → identical hash every pass.
+    for _ in 0..5 {
+        let again = build_judgment_prompt(&e1, &[], &g1);
+        assert_eq!(
+            p1, again,
+            "same evidence must render a byte-identical prompt"
+        );
+        assert_eq!(
+            prompt_cache_key(&p1),
+            prompt_cache_key(&again),
+            "same prompt must hash to the same cache key"
+        );
+    }
+
+    // Reordering the behaviors is a purely volatile, non-semantic change — the prompt sorts
+    // its behavior lines, so the prompt and its hash are unchanged (no false cache miss).
+    let mut reordered = behaviors.clone();
+    reordered.reverse();
+    let (g2, e2) = graph_with_behaviors(reordered);
+    let p2 = build_judgment_prompt(&e2, &[], &g2);
+    assert_eq!(p1, p2, "behavior order must not change the prompt");
+    assert_eq!(
+        prompt_cache_key(&p1),
+        prompt_cache_key(&p2),
+        "behavior order must not change the cache key"
+    );
+
+    // A genuinely NEW salient behavior DOES change the prompt (and so re-judges).
+    let mut more = behaviors;
+    more.push(Behavior::Alert {
+        rule: "reverse shell spawned".into(),
+    });
+    let (g3, e3) = graph_with_behaviors(more);
+    assert_ne!(
+        prompt_cache_key(&p1),
+        prompt_cache_key(&build_judgment_prompt(&e3, &[], &g3)),
+        "a new salient behavior changes the prompt, busting the cache"
     );
 }
 
@@ -778,11 +854,12 @@ fn ns_marker_flags_cross_namespace_only() {
     assert_eq!(k("host/node").namespace(), None);
 }
 
-/// JEF-51: reachability is part of the verdict fingerprint, so a flip to
-/// `LoadedAtRuntime` busts the cache and forces a re-judge. Two graphs that differ
-/// ONLY in a CVE's reachability MUST produce different `entry_fingerprint`s.
+/// JEF-51 + JEF-350: reachability is rendered into the prompt, so a flip to
+/// `LoadedAtRuntime` changes the prompt — and so its hash, the verdict-cache key — forcing
+/// a re-judge. Two graphs that differ ONLY in a CVE's reachability MUST produce different
+/// prompt hashes.
 #[test]
-fn fingerprint_changes_with_cve_reachability() {
+fn prompt_hash_changes_with_cve_reachability() {
     use crate::engine::graph::Reachability;
 
     // A graph with one internet-exposed workload running an image that carries a
@@ -854,14 +931,15 @@ fn fingerprint_changes_with_cve_reachability() {
         .expect("foothold chain");
     let objs = objectives_of(&chain);
 
-    let fp_unreached = entry_fingerprint(&g_unreached, &entry, &objs);
-    let fp_loaded = entry_fingerprint(&g_loaded, &entry, &objs);
+    let p_unreached = build_judgment_prompt(&entry, &objs, &g_unreached);
+    let p_loaded = build_judgment_prompt(&entry, &objs, &g_loaded);
     assert_ne!(
-        fp_unreached, fp_loaded,
-        "a reachability flip must change the fingerprint (bust the verdict cache)"
+        prompt_cache_key(&p_unreached),
+        prompt_cache_key(&p_loaded),
+        "a reachability flip must change the prompt hash (bust the verdict cache)"
     );
     assert!(
-        fp_loaded.contains("loaded-at-runtime"),
-        "the loaded fingerprint carries the reachability verbatim"
+        p_loaded.contains("loaded-at-runtime"),
+        "the loaded prompt carries the reachability verbatim"
     );
 }

@@ -1,15 +1,16 @@
 //! The model-backed adjudicator: the OpenAI-compatible model call plus the
 //! diagnostic judgement log. Split out of the adjudicate module root purely to keep
-//! every file under the 1,000-line cap (repo CLAUDE.md). It assembles the entry's
-//! evidence ONCE, builds the prompt, calls the shared model client, and runs the one
-//! remaining deterministic backstop (anti-fabrication) over the parsed verdict.
+//! every file under the 1,000-line cap (repo CLAUDE.md). It calls the shared model client
+//! with the caller-built prompt (JEF-350 — the same bytes the verdict cache keyed on),
+//! assembles the entry's evidence for the deterministic backstops, and runs the remaining
+//! backstop (anti-fabrication) over the parsed verdict.
 
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 
 use super::evidence::{cve_ids_of, entry_evidence, entry_findings};
 use super::guards::{guard_fabricated_cve, guard_unsupported_exploitable};
-use super::prompt::{build_judgment_prompt_with, parse_verdict};
+use super::prompt::parse_verdict;
 use super::{Adjudicator, Verdict};
 
 /// A model-backed adjudicator (OpenAI-compatible endpoint via [`crate::engine::model`]).
@@ -76,15 +77,15 @@ impl Adjudicator for ModelAdjudicator {
         entry: &NodeKey,
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
+        prompt: &str,
     ) -> Verdict {
-        // Fetch the entry's evidence ONCE; the prompt and the anti-fabrication backstop
-        // share it. JEF-134: the deterministic layer PROVES + ENRICHES only — there is no
-        // pre-call decision filter and no deterministic promotion-ground gate. EVERY
-        // breach-relevant entry's proven chain + enrichment is handed to the model, which
-        // decides breach holistically. Authorized access (RBAC/mounted), however broad or
-        // high-severity, is not a breach without exploitation evidence; that call is the
-        // model's, not the engine's. The ONE remaining backstop is anti-fabrication
-        // (guard_fabricated_cve), not a decision gate.
+        // Fetch the entry's evidence ONCE for the two anti-fabrication backstops. JEF-134:
+        // the deterministic layer PROVES + ENRICHES only — there is no pre-call decision
+        // filter and no deterministic promotion-ground gate. EVERY breach-relevant entry's
+        // proven chain + enrichment is handed to the model, which decides breach holistically.
+        // Authorized access (RBAC/mounted), however broad or high-severity, is not a breach
+        // without exploitation evidence; that call is the model's, not the engine's. The ONE
+        // remaining backstop is anti-fabrication (guard_fabricated_cve), not a decision gate.
         let (cves, behaviors) = entry_evidence(graph, entry);
         // Exposed-secret presence for the zero-anchor backstop, read from the SAME source the
         // prompt uses (`entry_findings` → `(secret_lines, posture_lines)`): a non-empty
@@ -93,9 +94,11 @@ impl Adjudicator for ModelAdjudicator {
         let (secret_lines, _posture_lines) = entry_findings(graph, entry);
         let has_exposed_secret = !secret_lines.is_empty();
 
-        let prompt = build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors);
+        // JEF-350: the caller already built this exact prompt to derive the verdict-cache key
+        // (its hash); reuse those bytes for the model call rather than rebuilding, so the input
+        // the cache keyed on and the input the model sees can never drift.
         let (reply, verdict) =
-            match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, &prompt)
+            match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, prompt)
                 .await
             {
                 // The sole deterministic backstop on a promotion is anti-fabrication (JEF-79):
@@ -125,7 +128,13 @@ impl Adjudicator for ModelAdjudicator {
             };
         // Capture the prompt the model saw, its raw reply, and the guarded verdict so an
         // `exploitable` call can be diagnosed from the judgement record (JEF diagnostic).
-        self.record_judgement(entry, objectives.len(), Some(prompt), reply, &verdict);
+        self.record_judgement(
+            entry,
+            objectives.len(),
+            Some(prompt.to_string()),
+            reply,
+            &verdict,
+        );
         verdict
     }
 }

@@ -64,14 +64,21 @@ use respond::actuator::{
 use std::collections::{HashMap, HashSet};
 
 /// One breach-relevant ENTRY queued for adjudication this pass: its identity, the
-/// (objective, technique) set the model judges it over, the evidence fingerprint that
-/// keys its verdict cache, and the chain indices its verdict stamps. Built once in the
-/// classification phase so the concurrent model dispatch (JEF-337) and the sequential
-/// result bookkeeping share exactly the same per-entry data.
+/// (objective, technique) set the model judges it over, the DETERMINISTIC prompt the model
+/// will see, the verdict-cache key (a hash of that prompt, JEF-350), and the chain indices
+/// its verdict stamps. Built once in the classification phase so the concurrent model
+/// dispatch (JEF-337) reuses the exact prompt bytes the cache key was derived from — the
+/// cached-on input and the sent input can never drift.
 struct PendingEntry {
     entry_key: String,
     entry: graph::NodeKey,
     objectives: Vec<(graph::NodeKey, graph::attack::AttackRef)>,
+    /// The model's complete, deterministic input (built by `build_judgment_prompt`).
+    prompt: String,
+    /// The verdict-cache key: `prompt_cache_key(&prompt)` — the freshness key persisted in
+    /// the journal (JEF-301) and matched by `cached_for`. Named `fingerprint` because the
+    /// cache/journal seam is generic over "the freshness key string"; its value is now the
+    /// prompt hash, not the old predicted-input fingerprint.
     fingerprint: String,
     idxs: Vec<usize>,
 }
@@ -515,11 +522,18 @@ impl Engine {
             objectives.sort_by(|a, b| a.0.0.cmp(&b.0.0));
             objectives.dedup_by(|a, b| a.0 == b.0);
 
-            let fingerprint = reason::adjudicate::entry_fingerprint(&graph, &entry, &objectives);
+            // Build the model's complete, deterministic prompt BEFORE the cache lookup, then
+            // key the cache on its hash (JEF-350): the prompt is exactly what the model sees,
+            // so the cache invalidates iff the model's input changes. On a hit we serve the
+            // stored decisive verdict with no model call; on a miss we hand this same prompt to
+            // `judge` (no rebuild), so the cached-on and sent inputs can't drift.
+            let prompt = reason::adjudicate::build_judgment_prompt(&entry, &objectives, &graph);
+            let fingerprint = reason::adjudicate::prompt_cache_key(&prompt);
             let pending = PendingEntry {
                 entry_key: entry_key.clone(),
                 entry,
                 objectives,
+                prompt,
                 fingerprint,
                 idxs: idxs.clone(),
             };
@@ -578,7 +592,12 @@ impl Engine {
             futures::stream::iter(to_judge.into_iter().map(|pending| async move {
                 let started = std::time::Instant::now();
                 let verdict = adjudicator
-                    .judge(&pending.entry, &pending.objectives, graph_ref)
+                    .judge(
+                        &pending.entry,
+                        &pending.objectives,
+                        graph_ref,
+                        &pending.prompt,
+                    )
                     .await;
                 (pending, verdict, started.elapsed())
             }))
