@@ -1,8 +1,9 @@
 //! The deterministic chain walk: the movement-edge BFS, the compromise gate, the
 //! entry-foothold/exposure predicates, the minimal-cut helpers, and the `Link`
 //! builder. Split out of the proof module root purely to keep every file under the
-//! 1,000-line cap (repo CLAUDE.md). It traverses ONLY proof-grade movement edges, so
-//! every step it reports is grounded in deterministic facts.
+//! 1,000-line cap (repo CLAUDE.md). It traverses movement edges — every edge is a
+//! deterministic observation by construction — so every step it reports is grounded
+//! in deterministic facts.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -56,7 +57,7 @@ pub(super) fn entry_exposed(graph: &SecurityGraph, entry: NodeIndex) -> bool {
     )
 }
 
-/// BFS over proof-grade movement edges from `start`. Returns, for every reachable
+/// BFS over movement edges from `start`. Returns, for every reachable
 /// node, the (predecessor, edge) it was first reached by — a shortest-path tree.
 /// If `excluded` is set, that one edge is skipped (used to test cuts).
 pub(super) fn movement_tree(
@@ -87,7 +88,7 @@ pub(super) fn movement_tree(
             if Some(edge.id()) == excluded {
                 continue;
             }
-            if !edge.weight().is_proof_grade() || !is_movement(&edge.weight().relation) {
+            if !is_movement(&edge.weight().relation) {
                 continue;
             }
             let v = edge.target();
@@ -100,7 +101,7 @@ pub(super) fn movement_tree(
     came
 }
 
-/// True if `target` is reachable from `start` over proof-grade movement edges with
+/// True if `target` is reachable from `start` over movement edges with
 /// `excluded` removed.
 /// Whether the edge `e` is a sensible *cut* candidate — a privilege/movement edge,
 /// not structural substrate (`runs-as`/`runs-image`/`scheduled-on`). Severing a
@@ -164,7 +165,7 @@ struct PathEnum<'g> {
 
 /// One in-progress `walk(node)` on the explicit DFS stack: the node being expanded and
 /// its outgoing edges (precomputed, in `g.edges(node)` order) with a cursor. `valid` is
-/// the proof-grade ∧ movement predicate the recursive form tested inline per edge; caching
+/// the movement predicate the recursive form tested inline per edge; caching
 /// it changes nothing about ordering or budget (the budget is still spent one relaxation
 /// per edge visited, in order, in [`PathEnum::walk`]).
 struct Frame {
@@ -176,7 +177,7 @@ struct Frame {
 impl PathEnum<'_> {
     /// The bounded simple-path DFS from `start`, run on an **explicit work-stack** rather
     /// than the call stack (JEF-298 — stack-safe for adversarially deep chains). It records
-    /// a path on reaching the objective; otherwise it expands over proof-grade movement
+    /// a path on reaching the objective; otherwise it expands over movement
     /// edges, honouring the SAME compromise gate as [`movement_tree`] (you may only move
     /// *out of* a workload you control — the entry or a compromisable one), so every
     /// enumerated path is as proof-grounded as the shortest one.
@@ -274,7 +275,7 @@ impl PathEnum<'_> {
         let edges = g
             .edges(u)
             .map(|edge| {
-                let valid = edge.weight().is_proof_grade() && is_movement(&edge.weight().relation);
+                let valid = is_movement(&edge.weight().relation);
                 (edge.target(), edge.id(), valid)
             })
             .collect();
@@ -286,7 +287,7 @@ impl PathEnum<'_> {
     }
 }
 
-/// Enumerate up to `cap` distinct proof-grade movement paths from `entry` to `objective`,
+/// Enumerate up to `cap` distinct movement paths from `entry` to `objective`,
 /// each grounded in the same compromise gate as [`movement_tree`]. Bounded DFS over SIMPLE
 /// paths, returned shortest-first (then by node order for a stable render). The `bool` is
 /// `truncated`: `true` when more than `cap` paths exist or the [`PATH_ENUM_BUDGET`] was

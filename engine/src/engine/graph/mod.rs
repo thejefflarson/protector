@@ -14,11 +14,10 @@
 //!   ([`Provenance`]). Multiple adapters asserting the same thing is
 //!   corroboration, not duplication — the generalization of ADR-0001's "trivy ∧
 //!   grype agreement" to "N providers for one port agree."
-//! - **Grade.** Every edge carries a [`Grade`]: `Proof` (backed by a deterministic
-//!   check — eligible to move privilege) or `Hypothesis` (a heuristic or
-//!   model-asserted claim — may inform a proposal, never an action). This makes
-//!   "only deterministic proof moves privilege" (the VISION's rule) enforceable at
-//!   the type boundary instead of by discipline.
+//! - **Deterministic by construction.** Every [`Edge`] is a deterministic
+//!   observation; no hypothesis-grade edges exist. "Only deterministic proof moves
+//!   privilege" (the VISION's rule) therefore holds structurally — the graph has
+//!   nothing else in it. (Grade removed with JEF-365; reintroducible per ADR-0001.)
 //!
 //! The graph holds **observed** state (ADR-0002): it is built from watch streams
 //! and is always reconstructable from the live cluster, so it lives in memory and
@@ -464,20 +463,13 @@ pub struct RuntimeSignal {
 
 /// A directed edge: a relation one node bears to another, with the evidence that
 /// asserts it.
+///
+/// Every edge is a deterministic observation by construction (no hypothesis-grade
+/// edges exist), so any edge is eligible to justify a privileged action.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Edge {
     pub relation: Relation,
     pub provenance: Provenance,
-    pub grade: Grade,
-}
-
-impl Edge {
-    /// Whether this edge is backed by a deterministic check and therefore eligible
-    /// to justify a privileged action. Hypothesis-grade edges may inform a
-    /// proposal but must never move privilege (the VISION's rule).
-    pub fn is_proof_grade(&self) -> bool {
-        matches!(self.grade, Grade::Proof)
-    }
 }
 
 /// The relation an [`Edge`] expresses. The first three are the proof-bar edges
@@ -570,19 +562,6 @@ impl Relation {
 pub enum Protocol {
     Tcp,
     Udp,
-}
-
-/// Whether a piece of evidence is deterministic proof or a heuristic hypothesis.
-///
-/// This is the type-level enforcement of the platform's central rule: only
-/// `Proof`-grade evidence may justify a privileged response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Grade {
-    /// Backed by a deterministic check (a real graph/RBAC query, a KEV lookup,
-    /// cross-scanner agreement). Eligible to move privilege.
-    Proof,
-    /// A heuristic or model-asserted claim. May inform a proposal; never an action.
-    Hypothesis,
 }
 
 /// Who asserted a fact or edge, and when — for corroboration and freshness.

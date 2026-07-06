@@ -3,8 +3,8 @@
 //! [`Snapshot`](super::Snapshot) into the graph vocabulary — and nothing
 //! else. The core never names a product; it iterates [`Adapter`]s.
 //!
-//! Every adapter in this slice is deterministic and therefore emits
-//! [`Grade::Proof`] edges:
+//! Every adapter in this slice is deterministic, so every edge it emits is a
+//! deterministic observation (the only kind that exists):
 //!
 //! - [`WorkloadAdapter`] — Workload, Image, and Identity nodes, with the
 //!   structural `runs-image` / `runs-as` edges.
@@ -32,7 +32,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use super::Snapshot;
 use crate::engine::graph::attack::{self, CAPABILITY_CATALOG};
 use crate::engine::graph::{
-    Capability, Edge, Endpoint, Exposure, Grade, Host, Identity, Image, Node, NodeKey, Protocol,
+    Capability, Edge, Endpoint, Exposure, Host, Identity, Image, Node, NodeKey, Protocol,
     Provenance, Relation, RuntimeSignal, Scope, SecretRef, SecurityGraph, Trust, Workload,
     canonical_image,
 };
@@ -88,13 +88,11 @@ pub trait Adapter: Send + Sync {
     fn contribute(&self, snapshot: &Snapshot, graph: &mut SecurityGraph);
 }
 
-/// A deterministic, freshly-observed edge: proof-grade, stamped now, attributed to
-/// `source`.
+/// A deterministic, freshly-observed edge: stamped now, attributed to `source`.
 pub(super) fn observed(source: &str, relation: Relation) -> Edge {
     Edge {
         relation,
         provenance: Provenance::new(source, SystemTime::now()),
-        grade: Grade::Proof,
     }
 }
 

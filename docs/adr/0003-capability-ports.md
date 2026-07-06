@@ -76,11 +76,12 @@ swap-ins are why the port exists.
    opinion is a second RuntimeEvidence adapter; the proof layer is unchanged.
 
 2. **Determinism and provenance live in the port contract.** A port does not
-   return an opinion — it returns a checkable answer tagged **proof-grade** (a
-   real graph/RBAC/feed query, eligible to move privilege) or **hypothesis-grade**
-   (a heuristic, may only inform a proposal). "Only deterministic proof moves
-   privilege" thereby becomes enforceable at the boundary instead of by
-   convention: the action layer accepts only proof-grade links as proof.
+   return an opinion — it returns a checkable answer from a real graph/RBAC/feed
+   query, eligible to move privilege. "Only deterministic proof moves privilege"
+   thereby becomes enforceable at the boundary instead of by convention. (Originally
+   this was a **proof-grade / hypothesis-grade** tag on each edge; JEF-365 removed the
+   tag — see the amendment below — because every edge is now a deterministic
+   observation by construction, so the tag never had a second value to hold.)
 
 3. **Plugin trust is an explicit security boundary**, because anything that builds
    the graph influences what gets cut on a cluster the engine can write to. A
@@ -107,8 +108,9 @@ Easier:
   beyond this one cluster.
 - Testable in isolation: fake adapters per port exercise the proof and response
   loops with no real stack.
-- Cross-source corroboration and the proof-grade/hypothesis-grade split become
-  first-class, enforced at the port boundary rather than assumed.
+- Cross-source corroboration is first-class, enforced at the port boundary rather
+  than assumed. (The proof-grade/hypothesis-grade split was removed in JEF-365; see
+  the amendment below.)
 - The core's real value — graph, proof, response — is no longer hidden behind
   product names.
 
@@ -126,5 +128,22 @@ Harder / accepted downsides:
   rules stay hardcoded. A contributor who wants a new *rule* still changes the
   core; plugins only add *evidence*. Holding that line is a permanent review
   responsibility, not a one-time decision.
+
+## Amendment (JEF-365): the edge-grade tag is removed
+
+The port contract above described each edge as carrying a **proof-grade /
+hypothesis-grade** tag (`Grade`), with the action layer accepting only proof-grade
+links. After ADR-0001's JEF-363 amendment removed the model-propose stage, no adapter
+or graph builder ever constructed a hypothesis-grade edge — every port in this ADR is
+deterministic, so every edge it emits is a deterministic observation. The tag became a
+type-level guard against an edge that can no longer exist.
+
+JEF-365 removes `Grade`, `Edge.grade`, and `Edge::is_proof_grade`. The edge contract is
+now simpler and unconditional: **every edge is a deterministic observation by
+construction, eligible to move privilege.** "Only deterministic proof moves privilege"
+holds structurally — the graph contains nothing else. If an untrusted or heuristic
+provider is ever admitted (the case the tag anticipated), the seam is reintroducible by
+re-adding the grade and restoring the proof-walk filter (see ADR-0001's JEF-365
+amendment); removing it now is safe because nothing constructs a hypothesis-grade edge.
 </content>
 </invoke>

@@ -930,7 +930,7 @@ fn library_load_does_not_corroborate_without_foothold() {
 fn deep_chain_enumerates_on_explicit_stack() {
     use super::chain::{MAX_PROVEN_PATHS, proven_paths};
     use crate::engine::graph::{
-        Edge, Endpoint, Grade, Node, Protocol, Provenance, Relation, SecurityGraph,
+        Edge, Endpoint, Node, Protocol, Provenance, Relation, SecurityGraph,
     };
     use std::time::SystemTime;
 
@@ -954,7 +954,6 @@ fn deep_chain_enumerates_on_explicit_stack() {
                     protocol: Protocol::Tcp,
                 },
                 provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-                grade: Grade::Proof,
             },
         );
     }

@@ -9,8 +9,8 @@ use super::super::*;
 use super::{critical_cve, entry_reaching_db, graph_with_vuln, objectives_of};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
-    Trust, Vulnerability, Workload,
+    Edge, Exposure, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity, Trust,
+    Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -256,12 +256,11 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     let argo_verdict = {
         use crate::engine::graph::attack::{CREDENTIAL_ACCESS, DATA_DESTRUCTION};
         use crate::engine::graph::{
-            Edge, Exposure, Grade, Identity, Node, Relation, SecretRef, SecurityGraph, Workload,
+            Edge, Exposure, Identity, Node, Relation, SecretRef, SecurityGraph, Workload,
         };
         let proof_edge = |relation| Edge {
             relation,
             provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-            grade: Grade::Proof,
         };
         let mut g = SecurityGraph::new();
         let entry = Node::Workload(Workload {
