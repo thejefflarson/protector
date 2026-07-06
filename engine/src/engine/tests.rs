@@ -24,6 +24,7 @@ impl reason::adjudicate::Adjudicator for CountingAdjudicator {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         self.0.fetch_add(1, Ordering::SeqCst);
         Verdict::Refuted("counted".into())
@@ -164,6 +165,40 @@ async fn judges_every_breach_relevant_path_even_without_a_cve() {
     );
 }
 
+/// JEF-350: the verdict cache is keyed on a hash of the DETERMINISTIC prompt (the model's
+/// complete input), so it hits exactly when — and only when — what the model would see is
+/// unchanged. An identical snapshot renders an identical prompt → same hash → a cache hit
+/// (no model call); a MATERIALLY changed snapshot (here a new critical CVE enters the
+/// entry's evidence) changes the prompt → a new hash → a miss → a re-judge. This is the
+/// behavioral proof that the drift the ticket fixed — a cache key that churned while the
+/// model's input was unchanged — is gone.
+#[tokio::test]
+async fn verdict_cache_hits_on_unchanged_prompt_and_misses_when_the_prompt_changes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine_with(calls.clone());
+
+    // Pass 1 (cold cache): the internet-reachable entry is judged.
+    engine.process(&exposed_snapshot(false)).await;
+    let after_cold = calls.load(Ordering::SeqCst);
+    assert!(after_cold >= 1, "a cold cache judges the entry");
+
+    // Pass 2 (identical facts): same prompt → same hash → cache hit, no new model call.
+    engine.process(&exposed_snapshot(false)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        after_cold,
+        "an unchanged prompt is a cache hit (no re-judge)"
+    );
+
+    // Pass 3 (a new critical CVE on the same entry): the prompt's CVE evidence changes, so
+    // its hash changes → a cache miss → the entry is re-judged.
+    engine.process(&exposed_snapshot(true)).await;
+    assert!(
+        calls.load(Ordering::SeqCst) > after_cold,
+        "a materially changed prompt busts the cache and re-judges the entry"
+    );
+}
+
 /// An adjudicator that returns a fixed verdict and never re-judges issues a `judged`
 /// only on a fingerprint miss.
 struct FixedAdjudicator(Verdict);
@@ -175,6 +210,7 @@ impl reason::adjudicate::Adjudicator for FixedAdjudicator {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         self.0.clone()
     }
@@ -243,6 +279,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             _entry: &NodeKey,
             _objectives: &[(NodeKey, AttackRef)],
             _graph: &SecurityGraph,
+            _prompt: &str,
         ) -> Verdict {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Verdict::Exploitable("RCE reaches the secret".into())
@@ -440,6 +477,7 @@ impl reason::adjudicate::Adjudicator for ConcurrencyProbe {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(now, Ordering::SeqCst);
@@ -491,6 +529,7 @@ async fn one_entrys_model_failure_does_not_poison_the_others() {
             _entry: &NodeKey,
             _objectives: &[(NodeKey, AttackRef)],
             _graph: &SecurityGraph,
+            _prompt: &str,
         ) -> Verdict {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Verdict::Uncertain("model unavailable".into())
@@ -750,6 +789,7 @@ impl reason::adjudicate::Adjudicator for AlwaysUncertain {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         self.0.fetch_add(1, Ordering::SeqCst);
         Verdict::Uncertain("model unavailable".into())
@@ -794,6 +834,7 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.down_for {

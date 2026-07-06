@@ -27,10 +27,13 @@ fn canonical_image_converges_pod_and_scanner_forms() {
 
 #[test]
 fn fingerprint_key_collapses_connection_churn() {
-    // The verdict cache is keyed on fingerprint_key; a high-cardinality behavior arm
-    // would bust it every pass and starve the slow CPU model (ADR-0013). Connections
-    // are the churny case — many distinct peers must collapse to a bounded set of
-    // scope tokens, NOT one key per peer. This guards future arms from regressing it.
+    // The agent's runtime-observation coalescer keys on fingerprint_key (JEF-296): a
+    // high-cardinality behavior arm would defeat the coalescing and flood the engine with
+    // near-duplicate POSTs. Connections are the churny case — many distinct peers must
+    // collapse to a bounded set of scope tokens, NOT one key per peer. This guards future
+    // arms from regressing it. (The verdict cache no longer keys on fingerprint_key; it keys
+    // on a hash of the deterministic prompt, JEF-350 — but the coalescing still relies on
+    // this collapse, so the property is still load-bearing.)
     use std::collections::HashSet;
     let keys: HashSet<String> = (0..1000)
         .flat_map(|i| {

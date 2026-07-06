@@ -101,11 +101,18 @@ pub trait Adjudicator: Send + Sync {
     /// (`objectives`, each with the technique it realizes), is anything a real breach
     /// risk? One call per entry, not per path — the model sees the whole subgraph
     /// anchored at that internet front door at once.
+    ///
+    /// `prompt` is the ALREADY-BUILT deterministic prompt (JEF-350): the engine builds it
+    /// once (before the cache lookup, to derive the cache key from its hash) and hands it in,
+    /// so the model call reuses the exact same bytes the cache keyed on rather than rebuilding
+    /// it — the cached-on input and the sent input can never drift. `entry`/`objectives`/
+    /// `graph` are still supplied for the deterministic backstops and the judgement record.
     async fn judge(
         &self,
         entry: &NodeKey,
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
+        prompt: &str,
     ) -> Verdict;
 }
 
@@ -120,6 +127,7 @@ impl Adjudicator for NullAdjudicator {
         _entry: &NodeKey,
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
+        _prompt: &str,
     ) -> Verdict {
         Verdict::Confirmed
     }
@@ -136,12 +144,13 @@ mod prompt;
 
 pub use evidence::{EntryCoverage, entry_coverage};
 pub use model_call::ModelAdjudicator;
-pub use prompt::{build_judgment_prompt, parse_verdict};
+pub use prompt::{build_judgment_prompt, parse_verdict, prompt_cache_key};
 // The cross-module helpers the rest of the crate imports by the stable
-// `reason::adjudicate::` path (the engine's verdict cache, and the notify/hypothesis
-// prompt sanitizer). The remaining submodule helpers are internal to this module and
-// are imported directly from their submodule (including by the tests).
-pub(crate) use guards::{entry_fingerprint, sanitize};
+// `reason::adjudicate::` path (the notify/hypothesis prompt sanitizer). The verdict cache
+// keys on `prompt_cache_key` (a hash of the deterministic prompt, JEF-350). The remaining
+// submodule helpers are internal to this module and are imported directly from their
+// submodule (including by the tests).
+pub(crate) use guards::sanitize;
 
 #[cfg(test)]
 mod tests;
