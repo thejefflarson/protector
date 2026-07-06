@@ -94,13 +94,14 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
     // The engine's own registry auth is the SAME shared resolver the webhook uses
-    // (`policies::signature::registry_auth`, JEF-339): username/password env → the mounted
-    // dockerconfigjson (`PROTECTOR_REGISTRY_AUTH_FILE`, the cluster's `github` pull secret) →
-    // Anonymous. Reading the auth file is what lets the sweep fetch signatures of PRIVATE
-    // first-party images instead of 401ing them into perpetual "checking". Anonymous stays the
-    // safe default — an unauthorized private image observes as `checking`/`not-signed`, never a
+    // (`policies::signature::RegistryAuth`, JEF-339/JEF-352): per image, explicit
+    // username/password env override → a matching entry in the mounted dockerconfigjson
+    // (`PROTECTOR_REGISTRY_AUTH_FILE`, the cluster's `github` pull secret) → Anonymous. Parsing
+    // the whole auth file is what lets the sweep fetch signatures of PRIVATE images on ANY
+    // registry instead of 401ing them into perpetual "checking". Anonymous stays the safe
+    // default — an unauthorized private image observes as `checking`/`not-signed`, never a
     // fabricated clean.
-    let auth = crate::policies::signature::registry_auth();
+    let auth = crate::policies::signature::RegistryAuth::from_env();
 
     // `observe` ignores the identity regex entirely; a match-nothing pattern keeps the gated
     // constructor happy without asserting any trusted signer.
@@ -138,9 +139,9 @@ fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceSc
     let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 20));
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
-    // Same shared resolver as the webhook + signing sweep (JEF-339): reads the mounted
-    // dockerconfigjson so private-image provenance fetches authenticate rather than 401.
-    let auth = crate::policies::signature::registry_auth();
+    // Same shared resolver as the webhook + signing sweep (JEF-339/JEF-352): parses the mounted
+    // dockerconfigjson so private-image provenance fetches authenticate per registry rather than 401.
+    let auth = crate::policies::signature::RegistryAuth::from_env();
     // Provenance observation ignores the identity regex entirely (the Fulcio/Rekor chain of the
     // attestation is the trust anchor); a match-nothing pattern keeps the constructor happy.
     match CosignChecker::new("$^", oidc_issuer, auth, tuf_cache, verify_timeout) {

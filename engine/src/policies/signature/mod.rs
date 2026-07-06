@@ -31,7 +31,7 @@ use tokio::sync::Mutex;
 
 use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
-pub use auth::registry_auth;
+pub use auth::RegistryAuth;
 pub use continuity::{ContinuityGate, SigningExceptions, SigningPin};
 pub use cosign::CosignChecker;
 pub use posture::{

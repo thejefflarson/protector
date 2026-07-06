@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use kube::core::DynamicObject;
 use kube::core::admission::AdmissionRequest;
 use serde_json::json;
-use sigstore::registry::Auth;
 
+use super::RegistryAuth;
 use super::continuity::{ContinuityGate, SigningExceptions};
 use super::cosign::{LayerFacts, classify_facts};
 use super::posture::{SignatureObserver, Signer, SigningObserver, SigningPosture};
@@ -162,7 +162,7 @@ fn identity_regex_anchors_every_alternation_branch() {
     let checker = CosignChecker::new(
         "^https://github.com/org/|https://gitlab.com/org/",
         "https://token.actions.githubusercontent.com".to_string(),
-        Auth::Anonymous,
+        RegistryAuth::default(),
         std::env::temp_dir().join(format!("protector-anchor-{}", std::process::id())),
         Duration::from_secs(5),
     )
@@ -191,7 +191,7 @@ fn new_creates_the_missing_tuf_cache_dir() {
     let checker = CosignChecker::new(
         "^https://github\\.com/thejefflarson/",
         "https://token.actions.githubusercontent.com".to_string(),
-        Auth::Anonymous,
+        RegistryAuth::default(),
         cache.clone(),
         Duration::from_secs(5),
     );
