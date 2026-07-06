@@ -64,17 +64,8 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
     }
 }
 
-/// Build the signing-posture observer (ADR-0020 Stage 1, JEF-261) the per-pass running-Pod
-/// sweep uses. It reuses the SAME cosign verifier the webhook gates with, but for pure
-/// observation — so it needs no trusted-identity config (the Fulcio/Rekor chain is the trust
-/// anchor). The identity regex is irrelevant to `observe`, so any value compiles; we pass a
-/// match-nothing pattern. Bounded by the same `PROTECTOR_MAX_IMAGES` + `PROTECTOR_CACHE_TTL`
-/// the webhook honors, so observing every running image stays inside the already-sanctioned
-/// outbound envelope (ADR-0015 carve-out). `None` (a no-op sweep — zero outbound calls) if the
-/// TUF cache dir can't be created, so a misconfigured volume degrades to today's behavior
-/// rather than crashing the engine loop.
 /// The sigstore TUF trust-root cache directory (`PROTECTOR_TUF_CACHE`, default `/tmp/sigstore`) —
-/// the same path [`build_signing_observer`] hands the cosign checker. Its freshness is surfaced in
+/// the same path [`cosign_observer_parts`] hands the cosign checker. Its freshness is surfaced in
 /// readiness (JEF-280), so the two must agree on the location.
 fn tuf_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(
@@ -82,8 +73,31 @@ fn tuf_cache_dir() -> std::path::PathBuf {
     )
 }
 
-fn build_signing_observer() -> Option<crate::policies::signature::SigningObserver> {
-    use crate::policies::signature::{CosignChecker, SigningObserver};
+/// The parts BOTH observing sweeps — signing posture ([`build_signing_observer`]) and build
+/// provenance ([`build_provenance_scanner`]) — share: the identical env-driven bounds
+/// (`PROTECTOR_VERIFY_TIMEOUT` / `PROTECTOR_CACHE_TTL` / `PROTECTOR_MAX_IMAGES` /
+/// `PROTECTOR_OIDC_ISSUER` / `PROTECTOR_TUF_CACHE`) plus the SAME `CosignChecker` verifier the
+/// webhook gates with. This is the single source of truth for that shape — factored out (JEF-366)
+/// so the next JEF-326-style timeout tweak lands in ONE place. Two hand-copied builders are exactly
+/// the `registry_auth()` pattern that silently drifted into the JEF-339 outage.
+///
+/// It reuses the webhook's verifier but for pure observation, so it needs no trusted-identity
+/// config (the Fulcio/Rekor chain is the trust anchor); `observe` ignores the identity regex
+/// entirely, so a match-nothing pattern keeps the gated constructor happy without asserting any
+/// trusted signer. Bounded by the same caps the webhook honors, so observing every running image
+/// stays inside the already-sanctioned outbound envelope (ADR-0015 carve-out).
+///
+/// `observer` names the sweep for the log line only. Returns `None` (a no-op sweep — zero outbound
+/// calls) if the checker can't build (e.g. the TUF cache dir can't be created), so a misconfigured
+/// volume degrades to today's behavior rather than crashing the engine loop.
+fn cosign_observer_parts(
+    observer: &str,
+) -> Option<(
+    std::sync::Arc<crate::policies::signature::CosignChecker>,
+    usize,
+    std::time::Duration,
+)> {
+    use crate::policies::signature::{CosignChecker, RegistryAuth};
 
     let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
         .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
@@ -97,69 +111,48 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     // (`policies::signature::RegistryAuth`, JEF-339/JEF-352): per image, explicit
     // username/password env override → a matching entry in the mounted dockerconfigjson
     // (`PROTECTOR_REGISTRY_AUTH_FILE`, the cluster's `github` pull secret) → Anonymous. Parsing
-    // the whole auth file is what lets the sweep fetch signatures of PRIVATE images on ANY
-    // registry instead of 401ing them into perpetual "checking". Anonymous stays the safe
+    // the whole auth file is what lets the sweep fetch signatures/attestations of PRIVATE images on
+    // ANY registry instead of 401ing them into perpetual "checking". Anonymous stays the safe
     // default — an unauthorized private image observes as `checking`/`not-signed`, never a
     // fabricated clean.
-    let auth = crate::policies::signature::RegistryAuth::from_env();
+    let auth = RegistryAuth::from_env();
 
-    // `observe` ignores the identity regex entirely; a match-nothing pattern keeps the gated
-    // constructor happy without asserting any trusted signer.
     match CosignChecker::new("$^", oidc_issuer, auth, tuf_cache, verify_timeout) {
-        Ok(checker) => Some(SigningObserver::new(
-            std::sync::Arc::new(checker),
-            max_images,
-            cache_ttl,
-        )),
+        Ok(checker) => Some((std::sync::Arc::new(checker), max_images, cache_ttl)),
         Err(error) => {
-            tracing::warn!(%error, "signing-posture observer unavailable (TUF cache dir?); running-pod sweep disabled");
+            tracing::warn!(%error, %observer, "cosign observer unavailable (TUF cache dir?); sweep disabled");
             None
         }
     }
 }
 
+/// Build the signing-posture observer (ADR-0020 Stage 1, JEF-261) the per-pass running-Pod sweep
+/// uses. Just the shared cosign observer parts ([`cosign_observer_parts`]) wrapped in a
+/// [`SigningObserver`] — it has no distinct config of its own.
+fn build_signing_observer() -> Option<crate::policies::signature::SigningObserver> {
+    let (checker, max_images, cache_ttl) = cosign_observer_parts("signing-posture")?;
+    Some(crate::policies::signature::SigningObserver::new(
+        checker, max_images, cache_ttl,
+    ))
+}
+
 /// Build the opt-in build-provenance scanner (ADR-0020 §5, JEF-275). Returns `None` — and so makes
 /// NO extra outbound call ever — unless `PROTECTOR_PROVENANCE_ENABLE` is explicitly set (the default
 /// posture adds zero egress beyond the signing sweep). When enabled it observes each running image's
-/// SLSA provenance on the SAME sanctioned registry/sigstore path as signature verification
-/// (ADR-0015), bounded by a per-image timeout + a TTL cache + a `max_images` cap. It reuses the
-/// [`CosignChecker`] verifier — no second verifier. A build failure degrades to `None` (off) rather
-/// than crashing the loop.
+/// SLSA provenance on the SAME sanctioned cosign path as signature verification, reusing the shared
+/// [`cosign_observer_parts`] verifier — no second verifier.
 fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceScanner> {
-    use crate::policies::signature::{CosignChecker, ProvenanceScanner};
-
+    // Opt-in gate: the one bit distinct from the signing sweep. Absent ⇒ zero extra egress.
     if std::env::var("PROTECTOR_PROVENANCE_ENABLE").is_err() {
         return None;
     }
-    let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
-        .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
-    let tuf_cache = tuf_cache_dir();
-    // 20s (was 5s): a cold-cache keyless verify on the arm64 engine routinely exceeds 5s, which
-    // stranded first-party signed images in perpetual "checking" (JEF-326). Env-overridable.
-    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 20));
-    let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
-    let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
-    // Same shared resolver as the webhook + signing sweep (JEF-339/JEF-352): parses the mounted
-    // dockerconfigjson so private-image provenance fetches authenticate per registry rather than 401.
-    let auth = crate::policies::signature::RegistryAuth::from_env();
-    // Provenance observation ignores the identity regex entirely (the Fulcio/Rekor chain of the
-    // attestation is the trust anchor); a match-nothing pattern keeps the constructor happy.
-    match CosignChecker::new("$^", oidc_issuer, auth, tuf_cache, verify_timeout) {
-        Ok(checker) => {
-            tracing::info!(
-                "build-provenance scanner ENABLED (opt-in; reuses the sanctioned cosign fetch path, ADR-0020 §5)"
-            );
-            Some(ProvenanceScanner::new(
-                std::sync::Arc::new(checker),
-                max_images,
-                cache_ttl,
-            ))
-        }
-        Err(error) => {
-            tracing::warn!(%error, "build-provenance scanner unavailable (TUF cache dir?); provenance sweep disabled");
-            None
-        }
-    }
+    let (checker, max_images, cache_ttl) = cosign_observer_parts("build-provenance")?;
+    tracing::info!(
+        "build-provenance scanner ENABLED (opt-in; reuses the sanctioned cosign fetch path, ADR-0020 §5)"
+    );
+    Some(crate::policies::signature::ProvenanceScanner::new(
+        checker, max_images, cache_ttl,
+    ))
 }
 
 /// Build the opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266). Returns `None` — and so
@@ -734,6 +727,99 @@ mod tests {
         assert!(
             !text.contains("c3VwZXItc2VjcmV0") && !text.contains("super-secret"),
             "no credential bytes may survive into the reflected store"
+        );
+    }
+
+    // JEF-366: the signing-posture and build-provenance sweeps must draw their cosign verifier
+    // and env-driven bounds from ONE shared source (`super::cosign_observer_parts`) so the two
+    // builders can never silently drift — the hand-copied `registry_auth()` shape that caused the
+    // JEF-339 outage. These tests own a clean process env (nextest runs each test in its own
+    // process, so the `unsafe { set_var }` blocks are isolated) and point the TUF cache at a
+    // per-test temp dir so `CosignChecker::new` succeeds offline.
+    use std::time::Duration;
+
+    /// A unique, creatable TUF cache dir for a test, so the checker builds without touching
+    /// `/tmp/sigstore` or any other test's dir.
+    fn scratch_tuf_cache(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "protector-jef366-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// Clear the observer env so a test starts from the documented defaults.
+    /// SAFETY: nextest runs each test in its own process, so this mutation is isolated.
+    fn clear_observer_env() {
+        unsafe {
+            std::env::remove_var("PROTECTOR_VERIFY_TIMEOUT");
+            std::env::remove_var("PROTECTOR_CACHE_TTL");
+            std::env::remove_var("PROTECTOR_MAX_IMAGES");
+            std::env::remove_var("PROTECTOR_OIDC_ISSUER");
+            std::env::remove_var("PROTECTOR_PROVENANCE_ENABLE");
+        }
+    }
+
+    /// The shared source of truth returns the documented JEF-326 defaults (20s verify, 300s TTL,
+    /// 32 images) when nothing is set — the exact bounds both builders inherit.
+    #[test]
+    fn cosign_observer_parts_uses_documented_defaults() {
+        clear_observer_env();
+        unsafe { std::env::set_var("PROTECTOR_TUF_CACHE", scratch_tuf_cache("defaults")) };
+
+        let (_, max_images, cache_ttl) = super::cosign_observer_parts("test")
+            .expect("checker builds with a creatable cache dir");
+        assert_eq!(max_images, 32, "PROTECTOR_MAX_IMAGES default");
+        assert_eq!(
+            cache_ttl,
+            Duration::from_secs(300),
+            "PROTECTOR_CACHE_TTL default"
+        );
+    }
+
+    /// Env overrides flow through the single helper — so both sweeps track the same knobs.
+    #[test]
+    fn cosign_observer_parts_honors_env_overrides() {
+        clear_observer_env();
+        unsafe {
+            std::env::set_var("PROTECTOR_TUF_CACHE", scratch_tuf_cache("overrides"));
+            std::env::set_var("PROTECTOR_CACHE_TTL", "42");
+            std::env::set_var("PROTECTOR_MAX_IMAGES", "7");
+        }
+
+        let (_, max_images, cache_ttl) =
+            super::cosign_observer_parts("test").expect("checker builds");
+        assert_eq!(max_images, 7);
+        assert_eq!(cache_ttl, Duration::from_secs(42));
+    }
+
+    /// Anti-drift: from ONE env, the signing observer builds AND (once opted in) the provenance
+    /// scanner builds — both routed through the shared parts, both inheriting the same bounds. If
+    /// either builder stopped going through `cosign_observer_parts`, this pins the equivalence.
+    #[test]
+    fn both_builders_build_from_the_same_env() {
+        clear_observer_env();
+        unsafe {
+            std::env::set_var("PROTECTOR_TUF_CACHE", scratch_tuf_cache("both"));
+            std::env::set_var("PROTECTOR_MAX_IMAGES", "9");
+            std::env::set_var("PROTECTOR_CACHE_TTL", "77");
+        }
+
+        assert!(
+            super::build_signing_observer().is_some(),
+            "signing observer must build from a valid env"
+        );
+
+        // Provenance is opt-in: off by default, on only when explicitly enabled — the one bit
+        // that stays distinct from the signing sweep.
+        assert!(
+            super::build_provenance_scanner().is_none(),
+            "provenance scanner is off until PROTECTOR_PROVENANCE_ENABLE is set"
+        );
+        unsafe { std::env::set_var("PROTECTOR_PROVENANCE_ENABLE", "1") };
+        assert!(
+            super::build_provenance_scanner().is_some(),
+            "provenance scanner must build from the same env once opted in"
         );
     }
 }
