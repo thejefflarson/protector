@@ -25,6 +25,7 @@ pub(super) fn judging_readiness() -> Readiness {
         armed: false,
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        checking_images: 0,
     };
     derive_readiness(
         &config,
@@ -54,6 +55,7 @@ fn timed_out_readiness() -> Readiness {
         armed: false,
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        checking_images: 0,
     };
     derive_readiness(
         &config,
@@ -830,6 +832,7 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
         armed: false,
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        checking_images: 0,
     };
     let readiness = derive_readiness(
         &config,

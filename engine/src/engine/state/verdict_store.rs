@@ -140,6 +140,13 @@ pub struct ReadinessConfig {
     /// drifted or is being starved. Surfaced (non-green) rather than silently swallowed. Computed
     /// each pass by [`is_unverifiable_spike`](crate::engine::signing_trust::is_unverifiable_spike).
     pub unverifiable_spike: bool,
+    /// How many images were left in the transient
+    /// [`Checking`](crate::policies::signature::SigningPosture::Checking) state this pass (JEF-326):
+    /// verification couldn't complete (registry/Rekor/TUF unreachable, or the per-image budget
+    /// `PROTECTOR_VERIFY_TIMEOUT` was exhausted), so their signing posture is UNKNOWN, not clean.
+    /// `Checking` is deliberately never cached, so a persistently non-zero count means signing
+    /// coverage is silently stuck — surfaced (non-green) in readiness rather than left invisible.
+    pub checking_images: usize,
 }
 
 /// One internet-facing entry's verdict state — the SINGLE source of truth for the

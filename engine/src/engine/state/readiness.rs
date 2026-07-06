@@ -194,6 +194,11 @@ pub(crate) fn derive_readiness(
     // read as a silent green.
     let (tuf_state, tuf_detail) = tuf_row(config.tuf_cache_age_secs, config.unverifiable_spike);
 
+    // Signature-verification reachability (JEF-326): images left in the transient `Checking` state
+    // have an UNKNOWN posture (verification couldn't complete), never a clean one. A persistent
+    // backlog is surfaced non-green so perpetual "checking" is honestly visible, not silent.
+    let (verify_state, verify_detail) = signature_verification_row(config.checking_images);
+
     let inputs = vec![
         ReadinessRow {
             id: "model",
@@ -265,6 +270,18 @@ pub(crate) fn derive_readiness(
             nodes: Vec::new(),
         },
         ReadinessRow {
+            id: "signature-verification",
+            label: "Signature verification",
+            state: verify_state,
+            why: "reads each image's signing posture; while verification can't complete (registry/Rekor/TUF unreachable or the per-image budget too short) those images stay 'checking' — posture unknown, not clean",
+            enable: "PROTECTOR_VERIFY_TIMEOUT",
+            detail: verify_detail,
+            // Signing-detection coverage, not a model-adjudication enrichment input — its gap
+            // doesn't weaken the model's exploitability call (ADR-0016), mirroring the TUF row.
+            weakens_decisions: false,
+            nodes: Vec::new(),
+        },
+        ReadinessRow {
             id: "arm-state",
             label: "Arm state",
             // Posture, never a gap: shadow is the safe default. Always Present (the engine
@@ -324,6 +341,28 @@ fn tuf_row(age_secs: Option<u64>, spike: bool) -> (InputState, String) {
                 ),
             }
         }
+    }
+}
+
+/// The signature-verification reachability row's `(state, detail)` (JEF-326). `Present` when no
+/// image is stuck in the transient `Checking` state (verification is completing), `Degraded` when
+/// one or more images could not be resolved this pass — their posture is unknown, not clean, so the
+/// row goes non-green and names the count. Never `Absent`: the sweep always runs; a stuck backlog
+/// is a degradation of a working input, not a missing one.
+fn signature_verification_row(checking_images: usize) -> (InputState, String) {
+    if checking_images == 0 {
+        (
+            InputState::Present,
+            "verification completing — no images stuck checking".to_string(),
+        )
+    } else {
+        (
+            InputState::Degraded,
+            format!(
+                "verification unavailable — {checking_images} image{} stuck 'checking' (registry/Rekor/TUF unreachable or PROTECTOR_VERIFY_TIMEOUT too short); posture unknown, not clean",
+                plural(checking_images as u64)
+            ),
+        )
     }
 }
 

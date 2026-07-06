@@ -26,6 +26,7 @@ fn judging_readiness() -> crate::engine::state::Readiness {
         armed: false,
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        checking_images: 0,
     };
     derive_readiness(
         &config,

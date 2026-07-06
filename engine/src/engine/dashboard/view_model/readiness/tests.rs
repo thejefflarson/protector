@@ -15,6 +15,7 @@ fn covered() -> ReadinessConfig {
         armed: false,
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        checking_images: 0,
     }
 }
 
@@ -27,9 +28,10 @@ fn every_input_becomes_a_row_with_state_word_and_why() {
         &RuntimeCoverage::default(),
     );
     let rows = map_readiness(&r);
-    // model / kev / epss / runtime-corroboration / journal / tuf-root / arm-state == 7 inputs
-    // (runtime corroboration is one agent-sourced, per-node row, JEF-308).
-    assert_eq!(rows.len(), 7);
+    // model / kev / epss / runtime-corroboration / journal / tuf-root / signature-verification /
+    // arm-state == 8 inputs (runtime corroboration is one agent-sourced, per-node row, JEF-308;
+    // signature-verification is the JEF-326 perpetual-checking coverage row).
+    assert_eq!(rows.len(), 8);
     // Every row carries a non-empty label + why + state word (meaning never by colour alone).
     for row in &rows {
         assert!(!row.label.is_empty());

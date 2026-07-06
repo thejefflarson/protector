@@ -88,7 +88,9 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
         .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
     let tuf_cache = tuf_cache_dir();
-    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 5));
+    // 20s (was 5s): a cold-cache keyless verify on the arm64 engine routinely exceeds 5s, which
+    // stranded first-party signed images in perpetual "checking" (JEF-326). Env-overridable.
+    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 20));
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
     // The engine's own registry auth mirrors the webhook's; anonymous is the safe default. An
@@ -127,7 +129,9 @@ fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceSc
     let oidc_issuer = std::env::var("PROTECTOR_OIDC_ISSUER")
         .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
     let tuf_cache = tuf_cache_dir();
-    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 5));
+    // 20s (was 5s): a cold-cache keyless verify on the arm64 engine routinely exceeds 5s, which
+    // stranded first-party signed images in perpetual "checking" (JEF-326). Env-overridable.
+    let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 20));
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
     let auth = registry_auth();
@@ -352,6 +356,8 @@ pub async fn run_watch(
                 std::time::SystemTime::now(),
             ),
             unverifiable_spike: false,
+            // Refreshed each pass from the sweep (JEF-326); starts clear until the first sweep.
+            checking_images: 0,
         });
 
     // The read-only operator dashboard (ADR-0019), served behind `PROTECTOR_DASHBOARD_ADDR`
@@ -674,6 +680,9 @@ pub async fn run_watch(
             );
             rc.unverifiable_spike =
                 super::signing_trust::is_unverifiable_spike(unverifiable, total);
+            // How many images this sweep couldn't resolve (JEF-326): stuck in the transient
+            // `Checking` state, so their posture is unknown — surfaced non-green in readiness.
+            rc.checking_images = signing_map.summary().checking;
             engine.findings().set_readiness_config(rc);
         }
 

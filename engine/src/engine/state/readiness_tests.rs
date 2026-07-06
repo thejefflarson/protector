@@ -14,6 +14,8 @@ fn covered_config() -> ReadinessConfig {
         // A fresh trust root, no fleet-wide unverifiable spike ⇒ the TUF row is Present.
         tuf_cache_age_secs: Some(60),
         unverifiable_spike: false,
+        // No images stuck checking ⇒ the signature-verification row is Present.
+        checking_images: 0,
     }
 }
 
@@ -140,6 +142,52 @@ fn a_fleet_wide_unverifiable_spike_is_surfaced_even_on_a_fresh_root() {
     );
     assert_eq!(tuf(&readiness).state, InputState::Degraded);
     assert!(tuf(&readiness).detail.contains("spike"));
+    assert!(readiness.has_unmet());
+}
+
+// --- JEF-326: the signature-verification reachability row (perpetual "checking") ---
+
+/// The signature-verification row from a readiness snapshot.
+fn verify(readiness: &Readiness) -> &ReadinessRow {
+    readiness
+        .inputs
+        .iter()
+        .find(|r| r.id == "signature-verification")
+        .expect("a signature-verification row is present")
+}
+
+#[test]
+fn no_images_checking_reads_present() {
+    let readiness = derive_readiness(
+        &covered_config(),
+        ModelHealth::Ok,
+        Some(SystemTime::now()),
+        &no_runtime(),
+    );
+    assert_eq!(verify(&readiness).state, InputState::Present);
+    assert!(verify(&readiness).detail.contains("no images stuck"));
+}
+
+#[test]
+fn images_stuck_checking_are_degraded_and_surfaced_non_green() {
+    // The JEF-326 bug made visible: a perpetual-checking backlog reads Degraded (non-green),
+    // names the count, and points at the timeout knob — never a silent green.
+    let mut config = covered_config();
+    config.checking_images = 5;
+    let readiness = derive_readiness(
+        &config,
+        ModelHealth::Ok,
+        Some(SystemTime::now()),
+        &no_runtime(),
+    );
+    assert_eq!(verify(&readiness).state, InputState::Degraded);
+    assert!(verify(&readiness).detail.contains("5 images stuck"));
+    assert!(
+        verify(&readiness)
+            .detail
+            .contains("PROTECTOR_VERIFY_TIMEOUT")
+    );
+    // Non-green: a stuck signing-verification backlog counts as an unmet input.
     assert!(readiness.has_unmet());
 }
 

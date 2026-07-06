@@ -68,3 +68,49 @@ fn signer_canonical_identity_delegates_to_the_helper() {
     assert_eq!(signer.identity, format!("{WF_SAN}@refs/tags/v0.3.80"));
     assert_eq!(signer.canonical_identity(), format!("{WF_SAN}@refs/tags/*"));
 }
+
+// --- JEF-326: the per-sweep posture summary (the INFO line the sweep logs) ---
+
+#[test]
+fn posture_summary_tallies_every_variant() {
+    let mut map = PostureMap::new();
+    map.record(
+        "a",
+        SigningPosture::Signed(Signer {
+            identity: format!("{WF_SAN}@refs/tags/v1"),
+            issuer: None,
+        }),
+    );
+    map.record("b", SigningPosture::SignedKeyBased);
+    map.record("c", SigningPosture::UnverifiableHere);
+    map.record("d", SigningPosture::InvalidSignature);
+    map.record("e", SigningPosture::NotSigned);
+    map.record("f", SigningPosture::Checking);
+    map.record("g", SigningPosture::Checking);
+    let s = map.summary();
+    assert_eq!(s.signed, 1);
+    assert_eq!(s.signed_key_based, 1);
+    assert_eq!(s.unverifiable, 1);
+    assert_eq!(s.invalid, 1);
+    assert_eq!(s.not_signed, 1);
+    assert_eq!(s.checking, 2, "both stuck images are counted");
+    assert_eq!(s.total(), 7);
+}
+
+#[test]
+fn posture_summary_display_is_the_stable_info_line() {
+    // The exact shape an operator greps for; `checking=` is present so a stuck fleet is visible.
+    let mut map = PostureMap::new();
+    map.record("a", SigningPosture::NotSigned);
+    map.record("b", SigningPosture::Checking);
+    assert_eq!(
+        map.summary().to_string(),
+        "signed=0 key-based=0 unverifiable=0 invalid=0 not-signed=1 checking=1"
+    );
+}
+
+#[test]
+fn empty_map_summarizes_to_all_zeros() {
+    assert_eq!(PostureMap::new().summary(), PostureSummary::default());
+    assert_eq!(PostureMap::new().summary().total(), 0);
+}
