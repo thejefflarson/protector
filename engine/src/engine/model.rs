@@ -6,35 +6,38 @@
 //! This is glue — the one network call the model layers make. The prompt-building
 //! and reply-parsing that wrap it are pure and tested in their own modules.
 
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::sync::Semaphore;
 
-/// Process-wide single-flight gate for the model endpoint: at most ONE Ollama request
-/// is in flight at any instant. The judging path serializes its calls within a pass, but
-/// the background keep-warm task ([`spawn_keep_warm`]) pings on its own timer and could
-/// otherwise overlap a `propose`/`judge` request. On the single-CPU, OOM-prone Ollama
-/// node that homelab deployments run, two concurrent requests add contention and risk an
-/// out-of-memory unload. A 1-permit semaphore makes "one request at a time" structural
-/// rather than incidental — every path that POSTs the model endpoint ([`chat`] and
-/// [`keep_warm`]) acquires the permit first and holds it for the whole request.
+/// Default cap on the model calls protector keeps IN FLIGHT at once during an adjudication
+/// pass. Deliberately generous (never 1): this is a connection/timeout fan-out safety bound,
+/// not the old serialization gate (JEF-337 removed that). See [`model_concurrency`].
+pub const DEFAULT_MODEL_CONCURRENCY: usize = 8;
+
+/// Max model calls protector dispatches concurrently within a single adjudication pass,
+/// from `PROTECTOR_MODEL_CONCURRENCY` (default [`DEFAULT_MODEL_CONCURRENCY`]).
 ///
-/// Each call is still bounded by the reqwest timeout (see [`client`]), so a hung request
-/// releases the permit when it times out — the gate cannot deadlock.
-static MODEL_GATE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));
+/// JEF-337: protector no longer serializes model calls behind a process-wide 1-permit gate.
+/// Ollama owns concurrency now — `OLLAMA_NUM_PARALLEL` decides how many requests it runs at
+/// once and `OLLAMA_MAX_QUEUE` bounds the rest — and it is sized for the node it runs on. That
+/// is the REAL throttle; protector reinventing it (one in-flight request) only capped
+/// throughput and left ollama replicas idle. This knob is NOT that gate reborn: it is a
+/// generous upper bound on how many timeouts/connections protector may hold open at once (each
+/// call can hold the full `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS` window), so a huge fleet can't
+/// open thousands of sockets in one pass. An unset, unparseable, or `0` value falls back to the
+/// default; a positive value is honoured verbatim.
+pub fn model_concurrency() -> usize {
+    parse_model_concurrency(std::env::var("PROTECTOR_MODEL_CONCURRENCY").ok().as_deref())
+}
 
-/// Acquire the single-flight permit, blocking until the in-flight request (if any)
-/// finishes. The returned guard releases the permit on drop — on BOTH success and
-/// error/timeout — so callers just hold it for the duration of their request and let it
-/// drop at function return. The semaphore is never closed, so `acquire` cannot fail;
-/// `expect` documents that invariant rather than papering over a real error.
-async fn acquire_gate() -> tokio::sync::SemaphorePermit<'static> {
-    MODEL_GATE
-        .acquire()
-        .await
-        .expect("the model single-flight semaphore is never closed")
+/// Pure parse of the `PROTECTOR_MODEL_CONCURRENCY` value, split out so it's testable without
+/// process-global env: unset / unparseable / `0` → [`DEFAULT_MODEL_CONCURRENCY`] (never a
+/// deadlocking `buffer_unordered(0)`); any positive value is that many concurrent calls.
+fn parse_model_concurrency(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MODEL_CONCURRENCY)
 }
 
 /// Total request timeout in seconds, from `PROTECTOR_ENGINE_MODEL_TIMEOUT_SECS`
@@ -139,11 +142,9 @@ pub async fn chat(
     model: &str,
     prompt: &str,
 ) -> Option<String> {
-    // Single-flight: hold the process-wide permit for the whole request so no other
-    // model call (judge/propose/keep-warm) overlaps it. The guard releases on drop at
-    // function return — on the `?` early-exits, the timeout error, and the happy path
-    // alike — so a hung-then-timed-out request never strands the permit.
-    let _permit = acquire_gate().await;
+    // JEF-337: no serialization gate — the call just fires. Concurrency is owned by ollama
+    // (`OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_QUEUE`) and fan-out is bounded per pass by
+    // `model_concurrency`. Each call is still bounded by the reqwest timeout (see `client`).
     let body = json!({
         "model": model,
         "temperature": 0,
@@ -354,11 +355,9 @@ fn parse_keepwarm_interval(raw: Option<&str>) -> Option<Duration> {
 /// model is warm), `false` on any transport/status error — callers treat this as
 /// best-effort and never block on it. Does NOT touch verdicts or actuation.
 pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) -> bool {
-    // keep-warm builds its own (one-token, `keep_alive`) request rather than routing
-    // through `chat`, so it must take the single-flight permit itself — otherwise the
-    // background ping could overlap a judging/propose request on the single-CPU node.
-    // The guard releases on drop at function return (success or transport error).
-    let _permit = acquire_gate().await;
+    // JEF-337: keep-warm's one-token ping fires without any gate — ollama owns concurrency,
+    // so a background ping overlapping a judging/propose request is fine. Best-effort and
+    // bounded by the reqwest timeout.
     let body = json!({
         "model": model,
         "temperature": 0,
@@ -662,64 +661,14 @@ mod tests {
         let _ = server.await;
     }
 
-    /// JEF-301: the single-flight permit must be released on the ERROR path too (a 500), so a
-    /// failing request can never strand the gate and deadlock every later model call. We fire 3
-    /// concurrent `chat` calls at a server that always 500s: if the permit leaked on the error
-    /// path, the second and third would block forever and this test would hang. That they all
-    /// complete (each returning `None`) proves the guard releases on drop on the error path.
+    /// JEF-337: with the serialization gate removed, concurrent `chat` calls run in PARALLEL —
+    /// protector no longer caps itself to one in-flight model request; ollama owns concurrency.
+    /// A localhost server records the max number of requests open at once; each lingers briefly
+    /// so overlap is observable. We fire 5 `chat` calls with a `JoinSet` and assert the server
+    /// saw MORE THAN ONE in flight at once — the exact opposite of the old single-flight gate,
+    /// proving the gate is truly gone (not reborn under another name).
     #[tokio::test]
-    async fn the_gate_is_released_on_the_error_path_so_later_calls_proceed() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        const CALLS: usize = 3;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for _ in 0..CALLS {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    let _ = sock.read(&mut buf).await;
-                    let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.flush().await;
-                });
-            }
-        });
-
-        let endpoint = format!("http://{addr}/v1/chat/completions");
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..CALLS {
-            let endpoint = endpoint.clone();
-            set.spawn(async move {
-                let client = timeout_only_client(5).unwrap();
-                chat(&client, &endpoint, "m", "p").await
-            });
-        }
-        let mut completed = 0;
-        while let Some(res) = set.join_next().await {
-            assert!(
-                res.unwrap().is_none(),
-                "a 500 yields None (the permit released, the call did not hang)"
-            );
-            completed += 1;
-        }
-        assert_eq!(
-            completed, CALLS,
-            "every gated call after an error must proceed — the permit is never stranded"
-        );
-        server.await.unwrap();
-    }
-
-    /// JEF-236: the process-wide single-flight gate must keep at most ONE model request
-    /// in flight at a time across all callers (judge/propose/keep-warm all go through the
-    /// gate). A localhost server records the number of CONCURRENTLY-open requests and the
-    /// max it ever observes; each request lingers briefly (released by a shared `Notify`
-    /// only once all clients have connected the gate would have to permit) so overlap is
-    /// observable if the gate were absent. We fire 5 `chat` calls with a `JoinSet` and
-    /// assert the server never saw more than one request open at once.
-    #[tokio::test]
-    async fn chat_calls_are_serialized_to_one_in_flight() {
+    async fn chat_calls_run_concurrently_without_a_serialization_gate() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -743,13 +692,13 @@ mod tests {
                     // Drain the request enough to respond; we don't need to parse it.
                     let mut buf = [0u8; 1024];
                     let _ = sock.read(&mut buf).await;
-                    // Record the concurrency this request observed. If the gate works,
-                    // `now` is always 1; without it, overlapping requests push it higher.
+                    // Record the concurrency this request observed. With the gate gone,
+                    // overlapping requests push `now` above 1.
                     let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                     max.fetch_max(now, Ordering::SeqCst);
-                    // Linger so a second request — were the gate absent — would overlap
-                    // this one and be seen by the counter above.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    // Linger so the other in-flight requests overlap this one and are seen
+                    // by the counter above.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     in_flight.fetch_sub(1, Ordering::SeqCst);
                     let payload = json!({
                         "choices": [{ "message": { "content": "ok" } }]
@@ -779,15 +728,48 @@ mod tests {
             assert_eq!(
                 res.unwrap().as_deref(),
                 Some("ok"),
-                "every gated chat call must still complete normally"
+                "every concurrent chat call must still complete normally"
             );
         }
         server.await.unwrap();
 
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) > 1,
+            "with the serialization gate removed, model calls must overlap (saw {})",
+            max_in_flight.load(Ordering::SeqCst)
+        );
+    }
+
+    /// JEF-337: the concurrency knob defaults to a generous [`DEFAULT_MODEL_CONCURRENCY`]
+    /// (never 1), falls back to it for an unset / unparseable / `0` value (a `0` would
+    /// deadlock `buffer_unordered`), and honours any positive value verbatim.
+    #[test]
+    fn model_concurrency_defaults_generously_and_honours_the_env() {
         assert_eq!(
-            max_in_flight.load(Ordering::SeqCst),
-            1,
-            "the single-flight gate must keep at most one model request in flight at once"
+            parse_model_concurrency(None),
+            DEFAULT_MODEL_CONCURRENCY,
+            "unset must fall back to the generous default"
+        );
+        assert_ne!(DEFAULT_MODEL_CONCURRENCY, 1, "the default must never be 1");
+        assert_eq!(
+            parse_model_concurrency(Some("0")),
+            DEFAULT_MODEL_CONCURRENCY,
+            "0 must fall back to the default (never a deadlocking buffer_unordered(0))"
+        );
+        assert_eq!(
+            parse_model_concurrency(Some("not-a-number")),
+            DEFAULT_MODEL_CONCURRENCY,
+            "an unparseable value must fall back to the default"
+        );
+        assert_eq!(
+            parse_model_concurrency(Some("16")),
+            16,
+            "a positive value is honoured verbatim"
+        );
+        assert_eq!(
+            parse_model_concurrency(Some(" 4 ")),
+            4,
+            "a trimmed positive value is honoured"
         );
     }
 

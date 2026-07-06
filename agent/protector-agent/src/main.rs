@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use protector_behavior::{AgentReport, RuntimeObservation};
+use protector_behavior::{AgentReport, RuntimeObservation, RuntimeReport};
 use tokio::sync::mpsc;
 
 use coalesce::Coalescer;
@@ -162,11 +162,22 @@ async fn main() -> anyhow::Result<()> {
                         // or the drained buffer if this new distinct key hit the max-size cap.
                         let immediate = coalescer.offer(obs);
                         if !immediate.is_empty() {
-                            reported_since_tick += reporter.send(&immediate).await;
+                            reported_since_tick += reporter
+                                .send(&RuntimeReport {
+                                    observations: immediate,
+                                    liveness: None,
+                                })
+                                .await;
                         }
                     }
                     None => {
-                        reporter.send(&coalescer.drain()).await; // drain on shutdown
+                        // drain on shutdown
+                        reporter
+                            .send(&RuntimeReport {
+                                observations: coalescer.drain(),
+                                liveness: None,
+                            })
+                            .await;
                         break;
                     }
                 },
@@ -174,7 +185,12 @@ async fn main() -> anyhow::Result<()> {
                     // Window elapsed: flush the coalesced batch. Skip the round-trip when
                     // nothing accumulated (a quiet window stays silent).
                     if !coalescer.is_empty() {
-                        reported_since_tick += reporter.send(&coalescer.drain()).await;
+                        reported_since_tick += reporter
+                            .send(&RuntimeReport {
+                                observations: coalescer.drain(),
+                                liveness: None,
+                            })
+                            .await;
                     }
                 }
                 _ = heartbeat.tick() => {
@@ -196,12 +212,20 @@ async fn main() -> anyhow::Result<()> {
                     // un-attributable beacon would be dishonest). probes==0/0 ⇒ blind (Ready
                     // but no probe attached, or the no-eBPF build).
                     if let Some(node) = &beacon_node {
-                        let report = build_agent_report(
+                        let liveness = build_agent_report(
                             node,
                             beacon_probes.snapshot(),
                             reported_since_tick as u64,
                         );
-                        reporter.send_report(&report).await;
+                        // Liveness rides the unified envelope (JEF-336): a quiet node still POSTs
+                        // — empty observations, liveness present — so it reads HEALTHY-quiet, not
+                        // blind, instead of the old single-beacon POST the engine 422-rejected.
+                        reporter
+                            .send(&RuntimeReport {
+                                observations: Vec::new(),
+                                liveness: Some(liveness),
+                            })
+                            .await;
                     }
                     reported_since_tick = 0;
                 }

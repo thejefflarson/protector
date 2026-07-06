@@ -214,7 +214,7 @@ pub(crate) fn report_resource(object: &DynamicObject) -> Option<WorkloadRef> {
 /// definition rather than a hand-synced duplicate. Re-exported here because the Observer
 /// and adapters refer to it as `observe::RuntimeObservation`. [`Attribution`] (how an
 /// observation is attributed to a workload) is re-exported alongside it for the same reason.
-pub use protector_behavior::{AgentReport, Attribution, RuntimeObservation};
+pub use protector_behavior::{AgentReport, Attribution, RuntimeObservation, RuntimeReport};
 
 /// The normalized API secret-read lifted from the apiserver audit log (JEF-269) — the
 /// corroborating runtime signal the eBPF agent can't observe. Re-exported here because the

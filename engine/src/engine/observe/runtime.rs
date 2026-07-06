@@ -1,8 +1,14 @@
 //! The RuntimeEvidence ingest: live behavioral signals that supply the action bar's
 //! `corroborated-now` predicate. The first-party eBPF agent (and any sensor with a
-//! translation adapter) POSTs normalized [`RuntimeObservation`]s to the tool-agnostic
-//! behavioral port (ADR-0003), the `/behavior` route the engine exposes; [`RuntimeEvents`]
-//! holds the recent ones.
+//! translation adapter) POSTs a per-window [`RuntimeReport`] envelope to the tool-agnostic
+//! behavioral port (ADR-0003), the single `/behavior` route the engine exposes; [`RuntimeEvents`]
+//! holds the recent observations.
+//!
+//! One envelope, one endpoint (JEF-336): the report carries the window's observations AND — when
+//! the sensor has one — its per-node liveness beacon (JEF-308), so liveness ALWAYS travels with the
+//! report. A quiet node still POSTs (empty observations, liveness present) and reads HEALTHY-quiet
+//! rather than blind. For backward compatibility the route also accepts a *bare* `[...]` array of
+//! observations (a legacy / third-party observations-only poster) — see [`BehaviorIngest`].
 //!
 //! A runtime signal is a *stream*, not a Kubernetes object, so it can't be reflected like
 //! the rest of the graph — hence the HTTP ingest.
@@ -27,7 +33,7 @@ use tokio::sync::mpsc::Sender;
 use super::ingest_guard::{
     DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
 };
-use super::{AgentReport, RuntimeObservation};
+use super::{RuntimeObservation, RuntimeReport};
 use crate::engine::state::AgentLivenessStore;
 
 /// A time-windowed store of recent runtime observations. Thread-safe so the HTTP
@@ -104,39 +110,72 @@ fn same_signal(a: &RuntimeObservation, b: &RuntimeObservation) -> bool {
     a.behavior == b.behavior && a.attribution == b.attribution
 }
 
-/// Shared state for the ingest handlers: the event store, a wake channel, and the per-node
-/// agent-liveness store (JEF-308) the `/agent-liveness` beacon feeds.
+/// Shared state for the ingest handler: the event store, a wake channel, and the per-node
+/// agent-liveness store (JEF-308) the report envelope's `liveness` feeds.
 type IngestState = (Arc<RuntimeEvents>, Sender<()>, Arc<AgentLivenessStore>);
 
-/// Receive a batch of normalized [`RuntimeObservation`]s on the tool-agnostic
-/// behavioral port (ADR-0014) — the shape the first-party eBPF agent (and any sensor
-/// with a translation adapter) POSTs. Each is recorded; the engine is woken once, and
-/// only if the batch actually changed the store. The agent re-reports the same
-/// connections continuously, so most batches are pure repeats — those refresh TTLs but
-/// must not churn a process pass, which is the whole point of gating the wake here.
+/// What the `/behavior` route accepts (JEF-336). The first-party agent POSTs a
+/// [`RuntimeReport`] envelope (`{observations, liveness}`); a legacy or third-party sensor may
+/// still POST a *bare* `[...]` array of observations. Untagged, envelope-first: an object matches
+/// [`Self::Envelope`], a JSON array matches [`Self::Bare`], so the two wire forms never collide.
+///
+/// Accepting both is the zero-break path that stays truest to the ADR-0003 tool-agnostic port — a
+/// third-party poster that only speaks the pre-existing bare-array contract keeps working, while
+/// the first-party agent gets liveness-with-observations in one envelope.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum BehaviorIngest {
+    /// The JEF-336 envelope: observations plus optional per-node liveness.
+    Envelope(RuntimeReport),
+    /// The legacy / third-party bare array of observations (no liveness).
+    Bare(Vec<RuntimeObservation>),
+}
+
+impl BehaviorIngest {
+    /// Normalize either accepted wire form into a [`RuntimeReport`]. A bare array becomes an
+    /// envelope with no liveness.
+    fn into_report(self) -> RuntimeReport {
+        match self {
+            BehaviorIngest::Envelope(report) => report,
+            BehaviorIngest::Bare(observations) => RuntimeReport {
+                observations,
+                liveness: None,
+            },
+        }
+    }
+}
+
+/// Receive one per-window [`RuntimeReport`] on the tool-agnostic behavioral port (ADR-0014) — the
+/// envelope the first-party eBPF agent (and any sensor with a translation adapter) POSTs, or a bare
+/// legacy array (see [`BehaviorIngest`]). Observations are recorded and the engine is woken once,
+/// and only if the batch actually changed the store — the agent re-reports the same connections
+/// continuously, so most batches are pure repeats that refresh TTLs but must not churn a process
+/// pass. Any `liveness` in the envelope is recorded into the agent-liveness store; unlike a
+/// behavior it does NOT wake the engine (liveness is read at pass time). Because the envelope
+/// arrives every window even when the node saw nothing, a quiet node reads HEALTHY-quiet, not blind.
 async fn ingest_behavior(
-    State((events, notify, _liveness)): State<IngestState>,
-    Json(observations): Json<Vec<RuntimeObservation>>,
+    State((events, notify, liveness)): State<IngestState>,
+    Json(payload): Json<BehaviorIngest>,
 ) -> StatusCode {
-    if record_batch(&events, observations) {
+    if ingest_report(&events, &liveness, payload.into_report()) {
         let _ = notify.try_send(());
     }
     StatusCode::OK
 }
 
-/// Receive a batch of per-node [`AgentReport`] liveness beacons (JEF-308) and record them into the
-/// liveness store. Unlike a behavior, a beacon does NOT wake the engine — liveness is read at pass
-/// time; a beacon only refreshes freshness. A beacon arrives every window even when the node saw
-/// nothing, which is exactly what lets a quiet node read HEALTHY-quiet instead of blind. Same body
-/// cap / authn / rate limit as the sibling routes; over-cap batches are truncated defensively.
-async fn ingest_agent_liveness(
-    State((_events, _notify, liveness)): State<IngestState>,
-    Json(reports): Json<Vec<AgentReport>>,
-) -> StatusCode {
-    for report in reports.into_iter().take(MAX_BATCH) {
-        liveness.record(report);
+/// Apply one [`RuntimeReport`] to the stores: record its liveness beacon (if any) and its
+/// observations, returning whether the observation store actually **changed** (so the caller wakes
+/// the engine only on a real change — liveness alone never wakes it). Split out and pure-over-the-
+/// stores so the envelope's dual effect is unit-testable without an HTTP server.
+fn ingest_report(
+    events: &RuntimeEvents,
+    liveness: &AgentLivenessStore,
+    report: RuntimeReport,
+) -> bool {
+    if let Some(beacon) = report.liveness {
+        liveness.record(beacon);
     }
-    StatusCode::OK
+    record_batch(events, report.observations)
 }
 
 /// Upper bound on observations accepted per `/behavior` batch. Each `record()` is an
@@ -168,10 +207,11 @@ fn record_batch(events: &RuntimeEvents, observations: Vec<RuntimeObservation>) -
     changed
 }
 
-/// Serve the runtime-evidence ingest. `/behavior` accepts a batch of normalized observations
-/// on the tool-agnostic behavioral port (ADR-0003) from the first-party eBPF agent or any
-/// sensor with a translation adapter; `/agent-liveness` accepts the per-node liveness beacon.
-/// This is the cluster-facing glue; the store it drives is what the tests cover.
+/// Serve the runtime-evidence ingest. The single `/behavior` route accepts a per-window
+/// [`RuntimeReport`] envelope (observations + optional per-node liveness) on the tool-agnostic
+/// behavioral port (ADR-0003) from the first-party eBPF agent or any sensor with a translation
+/// adapter — or a bare legacy `[...]` array of observations (JEF-336). This is the cluster-facing
+/// glue; the store it drives is what the tests cover.
 pub async fn serve_runtime(
     addr: SocketAddr,
     events: Arc<RuntimeEvents>,
@@ -190,9 +230,9 @@ pub async fn serve_runtime(
     let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
 
     let mut app = Router::new()
+        // One endpoint (JEF-336): the report envelope carries observations AND the per-node
+        // agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
         .route("/behavior", post(ingest_behavior))
-        // The per-node agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
-        .route("/agent-liveness", post(ingest_agent_liveness))
         // A real alert/batch is small; cap the body so a client can't OOM the engine
         // with a giant POST (mirrors the webhook server). The body cap, MAX_EVENTS, and
         // the per-batch MAX_BATCH all remain in force alongside authn + rate limiting.
@@ -205,7 +245,7 @@ pub async fn serve_runtime(
     match token {
         Some(token) => {
             app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
-            tracing::info!(%addr, "runtime-evidence ingest listening (/behavior, /agent-liveness) — bearer-authenticated");
+            tracing::info!(%addr, "runtime-evidence ingest listening (/behavior) — bearer-authenticated");
         }
         None => {
             tracing::warn!(
@@ -229,7 +269,7 @@ pub async fn serve_runtime(
 
 #[cfg(test)]
 mod tests {
-    use super::super::Attribution;
+    use super::super::{AgentReport, Attribution};
     use super::*;
     use crate::engine::graph::Behavior;
     use serde_json::json;
@@ -329,6 +369,122 @@ mod tests {
         // which all make connections, would fire the action bar).
         assert!(!obs[0].behavior.is_alert());
         assert!(!obs[1].behavior.is_alert());
+    }
+
+    fn liveness_store() -> Arc<AgentLivenessStore> {
+        Arc::new(AgentLivenessStore::new(Duration::from_secs(300)))
+    }
+
+    fn beacon(node: &str, signals: u64) -> AgentReport {
+        AgentReport {
+            node: node.into(),
+            probes_loaded: 6,
+            probes_total: 6,
+            signals_emitted: signals,
+            observed_at_ms: None,
+        }
+    }
+
+    /// JEF-336: both accepted wire forms deserialize — the `{observations, liveness}` envelope and
+    /// a bare legacy `[...]` array — and normalize to the same [`RuntimeReport`] shape.
+    #[test]
+    fn behavior_ingest_accepts_both_the_envelope_and_a_bare_array() {
+        // The first-party agent's envelope: observations + a per-node liveness beacon.
+        let envelope: BehaviorIngest = serde_json::from_value(json!({
+            "observations": [
+                {"namespace": "app", "pod": "web",
+                 "behavior": {"kind": "alert", "rule": "Terminal shell in container"}}
+            ],
+            "liveness": {"node": "node-a", "probes_loaded": 6, "probes_total": 6, "signals_emitted": 1}
+        }))
+        .expect("envelope deserializes");
+        let report = envelope.into_report();
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.liveness.as_ref().unwrap().node, "node-a");
+
+        // A legacy / third-party bare array: observations only, no liveness.
+        let bare: BehaviorIngest = serde_json::from_value(json!([
+            {"namespace": "app", "pod": "web",
+             "behavior": {"kind": "network_connection", "peer": "1.2.3.4:443", "internet": true}}
+        ]))
+        .expect("bare array deserializes");
+        let report = bare.into_report();
+        assert_eq!(report.observations.len(), 1);
+        assert!(
+            report.liveness.is_none(),
+            "a bare array carries no liveness (third-party path)"
+        );
+    }
+
+    /// The envelope's observations still ingest exactly as before (incl. the Alert path), and a
+    /// fresh batch wakes the engine (returns changed).
+    #[test]
+    fn ingest_report_records_observations_and_signals_a_change() {
+        let events = RuntimeEvents::new(Duration::from_secs(300));
+        let liveness = liveness_store();
+        let report = RuntimeReport {
+            observations: vec![obs("Terminal shell in container")],
+            liveness: None,
+        };
+        assert!(
+            ingest_report(&events, &liveness, report),
+            "a fresh observation changes the store → wake the engine"
+        );
+        let current = events.current();
+        assert_eq!(current.len(), 1);
+        assert!(current[0].behavior.is_alert());
+        // No liveness in the envelope → the liveness store stays empty.
+        assert!(liveness.snapshot().is_empty());
+    }
+
+    /// The engine records liveness carried in the envelope — the JEF-336 fix for the 422 bug.
+    #[test]
+    fn ingest_report_records_liveness_from_the_envelope() {
+        let events = RuntimeEvents::new(Duration::from_secs(300));
+        let liveness = liveness_store();
+        let report = RuntimeReport {
+            observations: vec![obs("shell")],
+            liveness: Some(beacon("node-a", 1)),
+        };
+        ingest_report(&events, &liveness, report);
+        let snap = liveness.snapshot();
+        assert_eq!(snap.len(), 1, "the node's liveness was recorded");
+        assert!(snap.contains_key("node-a"));
+    }
+
+    /// A quiet node: empty observations + liveness present. The liveness is recorded, but with no
+    /// observation change the engine is NOT woken — liveness alone never churns a pass.
+    #[test]
+    fn quiet_node_records_liveness_without_waking_the_engine() {
+        let events = RuntimeEvents::new(Duration::from_secs(300));
+        let liveness = liveness_store();
+        let report = RuntimeReport {
+            observations: Vec::new(),
+            liveness: Some(beacon("node-a", 0)),
+        };
+        assert!(
+            !ingest_report(&events, &liveness, report),
+            "no observation change → no wake"
+        );
+        assert!(events.current().is_empty());
+        assert!(
+            liveness.snapshot().contains_key("node-a"),
+            "a quiet node still records liveness (quiet ≠ blind)"
+        );
+    }
+
+    /// A third-party liveness-less payload still ingests its observations, leaving liveness empty.
+    #[test]
+    fn liveness_less_payload_still_ingests_observations() {
+        let events = RuntimeEvents::new(Duration::from_secs(300));
+        let liveness = liveness_store();
+        let report = BehaviorIngest::Bare(vec![obs("shell")]).into_report();
+        assert!(ingest_report(&events, &liveness, report));
+        assert_eq!(events.current().len(), 1);
+        assert!(
+            liveness.snapshot().is_empty(),
+            "a third-party observations-only poster records no liveness"
+        );
     }
 
     #[test]

@@ -294,8 +294,9 @@ pub async fn run_watch(
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
     // written by the adjudicator for later inspection.
     let journal = std::sync::Arc::new(state::JudgementLog::new());
-    // Per-node agent-liveness (JEF-308): the TTL'd store the `/agent-liveness` beacon feeds and
-    // the engine reads each pass to classify runtime-corroboration coverage per node. Same 300s
+    // Per-node agent-liveness (JEF-308): the TTL'd store the `/behavior` report envelope's liveness
+    // feeds (JEF-336) and the engine reads each pass to classify runtime-corroboration coverage per
+    // node. Same 300s
     // freshness window as the runtime feed — a node whose agent stopped beaconing goes stale and
     // reads blind. Shared (`Arc`) between the ingest task and the engine loop.
     let agent_liveness = std::sync::Arc::new(state::AgentLivenessStore::new(

@@ -1,7 +1,13 @@
-//! The reporter: batches observations and POSTs them to the engine's behavioral
-//! ingest (`/behavior`, ADR-0014). In-cluster, mesh-protected hop; the agent never
-//! sends behavioral data anywhere else (the data is a map of the cluster — it stays
+//! The reporter: batches a window's observations and (when this node has one) its per-node
+//! liveness beacon into ONE [`RuntimeReport`] envelope and POSTs it to the engine's unified
+//! behavioral ingest (`/behavior`, ADR-0014 / JEF-336). In-cluster, mesh-protected hop; the agent
+//! never sends behavioral data anywhere else (the data is a map of the cluster — it stays
 //! in-cluster, per VISION's local-first conviction).
+//!
+//! One endpoint, one envelope (JEF-336): liveness always travels with the report, so a quiet node
+//! still POSTs (empty observations, liveness present) and the engine reads it HEALTHY-quiet rather
+//! than blind. This replaced a separate `/agent-liveness` beacon POST that shipped a single
+//! `AgentReport` the engine's array-typed handler 422-rejected — the "no agents connected" bug.
 //!
 //! The POST carries an `Authorization: Bearer <token>` (Fix A) so the engine can
 //! reject forged observations from any other caller that can reach :9999. The token
@@ -23,7 +29,7 @@
 
 use std::time::Duration;
 
-use protector_behavior::{AgentReport, RuntimeObservation};
+use protector_behavior::RuntimeReport;
 
 /// Re-resolve the token after this many consecutive 401s. Small so a genuine skew heals
 /// fast, but >1 so a single transient 401 (e.g. an engine mid-restart that hasn't loaded
@@ -39,13 +45,11 @@ const ERROR_EVERY_N_REJECTIONS: u64 = 20;
 /// (a stale-then-fresh token) without touching the filesystem or sleeping.
 type TokenSource = Box<dyn FnMut() -> Option<String> + Send>;
 
-/// POSTs batches of [`RuntimeObservation`]s to `{base}/behavior`, and per-node liveness beacons
-/// (JEF-308) to `{base}/agent-liveness`.
+/// POSTs per-window [`RuntimeReport`] envelopes (observations + optional per-node liveness beacon,
+/// JEF-336) to `{base}/behavior`.
 pub struct Reporter {
     client: reqwest::Client,
     url: String,
-    /// The per-node agent-liveness beacon endpoint (`{base}/agent-liveness`, JEF-308).
-    liveness_url: String,
     /// Shared-secret bearer for the engine's ingest authn (Fix A). `None` = send no
     /// `Authorization` header (the engine then runs the ingest unauthenticated, which
     /// it warns about); set it once the Secret has rolled out.
@@ -122,7 +126,6 @@ impl Reporter {
         Self {
             client,
             url: format!("{base}/behavior"),
-            liveness_url: format!("{base}/agent-liveness"),
             token,
             token_source: source,
             consecutive_401s: 0,
@@ -131,44 +134,14 @@ impl Reporter {
         }
     }
 
-    /// Build the POST for `batch`, attaching the bearer header when a token is
-    /// configured. Split out so the header wiring is unit-testable without a server.
-    fn build_request(&self, batch: &[RuntimeObservation]) -> reqwest::RequestBuilder {
-        let mut req = self.client.post(&self.url).json(batch);
+    /// Build the POST for one [`RuntimeReport`] envelope, attaching the bearer header when a token
+    /// is configured. Split out so the header/URL wiring is unit-testable without a server.
+    fn build_request(&self, report: &RuntimeReport) -> reqwest::RequestBuilder {
+        let mut req = self.client.post(&self.url).json(report);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
         req
-    }
-
-    /// Build the POST for a per-node liveness beacon (JEF-308), attaching the same bearer as the
-    /// observation path. Split out so the header/URL wiring is unit-testable without a server.
-    fn build_report_request(&self, report: &AgentReport) -> reqwest::RequestBuilder {
-        let mut req = self.client.post(&self.liveness_url).json(report);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        req
-    }
-
-    /// POST one per-node liveness beacon (JEF-308) to `{base}/agent-liveness`. Best-effort like
-    /// [`send`](Self::send): a failed beacon is logged and dropped — a missed beacon costs a little
-    /// freshness, and the engine's TTL means a node that genuinely stops beaconing reads blind,
-    /// which is the honest outcome. Sent every window even when the node is quiet, so a quiet node
-    /// reads healthy-quiet, not blind. `&mut self` (like [`send`](Self::send)) so the future stays
-    /// `Send` for `tokio::spawn` — the boxed token source makes a shared `&Reporter` non-`Send`.
-    pub async fn send_report(&mut self, report: &AgentReport) {
-        match self.build_report_request(report).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::debug!(node = %report.node, "reported agent liveness");
-            }
-            Ok(resp) => {
-                tracing::warn!(status = %resp.status(), "agent-liveness ingest rejected beacon");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "agent-liveness ingest unreachable");
-            }
-        }
     }
 
     /// Cumulative (delivered, rejected) tallies for the periodic heartbeat (JEF-240).
@@ -220,21 +193,28 @@ impl Reporter {
         }
     }
 
-    /// Send one batch; returns how many observations were accepted (0 on failure or an
-    /// empty batch). Best-effort: a failed POST is logged and dropped — behavioral
-    /// evidence is additive, so a lost batch costs a little freshness, never correctness,
-    /// and must never wedge the agent. The caller rolls the count into an interval
-    /// heartbeat; per-send detail stays at debug.
+    /// Send one per-window [`RuntimeReport`] envelope (observations + optional liveness, JEF-336);
+    /// returns how many observations were accepted (0 on failure, or when the envelope carries
+    /// neither observations nor liveness). An envelope with empty observations but a liveness beacon
+    /// IS sent — that is the quiet-node path that keeps a silent node reading HEALTHY-quiet, not
+    /// blind. Best-effort: a failed POST is logged and dropped — behavioral evidence is additive, so
+    /// a lost report costs a little freshness, never correctness, and must never wedge the agent.
+    /// The caller rolls the count into an interval heartbeat; per-send detail stays at debug.
     ///
     /// On a run of 401s the token is re-resolved (JEF-240) so a secret rotation self-heals
     /// without a pod restart; the run-length resets on the first 2xx.
-    pub async fn send(&mut self, batch: &[RuntimeObservation]) -> usize {
-        if batch.is_empty() {
+    pub async fn send(&mut self, report: &RuntimeReport) -> usize {
+        if report.observations.is_empty() && report.liveness.is_none() {
             return 0;
         }
-        match self.build_request(batch).send().await {
+        let n = report.observations.len();
+        match self.build_request(report).send().await {
             Ok(resp) if resp.status().is_success() => {
-                tracing::debug!(n = batch.len(), "reported behavioral observations");
+                tracing::debug!(
+                    observations = n,
+                    liveness = report.liveness.is_some(),
+                    "reported runtime envelope"
+                );
                 if self.consecutive_401s > 0 {
                     tracing::info!(
                         after_401s = self.consecutive_401s,
@@ -242,8 +222,8 @@ impl Reporter {
                     );
                 }
                 self.consecutive_401s = 0;
-                self.delivered_total = self.delivered_total.saturating_add(batch.len() as u64);
-                batch.len()
+                self.delivered_total = self.delivered_total.saturating_add(n as u64);
+                n
             }
             Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.rejected_total = self.rejected_total.saturating_add(1);
@@ -268,7 +248,9 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protector_behavior::{Attribution, Behavior, SecretReadSource};
+    use protector_behavior::{
+        AgentReport, Attribution, Behavior, RuntimeObservation, SecretReadSource,
+    };
 
     fn reporter_with(token: Option<&str>) -> Reporter {
         let owned = token.map(str::to_string);
@@ -276,7 +258,6 @@ mod tests {
         Reporter {
             client: reqwest::Client::new(),
             url: "http://engine.svc:9999/behavior".to_string(),
-            liveness_url: "http://engine.svc:9999/agent-liveness".to_string(),
             token: owned,
             token_source: Box::new(move || for_source.clone()),
             consecutive_401s: 0,
@@ -285,8 +266,8 @@ mod tests {
         }
     }
 
-    fn sample_batch() -> Vec<RuntimeObservation> {
-        vec![RuntimeObservation {
+    fn sample_observation() -> RuntimeObservation {
+        RuntimeObservation {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: Some("agent".into()),
             observed_at_ms: None,
@@ -295,7 +276,14 @@ mod tests {
                 secret: "app/session-key".into(),
                 source: SecretReadSource::Mounted,
             },
-        }]
+        }
+    }
+
+    fn sample_report() -> RuntimeReport {
+        RuntimeReport {
+            observations: vec![sample_observation()],
+            liveness: None,
+        }
     }
 
     /// When a token is configured the POST carries `Authorization: Bearer <token>`.
@@ -303,7 +291,7 @@ mod tests {
     fn attaches_bearer_header_when_token_set() {
         let reporter = reporter_with(Some("s3cr3t"));
         let req = reporter
-            .build_request(&sample_batch())
+            .build_request(&sample_report())
             .build()
             .expect("request builds");
         let auth = req
@@ -313,22 +301,26 @@ mod tests {
         assert_eq!(auth, "Bearer s3cr3t");
     }
 
-    /// JEF-308: a liveness beacon POSTs to `{base}/agent-liveness` carrying the same bearer.
+    /// JEF-336: the unified envelope — including a quiet-node liveness-only report — POSTs to the
+    /// single `{base}/behavior` route carrying the same bearer (no separate `/agent-liveness`).
     #[test]
-    fn liveness_beacon_targets_agent_liveness_with_bearer() {
+    fn liveness_rides_the_behavior_envelope_with_bearer() {
         let reporter = reporter_with(Some("s3cr3t"));
-        let report = AgentReport {
-            node: "node-a".into(),
-            probes_loaded: 6,
-            probes_total: 6,
-            signals_emitted: 3,
-            observed_at_ms: None,
+        let report = RuntimeReport {
+            observations: Vec::new(),
+            liveness: Some(AgentReport {
+                node: "node-a".into(),
+                probes_loaded: 6,
+                probes_total: 6,
+                signals_emitted: 3,
+                observed_at_ms: None,
+            }),
         };
         let req = reporter
-            .build_report_request(&report)
+            .build_request(&report)
             .build()
             .expect("request builds");
-        assert_eq!(req.url().as_str(), "http://engine.svc:9999/agent-liveness");
+        assert_eq!(req.url().as_str(), "http://engine.svc:9999/behavior");
         assert_eq!(
             req.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
             "Bearer s3cr3t"
@@ -341,14 +333,14 @@ mod tests {
     fn omits_bearer_header_when_token_unset() {
         let reporter = reporter_with(None);
         let req = reporter
-            .build_request(&sample_batch())
+            .build_request(&sample_report())
             .build()
             .expect("request builds");
         assert!(
             req.headers().get(reqwest::header::AUTHORIZATION).is_none(),
             "no Authorization header when token unset"
         );
-        // The body is still the JSON batch — auth is the only thing that changed.
+        // The body is still the JSON envelope — auth is the only thing that changed.
         assert_eq!(req.url().as_str(), "http://engine.svc:9999/behavior");
     }
 
@@ -403,7 +395,7 @@ mod tests {
 
         // The fresh bearer is what subsequent posts attach.
         let req = reporter
-            .build_request(&sample_batch())
+            .build_request(&sample_report())
             .build()
             .expect("request builds");
         assert_eq!(
