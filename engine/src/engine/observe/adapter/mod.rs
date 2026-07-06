@@ -89,6 +89,16 @@ pub trait Adapter: Send + Sync {
 }
 
 /// A deterministic, freshly-observed edge: stamped now, attributed to `source`.
+///
+/// SOLE edge-construction path for the observe layer: every edge is a deterministic
+/// observation minted here from trusted cluster topology/RBAC (the adapters above).
+/// The removed `Grade` gate (JEF-365) used to enforce "only deterministic proof moves
+/// privilege" at the type level; with it gone that invariant now rests on this
+/// chokepoint. Any new adapter that maps runtime, LLM, or feed data into a *movement*
+/// edge (`reaches` / `can-do` / `escapes-to` — the proof-walk relations) would break
+/// "only deterministic proof moves privilege" (ADR-0001/0003). Runtime/LLM/feed
+/// evidence must attach node *facts*, never mint a movement edge, unless a `Grade`-style
+/// seam is reintroduced first (ADR-0001's JEF-365 amendment).
 pub(super) fn observed(source: &str, relation: Relation) -> Edge {
     Edge {
         relation,
