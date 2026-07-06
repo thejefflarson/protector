@@ -299,7 +299,16 @@ async fn main() -> Result<()> {
         );
     }
     let tuf_cache = PathBuf::from(env_or("PROTECTOR_TUF_CACHE", "/tmp/sigstore"));
-    let verify_timeout = Duration::from_secs(env_parse("PROTECTOR_VERIFY_TIMEOUT", 5));
+    // 20s (was 5s): a keyless Fulcio+Rekor+TUF verify of a first-party signed image on the arm64
+    // engine — especially with a cold TUF cache after a restart — routinely needs >5s, so a 5s
+    // budget left those images stuck in "checking" forever (JEF-326). Still env-overridable, and
+    // shared with the engine's running-pod sweep (the path that was actually stuck). NOTE: the
+    // *admission* verify is additionally bounded by the ValidatingWebhookConfiguration's
+    // `timeoutSeconds` (5s in the chart), so on the webhook path the effective budget is the
+    // smaller of the two — this larger default mainly benefits the engine sweep, which has no such
+    // k8s cap. Raising the webhook's own `timeoutSeconds` is a cluster-owned decision (it trades
+    // admission latency for verify headroom) and is left as an operator follow-up.
+    let verify_timeout = Duration::from_secs(env_parse("PROTECTOR_VERIFY_TIMEOUT", 20));
     let cache_ttl = Duration::from_secs(env_parse("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_parse("PROTECTOR_MAX_IMAGES", 32) as usize;
 

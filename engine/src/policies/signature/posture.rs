@@ -274,6 +274,64 @@ impl PostureMap {
     pub fn entries(&self) -> impl Iterator<Item = (&str, &SigningPosture)> {
         self.images.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    /// Tally this pass's postures into a low-cardinality [`PostureSummary`] (JEF-326) — the counts
+    /// the sweep logs at INFO so an operator can see, at the default log level, how many images
+    /// resolved vs how many are stuck "checking". Pure over the map, so it is unit-testable.
+    pub fn summary(&self) -> PostureSummary {
+        let mut s = PostureSummary::default();
+        for posture in self.images.values() {
+            match posture {
+                SigningPosture::Signed(_) => s.signed += 1,
+                SigningPosture::SignedKeyBased => s.signed_key_based += 1,
+                SigningPosture::UnverifiableHere => s.unverifiable += 1,
+                SigningPosture::InvalidSignature => s.invalid += 1,
+                SigningPosture::NotSigned => s.not_signed += 1,
+                SigningPosture::Checking => s.checking += 1,
+            }
+        }
+        s
+    }
+}
+
+/// A per-sweep count of observed signing postures (JEF-326), one field per [`SigningPosture`]
+/// variant. Logged at INFO by the sweep so perpetual "checking" is visible at the default log
+/// level instead of silent. `Display` renders the stable `signed=N key-based=… checking=M` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostureSummary {
+    pub signed: usize,
+    pub signed_key_based: usize,
+    pub unverifiable: usize,
+    pub invalid: usize,
+    pub not_signed: usize,
+    pub checking: usize,
+}
+
+impl PostureSummary {
+    /// Total images tallied this sweep.
+    pub fn total(&self) -> usize {
+        self.signed
+            + self.signed_key_based
+            + self.unverifiable
+            + self.invalid
+            + self.not_signed
+            + self.checking
+    }
+}
+
+impl std::fmt::Display for PostureSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "signed={} key-based={} unverifiable={} invalid={} not-signed={} checking={}",
+            self.signed,
+            self.signed_key_based,
+            self.unverifiable,
+            self.invalid,
+            self.not_signed,
+            self.checking,
+        )
+    }
 }
 
 /// Drives signing-posture observation for the engine and the webhook off a SHARED, bounded
@@ -357,6 +415,16 @@ impl SigningObserver {
         for image in distinct.into_iter().take(self.max_images) {
             let posture = self.observe(&image).await;
             map.record(image, posture);
+        }
+        // The INFO sweep summary (JEF-326): at the default log level the sweep was previously
+        // silent, so a fleet stuck in "checking" was invisible. One line per pass makes the
+        // signing-coverage posture — and any stuck "checking" backlog — plainly visible; the
+        // per-image reason for each `checking` is logged (WARN) by the observer itself.
+        if !map.is_empty() {
+            let summary = map.summary();
+            // `checking` is a structured field so an operator can alert on a stuck backlog directly;
+            // the message carries the full breakdown for the human reading the log.
+            tracing::info!(checking = summary.checking, "signing sweep: {summary}");
         }
         map
     }

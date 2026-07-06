@@ -489,6 +489,7 @@ fn covered_config(model_attached: bool) -> ReadinessConfig {
         armed: false,                          // shadow — the safe default (ADR-0016).
         tuf_cache_age_secs: Some(3 * 60 * 60), // a fresh trust root (3h old).
         unverifiable_spike: false,
+        checking_images: 0, // verification completing — nothing stuck checking.
     }
 }
 
@@ -640,6 +641,7 @@ fn build_watching() -> DashboardState {
         armed: false,
         tuf_cache_age_secs: Some(3 * 60 * 60),
         unverifiable_spike: false,
+        checking_images: 2, // degraded — two images stuck 'checking' (JEF-326).
     });
     findings.set_model_health(ModelHealth::Ok);
     findings.mark_pass(SystemTime::now());

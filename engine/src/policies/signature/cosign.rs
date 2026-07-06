@@ -130,7 +130,10 @@ impl CosignChecker {
             client.trusted_signature_layers(&self.auth, &image_ref),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("verification timed out after {:?}", self.verify_timeout))??;
+        // A distinguishable error type (not a bare string) so the observer can tell a spent
+        // verification budget apart from a genuine reachability failure via `downcast_ref` —
+        // the load-bearing distinction for diagnosing a stuck "checking" posture (JEF-326).
+        .map_err(|_| anyhow::Error::new(VerifyTimeout(self.verify_timeout)))??;
         Ok(layers)
     }
 
@@ -147,13 +150,62 @@ impl CosignChecker {
     }
 }
 
+/// Why an image's signing posture could not be resolved this pass (JEF-326) — the transient
+/// [`Checking`](SigningPosture::Checking) split into its two operational causes so the log
+/// tells the operator which knob to reach for. Derived from the `fetch_layers` error via
+/// [`classify_checking_reason`]; pure and exhaustively unit-testable without a registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckingReason {
+    /// The per-image verification budget (`PROTECTOR_VERIFY_TIMEOUT`) was exhausted before the
+    /// registry/Rekor round trip completed — the slow-path (keyless Fulcio+Rekor+TUF) symptom of
+    /// a too-short timeout or a cold TUF cache, NOT unreachability.
+    TimedOut(Duration),
+    /// The round trip failed outright — registry / transparency log / TUF trust root unreachable
+    /// or erroring. Distinct from a spent budget: raising the timeout won't help here.
+    Unreachable,
+}
+
+impl CheckingReason {
+    /// A short, human-facing reason clause for the WARN line (JEF-326).
+    fn describe(&self) -> String {
+        match self {
+            CheckingReason::TimedOut(budget) => {
+                format!(
+                    "verification timed out after {budget:?} (raise PROTECTOR_VERIFY_TIMEOUT or warm the TUF cache)"
+                )
+            }
+            CheckingReason::Unreachable => "registry/Rekor/TUF unreachable".to_string(),
+        }
+    }
+}
+
+/// Classify a `fetch_layers` error into the operational [`CheckingReason`] (JEF-326): a spent
+/// verification budget (a [`VerifyTimeout`] anywhere in the chain) vs a genuine reachability
+/// failure. Reads the typed cause via `downcast_ref` rather than matching on message text, so the
+/// classification can't silently drift when an error string is reworded.
+pub(super) fn classify_checking_reason(err: &anyhow::Error) -> CheckingReason {
+    match err.downcast_ref::<VerifyTimeout>() {
+        Some(VerifyTimeout(budget)) => CheckingReason::TimedOut(*budget),
+        None => CheckingReason::Unreachable,
+    }
+}
+
 #[async_trait]
 impl SignatureObserver for CosignChecker {
     async fn observe(&self, image: &str) -> SigningPosture {
         match self.fetch_layers(image).await {
             Ok(layers) => classify(&layers),
             Err(err) => {
-                tracing::debug!(%image, error = %err, "signing posture: registry/Rekor unreachable — checking");
+                // WARN, not debug (JEF-326): a stuck "checking" posture was invisible at the default
+                // log level, so the perpetual-checking bug was silent. The classified reason names
+                // the cause (timeout vs unreachable) so the operator knows which lever to pull.
+                let reason = classify_checking_reason(&err);
+                tracing::warn!(
+                    %image,
+                    error = %err,
+                    "signing posture unresolved (checking): {}",
+                    reason.describe()
+                );
                 SigningPosture::Checking
             }
         }
@@ -334,6 +386,14 @@ fn pae_payload(raw: &[u8]) -> Option<&[u8]> {
     }
 }
 
+/// The per-image verification budget was exhausted before the registry/Rekor round trip returned
+/// (JEF-326). A typed error (rather than a formatted string) so [`classify_checking_reason`] can
+/// tell a spent timeout apart from a reachability failure via `downcast_ref`, robust to message
+/// rewording. Carries the budget that elapsed for the operator-facing WARN line.
+#[derive(Debug, thiserror::Error)]
+#[error("verification timed out after {0:?}")]
+pub(super) struct VerifyTimeout(pub(super) Duration);
+
 /// A [`VerificationConstraint`] that admits a signing cert whose SAN identity
 /// matches a (start-anchored) regex and whose OIDC issuer matches exactly.
 /// sigstore-rs ships only an exact-match URL verifier; our identity is a
@@ -409,5 +469,49 @@ mod provenance_pae_tests {
         // Declared length longer than the actual bytes must not silently succeed.
         let raw = b"DSSEv1 4 json 999 {}".to_vec();
         assert!(pae_payload(&raw).is_none());
+    }
+}
+
+#[cfg(test)]
+mod checking_reason_tests {
+    use super::*;
+
+    #[test]
+    fn a_verify_timeout_error_classifies_as_timed_out_with_its_budget() {
+        // The typed timeout — the perpetual-checking symptom on the slow keyless path (JEF-326).
+        let err = anyhow::Error::new(VerifyTimeout(Duration::from_secs(20)));
+        assert_eq!(
+            classify_checking_reason(&err),
+            CheckingReason::TimedOut(Duration::from_secs(20))
+        );
+        // The reason names the knob so the operator isn't left guessing.
+        assert!(
+            CheckingReason::TimedOut(Duration::from_secs(20))
+                .describe()
+                .contains("PROTECTOR_VERIFY_TIMEOUT")
+        );
+    }
+
+    #[test]
+    fn a_timeout_wrapped_in_context_still_classifies_as_timed_out() {
+        // `downcast_ref` walks the cause chain, so an added context layer doesn't lose the cause.
+        let err = anyhow::Error::new(VerifyTimeout(Duration::from_secs(5)))
+            .context("observing ghcr.io/org/app:1");
+        assert_eq!(
+            classify_checking_reason(&err),
+            CheckingReason::TimedOut(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn a_generic_error_classifies_as_unreachable() {
+        // Any non-timeout failure (registry 500, Rekor DNS, TUF fetch) is reachability, not budget.
+        let err = anyhow::anyhow!("connection refused");
+        assert_eq!(classify_checking_reason(&err), CheckingReason::Unreachable);
+        assert!(
+            CheckingReason::Unreachable
+                .describe()
+                .contains("unreachable")
+        );
     }
 }
