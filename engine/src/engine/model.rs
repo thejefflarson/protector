@@ -10,6 +10,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+/// The bounded in-memory completion cache (JEF-362): the ONE mechanism that keeps every
+/// model consumer off the wire for a repeated request. `chat` routes through it;
+/// `keep_warm` deliberately does not.
+mod cache;
+
+pub use cache::DEFAULT_CACHE_ENTRIES;
+
 /// Default cap on the model calls protector keeps IN FLIGHT at once during an adjudication
 /// pass. Deliberately generous (never 1): this is a connection/timeout fan-out safety bound,
 /// not the old serialization gate (JEF-337 removed that). See [`model_concurrency`].
@@ -136,6 +143,14 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// `max_tokens` cap asks the server to stop early, and the response body is read
 /// with a [`MAX_RESPONSE_BYTES`] cap so a server that ignores `max_tokens` still
 /// can't make us buffer an unbounded reply.
+///
+/// JEF-362: every completion is served through the bounded in-memory [`cache`]. An
+/// identical request (same endpoint + body) is returned from memory with NO HTTP; a
+/// miss calls the endpoint and stores ONLY a successful completion. Errors, non-success
+/// statuses, over-cap bodies, and unparseable replies are never cached — they must retry
+/// next pass. The cache lock is never held across the `await` below (it is taken and
+/// released inside `cache::get`/`cache::put`), so it sits in front of the concurrent
+/// dispatch (JEF-337) without reintroducing serialization.
 pub async fn chat(
     client: &reqwest::Client,
     endpoint: &str,
@@ -151,6 +166,13 @@ pub async fn chat(
         "max_tokens": MAX_COMPLETION_TOKENS,
         "messages": [{ "role": "user", "content": prompt }]
     });
+    // Cache hit → return the stored completion, no HTTP. The key is a stable hash of the
+    // full request (endpoint + body), so only a byte-identical request hits.
+    let key = cache::cache_key(endpoint, &body);
+    if let Some(hit) = cache::get(key) {
+        tracing::debug!("model completion served from cache (no HTTP)");
+        return Some(hit);
+    }
     let response = client.post(endpoint).json(&body).send().await.ok()?;
     // JEF-301: a non-success HTTP status (the 500 Ollama returns when it OOM-crashes ingesting
     // a heavy prompt, a 502/503 while it restarts, etc.) is a FAILURE, not an answer. Return
@@ -167,9 +189,14 @@ pub async fn chat(
     }
     let bytes = bounded_body(response).await?;
     let json: Value = serde_json::from_slice(&bytes).ok()?;
-    json["choices"][0]["message"]["content"]
+    let content = json["choices"][0]["message"]["content"]
         .as_str()
-        .map(str::to_string)
+        .map(str::to_string)?;
+    // Success only: a completion we actually extracted is cacheable. Everything above that
+    // returned `None` (transport error, non-success status, over-cap body, unparseable or
+    // shapeless reply) short-circuited before here, so it is never stored — it retries.
+    cache::put(key, content.clone());
+    Some(content)
 }
 
 /// Read a response body with a [`MAX_RESPONSE_BYTES`] ceiling, returning `None` if it
@@ -717,11 +744,16 @@ mod tests {
 
         let endpoint = format!("http://{addr}/v1/chat/completions");
         let mut set = tokio::task::JoinSet::new();
-        for _ in 0..CALLS {
+        for i in 0..CALLS {
             let endpoint = endpoint.clone();
+            // Distinct prompts so the JEF-362 completion cache can't short-circuit any of
+            // the CALLS requests — this test is about concurrency (the server must see all
+            // CALLS in flight), not caching. Identical prompts would let a fast responder
+            // populate the cache and starve the server's accept loop.
+            let prompt = format!("p{i}");
             set.spawn(async move {
                 let client = timeout_only_client(5).unwrap();
-                chat(&client, &endpoint, "m", "p").await
+                chat(&client, &endpoint, "m", &prompt).await
             });
         }
         while let Some(res) = set.join_next().await {
