@@ -78,6 +78,47 @@ fn exposed_snapshot(with_cve: bool) -> Snapshot {
     }
 }
 
+/// `n` INDEPENDENT internet-exposed workloads, each a distinct entry: pod `app/web-{i}`
+/// behind its own LoadBalancer, mounting its own secret — so a pass has `n` breach-relevant
+/// entries the adjudicator is consulted on. Used to exercise the concurrent dispatch and its
+/// per-entry isolation (JEF-337): with one entry per snapshot the concurrency is invisible.
+fn exposed_snapshot_n(n: usize) -> Snapshot {
+    let mut pods = Vec::new();
+    let mut services = Vec::new();
+    let mut secrets = Vec::new();
+    for i in 0..n {
+        pods.push(
+            serde_json::from_value(json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": format!("web-{i}"), "namespace": "app", "labels": {"app": format!("web-{i}")}},
+                "spec": {"containers": [{
+                    "name": "web", "image": format!("web-{i}:1"),
+                    "envFrom": [{"secretRef": {"name": format!("session-key-{i}")}}]
+                }]}
+            }))
+            .unwrap(),
+        );
+        services.push(
+            serde_json::from_value(json!({
+                "apiVersion": "v1", "kind": "Service",
+                "metadata": {"name": format!("web-lb-{i}"), "namespace": "app"},
+                "spec": {"type": "LoadBalancer", "selector": {"app": format!("web-{i}")}}
+            }))
+            .unwrap(),
+        );
+        secrets.push(SecretMeta {
+            namespace: "app".into(),
+            name: format!("session-key-{i}"),
+        });
+    }
+    Snapshot {
+        pods,
+        services,
+        secrets,
+        ..Default::default()
+    }
+}
+
 fn engine_with(counter: Arc<AtomicUsize>) -> Engine {
     Engine::new(
         EnabledActions::from_names(std::iter::empty::<&str>()),
@@ -382,6 +423,108 @@ async fn process_publishes_the_behavioral_bake_snapshot() {
     assert!(
         bake.corroborations >= 1,
         "the live alert corroborates a breach-relevant chain"
+    );
+}
+
+/// JEF-337: an adjudicator that records how many `judge` calls overlap at once. Each call
+/// lingers briefly so, if the dispatch runs them concurrently, the observed max exceeds one.
+struct ConcurrencyProbe {
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl reason::adjudicate::Adjudicator for ConcurrencyProbe {
+    async fn judge(
+        &self,
+        _entry: &NodeKey,
+        _objectives: &[(NodeKey, AttackRef)],
+        _graph: &SecurityGraph,
+    ) -> Verdict {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        // Linger so concurrent calls overlap and are seen by the max counter above.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Verdict::Refuted("counted".into())
+    }
+}
+
+/// JEF-337 acceptance: a single adjudication pass dispatches its per-entry model calls
+/// CONCURRENTLY, not one-at-a-time behind the old serialization gate. With several distinct
+/// breach entries in one snapshot, the adjudicator must see more than one `judge` in flight at
+/// once — the observable difference from the removed 1-permit gate.
+#[tokio::test]
+async fn adjudication_dispatches_entries_concurrently() {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let mut engine = engine_with_adjudicator(Box::new(ConcurrencyProbe {
+        in_flight: in_flight.clone(),
+        max_in_flight: max_in_flight.clone(),
+    }));
+
+    // Six independent entries in one pass — comfortably under the default concurrency (8).
+    engine.process(&exposed_snapshot_n(6)).await;
+
+    assert!(
+        max_in_flight.load(Ordering::SeqCst) > 1,
+        "the pass must run entries concurrently (max in flight was {}), not serialize them",
+        max_in_flight.load(Ordering::SeqCst)
+    );
+}
+
+/// JEF-337 isolation: one entry's model failure (an Uncertain — a 500/timeout maps to that)
+/// must NOT abort or poison the other entries' adjudication in the same concurrent pass. An
+/// adjudicator that fails exactly ONE entry (the first to be polled) and decisively judges the
+/// rest must leave every other entry with its decisive verdict; only the failing one is
+/// inconclusive, and it is simply retried next pass.
+#[tokio::test]
+async fn one_entrys_model_failure_does_not_poison_the_others() {
+    // The first `judge` call this pass returns Uncertain (a model error); all others are
+    // decisive Exploitable. Which entry fails is whichever the concurrent dispatch polls
+    // first — irrelevant; the point is that exactly one fails and the rest are unaffected.
+    struct FailFirst(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for FailFirst {
+        async fn judge(
+            &self,
+            _entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+        ) -> Verdict {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Verdict::Uncertain("model unavailable".into())
+            } else {
+                Verdict::Exploitable("RCE reaches the secret".into())
+            }
+        }
+    }
+    const N: usize = 5;
+    let mut engine = engine_with_adjudicator(Box::new(FailFirst(Arc::new(AtomicUsize::new(0)))));
+    engine.process(&exposed_snapshot_n(N)).await;
+
+    let findings = engine.findings().snapshot();
+    let breach: Vec<_> = findings.iter().filter(|f| f.breach_relevant).collect();
+    assert_eq!(
+        breach.len(),
+        N,
+        "every entry produced a breach-relevant finding"
+    );
+    let exploitable = breach
+        .iter()
+        .filter(|f| {
+            f.verdict
+                .as_ref()
+                .map(|v| v.summary())
+                .as_deref()
+                .is_some_and(|s| s.starts_with("exploitable"))
+        })
+        .count();
+    assert_eq!(
+        exploitable,
+        N - 1,
+        "one entry's failure leaves the other {} entries' decisive verdicts intact",
+        N - 1
     );
 }
 
