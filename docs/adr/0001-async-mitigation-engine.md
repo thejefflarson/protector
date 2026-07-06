@@ -1,7 +1,9 @@
 # 0001. Async mitigation engine: propose / prove / respond, local-first
 
-- Status: Accepted
-- Date: 2026-06-11
+- Status: Accepted — narrowed by the JEF-363 amendment below (the model-backed
+  *hypothesis / propose* half is removed; the engine runs purely on the deterministic
+  proof enumerator).
+- Date: 2026-06-11 (amended 2026-07-06: model-propose stage removed, JEF-363)
 
 ## Context
 
@@ -136,3 +138,39 @@ Harder / accepted downsides:
   plus live evidence — and the action is justified by severing a proven-reachable
   privileged path, not by a proof of exploitation. This is a deliberate, named
   bound on the claim.
+
+## Amendment (JEF-363): the model-backed *propose* half is removed — deterministic enumeration is exhaustive at this cluster's scale
+
+The original decision above framed the engine as **propose → prove → respond**, with
+a model-backed *hypothesis engine* (Decision step 2) generating candidate chains that a
+deterministic gate then confirmed (step 3). That propose-half was hedged against the
+**Scale** force in Context: multi-hop chain analysis "does not scale to large clusters,"
+so a model was expected to *reach chains an exhaustive walk would miss at scale.*
+
+In practice the hedge never bound. The deterministic proof layer (`reason::proof::prove`)
+enumerates **every** structurally-proven chain by exhaustive walk of the proof-grade graph,
+and at this cluster's scale — the small-cluster design this ADR already commits to — that
+walk *is* exhaustive: the model discovered nothing the enumerator didn't already find. Each
+pass it merely burned an Ollama completion to re-derive the same chains, adding latency and a
+second per-pass model dependency for no coverage gain. The operator confirms the deterministic
+graph build and chain enumeration scale fine at the sizes we run.
+
+**Decision (narrowing):** Remove the model-propose stage entirely.
+
+- The **only** chain source is now the deterministic enumerator. There is no
+  `HypothesisSource`, no `ModelHypothesizer`, no per-pass graph-to-prompt render, and no
+  confirmation gate for proposed candidates (`proof::confirm` is deleted — nothing proposes
+  candidates for it to gate).
+- The **only** remaining Ollama consumer is the *adjudicator* (ADR-0013): the model still
+  judges exploitability of an already-proven chain (promote/veto), which is the half where a
+  model adds value and is verified downstream. "Only deterministic proof moves privilege" is
+  unchanged and, if anything, stricter: no model output enters chain discovery at all.
+- The tiering language in the Decision (Tier 0/1/2, "hypothesis generator only") now applies
+  solely to adjudication, not to a propose stage.
+
+**Reversibility.** This narrows, it does not repudiate, the propose→confirm seam. The
+`Grade::Hypothesis` edge grade remains in the graph vocabulary, and `proof::prove` still
+traverses only proof-grade edges — so if the cluster ever outgrows exhaustive walk (the
+Scale force actually biting), a candidate proposer feeding a deterministic gate can be
+reintroduced without reshaping the proof layer. Until then, carrying that machinery unused
+was dead cost, not insurance.

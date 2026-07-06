@@ -36,8 +36,7 @@
 
 use std::collections::BTreeMap;
 
-use petgraph::stable_graph::{EdgeIndex, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::stable_graph::NodeIndex;
 
 use super::objective::{ObjectiveRecognizer, default_recognizers};
 use crate::engine::graph::attack::AttackRef;
@@ -244,99 +243,16 @@ impl ProvenChain {
 }
 
 // Cohesive submodules, split out of this file to keep each under the 1,000-line cap
-// (repo CLAUDE.md). The public surface (`Link`, `ProvenChain`, `prove`/`prove_with`/
-// `confirm`) stays here so external paths (`reason::proof::...`) resolve unchanged.
+// (repo CLAUDE.md). The public surface (`Link`, `ProvenChain`, `prove`/`prove_with`)
+// stays here so external paths (`reason::proof::...`) resolve unchanged.
 mod chain;
 mod corroborate;
 
 use chain::{
-    MAX_PROVEN_PATHS, entry_exposed, entry_foothold, is_cuttable_edge, is_movement, link_of,
-    movement_tree, path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
+    MAX_PROVEN_PATHS, entry_exposed, entry_foothold, is_cuttable_edge, link_of, movement_tree,
+    path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
 };
 use corroborate::{corroborated_for, entry_runtime};
-
-/// Confirm a *proposed* chain against the graph — the deterministic gate a
-/// hypothesis (e.g. a model's guess) must pass before it counts (ADR-0001: "a
-/// model may propose; only deterministic proof may move privilege").
-///
-/// `steps` is the proposed path as `(from, to)` node-key pairs. The chain is
-/// confirmed only if every step is backed by a real **proof-grade movement edge**
-/// in the graph, the steps form a connected path from `entry`, and the final node
-/// is a recognized objective. A step with no such edge — a hallucinated
-/// relationship, or one backed only by a hypothesis-grade edge — drops the whole
-/// chain (returns `None`). A confirmed chain is identical to one [`prove`] would
-/// find, cuts and foothold included.
-pub fn confirm(
-    graph: &SecurityGraph,
-    entry: &NodeKey,
-    steps: &[(NodeKey, NodeKey)],
-) -> Option<ProvenChain> {
-    if steps.is_empty() {
-        return None;
-    }
-    let g = graph.inner();
-    let entry_idx = graph.index_of(entry)?;
-
-    // Validate connectivity and that each step is a real proof-grade movement edge.
-    let mut prev = entry.clone();
-    let mut edges: Vec<(NodeIndex, NodeIndex, EdgeIndex)> = Vec::new();
-    for (from, to) in steps {
-        if *from != prev {
-            return None; // steps don't form a path from the entry
-        }
-        let from_idx = graph.index_of(from)?;
-        let to_idx = graph.index_of(to)?;
-        let edge = g.edges(from_idx).find(|e| {
-            e.target() == to_idx && e.weight().is_proof_grade() && is_movement(&e.weight().relation)
-        })?;
-        edges.push((from_idx, to_idx, edge.id()));
-        prev = to.clone();
-    }
-
-    // The path's end must be a recognized objective; its technique tags the chain.
-    let objective = prev;
-    let attack = default_recognizers()
-        .iter()
-        .flat_map(|r| r.recognize(graph))
-        .find(|o| o.node == objective)
-        .map(|o| o.attack)?;
-    let objective_idx = graph.index_of(&objective)?;
-
-    let links: Vec<Link> = edges
-        .iter()
-        .map(|&(u, v, e)| link_of(graph, u, v, e))
-        .collect();
-    let single_edge_cuts = edges
-        .iter()
-        .filter(|&&(_, _, e)| {
-            is_cuttable_edge(graph, e) && !reachable_without(graph, entry_idx, objective_idx, e)
-        })
-        .map(|&(u, v, e)| link_of(graph, u, v, e))
-        .collect();
-    let foothold = entry_foothold(graph, entry_idx);
-    let exposed_entry = entry_exposed(graph, entry_idx);
-    let quarantine_targets = quarantine_targets_on_path(graph, entry_idx, &edges, exposed_entry);
-    let corroborated =
-        corroborated_for(entry_runtime(graph, entry_idx), &attack, foothold.as_ref());
-    Some(ProvenChain {
-        entry: entry.clone(),
-        objective,
-        attack,
-        foothold,
-        corroborated,
-        adjudicated: true,
-        promoted: false,
-        exposed_entry,
-        verdict: None,
-        // A confirmed chain is one specific proposed path; its complete-set view is just
-        // that path (the dashboard's multi-path enumeration runs in `prove_with`).
-        paths: vec![links.clone()],
-        paths_truncated: false,
-        links,
-        single_edge_cuts,
-        quarantine_targets,
-    })
-}
 
 /// Find every proven chain in `graph` using the default objective recognizers
 /// (ADR-0005).

@@ -8,7 +8,8 @@
 //! [`Engine::process`] runs the five-question pipeline against one observed
 //! snapshot: build the [`graph`], diff it (Q1, [`graph::delta`]), assess health (Q3,
 //! [`observe::health`]), prove ATT&CK-tagged chains and cuts (Q2, [`reason::proof`]) —
-//! a model may propose candidates ([`reason::hypothesis`]) the proof gate confirms, and
+//! the deterministic enumerator is exhaustive at this cluster's scale, so it is the sole
+//! chain source (ADR-0001, narrowed: no model-backed propose stage) — and
 //! [`reason::adjudicate`] each breach-relevant chain — the model judges exploitability,
 //! vetoing a live chain or promoting an exposed one (ADR-0013) — reconcile proposed
 //! mitigations as self-retiring debt (Q4/Q5, [`respond`]), and gate + (closed-loop)
@@ -24,7 +25,7 @@
 // Modules are grouped by domain (see each group's mod.rs):
 //   graph/   — the stable vocabulary + its diff (ADR-0003/0004)
 //   observe/ — observed state + capability ports/adapters (ADR-0002/0003)
-//   reason/  — propose / prove / judge (ADR-0001/0005/0013)
+//   reason/  — prove / judge (ADR-0001/0005/0013)
 //   respond/ — proven chains → self-retiring controls, then apply (ADR-0002/0009)
 // `model` is a cross-cutting single file; `state` is the engine's output-state domain layer;
 // this mod.rs is the orchestrator.
@@ -97,7 +98,6 @@ pub struct Engine {
     /// the other "is this cut in scope" (JEF-104 follow-up).
     scope: ActuationScope,
     actuator: Box<dyn Actuator>,
-    hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
     adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     findings: std::sync::Arc<state::Findings>,
     /// The reversion log (JEF-141): recent lifted cuts + why. Seeded from the journal on boot
@@ -148,15 +148,15 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build an engine with an explicit actuator, hypothesis source, and
-    /// adjudicator. The binary passes a [`DryRunActuator`] when nothing is enabled
-    /// and a live actuator otherwise, and model-backed source/adjudicator when a
-    /// model is configured.
+    /// Build an engine with an explicit actuator and adjudicator. The binary passes
+    /// a [`DryRunActuator`] when nothing is enabled and a live actuator otherwise,
+    /// and a model-backed adjudicator when a model is configured. Chain discovery is
+    /// the deterministic enumerator ([`reason::proof::prove`]) alone — there is no
+    /// model-backed propose stage (ADR-0001, narrowed).
     pub fn new(
         active: EnabledActions,
         scope: ActuationScope,
         actuator: Box<dyn Actuator>,
-        hypothesizer: Box<dyn reason::hypothesis::HypothesisSource>,
         adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     ) -> Self {
         if active.is_empty() {
@@ -176,7 +176,6 @@ impl Engine {
             active,
             scope,
             actuator,
-            hypothesizer,
             adjudicator,
             findings,
             reversions: std::sync::Arc::new(state::ReversionLog::new()),
@@ -397,21 +396,11 @@ impl Engine {
             tracing::info!(alive, degraded, halted, "cluster health");
         }
 
-        // Prove (Question 2) every pass. The deterministic enumerator finds the
-        // structural chains; a model hypothesis source may *additionally* propose
-        // candidates, which the confirmation gate accepts only if every link is a
-        // real proof-grade edge ("a model may propose; only proof moves
-        // privilege"). Confirmed model chains are merged, deduped by endpoints.
+        // Prove (Question 2) every pass. The deterministic enumerator finds every
+        // structurally-proven chain by exhaustive walk — at this cluster's scale that
+        // is exhaustive, so it is the sole chain source (ADR-0001, narrowed: no
+        // model-backed propose stage). Only proof moves privilege.
         let mut chains = reason::proof::prove(&graph);
-        let proposed = self.hypothesizer.propose(&graph).await;
-        for confirmed in reason::hypothesis::confirm_all(&graph, &proposed) {
-            if !chains
-                .iter()
-                .any(|c| c.entry == confirmed.entry && c.objective == confirmed.objective)
-            {
-                chains.push(confirmed);
-            }
-        }
 
         // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
         // unreachable) adjudication. The findings snapshot must always reflect the current

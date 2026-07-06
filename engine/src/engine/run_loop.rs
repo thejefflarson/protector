@@ -1,5 +1,5 @@
 //! The engine's driver: the event-driven observer ([`run_watch`]), plus the small
-//! builders that wire the actuator, hypothesis source, and adjudicator from the
+//! builders that wire the actuator and adjudicator from the
 //! environment. Split out of the engine module root (`mod.rs`) purely to keep every file
 //! under the 1,000-line cap (repo CLAUDE.md); the orchestration core
 //! ([`Engine::process`]) stays there.
@@ -201,27 +201,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Choose the hypothesis source: a model-backed one when a model endpoint is configured,
-/// else the null source (ADR-0021: derive from "a model is configured", don't require a
-/// separate opt-in). Local-first: point it at an in-cluster model so the graph never
-/// leaves. The deterministic enumerator still finds every structural chain; the model
-/// proposer adds contextual chains where a model is available. The hypothesis prompt sends
-/// the graph, so on a Pi-class node keep the model tier fast enough that a pass isn't
-/// blocked — the same node the adjudicator (ADR-0013) uses.
-fn build_hypothesizer() -> Box<dyn reason::hypothesis::HypothesisSource> {
-    match model::config() {
-        Some((endpoint, model)) => {
-            tracing::info!(%endpoint, %model, "hypothesis source: model-backed (local tier)");
-            Box::new(reason::hypothesis::ModelHypothesizer::new(
-                endpoint,
-                model,
-                reason::hypothesis::Tier::Local,
-            ))
-        }
-        None => Box::new(reason::hypothesis::NullHypothesizer),
-    }
-}
-
 /// Choose the adjudicator (ADR-0013): a model-backed judge when a model endpoint is
 /// configured, else the null adjudicator (confirm everything — the deterministic bar
 /// governs). The model judges exploitability bidirectionally — vetoing a live chain
@@ -303,7 +282,6 @@ pub async fn run_watch(
         active.clone(),
         scope,
         build_actuator(&active, &client),
-        build_hypothesizer(),
         build_adjudicator(journal.clone()),
     )
     .with_journal(journal::DecisionJournal::from_env())

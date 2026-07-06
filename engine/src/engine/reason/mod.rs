@@ -1,8 +1,10 @@
-//! Reasoning: the propose / prove / judge core (ADR-0001, 0005, 0013).
+//! Reasoning: the prove / judge core (ADR-0001, 0005, 0013).
 //!
 //! - [`objective`] — what an attacker would want to reach (the recognized goals).
-//! - [`proof`] — deterministic enumeration of proven chains to those objectives.
-//! - [`hypothesis`] — the model *proposes* a chain; a deterministic gate confirms it.
+//! - [`proof`] — deterministic enumeration of proven chains to those objectives. At
+//!   this cluster's scale this exhaustive walk finds every structurally-proven chain,
+//!   so the engine runs purely on it — there is no model-backed *propose* stage
+//!   (ADR-0001, narrowed).
 //! - [`adjudicate`] — the model *decides* exploitability of a proven chain.
 //! - [`backoff`] — exponential backoff + a global circuit-breaker so an inconclusive
 //!   (model-down) adjudication is not re-judged every pass (JEF-234).
@@ -12,6 +14,5 @@
 
 pub mod adjudicate;
 pub mod backoff;
-pub mod hypothesis;
 pub mod objective;
 pub mod proof;
