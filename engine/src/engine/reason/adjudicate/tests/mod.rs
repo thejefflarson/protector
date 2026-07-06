@@ -9,8 +9,8 @@
 use super::*;
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Behavior, Edge, Exposure, Grade, Image, Node, NodeKey, Provenance, Relation, SecurityGraph,
-    Severity, Trust, Vulnerability, Workload,
+    Behavior, Edge, Exposure, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
+    Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -66,7 +66,6 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
         Edge {
             relation: Relation::RunsImage,
             provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-            grade: Grade::Proof,
         },
     );
     (g, entry_key)
@@ -121,13 +120,10 @@ pub(super) fn entry_reaching_db(
     db_name: &str,
     attack: AttackRef,
 ) -> (SecurityGraph, NodeKey, Vec<(NodeKey, AttackRef)>) {
-    use crate::engine::graph::{
-        Edge, Exposure, Grade, Node, Protocol, Relation, SecurityGraph, Workload,
-    };
+    use crate::engine::graph::{Edge, Exposure, Node, Protocol, Relation, SecurityGraph, Workload};
     let proof = |relation| Edge {
         relation,
         provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
-        grade: Grade::Proof,
     };
     let workload = |ns: &str, name: &str| {
         Node::Workload(Workload {

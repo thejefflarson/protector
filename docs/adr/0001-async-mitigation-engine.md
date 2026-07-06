@@ -168,9 +168,21 @@ graph build and chain enumeration scale fine at the sizes we run.
 - The tiering language in the Decision (Tier 0/1/2, "hypothesis generator only") now applies
   solely to adjudication, not to a propose stage.
 
-**Reversibility.** This narrows, it does not repudiate, the propose→confirm seam. The
-`Grade::Hypothesis` edge grade remains in the graph vocabulary, and `proof::prove` still
-traverses only proof-grade edges — so if the cluster ever outgrows exhaustive walk (the
-Scale force actually biting), a candidate proposer feeding a deterministic gate can be
-reintroduced without reshaping the proof layer. Until then, carrying that machinery unused
-was dead cost, not insurance.
+**Reversibility.** This narrows, it does not repudiate, the propose→confirm seam. If the
+cluster ever outgrows exhaustive walk (the Scale force actually biting), a candidate
+proposer feeding a deterministic gate can be reintroduced without reshaping the proof
+layer: re-add an edge grade (a `proof`/`hypothesis` tag on `Edge`) and restore the
+`is_proof_grade` filter in the proof walk. Until then, carrying that machinery unused was
+dead cost, not insurance.
+
+**Amendment (JEF-365): the `Grade::Hypothesis` seam is removed too.** The reversibility
+note above originally kept the `Grade` enum and the proof-walk filter in place as a
+standing seam. Once the model-propose stage was gone, nothing constructed a
+hypothesis-grade edge — every edge in the graph is a deterministic observation by
+construction — so `Grade`, `Edge.grade`, `Edge::is_proof_grade`, and the proof-walk
+filter arms were all vestigial (a type guard against an edge that can no longer exist).
+JEF-365 deletes them. This is safe precisely because nothing constructs a hypothesis-grade
+edge; the proof walk now traverses all edges, which is behaviourally identical (every edge
+was already proof-grade). The seam remains reintroducible exactly as described above — re-add
+the grade and the filter if scale ever bites — but it is cheaper to reintroduce a small enum
+than to carry it unused indefinitely.

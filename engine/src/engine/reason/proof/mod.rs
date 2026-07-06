@@ -2,11 +2,9 @@
 //! graph and the single edge that breaks each one.
 //!
 //! This is the deterministic half of "a model may propose; only deterministic
-//! proof may move privilege." It walks the graph directly — no model — and it
-//! traverses **only proof-grade edges** ([`Edge::is_proof_grade`]), so a chain it
-//! reports is grounded entirely in deterministic facts. A hypothesis-grade edge
-//! (a future model's guess) is invisible here and can never appear in a proven
-//! chain.
+//! proof may move privilege." It walks the graph directly — no model. Every edge
+//! is a deterministic observation by construction (no hypothesis-grade edges
+//! exist), so a chain it reports is grounded entirely in deterministic facts.
 //!
 //! ## What "proven" means in this slice
 //!
