@@ -24,11 +24,12 @@ use regex::Regex;
 use sigstore::cosign::signature_layers::CertificateSubject;
 use sigstore::cosign::verification_constraint::VerificationConstraint;
 use sigstore::cosign::{ClientBuilder, CosignCapabilities, SignatureLayer, verify_constraints};
-use sigstore::registry::{Auth, OciReference};
+use sigstore::registry::OciReference;
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use tokio::sync::OnceCell;
 
 use super::SignatureChecker;
+use super::auth::RegistryAuth;
 use super::posture::{SignatureObserver, Signer, SigningPosture};
 use super::provenance::{
     ProvenanceFacts, ProvenanceObserver, ProvenancePosture, classify_provenance,
@@ -45,8 +46,10 @@ pub struct CosignChecker {
     identity: Regex,
     /// OIDC issuer expected in the signing cert for the gated check.
     oidc_issuer: String,
-    /// Registry credentials, when the gated images are private.
-    auth: Auth,
+    /// Per-image registry-auth resolver (JEF-352): the whole mounted dockerconfigjson parsed
+    /// once, looked up by each image's registry host at verify time — so a private image on ANY
+    /// registry authenticates with its own creds, not one hardcoded registry's.
+    auth: RegistryAuth,
     /// Writable directory for the sigstore TUF cache (an emptyDir in-cluster).
     cache_dir: PathBuf,
     /// Per-image wall-clock budget for the registry/Rekor round trip, so a slow
@@ -63,7 +66,7 @@ impl CosignChecker {
     pub fn new(
         identity_regexp: &str,
         oidc_issuer: String,
-        auth: Auth,
+        auth: RegistryAuth,
         cache_dir: PathBuf,
         verify_timeout: Duration,
     ) -> Result<Self> {
@@ -119,6 +122,10 @@ impl CosignChecker {
     /// the transient "checking" state — never as a resting posture, never as a clean verdict.
     async fn fetch_layers(&self, image: &str) -> Result<Vec<SignatureLayer>> {
         let image_ref: OciReference = image.parse()?;
+        // Resolve auth for THIS image's registry (JEF-352): the mounted dockerconfigjson may carry
+        // creds for several registries, so we look up the image's host rather than applying one
+        // global credential to every image (which only authenticated ghcr.io and 401ed the rest).
+        let auth = self.auth.for_image(image);
         let trust_root = self.trust_root().await?;
         // A fresh client per call — build() is local (TUF was already fetched),
         // so verifications run concurrently with no shared lock.
@@ -127,7 +134,7 @@ impl CosignChecker {
             .build()?;
         let layers = tokio::time::timeout(
             self.verify_timeout,
-            client.trusted_signature_layers(&self.auth, &image_ref),
+            client.trusted_signature_layers(&auth, &image_ref),
         )
         .await
         // A distinguishable error type (not a bare string) so the observer can tell a spent

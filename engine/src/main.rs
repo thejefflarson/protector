@@ -15,8 +15,8 @@ use protector::engine::state::SharedSigningBaseline;
 use protector::metrics::Metrics;
 use protector::policies::mesh::MeshInjectionPolicy;
 use protector::policies::signature::{
-    ContinuityGate, CosignChecker, SignaturePolicy, SigningExceptions, SigningObserver, SigningPin,
-    registry_auth,
+    ContinuityGate, CosignChecker, RegistryAuth, SignaturePolicy, SigningExceptions,
+    SigningObserver, SigningPin,
 };
 use protector::policy::{EnforceScope, Engine};
 use protector::server;
@@ -188,7 +188,7 @@ fn build_webhook_signing_observer(
     match CosignChecker::new(
         "$^",
         oidc_issuer.to_string(),
-        registry_auth(),
+        RegistryAuth::from_env(),
         tuf_cache.to_path_buf(),
         verify_timeout,
     ) {
@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
     let checker = CosignChecker::new(
         &identity_regexp,
         oidc_issuer.clone(),
-        registry_auth(),
+        RegistryAuth::from_env(),
         tuf_cache.clone(),
         verify_timeout,
     )
