@@ -9,6 +9,7 @@
 //!   * this file — the gated [`SignaturePolicy`] (behavior-identical to before the split)
 //!     and the shared image-extraction / host-normalization helpers.
 
+mod auth;
 pub mod continuity;
 mod cosign;
 pub mod posture;
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 
 use crate::policy::{Decision, EnforceScope, Policy, ShadowVerdict};
 
+pub use auth::registry_auth;
 pub use continuity::{ContinuityGate, SigningExceptions, SigningPin};
 pub use cosign::CosignChecker;
 pub use posture::{
