@@ -15,6 +15,7 @@ mod cosign;
 pub mod posture;
 pub mod provenance;
 pub mod rekor;
+pub mod tuf_tmpdir;
 
 #[cfg(test)]
 mod tests;

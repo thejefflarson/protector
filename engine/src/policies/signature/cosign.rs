@@ -102,6 +102,14 @@ impl CosignChecker {
     }
 
     /// Get (or lazily fetch) the sigstore TUF trust root.
+    ///
+    /// Fetch-once-and-stick (JEF-377): `get_or_try_init` caches only a *successful* init — on
+    /// `Err` the cell stays empty, so a transient TUF/registry blip is retried on the next call
+    /// rather than being frozen, and a success is reused for the process lifetime. There is no
+    /// per-verify or interval TUF refresh: the one fetch here (and its one-time tough temp write)
+    /// happens on the first verification and never again while it holds, so steady state does no
+    /// TUF writes at all. (The tough temp write itself is kept off /tmp via the startup `$TMPDIR`
+    /// pin — see `tuf_tmpdir`.)
     async fn trust_root(&self) -> Result<&SigstoreTrustRoot> {
         self.trust_root
             .get_or_try_init(|| async {
