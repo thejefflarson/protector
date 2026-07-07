@@ -29,7 +29,11 @@
 //! `169.254.0.0/16` block, because NodeLocal DNSCache and some CNIs legitimately use other
 //! link-local addresses (e.g. `169.254.20.10`) that pods hit constantly.
 
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
+
 use crate::engine::graph::Behavior;
+use crate::engine::observe::asn::AsnDb;
 
 /// Well-known cloud instance-metadata (IMDS) endpoints. Every major cloud — AWS, GCP,
 /// Azure, OpenStack, DigitalOcean, Oracle — serves instance metadata, and crucially
@@ -106,6 +110,51 @@ pub fn foothold_peer(behavior: &Behavior) -> Option<&'static str> {
     }
 }
 
+/// The rendered prefix for the collapsed INTERNET-egress line (JEF-380). Kept as a single
+/// constant so the prompt renderer and the tests agree on the exact byte string.
+const INTERNET_EGRESS_PREFIX: &str = "INTERNET egress: ";
+
+/// Attribute one raw internet peer (`IP:port`) to its network PROVIDER, rendered as
+/// `org [ASxxxxx]` (e.g. `GitHub [AS36459]`), via the offline ASN dataset (JEF-380). Falls
+/// back to the raw peer string verbatim when the address has no ASN attribution — an unknown
+/// / unrouted IPv4 range, an IPv6 literal (the v4 dataset can't attribute it), or an
+/// unparseable host — so a peer is NEVER dropped, only enriched when we can.
+///
+/// The org text is untrusted third-party feed data; it is neutralized (fenced + sanitized) by
+/// the prompt renderer, so nothing hostile in a description reaches the model as instructions.
+fn attribute_internet_peer(peer: &str, asn: &AsnDb) -> String {
+    raw_peer_host(peer)
+        .and_then(|host| host.parse::<Ipv4Addr>().ok())
+        .and_then(|ip| asn.lookup(ip))
+        .map(|hit| format!("{} [AS{}]", hit.org, hit.asn))
+        .unwrap_or_else(|| peer.to_string())
+}
+
+/// Collapse a set of INTERNET egress peers into ONE deterministic line grouped by PROVIDER
+/// (JEF-380): `INTERNET egress: Amazon [AS16509], GitHub [AS36459], OVH SAS [AS16276]`. This
+/// is both the feature (the adjudicator sees WHICH provider a workload egresses to — the
+/// salient signal) and the churn fix (rotating CDN IPs within one AS collapse to a single
+/// stable provider entry, so the prompt fingerprint is byte-identical across IP rotation).
+///
+/// Providers are a sorted, deduped set, so two different IP sets that resolve to the same
+/// providers render a byte-identical line. An IP with no ASN match contributes its raw
+/// `IP:port` to the set (never dropped). Returns `None` when there are no internet peers, so
+/// the caller adds no line at all.
+pub fn internet_egress_line<'a>(
+    peers: impl IntoIterator<Item = &'a str>,
+    asn: &AsnDb,
+) -> Option<String> {
+    let providers: BTreeSet<String> = peers
+        .into_iter()
+        .map(|peer| attribute_internet_peer(peer, asn))
+        .collect();
+    if providers.is_empty() {
+        return None;
+    }
+    let joined = providers.into_iter().collect::<Vec<_>>().join(", ");
+    Some(format!("{INTERNET_EGRESS_PREFIX}{joined}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +217,103 @@ mod tests {
             None
         );
         assert_eq!(foothold_peer(&conn("203.0.113.7:443", true)), None);
+    }
+
+    /// A small ASN fixture: GitHub, Amazon, OVH. Two of the GitHub rows are DIFFERENT ranges
+    /// in the SAME AS — the CDN-rotation case the churn fix targets.
+    fn asn_db() -> AsnDb {
+        AsnDb::parse(
+            "140.82.112.0\t140.82.127.255\t36459\tUS\tGitHub\n\
+             13.32.0.0\t13.35.255.255\t16509\tUS\tAmazon\n\
+             51.75.0.0\t51.75.255.255\t16276\tFR\tOVH SAS\n",
+        )
+    }
+
+    #[test]
+    fn internet_peer_resolves_to_its_provider() {
+        let db = asn_db();
+        assert_eq!(
+            attribute_internet_peer("140.82.121.3:443", &db),
+            "GitHub [AS36459]"
+        );
+        assert_eq!(
+            attribute_internet_peer("51.75.10.9:443", &db),
+            "OVH SAS [AS16276]"
+        );
+    }
+
+    #[test]
+    fn unknown_ip_falls_back_to_the_raw_peer() {
+        let db = asn_db();
+        // An IP in no known range keeps its raw `IP:port` — never dropped.
+        assert_eq!(
+            attribute_internet_peer("203.0.113.7:443", &db),
+            "203.0.113.7:443"
+        );
+        // An IPv6 literal can't be attributed by the v4 dataset — raw fallback.
+        assert_eq!(
+            attribute_internet_peer("[2606:4700::1111]:443", &db),
+            "[2606:4700::1111]:443"
+        );
+        // With an EMPTY DB every peer falls back to raw — the graceful-degrade contract.
+        assert_eq!(
+            attribute_internet_peer("140.82.121.3:443", &AsnDb::empty()),
+            "140.82.121.3:443"
+        );
+    }
+
+    #[test]
+    fn providers_render_as_one_sorted_deduped_line() {
+        let db = asn_db();
+        let line = internet_egress_line(
+            [
+                "140.82.121.3:443", // GitHub
+                "13.33.9.9:443",    // Amazon
+                "51.75.1.1:443",    // OVH
+                "203.0.113.7:443",  // unknown → raw
+            ],
+            &db,
+        )
+        .expect("some internet peers");
+        // Sorted set of providers (raw fallback sorts in too), comma-joined, one line.
+        assert_eq!(
+            line,
+            "INTERNET egress: 203.0.113.7:443, Amazon [AS16509], GitHub [AS36459], OVH SAS [AS16276]"
+        );
+    }
+
+    #[test]
+    fn no_internet_peers_render_no_line() {
+        assert_eq!(internet_egress_line(std::iter::empty(), &asn_db()), None);
+    }
+
+    /// The fingerprint-stability guarantee (JEF-380, the churn fix): two DIFFERENT sets of
+    /// internet IPs that resolve to the SAME providers must render a BYTE-IDENTICAL line, so a
+    /// CDN rotating through IPs never churns the adjudicator prompt.
+    #[test]
+    fn rotating_cdn_ips_in_the_same_asn_render_a_byte_identical_line() {
+        let db = asn_db();
+        // Window 1: one GitHub IP, one Amazon IP.
+        let set_a = ["140.82.112.5:443", "13.32.0.10:443"];
+        // Window 2 (CDN rotated): DIFFERENT GitHub + Amazon IPs, same two providers.
+        let set_b = ["140.82.127.200:443", "13.35.255.1:443"];
+        let line_a = internet_egress_line(set_a, &db).unwrap();
+        let line_b = internet_egress_line(set_b, &db).unwrap();
+        assert_eq!(
+            line_a, line_b,
+            "same providers → byte-identical line across IP rotation"
+        );
+        assert_eq!(
+            line_a,
+            "INTERNET egress: Amazon [AS16509], GitHub [AS36459]"
+        );
+        // And duplicate IPs within one window collapse (dedup) — three GitHub IPs, one entry.
+        let deduped = internet_egress_line(
+            ["140.82.112.1:443", "140.82.120.2:443", "140.82.127.3:443"],
+            &db,
+        )
+        .unwrap();
+        assert_eq!(deduped, "INTERNET egress: GitHub [AS36459]");
     }
 
     #[test]

@@ -83,6 +83,22 @@ impl Feed for super::epss::EpssStore {
     }
 }
 
+impl Feed for super::asn::AsnDb {
+    const LABEL: &'static str = "ASN dataset";
+    fn empty() -> Self {
+        Self::empty()
+    }
+    fn parse(contents: &str) -> Self {
+        Self::parse(contents)
+    }
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+    fn is_feed_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
 /// A feed store held behind an [`ArcSwap`] so it can be atomically hot-swapped by a background
 /// reload without disrupting a reader mid-pass. Cheap to clone (it shares the same swap cell and
 /// path), so the reload task holds its own handle.
@@ -124,6 +140,18 @@ impl<T: Feed> ReloadableFeed<T> {
         Self {
             path,
             current: Arc::new(ArcSwap::from_pointee(initial)),
+        }
+    }
+
+    /// A feed seeded with an explicit store and NO backing file — the honest default a
+    /// consumer holds when a feed isn't wired (e.g. `Engine::new` holds an empty ASN dataset
+    /// until the watch loop attaches the file-backed one via a builder). Its path is empty, so
+    /// a `reload_once` on it is a no-op read error that keeps the seeded store; the reloader is
+    /// simply never spawned on a `from_store` feed.
+    pub fn from_store(store: T) -> Self {
+        Self {
+            path: String::new(),
+            current: Arc::new(ArcSwap::from_pointee(store)),
         }
     }
 

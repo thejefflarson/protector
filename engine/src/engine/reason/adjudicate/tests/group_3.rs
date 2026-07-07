@@ -292,6 +292,113 @@ fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
     );
 }
 
+/// A network-connection behavior fixture (JEF-380 prompt-rendering tests).
+fn conn(peer: &str, internet: bool) -> Behavior {
+    Behavior::NetworkConnection {
+        peer: peer.into(),
+        internet,
+    }
+}
+
+/// A small ASN fixture: two GitHub ranges (the CDN-rotation case), Amazon, OVH.
+fn asn_fixture() -> crate::engine::observe::asn::AsnDb {
+    crate::engine::observe::asn::AsnDb::parse(
+        "140.82.112.0\t140.82.127.255\t36459\tUS\tGitHub\n\
+         13.32.0.0\t13.35.255.255\t16509\tUS\tAmazon\n\
+         51.75.0.0\t51.75.255.255\t16276\tFR\tOVH SAS\n",
+    )
+}
+
+/// JEF-380: with the ASN dataset present, INTERNET egress renders as ONE deduped, sorted
+/// PROVIDER line (`INTERNET egress: Amazon [AS16509], GitHub [AS36459]`) — the salient
+/// provider signal — instead of one raw-IP line per connection. A CLUSTER peer is untouched.
+#[test]
+fn prompt_groups_internet_egress_by_provider_with_the_asn_dataset() {
+    let (g, e) = graph_with_behaviors(vec![
+        conn("140.82.121.3:443", true),                       // GitHub
+        conn("13.33.9.9:443", true),                          // Amazon
+        conn("analytics/influxdb:8086 (10.42.1.159)", false), // cluster — untouched
+    ]);
+    let prompt = build_judgment_prompt_with_asn(&e, &[], &g, &asn_fixture());
+    assert!(
+        prompt.contains("INTERNET egress: Amazon [AS16509], GitHub [AS36459]"),
+        "prompt must group internet egress by provider:\n{prompt}"
+    );
+    // The rotating raw IPs are gone — the whole point of the churn fix.
+    assert!(
+        !prompt.contains("140.82.121.3") && !prompt.contains("13.33.9.9"),
+        "raw internet IPs must not appear once attributed:\n{prompt}"
+    );
+    // A CLUSTER peer's JEF-131/375 resolution is NOT touched by ASN attribution.
+    assert!(
+        prompt.contains("analytics/influxdb:8086 (10.42.1.159)"),
+        "cluster peer rendering must be preserved:\n{prompt}"
+    );
+}
+
+/// JEF-380 fingerprint stability (the churn fix): two DIFFERENT sets of internet IPs that
+/// resolve to the SAME providers must produce a BYTE-IDENTICAL prompt, so a CDN rotating its
+/// IPs never busts the verdict cache / re-judges.
+#[test]
+fn internet_egress_prompt_is_byte_identical_across_cdn_ip_rotation() {
+    let asn = asn_fixture();
+    // Window 1 vs. window 2: different GitHub + Amazon IPs, same two providers.
+    let (g1, e1) = graph_with_behaviors(vec![
+        conn("140.82.112.5:443", true),
+        conn("13.32.0.10:443", true),
+    ]);
+    let (g2, e2) = graph_with_behaviors(vec![
+        conn("140.82.127.200:443", true),
+        conn("13.35.255.1:443", true),
+    ]);
+    let p1 = build_judgment_prompt_with_asn(&e1, &[], &g1, &asn);
+    let p2 = build_judgment_prompt_with_asn(&e2, &[], &g2, &asn);
+    assert_eq!(
+        p1, p2,
+        "same providers must render a byte-identical prompt across IP rotation"
+    );
+    // And the fingerprint (verdict-cache key) is therefore identical.
+    assert_eq!(prompt_cache_key(&p1), prompt_cache_key(&p2));
+}
+
+/// JEF-380 graceful degradation: with an EMPTY ASN dataset (no feed wired / unreadable file),
+/// internet egress renders EXACTLY as before the feed — one raw `IP:port` line per
+/// connection via `Behavior::summary`. This is the same output `build_judgment_prompt`
+/// produces, so the no-dataset path is a strict no-op.
+#[test]
+fn empty_asn_dataset_degrades_to_raw_ip_rendering() {
+    let (g, e) = graph_with_behaviors(vec![conn("140.82.121.3:443", true)]);
+    let with_empty =
+        build_judgment_prompt_with_asn(&e, &[], &g, &crate::engine::observe::asn::AsnDb::empty());
+    assert!(
+        with_empty.contains("connects to 140.82.121.3:443 (INTERNET egress)"),
+        "empty dataset must fall back to the raw IP line:\n{with_empty}"
+    );
+    assert!(
+        !with_empty.contains("INTERNET egress: "),
+        "empty dataset must not emit the collapsed provider line:\n{with_empty}"
+    );
+    // The empty-dataset path is byte-identical to the no-ASN entry point.
+    let (g2, e2) = graph_with_behaviors(vec![conn("140.82.121.3:443", true)]);
+    assert_eq!(with_empty, build_judgment_prompt(&e2, &[], &g2));
+}
+
+/// JEF-380: an internet IP with NO ASN match (an unknown/unrouted range) is never dropped —
+/// it falls back to its raw `IP:port` inside the collapsed provider set, alongside the
+/// attributed providers.
+#[test]
+fn unknown_internet_ip_falls_back_to_raw_within_the_provider_set() {
+    let (g, e) = graph_with_behaviors(vec![
+        conn("203.0.113.7:443", true),
+        conn("140.82.121.3:443", true),
+    ]);
+    let prompt = build_judgment_prompt_with_asn(&e, &[], &g, &asn_fixture());
+    assert!(
+        prompt.contains("INTERNET egress: 203.0.113.7:443, GitHub [AS36459]"),
+        "unknown IP must fall back to raw inside the provider set:\n{prompt}"
+    );
+}
+
 /// The prompt clarifies (at the source of the watcher-server false breach) that a
 /// workload's OWN observed activity — outbound network connections, file reads, library
 /// loads, reading its own mounted secrets — is normal behavior and NOT a live signal;

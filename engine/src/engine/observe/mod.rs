@@ -8,6 +8,7 @@
 
 pub mod adapter;
 pub mod alarm_class;
+pub mod asn;
 pub mod audit;
 pub mod epss;
 pub mod exec_class;

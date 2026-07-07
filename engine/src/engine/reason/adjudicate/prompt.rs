@@ -13,11 +13,16 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::evidence::{entry_evidence, entry_findings};
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
+use crate::engine::observe::asn::AsnDb;
 // JEF-113: exec *classification* (shell / package-manager in container) moved out of the
 // shared `Behavior` wire type into engine policy; the prompt re-applies the notable-exec
 // annotation here so the model still sees "executed /bin/bash (interactive shell in
 // container)" rather than the bare path `Behavior::summary` now returns.
 use crate::engine::observe::exec_class::annotated_summary;
+// JEF-380: for INTERNET egress the prompt renders the deduped, sorted PROVIDER set
+// (`INTERNET egress: GitHub [AS36459], OVH SAS [AS16276]`) via the offline ASN dataset —
+// the salient provider signal AND the CDN-rotation churn fix. Cluster peers are untouched.
+use crate::engine::observe::peer_class::internet_egress_line;
 
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
@@ -36,8 +41,23 @@ pub fn build_judgment_prompt(
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
 ) -> String {
+    // No ASN dataset here: internet peers render exactly as they did before the feed (one
+    // raw `IP:port` line each). The engine calls [`build_judgment_prompt_with_asn`] with the
+    // live dataset; this signature stays for callers/tests that don't need provider grouping.
+    build_judgment_prompt_with_asn(entry, objectives, graph, &AsnDb::empty())
+}
+
+/// As [`build_judgment_prompt`], but with the offline ASN dataset (JEF-380) so INTERNET
+/// egress peers render grouped by provider. The engine calls this with the live, hot-reloaded
+/// dataset; an EMPTY dataset degrades to `build_judgment_prompt`'s raw-IP rendering exactly.
+pub fn build_judgment_prompt_with_asn(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+) -> String {
     let (cves, behaviors) = entry_evidence(graph, entry);
-    build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors)
+    build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors, asn)
 }
 
 /// As [`build_judgment_prompt`], but with the entry's evidence already fetched — so
@@ -49,6 +69,7 @@ pub(super) fn build_judgment_prompt_with(
     graph: &SecurityGraph,
     cves: &[String],
     behaviors: &[Behavior],
+    asn: &AsnDb,
 ) -> String {
     // The whole rendered prompt is the verdict-cache key (JEF-350): it is hashed and the
     // model response cached on that hash, so the cache invalidates exactly when — and only
@@ -59,13 +80,11 @@ pub(super) fn build_judgment_prompt_with(
     // a byte-identical prompt and so a byte-identical cache key.
     let mut cves = cves.to_vec();
 
-    // Annotate notable execs (shell / package-manager in container, JEF-55) via engine
-    // policy — `Behavior::summary` returns the bare path after JEF-113, so without this the
-    // prompt would silently lose the "(interactive shell in container)" signal. Sorted +
-    // deduped so behavior order (HashMap/traversal) never changes the prompt or its hash.
-    let mut behavior_lines: Vec<String> = behaviors.iter().map(annotated_summary).collect();
-    behavior_lines.sort();
-    behavior_lines.dedup();
+    // Render the observed behaviors into sorted, deduped prompt lines. Notable execs (shell /
+    // package-manager in container, JEF-55) are annotated via engine policy; INTERNET egress
+    // is collapsed to a deduped provider set via the offline ASN dataset (JEF-380). See
+    // [`render_behavior_lines`].
+    let behavior_lines = render_behavior_lines(behaviors, asn);
     // No LINE cap: the model sees every observed behavior and every CVE on the entry. The
     // untrusted third-party text WITHIN each line is fenced + sanitized AND hard length-capped
     // — both per-field and against a per-entry aggregate budget (JEF-106, in `entry_evidence`)
@@ -168,6 +187,46 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         posture = fence_list(&posture_lines),
         objectives = objectives,
     )
+}
+
+/// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
+/// runtime behavior" field carries. Two engine policies apply here, not in the shared wire
+/// type: notable-exec annotation (JEF-113) and INTERNET-egress provider grouping (JEF-380).
+///
+/// - When the ASN dataset is EMPTY (no feed wired / unreadable file), every behavior —
+///   including each internet connection — renders one line via [`annotated_summary`], exactly
+///   as it did before the feed existed (the graceful-degrade contract).
+/// - When the dataset is present, INTERNET egress connections are pulled out and collapsed
+///   into ONE deduped, sorted provider line ([`internet_egress_line`]); every other behavior
+///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
+///   `annotated_summary` as before.
+///
+/// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
+/// changes the prompt or its verdict-cache hash.
+fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::with_capacity(behaviors.len());
+    if asn.is_empty() {
+        // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
+        lines.extend(behaviors.iter().map(annotated_summary));
+    } else {
+        // Collapse INTERNET egress to a provider set; everything else renders as before.
+        let mut internet_peers: Vec<&str> = Vec::new();
+        for behavior in behaviors {
+            match behavior {
+                Behavior::NetworkConnection {
+                    peer,
+                    internet: true,
+                } => internet_peers.push(peer),
+                other => lines.push(annotated_summary(other)),
+            }
+        }
+        if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
+            lines.push(line);
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    lines
 }
 
 /// The verdict-cache key for a built prompt (JEF-350): the SHA-256 of the prompt string,
