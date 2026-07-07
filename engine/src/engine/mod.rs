@@ -584,7 +584,19 @@ impl Engine {
                         ),
                     ));
                 }
-                None => to_judge.push(pending),
+                None => {
+                    // TEMP DIAGNOSTIC (JEF-350 follow-up): dump the full prompt of every entry we
+                    // re-judge so consecutive passes can be diffed to find what churns the
+                    // fingerprint (peer set, CVEs, reachable objectives, runtime window). Re-added
+                    // (was removed in JEF-379) while tuning the window regression + landing ASN.
+                    tracing::info!(
+                        entry = %pending.entry_key,
+                        fp = %pending.fingerprint,
+                        prompt = ?pending.prompt,
+                        "ADJ-MISS-DIAG"
+                    );
+                    to_judge.push(pending);
+                }
             }
         }
         // Model calls this pass (cache misses actually sent). A persistently high value means
