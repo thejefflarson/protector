@@ -103,6 +103,38 @@ impl RuntimeEvents {
     }
 }
 
+/// The default runtime-signal observation window, in seconds (JEF-378). A runtime signal
+/// (`w.runtime`) survives in [`RuntimeEvents`] for this long after it was last observed;
+/// past it the signal ages out and stops corroborating. Widened from the original 300s to
+/// 30 minutes so a workload's connection/behavior set has time to *saturate into a stable
+/// set* — fewer age-in/age-out transitions that churn the adjudicator prompt. Memory stays
+/// bounded by [`RuntimeEvents::MAX_EVENTS`] regardless of the window, so a longer window is
+/// safe on a Pi. This only widens *observation* — it never filters or drops a signal.
+pub const DEFAULT_RUNTIME_WINDOW_SECS: u64 = 1800;
+
+/// The runtime-signal observation window, resolved from `PROTECTOR_RUNTIME_WINDOW_SECS`
+/// (defaulting to [`DEFAULT_RUNTIME_WINDOW_SECS`]). This is the TTL of the [`RuntimeEvents`]
+/// store the ingest feeds and the engine reads each pass.
+pub fn runtime_window() -> Duration {
+    parse_runtime_window(
+        std::env::var("PROTECTOR_RUNTIME_WINDOW_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the `PROTECTOR_RUNTIME_WINDOW_SECS` value, split out so it's testable
+/// without touching process-global env. An unset, empty, unparseable, or zero value falls
+/// back to [`DEFAULT_RUNTIME_WINDOW_SECS`] — a zero window would age every signal out
+/// instantly, blinding corroboration, so it is never honored.
+fn parse_runtime_window(raw: Option<&str>) -> Duration {
+    let secs = raw
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_RUNTIME_WINDOW_SECS);
+    Duration::from_secs(secs)
+}
+
 /// Two observations are the **same signal** when they attribute the same behavior to the
 /// same workload. The sensor identity and observation time are metadata, not identity — a
 /// repeat of the same behavior is not a new fact, so it shouldn't wake the engine.
@@ -281,6 +313,48 @@ mod tests {
             observed_at_ms: None,
             node: None,
             behavior: Behavior::Alert { rule: rule.into() },
+        }
+    }
+
+    #[test]
+    fn runtime_window_default_is_wider_than_the_original_300s() {
+        // JEF-378: an unset window must default to a window LARGER than the historical
+        // 300s so a workload's signal set saturates into a stable set.
+        const {
+            assert!(
+                DEFAULT_RUNTIME_WINDOW_SECS > 300,
+                "default runtime window must exceed the original 300s"
+            )
+        };
+        assert_eq!(
+            parse_runtime_window(None),
+            Duration::from_secs(DEFAULT_RUNTIME_WINDOW_SECS)
+        );
+    }
+
+    #[test]
+    fn runtime_window_honors_a_configured_value() {
+        assert_eq!(
+            parse_runtime_window(Some("3600")),
+            Duration::from_secs(3600)
+        );
+        // Surrounding whitespace is tolerated (env values often carry it).
+        assert_eq!(
+            parse_runtime_window(Some(" 900 ")),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn runtime_window_rejects_zero_empty_and_garbage() {
+        // A zero window would age every signal out instantly, blinding corroboration —
+        // never honor it. Empty/unparseable likewise fall back to the default.
+        for raw in ["0", "", "  ", "nonsense", "-5", "12.5"] {
+            assert_eq!(
+                parse_runtime_window(Some(raw)),
+                Duration::from_secs(DEFAULT_RUNTIME_WINDOW_SECS),
+                "{raw:?} must fall back to the default"
+            );
         }
     }
 

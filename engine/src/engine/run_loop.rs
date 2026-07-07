@@ -407,9 +407,12 @@ pub async fn run_watch(
     // not a Kubernetes object: behaviors POSTed to the ingest HTTP endpoint are held in a
     // TTL'd store, and wake the loop so a "happening now" signal is acted on immediately (it
     // flips a chain's corroboration without changing the graph's shape). Signals expire, so
-    // corroboration stays live.
+    // corroboration stays live. The window is env-configurable (`PROTECTOR_RUNTIME_WINDOW_SECS`,
+    // default 30 min) so a workload's connection/behavior set saturates into a stable set with
+    // fewer age-in/age-out transitions that churn the adjudicator prompt (JEF-378); memory stays
+    // bounded by `RuntimeEvents::MAX_EVENTS` regardless of the window.
     let runtime_events = std::sync::Arc::new(observe::runtime::RuntimeEvents::new(
-        std::time::Duration::from_secs(300),
+        observe::runtime::runtime_window(),
     ));
     let (runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
     if let Some(addr) = runtime_addr {
