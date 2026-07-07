@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use protector::engine::observe::epss::EpssStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
+use protector::engine::observe::feed_reload::ReloadableFeed;
 use protector::engine::policy_log::PolicyDecisionLog;
 use protector::engine::respond::ProposedAction;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
@@ -416,11 +417,20 @@ async fn run() -> Result<()> {
         // KEV catalogue (the exploited-in-wild feed) for the ExploitIntel signal. The path
         // defaults to the fixed feeds mount (JEF-273 owns the feed mechanism); the env is a
         // code-defaulted escape hatch. A missing/empty file degrades to no exploit intel.
-        let kev = KevCatalog::from_file(&env_or("PROTECTOR_KEV_FILE", FEEDS_KEV_PATH));
+        // Wrapped in a ReloadableFeed (JEF-384): the engine re-reads the file on an interval so a
+        // daily CronJob refresh takes effect without a restart, hot-swapping the snapshot without
+        // disrupting an in-flight sweep. Still a repeated FILE read — zero egress preserved.
+        let kev = ReloadableFeed::<KevCatalog>::load_initial(env_or(
+            "PROTECTOR_KEV_FILE",
+            FEEDS_KEV_PATH,
+        ));
         // EPSS scores (the FIRST.org predictive feed, JEF-243) — same fixed mount default.
         // Missing/empty ⇒ no EPSS evidence; a CVE's `epss` stays `None` and the prompt omits
-        // the `[epss: …]` token.
-        let epss = EpssStore::from_file(&env_or("PROTECTOR_EPSS_FILE", FEEDS_EPSS_PATH));
+        // the `[epss: …]` token. Reloaded on the same interval as KEV (JEF-384).
+        let epss = ReloadableFeed::<EpssStore>::load_initial(env_or(
+            "PROTECTOR_EPSS_FILE",
+            FEEDS_EPSS_PATH,
+        ));
         // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
         // the durable journal on boot — the same `Arc` the webhook engine writes to.
         let engine_policy_log = policy_log.clone();

@@ -235,8 +235,12 @@ pub async fn run_watch(
     // secret GET/LIST/WATCH events here for the RBAC-granted "corroborated-now" signal.
     // Unset = no audit feed.
     audit_addr: Option<std::net::SocketAddr>,
-    kev: observe::exploit_intel::KevCatalog,
-    epss: observe::epss::EpssStore,
+    // KEV + EPSS are hot-reloadable (JEF-384): a background task re-reads each feed file on an
+    // interval and atomically swaps the snapshot, so a daily CronJob refresh takes effect without
+    // a restart. Still FILE reads, repeated — zero egress preserved. Each pass reads one immutable
+    // snapshot for its whole duration, so a mid-pass reload never disrupts it.
+    kev: observe::feed_reload::ReloadableFeed<observe::exploit_intel::KevCatalog>,
+    epss: observe::feed_reload::ReloadableFeed<observe::epss::EpssStore>,
     // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
     // carries the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
@@ -309,8 +313,8 @@ pub async fn run_watch(
         .findings()
         .set_readiness_config(state::ReadinessConfig {
             model_attached: model::config().is_some(),
-            kev_count: kev.len(),
-            epss_count: epss.len(),
+            kev_count: kev.snapshot().len(),
+            epss_count: epss.snapshot().len(),
             journal_durable: engine.journal().is_enabled(),
             armed: !active.is_empty(),
             // The signing-trust signals (JEF-280) are LIVE — refreshed each pass below (the TUF
@@ -361,6 +365,14 @@ pub async fn run_watch(
     // Best-effort and shadow-safe; a no-op when no model is configured. Aborted on loop
     // exit so it can't outlive the engine.
     let keep_warm = model::spawn_keep_warm();
+
+    // Keep the exploit-intel feeds current without a restart (JEF-384): a background task per feed
+    // re-reads its file every `PROTECTOR_FEED_RELOAD_SECS` (default 6h — comfortably inside the
+    // daily CronJob refresh) and hot-swaps the snapshot, last-good-preserving (a failed/empty
+    // reload keeps serving the good data). Aborted on loop exit so it can't outlive the engine.
+    let reload_interval = observe::feed_reload::reload_interval();
+    let kev_reloader = kev.spawn_reloader(reload_interval);
+    let epss_reloader = epss.spawn_reloader(reload_interval);
 
     // The signing-posture observer (ADR-0020 Stage 1, JEF-261): built ONCE so its TTL + image
     // cache persists across passes — a steady cluster re-sweeps for free. Each pass runs every
@@ -565,8 +577,10 @@ pub async fn run_watch(
                     observe::trivy::parse_report,
                 )
                 .await;
-                kev.mark_exploited(&mut v);
-                epss.annotate(&mut v);
+                // One immutable snapshot per pass: a reload that lands mid-pass swaps the next
+                // pass's snapshot, never this in-flight one (JEF-384).
+                kev.snapshot().mark_exploited(&mut v);
+                epss.snapshot().annotate(&mut v);
                 v
             },
             image_secrets: image_secrets_now,
@@ -657,11 +671,13 @@ pub async fn run_watch(
         engine.process(&snapshot).await;
     }
 
-    // The change stream closed (all reflectors gone) — tear down the keep-warm task so
-    // it doesn't outlive the engine loop.
+    // The change stream closed (all reflectors gone) — tear down the keep-warm task and the
+    // feed reloaders so they don't outlive the engine loop.
     if let Some(task) = keep_warm {
         task.abort();
     }
+    kev_reloader.abort();
+    epss_reloader.abort();
     Ok(())
 }
 
