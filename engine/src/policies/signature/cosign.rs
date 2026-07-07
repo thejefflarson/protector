@@ -128,6 +128,20 @@ impl CosignChecker {
     /// `verify_timeout` so a slow registry can't stall the caller. An `Err` is an
     /// infrastructure failure (registry/Rekor/TUF unreachable), which the caller surfaces as
     /// the transient "checking" state — never as a resting posture, never as a clean verdict.
+    ///
+    /// MIRROR-SERVED IMAGES (JEF-386): sigstore-rs binds a signature to the image by its
+    /// **manifest digest** (`triangulate` fetches the pull ref's digest, then verifies each
+    /// layer's `simple_signing.critical.image.docker-manifest-digest` — and, on the OCI-1.1
+    /// referrer path, the in-toto subject digest — against it). It does NOT compare the
+    /// payload's `critical.identity.docker-reference` (nor the subject NAME) to the registry
+    /// we pulled from. So an image served from a vanity mirror (e.g. `cr.l5d.io/linkerd/proxy`,
+    /// whose signature payload names the signing registry `ghcr.io/linkerd/proxy` for the SAME
+    /// digest) verifies here exactly as `cosign verify` does — cert-chain + Rekor + digest, not
+    /// registry-name equality. This is safe precisely because the signature is digest-bound: it
+    /// cannot be replayed onto a different-digest image, and a digest mismatch or an absent/bad
+    /// signature still yields no verified signer (unverifiable / not-signed). The gated identity
+    /// check ([`satisfies_org_identity`](Self::satisfies_org_identity)) is unaffected — it still
+    /// tests the verified cert's SAN + issuer, never the docker-reference. See `cosign_tests.rs`.
     async fn fetch_layers(&self, image: &str) -> Result<Vec<SignatureLayer>> {
         let image_ref: OciReference = image.parse()?;
         // Resolve auth for THIS image's registry (JEF-352): the mounted dockerconfigjson may carry
@@ -433,6 +447,10 @@ impl VerificationConstraint for IdentityVerifier {
         Ok(issuer_ok && identity_ok)
     }
 }
+
+#[cfg(test)]
+#[path = "cosign_tests.rs"]
+mod cosign_tests;
 
 #[cfg(test)]
 mod provenance_pae_tests {
