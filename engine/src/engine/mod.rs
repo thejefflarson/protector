@@ -554,20 +554,7 @@ impl Engine {
                         ),
                     ));
                 }
-                None => {
-                    // TEMP DIAGNOSTIC (JEF-350 follow-up): dump the full prompt of every entry we
-                    // re-judge, newline-escaped (Debug) to ONE line, so consecutive passes for the
-                    // same entry can be diffed to find exactly what churns the prompt hash (the
-                    // suspected cause of protector's own pod re-judging every pass). Remove once
-                    // the churn source is identified.
-                    tracing::info!(
-                        entry = %pending.entry_key,
-                        fp = %pending.fingerprint,
-                        prompt = ?pending.prompt,
-                        "ADJ-MISS-DIAG"
-                    );
-                    to_judge.push(pending);
-                }
+                None => to_judge.push(pending),
             }
         }
         // Model calls this pass (cache misses actually sent). A persistently high value means
