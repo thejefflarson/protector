@@ -195,21 +195,37 @@ pub(crate) fn fence_list(values: &[String]) -> String {
 /// Kubernetes rule, so the workload's own) or an RBAC grant (`CanDo`); a workload or host
 /// objective is reached over the network. Unknown/structural ⇒ NETWORK (conservative: it
 /// is not an authorization grant).
+///
+/// JEF-376 — the tag is DETERMINISTIC: a secret reachable BOTH by mount and by RBAC grant
+/// used to flip between `MOUNTED` and `RBAC-GRANTED` depending on which incoming edge the
+/// graph traversal happened to visit first (HashMap/insertion order), which churned the
+/// prompt hash and forced a bogus verdict-cache re-judge. We do NOT drop either signal
+/// (both are real): we scan ALL incoming edges — no early return — and emit every
+/// applicable tag in a fixed precedence order (`MOUNTED` then `RBAC-GRANTED`), so the same
+/// reachability yields the same tag string every pass regardless of traversal order. Since
+/// `NETWORK` is the default when no authorization edge is present, it never co-occurs with
+/// the others.
 pub(crate) fn objective_reach(graph: &SecurityGraph, objective: &NodeKey) -> &'static str {
     let Some(idx) = graph.index_of(objective) else {
         return "NETWORK";
     };
     let g = graph.inner();
+    let mut mounted = false;
     let mut rbac = false;
     for edge in g.edges_directed(idx, petgraph::Direction::Incoming) {
         match &edge.weight().relation {
             // A pod-spec mount is the strongest "own" signal (same namespace by k8s rule).
-            Relation::CanRead => return "MOUNTED",
+            Relation::CanRead => mounted = true,
             Relation::CanDo { .. } => rbac = true,
             _ => {}
         }
     }
-    if rbac { "RBAC-GRANTED" } else { "NETWORK" }
+    match (mounted, rbac) {
+        (true, true) => "MOUNTED+RBAC-GRANTED",
+        (true, false) => "MOUNTED",
+        (false, true) => "RBAC-GRANTED",
+        (false, false) => "NETWORK",
+    }
 }
 
 /// JEF-79 — whether an objective sits in the SAME namespace as the entry. The model
