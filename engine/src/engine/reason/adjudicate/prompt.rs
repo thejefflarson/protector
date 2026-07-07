@@ -47,6 +47,32 @@ pub fn build_judgment_prompt(
     build_judgment_prompt_with_asn(entry, objectives, graph, &AsnDb::empty())
 }
 
+/// The per-section fingerprints of a built adjudication prompt (JEF-387). Each field is a
+/// short, stable hash of ONE labeled section's rendered lines, computed HERE — where the
+/// sections are assembled — so the churn harness never re-parses or text-diffs the rendered
+/// prompt. Two passes whose section hashes match in every field but one changed in exactly
+/// that one section: the diagnostic attributes the re-judge to it precisely.
+///
+/// A section hash is stable across passes for identical evidence (the underlying lines are
+/// already sorted + deduped, so ordering never leaks in) and collision-resistant enough for
+/// change-attribution (SHA-256 truncated to 12 hex chars). It is NOT the verdict-cache key —
+/// that is the hash of the WHOLE prompt ([`prompt_cache_key`]); these are its parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSections {
+    /// Observed runtime behavior (provider-grouped INTERNET egress + other behaviors).
+    pub runtime: String,
+    /// Critical / known-exploited CVEs loaded at runtime.
+    pub cves: String,
+    /// Exposed secrets baked into the image.
+    pub secrets: String,
+    /// Static posture findings (misconfiguration + RBAC checks).
+    pub posture: String,
+    /// The reachable-objective set with reach/tenancy tags and ATT&CK outcomes.
+    pub objectives: String,
+    /// The internet-facing entry (front door) node key.
+    pub entry: String,
+}
+
 /// As [`build_judgment_prompt`], but with the offline ASN dataset (JEF-380) so INTERNET
 /// egress peers render grouped by provider. The engine calls this with the live, hot-reloaded
 /// dataset; an EMPTY dataset degrades to `build_judgment_prompt`'s raw-IP rendering exactly.
@@ -56,13 +82,30 @@ pub fn build_judgment_prompt_with_asn(
     graph: &SecurityGraph,
     asn: &AsnDb,
 ) -> String {
+    build_judgment_prompt_with_sections_asn(entry, objectives, graph, asn).0
+}
+
+/// As [`build_judgment_prompt_with_asn`], but ALSO returns the per-section fingerprints of
+/// the rendered prompt ([`PromptSections`]) — the churn-attribution harness (JEF-387) logs
+/// them in the compact `ADJ-MISS-DIAG` line so every re-judge can be attributed to the EXACT
+/// prompt section that changed, with no rendered-string re-parsing / text-diffing. The
+/// prompt bytes returned are byte-identical to [`build_judgment_prompt_with_asn`]'s; the
+/// section hashes are a pure by-product of the same assembly.
+pub fn build_judgment_prompt_with_sections_asn(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+) -> (String, PromptSections) {
     let (cves, behaviors) = entry_evidence(graph, entry);
     build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors, asn)
 }
 
 /// As [`build_judgment_prompt`], but with the entry's evidence already fetched — so
 /// `ModelAdjudicator::judge` runs `entry_evidence` once and shares it with the two
-/// backstops. The rendered prompt is identical to `build_judgment_prompt`'s.
+/// backstops. Returns the rendered prompt (identical to `build_judgment_prompt`'s) AND the
+/// per-section fingerprints ([`PromptSections`]) — callers that only need the prompt string
+/// take `.0`.
 pub(super) fn build_judgment_prompt_with(
     entry: &NodeKey,
     objectives: &[(NodeKey, AttackRef)],
@@ -70,7 +113,7 @@ pub(super) fn build_judgment_prompt_with(
     cves: &[String],
     behaviors: &[Behavior],
     asn: &AsnDb,
-) -> String {
+) -> (String, PromptSections) {
     // The whole rendered prompt is the verdict-cache key (JEF-350): it is hashed and the
     // model response cached on that hash, so the cache invalidates exactly when — and only
     // when — what the model actually sees changes (killing the old fingerprint↔prompt drift,
@@ -133,6 +176,18 @@ pub(super) fn build_judgment_prompt_with(
     // breach on their own (the JEF-134 over-promotion guardrail). Both lists are already
     // fenced/capped/budgeted lines from `entry_findings`.
     let (secret_lines, posture_lines) = entry_findings(graph, entry);
+    // JEF-387: fingerprint each section from the SAME rendered lines the prompt below
+    // interpolates — no re-parsing the rendered string. `objectives` is already the joined
+    // objective lines; every other field is hashed from its sorted+deduped line vec, so a
+    // section hash changes iff that section's rendered content changes.
+    let sections = PromptSections {
+        runtime: section_hash(&behavior_lines),
+        cves: section_hash(&cves),
+        secrets: section_hash(&secret_lines),
+        posture: section_hash(&posture_lines),
+        objectives: section_hash_str(&objectives),
+        entry: section_hash_str(&entry.0),
+    };
     // JEF-134: the deterministic layer PROVES + ENRICHES; the model DECIDES breach. The prior
     // prompt encoded a rigid numbered procedure (step 4 → exploitable) plus six worked
     // examples; a small CPU model copied an example reason (Ex4's "another tenant's database
@@ -146,7 +201,7 @@ pub(super) fn build_judgment_prompt_with(
     // not breach drivers. Evidence is fenced as untrusted data so a malicious CVE id / node key
     // can't inject. The anti-fabrication backstop (guard_fabricated_cve) still catches a cited
     // CVE absent from the evidence.
-    format!(
+    let prompt = format!(
         r#"You are a senior security analyst making one call: is this internet-facing workload a real BREACH risk?
 
 A deterministic analysis already PROVED this workload can reach every objective listed — reachability is a GIVEN, not the question. Reaching things — however broadly, however many tenants, however high-impact, whether granted by RBAC, mounted, or over the network (same-namespace OR cross-namespace) — is NEVER a breach by itself. Breadth, tenancy, and the severity of what is reached are how BAD it would be if exploited; they are not whether it IS being exploited.
@@ -186,7 +241,8 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         runtime = fence_list(&behavior_lines),
         posture = fence_list(&posture_lines),
         objectives = objectives,
-    )
+    );
+    (prompt, sections)
 }
 
 /// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
@@ -237,10 +293,43 @@ fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
 /// entry whose model input was unchanged). Same prompt in ⇒ same key out, every pass; any
 /// material change to the evidence the model sees ⇒ a new key ⇒ a re-judge.
 pub fn prompt_cache_key(prompt: &str) -> String {
+    hex_digest(prompt.as_bytes(), 32)
+}
+
+/// Hash one prompt section's rendered lines (JEF-387). Lines are joined with `\n` and hashed;
+/// the caller has already sorted + deduped them, so the same evidence hashes identically every
+/// pass. Truncated to 12 hex chars — compact for a 24h log stream, collision-resistant enough
+/// to attribute a change to a section.
+fn section_hash(lines: &[String]) -> String {
+    section_hash_str(&lines.join("\n"))
+}
+
+/// As [`section_hash`], but for a section already rendered to a single string (the joined
+/// objective lines, the entry key).
+fn section_hash_str(rendered: &str) -> String {
+    hex_digest(rendered.as_bytes(), 6)
+}
+
+/// A stable hash of the entry's objective/technique SET — the "chain shape" (JEF-387). Hashed
+/// over the SORTED, DEDUPED set of ATT&CK technique ids alone (not the entry-specific objective
+/// node keys), so entries whose reachable chains have the SAME shape share a `chain` value and
+/// group together in the churn harness ("these N entries all churn on `runtime`"). Order- and
+/// entry-independent by construction.
+pub fn chain_shape_hash(objectives: &[(NodeKey, AttackRef)]) -> String {
+    let mut techniques: Vec<&str> = objectives.iter().map(|(_, a)| a.technique_id).collect();
+    techniques.sort_unstable();
+    techniques.dedup();
+    section_hash_str(&techniques.join(","))
+}
+
+/// SHA-256 of `bytes`, hex-encoded and truncated to `bytes_of_digest` leading digest bytes
+/// (`2 * bytes_of_digest` hex chars). Shared by the whole-prompt cache key and the compact
+/// per-section / chain fingerprints so they all hash identically, differing only in length.
+fn hex_digest(bytes: &[u8], bytes_of_digest: usize) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(prompt.as_bytes());
-    let mut key = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let digest = Sha256::digest(bytes);
+    let mut key = String::with_capacity(bytes_of_digest * 2);
+    for byte in digest.iter().take(bytes_of_digest) {
         use std::fmt::Write;
         let _ = write!(key, "{byte:02x}");
     }

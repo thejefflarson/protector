@@ -53,6 +53,11 @@ pub mod state;
 mod metrics;
 use metrics::EngineMetrics;
 
+// The ADJ-MISS-DIAG re-judge diagnostic (JEF-387), extracted to keep this orchestrator under
+// the file-size cap (CLAUDE.md). Emits the compact, per-section-fingerprinted line the churn
+// harness ingests.
+mod churn_diag;
+
 use futures::StreamExt;
 use graph::delta::GraphSnapshot;
 use observe::Snapshot;
@@ -81,6 +86,13 @@ struct PendingEntry {
     /// cache/journal seam is generic over "the freshness key string"; its value is now the
     /// prompt hash, not the old predicted-input fingerprint.
     fingerprint: String,
+    /// The per-section fingerprints of `prompt` (JEF-387): a hash of each labeled section
+    /// (runtime / cves / secrets / posture / objectives / entry), logged in the compact
+    /// `ADJ-MISS-DIAG` line so the churn harness attributes each re-judge to the EXACT section.
+    sections: reason::adjudicate::PromptSections,
+    /// A stable hash of this entry's objective/technique SET — the "chain shape" (JEF-387).
+    /// Entries with the same shape share this value so the harness can group them.
+    chain: String,
     idxs: Vec<usize>,
 }
 
@@ -541,19 +553,23 @@ impl Engine {
             // so the cache invalidates iff the model's input changes. On a hit we serve the
             // stored decisive verdict with no model call; on a miss we hand this same prompt to
             // `judge` (no rebuild), so the cached-on and sent inputs can't drift.
-            let prompt = reason::adjudicate::build_judgment_prompt_with_asn(
+            // JEF-387: build the prompt AND its per-section fingerprints from the SAME assembly.
+            let (prompt, sections) = reason::adjudicate::build_judgment_prompt_with_sections_asn(
                 &entry,
                 &objectives,
                 &graph,
                 &asn,
             );
             let fingerprint = reason::adjudicate::prompt_cache_key(&prompt);
+            let chain = reason::adjudicate::chain_shape_hash(&objectives);
             let pending = PendingEntry {
                 entry_key: entry_key.clone(),
                 entry,
                 objectives,
                 prompt,
                 fingerprint,
+                sections,
+                chain,
                 idxs: idxs.clone(),
             };
             match self.verdicts.cached_for(entry_key, &pending.fingerprint) {
@@ -585,16 +601,9 @@ impl Engine {
                     ));
                 }
                 None => {
-                    // TEMP DIAGNOSTIC (JEF-350 follow-up): dump the full prompt of every entry we
-                    // re-judge so consecutive passes can be diffed to find what churns the
-                    // fingerprint (peer set, CVEs, reachable objectives, runtime window). Re-added
-                    // (was removed in JEF-379) while tuning the window regression + landing ASN.
-                    tracing::info!(
-                        entry = %pending.entry_key,
-                        fp = %pending.fingerprint,
-                        prompt = ?pending.prompt,
-                        "ADJ-MISS-DIAG"
-                    );
+                    // ADJ-MISS-DIAG (JEF-387): one compact, structured line per re-judge for the
+                    // 24h churn-attribution harness — see [`churn_diag::log_rejudge`].
+                    churn_diag::log_rejudge(&pending);
                     to_judge.push(pending);
                 }
             }

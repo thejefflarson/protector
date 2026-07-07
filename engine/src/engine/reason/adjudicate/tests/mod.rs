@@ -21,6 +21,7 @@ use std::time::SystemTime;
 mod group_1;
 mod group_2;
 mod group_3;
+mod sections;
 
 /// The (objective, technique) list for a chain — the shape `judge` now takes.
 pub(super) fn objectives_of(chain: &ProvenChain) -> Vec<(NodeKey, AttackRef)> {
