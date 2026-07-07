@@ -241,6 +241,11 @@ pub async fn run_watch(
     // snapshot for its whole duration, so a mid-pass reload never disrupts it.
     kev: observe::feed_reload::ReloadableFeed<observe::exploit_intel::KevCatalog>,
     epss: observe::feed_reload::ReloadableFeed<observe::epss::EpssStore>,
+    // The offline IP→ASN dataset (JEF-380): attributes an INTERNET egress peer to its network
+    // provider (`GitHub [AS36459]`) for the adjudication prompt — the salient provider signal
+    // AND the CDN-rotation churn fix. Hot-reloaded on the same interval as KEV/EPSS; an
+    // empty/absent dataset degrades to raw-IP rendering (today's behavior).
+    asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
     // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
     // carries the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
@@ -288,7 +293,10 @@ pub async fn run_watch(
     .with_notifier(notify::BreachNotifier::from_env())
     // The per-node agent-liveness store (JEF-308): read each pass to stamp the runtime-corroboration
     // coverage into the findings handle the readiness aggregation reads.
-    .with_agent_liveness(agent_liveness.clone());
+    .with_agent_liveness(agent_liveness.clone())
+    // The offline IP→ASN dataset (JEF-380): read each pass to group INTERNET egress by
+    // provider in the prompt. Shares the same swap cell we spawn the reloader on below.
+    .with_asn(asn.clone());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
     // (JEF-237), so the admission-decision log isn't blank after a restart — parallel to how
@@ -373,6 +381,9 @@ pub async fn run_watch(
     let reload_interval = observe::feed_reload::reload_interval();
     let kev_reloader = kev.spawn_reloader(reload_interval);
     let epss_reloader = epss.spawn_reloader(reload_interval);
+    // The ASN dataset reloads on the same cadence (JEF-380); the engine holds a clone of the
+    // same swap cell, so a refreshed provider table lands without a restart.
+    let asn_reloader = asn.spawn_reloader(reload_interval);
 
     // The signing-posture observer (ADR-0020 Stage 1, JEF-261): built ONCE so its TTL + image
     // cache persists across passes — a steady cluster re-sweeps for free. Each pass runs every
@@ -678,6 +689,7 @@ pub async fn run_watch(
     }
     kev_reloader.abort();
     epss_reloader.abort();
+    asn_reloader.abort();
     Ok(())
 }
 

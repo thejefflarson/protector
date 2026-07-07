@@ -143,6 +143,12 @@ pub struct Engine {
     /// Per-node agent-liveness (JEF-308), shared with the ingest; classified each pass into the
     /// runtime-corroboration coverage the readiness row reads. `None` when no ingest is wired.
     agent_liveness: Option<std::sync::Arc<state::AgentLivenessStore>>,
+    /// The offline IP→ASN dataset (JEF-380), hot-reloadable like KEV/EPSS. Read each pass when
+    /// building an entry's adjudication prompt so INTERNET egress renders grouped by provider
+    /// (`GitHub [AS36459]`) — the salient provider signal AND the CDN-rotation churn fix.
+    /// Defaults to an empty dataset (every internet peer falls back to its raw `IP:port`,
+    /// exactly today's behavior) until the watch loop attaches the file-backed feed.
+    asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -190,6 +196,9 @@ impl Engine {
             actions: ActionLog::new(),
             verdicts,
             agent_liveness: None,
+            // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
+            // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
+            asn: observe::feed_reload::ReloadableFeed::from_store(observe::asn::AsnDb::empty()),
             metrics: EngineMetrics::new(),
         }
     }
@@ -197,6 +206,18 @@ impl Engine {
     /// Attach the per-node agent-liveness store (JEF-308), read each pass to stamp coverage.
     pub fn with_agent_liveness(mut self, l: std::sync::Arc<state::AgentLivenessStore>) -> Self {
         self.agent_liveness = Some(l);
+        self
+    }
+
+    /// Attach the offline IP→ASN dataset (JEF-380), read each pass to group INTERNET egress
+    /// peers by provider in the adjudication prompt. Shares the same `ArcSwap` cell as the
+    /// handle the watch loop spawns the reloader on, so a daily CronJob refresh is visible to
+    /// the engine without a restart. Builder-style; called once on boot.
+    pub fn with_asn(
+        mut self,
+        asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
+    ) -> Self {
+        self.asn = asn;
         self
     }
 
@@ -501,6 +522,10 @@ impl Engine {
         // model dispatch below.
         let mut resolved: Vec<(PendingEntry, reason::adjudicate::Verdict)> = Vec::new();
         let mut to_judge: Vec<PendingEntry> = Vec::new();
+        // One immutable ASN snapshot for the whole pass (JEF-380): a hot-reload that lands
+        // mid-pass swaps the next pass's snapshot, never this one — so every entry judged this
+        // pass sees a consistent provider table (mirrors the KEV/EPSS per-pass snapshot).
+        let asn = self.asn.snapshot();
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
             // The (objective, technique) set this entry reaches — what the model judges.
@@ -516,7 +541,12 @@ impl Engine {
             // so the cache invalidates iff the model's input changes. On a hit we serve the
             // stored decisive verdict with no model call; on a miss we hand this same prompt to
             // `judge` (no rebuild), so the cached-on and sent inputs can't drift.
-            let prompt = reason::adjudicate::build_judgment_prompt(&entry, &objectives, &graph);
+            let prompt = reason::adjudicate::build_judgment_prompt_with_asn(
+                &entry,
+                &objectives,
+                &graph,
+                &asn,
+            );
             let fingerprint = reason::adjudicate::prompt_cache_key(&prompt);
             let pending = PendingEntry {
                 entry_key: entry_key.clone(),

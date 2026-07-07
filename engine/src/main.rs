@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use protector::engine::observe::asn::AsnDb;
 use protector::engine::observe::epss::EpssStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::observe::feed_reload::ReloadableFeed;
@@ -28,6 +29,10 @@ use protector::server;
 /// `PROTECTOR_EPSS_FILE` remain as escape-hatch overrides.
 const FEEDS_KEV_PATH: &str = "/var/lib/protector/feeds/kev.json";
 const FEEDS_EPSS_PATH: &str = "/var/lib/protector/feeds/epss.csv";
+/// The offline IP→ASN dataset (JEF-380): iptoasn.com's `ip2asn-v4.tsv`, synced into the feeds
+/// mount by a CronJob (ADR-0015 feed pattern) — the engine only READS it. `PROTECTOR_ASN_FILE`
+/// is the escape-hatch override; a missing/empty file degrades to raw-IP rendering.
+const FEEDS_ASN_PATH: &str = "/var/lib/protector/feeds/ip2asn-v4.tsv";
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
@@ -431,6 +436,11 @@ async fn run() -> Result<()> {
             "PROTECTOR_EPSS_FILE",
             FEEDS_EPSS_PATH,
         ));
+        // Offline IP→ASN dataset (JEF-380) — same fixed feeds mount, hot-reloaded like KEV/EPSS.
+        // Missing/empty ⇒ no attribution; every INTERNET egress peer falls back to its raw
+        // `IP:port` (today's pre-feed behavior), never a crash. Zero egress: a FILE read only.
+        let asn =
+            ReloadableFeed::<AsnDb>::load_initial(env_or("PROTECTOR_ASN_FILE", FEEDS_ASN_PATH));
         // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
         // the durable journal on boot — the same `Arc` the webhook engine writes to.
         let engine_policy_log = policy_log.clone();
@@ -449,6 +459,7 @@ async fn run() -> Result<()> {
                         audit_addr,
                         kev,
                         epss,
+                        asn,
                         engine_policy_log,
                         engine_shared_baseline,
                         engine_exceptions,
