@@ -204,8 +204,23 @@ fn build_webhook_signing_observer(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Route the sigstore/tough TUF client's atomic temp writes (latest_known_time.json + the
+    // refreshed root/timestamp/snapshot metadata) OFF /tmp and onto protector's own TUF cache
+    // dir (JEF-377). sigstore-rs 0.14 gives tough no datastore path, so it defaults to a
+    // `/tmp/.tmp<rand>/` TempDir that both churns the prompt and masquerades as a drop-and-execute
+    // IOC; $TMPDIR is the only lever. This MUST run before the tokio runtime spawns any worker
+    // thread — `set_var` is only sound single-threaded (edition 2024). See `tuf_tmpdir`.
+    protector::policies::signature::tuf_tmpdir::pin_from_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the tokio runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     // Logging + (when OTEL_EXPORTER_OTLP_ENDPOINT is set) OTLP export of traces and
     // engine metrics to the node-local collector, like the cluster's other services.
     let telemetry = protector::telemetry::init(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
@@ -254,7 +269,12 @@ async fn main() -> Result<()> {
             "signature gating off (PROTECTOR_GATED_PREFIXES empty) — no images are signature-checked"
         );
     }
-    let tuf_cache = PathBuf::from(env_or("PROTECTOR_TUF_CACHE", "/tmp/sigstore"));
+    // Same default the startup `$TMPDIR` pin uses (JEF-377), so tough's atomic temp writes land
+    // in exactly this cache dir rather than under /tmp/.tmp<rand>/.
+    let tuf_cache = PathBuf::from(env_or(
+        "PROTECTOR_TUF_CACHE",
+        protector::policies::signature::tuf_tmpdir::DEFAULT_TUF_CACHE,
+    ));
     // 20s (was 5s): a keyless Fulcio+Rekor+TUF verify of a first-party signed image on the arm64
     // engine — especially with a cold TUF cache after a restart — routinely needs >5s, so a 5s
     // budget left those images stuck in "checking" forever (JEF-326). Still env-overridable, and

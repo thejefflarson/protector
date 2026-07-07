@@ -216,10 +216,14 @@ spec:
               value: /etc/protector/tls/tls.crt
             - name: PROTECTOR_TLS_KEY
               value: /etc/protector/tls/tls.key
-            # sigstore TUF cache — must be writable under readOnlyRootFilesystem,
-            # so it points into the /tmp emptyDir below.
+            # sigstore TUF cache — must be writable under readOnlyRootFilesystem, so it points
+            # into the dedicated `tuf-cache` emptyDir below. Kept OFF /tmp (JEF-377): the engine
+            # pins $TMPDIR to this dir at startup so the tough TUF client's atomic temp writes
+            # (latest_known_time.json + refreshed metadata) land here — a stable, attributable,
+            # protector-owned path — instead of a `/tmp/.tmp<rand>/` dir that both churns the
+            # prompt and masquerades as a drop-and-execute IOC the agent must keep flagging.
             - name: PROTECTOR_TUF_CACHE
-              value: /tmp/sigstore
+              value: /var/lib/protector/tuf
             - name: PROTECTOR_GATED_PREFIXES
               value: {{ .Values.signature.gatedPrefixes | quote }}
             - name: PROTECTOR_IDENTITY_REGEXP
@@ -341,6 +345,10 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            # Writable sigstore TUF cache, kept OFF /tmp (JEF-377) so the tough client's atomic
+            # temp writes are attributable to protector, not IOC-shaped /tmp/.tmp<rand>/ paths.
+            - name: tuf-cache
+              mountPath: /var/lib/protector/tuf
             {{- if .Values.ingestAuth.enabled }}
             - name: ingest-auth
               mountPath: /etc/protector/ingest
@@ -367,6 +375,12 @@ spec:
           secret:
             secretName: {{ include "protector.servingCertName" . }}
         - name: tmp
+          emptyDir: {}
+        # Dedicated writable scratch for the sigstore TUF cache, deliberately separate from the
+        # /tmp emptyDir so protector's own TUF metadata writes never look like a /tmp drop IOC
+        # (JEF-377). Ephemeral per pod — tough deletes its datastore after each load, and the
+        # trusted_root.json checkout is cheap to re-fetch.
+        - name: tuf-cache
           emptyDir: {}
         {{- if .Values.ingestAuth.enabled }}
         # The ingest bearer token (Fix A), surfaced as a file the engine reads once.
