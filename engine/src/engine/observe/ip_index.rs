@@ -24,6 +24,10 @@ use k8s_openapi::api::core::v1::{Pod, Service};
 
 use super::Snapshot;
 
+mod memo;
+
+pub use self::memo::PeerResolutionMemo;
+
 /// What an IP resolves to: the namespace + name of the owning cluster object. A pod
 /// IP resolves to its pod's `namespace/name`; a service ClusterIP to the service's
 /// `namespace/name`. (We don't keep the `kind` distinct in the rendered label — both
@@ -139,37 +143,13 @@ impl IpIndex {
 
     /// Resolve a bare IP to the object that owns it, or `None` if unknown. Pure
     /// hashmap probe — no IO.
+    ///
+    /// This is the per-pass index. Rewriting a `NetworkConnection` peer string into its
+    /// resolved cluster form — and keeping that rendering *stable* across a transient
+    /// informer miss — is [`PeerResolutionMemo::resolve_peer`], which layers a last-known
+    /// resolution memo over this probe (JEF-375).
     pub fn resolve(&self, ip: &str) -> Option<&ResolvedPeer> {
         self.by_ip.get(ip)
-    }
-
-    /// Rewrite a `NetworkConnection` peer string into its resolved cluster form, or
-    /// return it unchanged when it can't be resolved.
-    ///
-    /// Rules (JEF: resolve-connection-peers):
-    /// - `internet` peers are left as the raw `IP:port` — they're external egress, not
-    ///   a cluster object, so there's nothing in-cluster to resolve to (the caller's
-    ///   `internet` flag still labels them as egress downstream).
-    /// - A same-cluster pod or service IP becomes
-    ///   `namespace/name:port (raw-ip)` — the resolved name, the original port, and the
-    ///   raw IP kept in parens for forensics.
-    /// - An unknown / unresolvable IP is left exactly as the raw `IP:port` — we never
-    ///   fabricate a name.
-    ///
-    /// Deterministic and pure given the index.
-    pub fn resolve_peer(&self, peer: &str, internet: bool) -> String {
-        if internet {
-            // External egress — nothing in-cluster to resolve to; keep it raw.
-            return peer.to_string();
-        }
-        let Some((ip, port)) = split_ip_port(peer) else {
-            // Not in `IP:port` shape — leave it untouched rather than guess.
-            return peer.to_string();
-        };
-        match self.resolve(ip) {
-            Some(resolved) => format!("{}:{port} ({ip})", resolved.label()),
-            None => peer.to_string(),
-        }
     }
 
     /// The number of indexed IPs — for observability/tests.

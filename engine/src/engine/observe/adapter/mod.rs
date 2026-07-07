@@ -190,7 +190,7 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(ExposedSecretAdapter),
         Box::new(ConfigAuditAdapter),
         Box::new(RbacAssessmentAdapter),
-        Box::new(RuntimeAdapter),
+        Box::new(RuntimeAdapter::new()),
         // API secret-reads from the apiserver audit log (JEF-269): attaches a
         // SecretRead{Api} corroboration signal to the workloads whose ServiceAccount made
         // the read. Runs after WorkloadAdapter (needs the RunsAs edges) alongside the
