@@ -329,3 +329,75 @@ fn prompt_clarifies_reaching_a_secret_objective_is_not_an_exposed_secret() {
         "prompt must point to the exposed-secrets field as the sole secret evidence:\n{prompt}"
     );
 }
+
+/// JEF-376: a secret reachable BOTH by a pod-spec mount (`CanRead`) and an RBAC grant
+/// (`CanDo`) must yield the SAME reach tag every pass, regardless of which incoming edge
+/// the graph traversal visits first. The old early-return let the winner depend on
+/// HashMap/insertion order, so the tag flipped `MOUNTED` ↔ `RBAC-GRANTED` pass-to-pass,
+/// churning the prompt hash and forcing a bogus verdict-cache re-judge. We now emit BOTH
+/// signals in a fixed order (`MOUNTED+RBAC-GRANTED`) — deterministic, and neither real
+/// reachability is dropped. A genuine change in reachability still changes the tag.
+#[test]
+fn objective_reach_is_deterministic_when_reachable_both_mounted_and_rbac() {
+    use super::super::guards::objective_reach;
+    use crate::engine::graph::{
+        Edge, Identity, Node, Provenance, Relation, SecretRef, SecurityGraph,
+    };
+    use std::time::SystemTime;
+
+    let can_do = Relation::CanDo {
+        verb: "get".into(),
+        resource: "secrets".into(),
+    };
+    // Build a graph whose secret has exactly the given incoming relations, in the given
+    // order — insertion order is what varies pass-to-pass (it tracks upstream HashMap order).
+    let reach_for = |relations: &[Relation]| {
+        let mut g = SecurityGraph::new();
+        let id = g.upsert_node(Node::Identity(Identity {
+            namespace: "security".into(),
+            name: "trivy-operator".into(),
+        }));
+        let sec = g.upsert_node(Node::Secret(SecretRef {
+            namespace: "security".into(),
+            name: "trivy-operator-trivy-config".into(),
+        }));
+        for relation in relations {
+            g.add_edge(
+                id,
+                sec,
+                Edge {
+                    relation: relation.clone(),
+                    provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+                },
+            );
+        }
+        objective_reach(&g, &sec_key())
+    };
+
+    // Both edge orderings produce the identical, combined tag — no flip on traversal order.
+    assert_eq!(
+        reach_for(&[Relation::CanRead, can_do.clone()]),
+        "MOUNTED+RBAC-GRANTED",
+        "reachable both ways must emit both tags in a fixed order"
+    );
+    assert_eq!(
+        reach_for(&[can_do.clone(), Relation::CanRead]),
+        reach_for(&[Relation::CanRead, can_do.clone()]),
+        "reach tag must not depend on incoming-edge traversal order"
+    );
+
+    // A REAL change in reachability changes the tag: only the RBAC grant ⇒ RBAC-GRANTED,
+    // only the mount ⇒ MOUNTED.
+    assert_eq!(reach_for(std::slice::from_ref(&can_do)), "RBAC-GRANTED");
+    assert_eq!(reach_for(&[Relation::CanRead]), "MOUNTED");
+}
+
+/// The stable `NodeKey` of the JEF-376 fixture secret.
+fn sec_key() -> crate::engine::graph::NodeKey {
+    use crate::engine::graph::{Node, SecretRef};
+    Node::Secret(SecretRef {
+        namespace: "security".into(),
+        name: "trivy-operator-trivy-config".into(),
+    })
+    .key()
+}
