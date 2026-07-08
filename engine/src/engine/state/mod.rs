@@ -39,4 +39,6 @@ pub use reversion::{ReversionLog, ReversionRecord};
 pub use signing_baseline::{
     DEFAULT_MAX_REPOS, SharedSigningBaseline, SigningBaseline, SigningBaselineStore,
 };
-pub use verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictEntry, VerdictStore};
+pub use verdict_store::{
+    BakeStats, ModelHealth, ReadinessConfig, VerdictBaseline, VerdictEntry, VerdictStore,
+};

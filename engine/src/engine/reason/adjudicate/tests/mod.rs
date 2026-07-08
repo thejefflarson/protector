@@ -18,6 +18,7 @@ use crate::engine::reason::proof::{ProvenChain, prove};
 use serde_json::json;
 use std::time::SystemTime;
 
+mod delta;
 mod group_1;
 mod group_2;
 mod group_3;
