@@ -18,6 +18,77 @@ use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
 
 use super::recency::{Delta, RecencyInfo, StoredPosture};
 
+/// Default number of decisive-verdict slots retained per entry (JEF-390). Wide enough that a
+/// workload whose evidence oscillates between a handful of recently-judged states serves every
+/// return to a recent state from cache instead of re-judging the (slow, CPU-bound) model.
+pub const DEFAULT_VERDICT_CACHE_SLOTS: usize = 32;
+
+/// The smallest per-entry cache the env may configure (JEF-390). A single slot is exactly the
+/// pre-JEF-390 behaviour that thrashes on an A→B→A flip, so even a hostile/typo'd env can't
+/// shrink the cache below the two slots it takes to retain the previous state across one flip.
+const MIN_VERDICT_CACHE_SLOTS: usize = 2;
+
+/// The per-entry cache capacity from `PROTECTOR_VERDICT_CACHE_SLOTS` (default
+/// [`DEFAULT_VERDICT_CACHE_SLOTS`]). Unset / unparseable / `0` → the default; a positive value
+/// is honoured but floored at [`MIN_VERDICT_CACHE_SLOTS`] so the LRU can always retain at least
+/// one prior state.
+pub fn verdict_cache_slots() -> usize {
+    parse_verdict_cache_slots(
+        std::env::var("PROTECTOR_VERDICT_CACHE_SLOTS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the `PROTECTOR_VERDICT_CACHE_SLOTS` value, split out so it's testable without
+/// process-global env: unset / unparseable / `0` → [`DEFAULT_VERDICT_CACHE_SLOTS`]; any positive
+/// value is honoured, floored at [`MIN_VERDICT_CACHE_SLOTS`].
+fn parse_verdict_cache_slots(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .map(|n| n.max(MIN_VERDICT_CACHE_SLOTS))
+        .unwrap_or(DEFAULT_VERDICT_CACHE_SLOTS)
+}
+
+/// A bounded per-entry LRU of `(evidence fingerprint → decisive Verdict)` — the JEF-390 widening
+/// of the old single verdict slot. A workload whose evidence oscillates between recently-judged
+/// states (A→B→A) returns to a state that is still cached and HITS, so it re-judges only on a
+/// genuinely new fingerprint rather than on every flip. Ordered most-recently-used FIRST; at
+/// N≈32 an ordered `Vec` with move-to-front + truncate is the whole data structure (no crate).
+///
+/// Only DECISIVE verdicts are ever inserted (JEF-234): an `Uncertain` is a transient model
+/// outage gated by [`EntryBackoff`], never pinned here. An exact-fingerprint hit is byte-identical
+/// evidence (the fingerprint is the whole-prompt hash), so a served verdict is exactly as valid as
+/// when it was judged — wider retention introduces no new staleness.
+#[derive(Debug, Clone, Default)]
+pub struct VerdictLru {
+    /// `(fingerprint, verdict)` pairs, most-recently-used first. Bounded by the store's cap on
+    /// every insert; a fingerprint is unique within the vec (a re-insert refreshes in place).
+    slots: Vec<(String, Verdict)>,
+}
+
+impl VerdictLru {
+    /// Serve the verdict whose fingerprint matches ANY slot, moving that slot to most-recently-used
+    /// so a repeatedly-revisited state survives eviction. `None` (a miss) means re-judge.
+    fn get(&mut self, fingerprint: &str) -> Option<Verdict> {
+        let pos = self.slots.iter().position(|(fp, _)| fp == fingerprint)?;
+        // Move-to-front: the just-served state is now the most-recently-used.
+        let hit = self.slots.remove(pos);
+        let verdict = hit.1.clone();
+        self.slots.insert(0, hit);
+        Some(verdict)
+    }
+
+    /// Insert a fresh decisive verdict as most-recently-used, evicting the least-recently-used
+    /// slot(s) once the vec exceeds `cap`. A repeat fingerprint is de-duplicated (refreshed in
+    /// place) rather than stored twice.
+    fn insert(&mut self, fingerprint: String, verdict: Verdict, cap: usize) {
+        self.slots.retain(|(fp, _)| fp != &fingerprint);
+        self.slots.insert(0, (fingerprint, verdict));
+        self.slots.truncate(cap.max(1));
+    }
+}
+
 /// The behavioral-bake snapshot (JEF-48): what the behavioral port saw in the most
 /// recent pass. The same per-pass figures feed the OTLP counters (JEF-100) — this is the
 /// in-process mirror. Purely observational: it carries no per-pod payload, only counts and
@@ -165,10 +236,12 @@ pub struct VerdictEntry {
     /// — held until a live verdict supersedes it (formerly `restored_verdicts`). Cleared
     /// once `display` lands a live verdict for the entry.
     pub restored: Option<String>,
-    /// The cached DECISIVE verdict and the evidence fingerprint it was judged against —
-    /// the re-judge gate (formerly `verdict_cache`). Present only for a decisive verdict;
-    /// an unchanged fingerprint serves this without calling the (slow CPU) model again.
-    pub cached: Option<(String, Verdict)>,
+    /// The bounded per-entry LRU of DECISIVE verdicts keyed by evidence fingerprint —
+    /// the re-judge gate (formerly `verdict_cache`, a single slot). JEF-390 widened it from
+    /// one slot to N so a workload whose evidence oscillates between recently-judged states
+    /// (A→B→A) HITS on the return instead of re-judging every flip. Only decisive verdicts
+    /// are ever inserted; a matching fingerprint serves without calling the (slow CPU) model.
+    pub cached: VerdictLru,
     /// The last verdict summary journaled + notified for this entry — the dedup key
     /// (formerly `journaled_verdicts`), so a steady-state cluster writes/notifies once
     /// per change, not per pass.
@@ -237,7 +310,6 @@ impl VerdictEntry {
 /// [`super::Findings::snapshot`]) and the per-pass display derive each finding's verdict by
 /// looking its entry up here at read time, so a verdict is visible the moment it is written —
 /// there is no end-of-pass re-publish lag. Keyed by the entry's node key.
-#[derive(Default)]
 pub struct VerdictStore {
     entries: Mutex<BTreeMap<String, VerdictEntry>>,
     /// The GLOBAL inconclusive-adjudication circuit-breaker (JEF-234): when the model
@@ -246,6 +318,16 @@ pub struct VerdictStore {
     /// total calls-per-window is bounded regardless of entry count. A decisive success
     /// closes it. Separate lock from `entries` — it is touched once per call, not per entry.
     breaker: Mutex<CircuitBreaker>,
+    /// The per-entry LRU capacity (JEF-390), resolved once at construction from
+    /// `PROTECTOR_VERDICT_CACHE_SLOTS` so every entry's cache is bounded consistently and the
+    /// process-global env is read exactly once, not per insert.
+    cache_slots: usize,
+}
+
+impl Default for VerdictStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A stable per-entry seed for the backoff jitter (JEF-234), derived from the entry key
@@ -261,7 +343,18 @@ fn jitter_seed(entry: &str) -> u64 {
 
 impl VerdictStore {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_cache_slots(verdict_cache_slots())
+    }
+
+    /// Construct with an explicit per-entry LRU capacity (JEF-390), bypassing the
+    /// process-global env — so tests exercise eviction deterministically without racing on
+    /// `PROTECTOR_VERDICT_CACHE_SLOTS` under parallel `nextest`.
+    fn with_cache_slots(cache_slots: usize) -> Self {
+        Self {
+            entries: Mutex::default(),
+            breaker: Mutex::default(),
+            cache_slots: cache_slots.max(MIN_VERDICT_CACHE_SLOTS),
+        }
     }
 
     /// The display summary for an entry, if any — what a finding from that entry shows
@@ -344,22 +437,24 @@ impl VerdictStore {
             .map(|e| e.recency_info(now))
     }
 
-    /// The cached decisive verdict for an entry whose fingerprint matches — the re-judge
-    /// gate. `Some(verdict)` serves the cache (no model call); `None` means re-judge.
+    /// The cached decisive verdict for an entry whose fingerprint matches ANY slot in its
+    /// per-entry LRU — the re-judge gate. `Some(verdict)` serves the cache (no model call) and
+    /// promotes that state to most-recently-used, so a repeatedly-revisited state survives
+    /// eviction (JEF-390); `None` means re-judge. Takes `&mut` through the lock because a HIT
+    /// reorders the LRU.
     pub fn cached_for(&self, entry: &str, fingerprint: &str) -> Option<Verdict> {
         self.entries
             .lock()
             .expect("verdict store mutex poisoned")
-            .get(entry)
-            .and_then(|e| match &e.cached {
-                Some((fp, v)) if fp == fingerprint => Some(v.clone()),
-                _ => None,
-            })
+            .get_mut(entry)
+            .and_then(|e| e.cached.get(fingerprint))
     }
 
-    /// Cache a fresh DECISIVE verdict + its fingerprint for the re-judge gate.
+    /// Cache a fresh DECISIVE verdict + its fingerprint in the entry's per-entry LRU (JEF-390),
+    /// evicting the least-recently-used state once the cache exceeds its capacity.
     pub fn cache_decisive(&self, entry: &str, fingerprint: String, verdict: Verdict) {
-        self.update(entry, |e| e.cached = Some((fingerprint, verdict)));
+        let cap = self.cache_slots;
+        self.update(entry, |e| e.cached.insert(fingerprint, verdict, cap));
     }
 
     /// JEF-234 — whether the judging loop should SKIP the model call for `entry` this pass
@@ -454,3 +549,7 @@ impl VerdictStore {
             .retain(|entry, _| present.contains(entry));
     }
 }
+
+#[cfg(test)]
+#[path = "verdict_store_tests.rs"]
+mod tests;
