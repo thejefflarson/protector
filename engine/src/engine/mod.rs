@@ -58,6 +58,10 @@ use metrics::EngineMetrics;
 // harness ingests.
 mod churn_diag;
 
+// The layered per-entry adjudication re-judge gate (JEF-390 / JEF-391 / JEF-234), extracted to
+// keep this orchestrator under the file-size cap.
+mod adj_gate;
+
 use futures::StreamExt;
 use graph::delta::GraphSnapshot;
 use observe::Snapshot;
@@ -93,6 +97,9 @@ struct PendingEntry {
     /// A stable hash of this entry's objective/technique SET — the "chain shape" (JEF-387).
     /// Entries with the same shape share this value so the harness can group them.
     chain: String,
+    /// This pass's delta-aware surface (ADR-0023, JEF-391): snapshotted as the entry's next
+    /// baseline when this pass judges it decisively, so the next pass measures additions against it.
+    surface: reason::adjudicate::JudgedSurface,
     idxs: Vec<usize>,
 }
 
@@ -521,6 +528,10 @@ impl Engine {
         // A sustained nonzero rate means the model is down and we are correctly NOT hammering it.
         let mut cached = 0u64;
         let mut skipped = 0u64;
+        // ADR-0023 (JEF-391): fingerprint misses HELD on a purely-subtractive delta (the prior
+        // decisive verdict served, no model call). Folded into `cached` for the OTLP counter;
+        // tracked separately only so the pass log shows how much churn the delta gate absorbed.
+        let mut held = 0u64;
         // One `now` for the whole pass so every backoff/breaker decision shares a single clock
         // read — the timing seam the JEF-234 tests drive deterministically (store methods all
         // take `now`, never reach for `Instant::now()`).
@@ -548,61 +559,31 @@ impl Engine {
             objectives.sort_by(|a, b| a.0.0.cmp(&b.0.0));
             objectives.dedup_by(|a, b| a.0 == b.0);
 
-            // Build the model's complete, deterministic prompt BEFORE the cache lookup, then
-            // key the cache on its hash (JEF-350): the prompt is exactly what the model sees,
-            // so the cache invalidates iff the model's input changes. On a hit we serve the
-            // stored decisive verdict with no model call; on a miss we hand this same prompt to
-            // `judge` (no rebuild), so the cached-on and sent inputs can't drift.
-            // JEF-387: build the prompt AND its per-section fingerprints from the SAME assembly.
-            let (prompt, sections) = reason::adjudicate::build_judgment_prompt_with_sections_asn(
-                &entry,
-                &objectives,
-                &graph,
-                &asn,
-            );
-            let fingerprint = reason::adjudicate::prompt_cache_key(&prompt);
-            let chain = reason::adjudicate::chain_shape_hash(&objectives);
-            let pending = PendingEntry {
-                entry_key: entry_key.clone(),
-                entry,
-                objectives,
-                prompt,
-                fingerprint,
-                sections,
-                chain,
-                idxs: idxs.clone(),
-            };
-            match self.verdicts.cached_for(entry_key, &pending.fingerprint) {
-                Some(v) => {
+            // Build the entry's delta-aware pending record (prompt + fingerprint + projected
+            // surface) and read its baseline — see [`Engine::prepare_pending`] (ADR-0023 / JEF-350
+            // / JEF-387). `additive` says whether the delta since the baseline is additive.
+            let (pending, additive, baseline) =
+                self.prepare_pending(entry_key, entry, objectives, idxs, &graph, &asn);
+            // The layered re-judge gate (JEF-390 LRU / JEF-391 delta hold / JEF-234 breaker +
+            // backoff / re-judge), decided WITHOUT a model call — see [`adj_gate`].
+            match adj_gate::classify_adjudication(
+                &self.verdicts,
+                &pending,
+                additive,
+                baseline.as_ref(),
+                pass_now,
+            ) {
+                adj_gate::AdjGate::Resolved { verdict, held: h } => {
                     cached += 1;
-                    resolved.push((pending, v));
+                    held += u64::from(h);
+                    resolved.push((pending, verdict));
                 }
-                // JEF-234: the GLOBAL breaker is open — the model looks fully down, so skip
-                // EVERY entry's model call this pass (a fully-down Ollama is probed at most
-                // ~once per cooldown).
-                None if self.verdicts.breaker_open(pass_now) => {
+                adj_gate::AdjGate::Skipped(verdict) => {
                     skipped += 1;
-                    resolved.push((
-                        pending,
-                        reason::adjudicate::Verdict::Uncertain(
-                            "model unavailable (breaker open)".into(),
-                        ),
-                    ));
+                    resolved.push((pending, verdict));
                 }
-                // JEF-234: THIS entry is in exponential backoff after a recent inconclusive
-                // verdict — don't re-judge it until its backoff elapses.
-                None if self.verdicts.entry_backing_off(entry_key, pass_now) => {
-                    skipped += 1;
-                    resolved.push((
-                        pending,
-                        reason::adjudicate::Verdict::Uncertain(
-                            "model unavailable (backing off)".into(),
-                        ),
-                    ));
-                }
-                None => {
-                    // ADJ-MISS-DIAG (JEF-387): one compact, structured line per re-judge for the
-                    // 24h churn-attribution harness — see [`churn_diag::log_rejudge`].
+                adj_gate::AdjGate::Judge => {
+                    // ADJ-MISS-DIAG (JEF-387): one compact churn-attribution line per re-judge.
                     churn_diag::log_rejudge(&pending);
                     to_judge.push(pending);
                 }
@@ -675,6 +656,15 @@ impl Engine {
                     self.verdicts.cache_decisive(
                         &pending.entry_key,
                         pending.fingerprint.clone(),
+                        verdict.clone(),
+                    );
+                    // ADR-0023 (JEF-391): snapshot THIS pass's judged surface + verdict as the
+                    // entry's new baseline, so the next pass measures additions against what this
+                    // call saw. Only decisive verdicts baseline (the `Uncertain` arm never does),
+                    // so a failed call can't suppress a later re-judge.
+                    self.verdicts.set_baseline(
+                        &pending.entry_key,
+                        pending.surface.clone(),
                         verdict.clone(),
                     );
                     // JEF-234: a decisive answer means the model is alive — clear this entry's
@@ -841,6 +831,7 @@ impl Engine {
                 entries = by_entry.len(),
                 judged,
                 cached,
+                held,
                 skipped,
                 "adjudication pass (model calls = judged)"
             );

@@ -141,13 +141,16 @@ mod evidence;
 mod guards;
 mod model_call;
 mod prompt;
+mod surface;
 
 pub use evidence::{EntryCoverage, entry_coverage};
 pub use model_call::ModelAdjudicator;
 pub use prompt::{
-    PromptSections, build_judgment_prompt, build_judgment_prompt_with_asn,
-    build_judgment_prompt_with_sections_asn, chain_shape_hash, parse_verdict, prompt_cache_key,
+    DeltaBuild, PromptSections, build_delta_prompt_asn, build_judgment_prompt,
+    build_judgment_prompt_with_asn, build_judgment_prompt_with_sections_asn, chain_shape_hash,
+    parse_verdict, prompt_cache_key,
 };
+pub use surface::JudgedSurface;
 // The cross-module helpers the rest of the crate imports by the stable
 // `reason::adjudicate::` path (the prompt sanitizer). The verdict cache
 // keys on `prompt_cache_key` (a hash of the deterministic prompt, JEF-350). The remaining

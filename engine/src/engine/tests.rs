@@ -289,8 +289,10 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine_with_adjudicator(Box::new(FlakyAdjudicator(calls.clone())));
 
-    // Pass 1: decisive Exploitable, resolved in the findings snapshot.
-    engine.process(&exposed_snapshot(true)).await;
+    // Pass 1: decisive Exploitable (no CVE yet — the entry is breach-relevant because it
+    // reaches the mounted secret), resolved in the findings snapshot. This sets the JEF-391
+    // baseline to the current, CVE-free surface.
+    engine.process(&exposed_snapshot(false)).await;
     assert!(
         engine
             .findings()
@@ -302,10 +304,11 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
         "the first decisive verdict shows"
     );
 
-    // Pass 2 with DIFFERENT evidence (no CVE) so the fingerprint changes and the model
-    // is re-consulted — and this time it returns Uncertain. The resolved posture must keep
-    // the prior decisive verdict, not regress to "uncertain".
-    engine.process(&exposed_snapshot(false)).await;
+    // Pass 2 ADDS a critical CVE — an ADDITIVE delta since the baseline (JEF-391), so the model
+    // is re-consulted — and this time it returns Uncertain. The resolved posture must keep the
+    // prior decisive verdict, not regress to "uncertain". (A purely SUBTRACTIVE change would NOT
+    // re-judge under ADR-0023; the additive one is what drives the re-judge here.)
+    engine.process(&exposed_snapshot(true)).await;
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "the changed fingerprint forced a re-judge"

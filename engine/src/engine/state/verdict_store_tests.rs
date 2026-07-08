@@ -105,6 +105,34 @@ fn beyond_the_cap_lru_evicts_least_recently_used_and_re_judges_it() {
     );
 }
 
+/// ADR-0023 (JEF-391): the delta-aware baseline round-trips — absent until set, then stored and
+/// replaced by the most recent decisive verdict's surface.
+#[test]
+fn baseline_is_absent_then_set_and_replaced() {
+    use crate::engine::reason::adjudicate::JudgedSurface;
+    let store = VerdictStore::with_cache_slots(32);
+
+    assert!(
+        store.baseline_for("entry").is_none(),
+        "no baseline until the entry is judged decisively"
+    );
+
+    store.set_baseline("entry", JudgedSurface::default(), decisive("first"));
+    assert_eq!(
+        store.baseline_for("entry").map(|b| b.verdict),
+        Some(decisive("first")),
+        "the baseline holds the decisive verdict it was set with"
+    );
+
+    // A later decisive verdict replaces the baseline (the accumulation window resets).
+    store.set_baseline("entry", JudgedSurface::default(), decisive("second"));
+    assert_eq!(
+        store.baseline_for("entry").map(|b| b.verdict),
+        Some(decisive("second")),
+        "the most recent decisive verdict is the baseline"
+    );
+}
+
 #[test]
 fn uncertain_is_never_cached_and_the_entry_backs_off() {
     let store = VerdictStore::with_cache_slots(32);
