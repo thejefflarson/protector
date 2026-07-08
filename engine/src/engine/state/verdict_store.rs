@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::adjudicate::{JudgedSurface, Verdict};
 use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
 
 use super::recency::{Delta, RecencyInfo, StoredPosture};
@@ -220,6 +220,19 @@ pub struct ReadinessConfig {
     pub checking_images: usize,
 }
 
+/// The delta-aware baseline (ADR-0023, JEF-391): the surface the model judged at an entry's last
+/// DECISIVE verdict, paired with that verdict. The re-judge gate diffs the current surface against
+/// `surface` — a purely subtractive / unchanged delta serves `verdict` with no fresh model call.
+#[derive(Debug, Clone)]
+pub struct VerdictBaseline {
+    /// The judged surface (reachable objectives + running CVEs + secrets + posture + behaviors)
+    /// as of the last decisive verdict — the set the current surface's ADDITIONS are measured
+    /// against.
+    pub surface: JudgedSurface,
+    /// The decisive verdict that holds as of that surface — served on a purely subtractive delta.
+    pub verdict: Verdict,
+}
+
 /// One internet-facing entry's verdict state — the SINGLE source of truth for the
 /// model's call on that entry (JEF-157). Collapses what used to be four separate
 /// per-entry maps in the engine (`last_verdict` / `verdict_cache` / `restored_verdicts`
@@ -242,6 +255,18 @@ pub struct VerdictEntry {
     /// (A→B→A) HITS on the return instead of re-judging every flip. Only decisive verdicts
     /// are ever inserted; a matching fingerprint serves without calling the (slow CPU) model.
     pub cached: VerdictLru,
+    /// The delta-aware baseline (ADR-0023, JEF-391): the [`JudgedSurface`] snapshotted at this
+    /// entry's LAST DECISIVE verdict, paired with that verdict. The re-judge gate diffs the
+    /// CURRENT surface against this: an ADDITIVE delta (something new) re-judges; a purely
+    /// subtractive / unchanged delta serves this stored verdict without a fresh model call (the
+    /// prior decisive verdict still holds — its surface only shrank). `None` until the entry has
+    /// been judged decisively this run (a first judgment re-judges). Only DECISIVE verdicts set
+    /// it — an `Uncertain` never does (JEF-234), so a failed call never establishes a baseline
+    /// that could suppress a later re-judge. In-memory only: a restart re-seeds the LRU from the
+    /// journal (JEF-301) but NOT the baseline, so a post-restart entry re-judges once (fail
+    /// toward re-judging) before its baseline is re-established. Bounded — one snapshot per
+    /// entry, replaced each decisive verdict, sized by the entry's proven surface.
+    pub baseline: Option<VerdictBaseline>,
     /// The last verdict summary journaled + notified for this entry — the dedup key
     /// (formerly `journaled_verdicts`), so a steady-state cluster writes/notifies once
     /// per change, not per pass.
@@ -455,6 +480,30 @@ impl VerdictStore {
     pub fn cache_decisive(&self, entry: &str, fingerprint: String, verdict: Verdict) {
         let cap = self.cache_slots;
         self.update(entry, |e| e.cached.insert(fingerprint, verdict, cap));
+    }
+
+    /// ADR-0023 (JEF-391) — the entry's delta-aware baseline: the [`JudgedSurface`] + decisive
+    /// verdict captured at its last decisive judgment, or `None` if it has none yet this run. The
+    /// classification loop reads this BEFORE building the prompt so it can render the additions
+    /// since the baseline and decide whether the delta is additive (re-judge) or purely
+    /// subtractive (serve the stored verdict).
+    pub fn baseline_for(&self, entry: &str) -> Option<VerdictBaseline> {
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(|e| e.baseline.clone())
+    }
+
+    /// ADR-0023 (JEF-391) — snapshot the entry's judged surface + this DECISIVE verdict as its
+    /// new baseline, replacing any prior one. Called only for a decisive verdict (an `Uncertain`
+    /// never sets a baseline — JEF-234 — so a failed call can never suppress a later re-judge).
+    /// A subtractive-serve does NOT call this: the baseline stays put so the verdict remains
+    /// "valid as of baseline B" until a genuinely additive delta arrives.
+    pub fn set_baseline(&self, entry: &str, surface: JudgedSurface, verdict: Verdict) {
+        self.update(entry, |e| {
+            e.baseline = Some(VerdictBaseline { surface, verdict });
+        });
     }
 
     /// JEF-234 — whether the judging loop should SKIP the model call for `entry` this pass

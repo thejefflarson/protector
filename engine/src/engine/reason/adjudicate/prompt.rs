@@ -13,6 +13,7 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::evidence::{entry_evidence, entry_findings};
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
+use super::surface::{ChangesSince, JudgedSurface};
 use crate::engine::observe::asn::AsnDb;
 // JEF-113: exec *classification* (shell / package-manager in container) moved out of the
 // shared `Behavior` wire type into engine policy; the prompt re-applies the notable-exec
@@ -114,15 +115,112 @@ pub(super) fn build_judgment_prompt_with(
     behaviors: &[Behavior],
     asn: &AsnDb,
 ) -> (String, PromptSections) {
-    // The whole rendered prompt is the verdict-cache key (JEF-350): it is hashed and the
-    // model response cached on that hash, so the cache invalidates exactly when — and only
-    // when — what the model actually sees changes (killing the old fingerprint↔prompt drift,
-    // where a predicted-input fingerprint churned while the model's input was unchanged).
-    // Every list below is therefore rendered DETERMINISTICALLY — sorted + deduped, no
-    // timestamps / pod-UIDs / HashMap iteration order — so the same evidence always produces
-    // a byte-identical prompt and so a byte-identical cache key.
-    let mut cves = cves.to_vec();
+    let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn);
+    // Empty `changes_block` ⇒ byte-identical to the pre-ADR-0023 full-state prompt (the
+    // non-delta callers/tests). The delta path passes the rendered "Changes since…" section.
+    assemble(entry, &ev, "")
+}
 
+/// The delta-aware prompt build (ADR-0023, JEF-391): the FULL-state prompt PLUS the "Changes
+/// since the last decisive verdict" section that names the ADDITIONS since `baseline` — the
+/// surface captured at this entry's last decisive verdict. The full state is ALWAYS present (the
+/// delta only directs attention, it never replaces the state); an empty/absent delta renders the
+/// section as `(none)`. Also returns the CURRENT [`JudgedSurface`] (snapshotted as the next
+/// baseline on a decisive verdict) and whether the delta is ADDITIVE (`baseline` absent — first
+/// judgment — or something was added), which the re-judge gate reads: a non-additive (purely
+/// subtractive / unchanged) delta means the prior decisive verdict still holds, no fresh call.
+pub fn build_delta_prompt_asn(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+    baseline: Option<&JudgedSurface>,
+) -> DeltaBuild {
+    let (cves, behaviors) = entry_evidence(graph, entry);
+    let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn);
+    // Project the surface from the SAME rendered lines the prompt carries — no second source of
+    // truth (ADR-0023): a change the model would see is exactly a change the surface records.
+    let surface = JudgedSurface::from_lines(
+        &ev.objective_lines,
+        &ev.cves,
+        &ev.secret_lines,
+        &ev.posture_lines,
+        &ev.behavior_lines,
+    );
+    let changes = surface.additions_since(baseline);
+    // ADDITIVE ⇒ re-judge: no baseline yet (first judgment) OR something new appeared. A
+    // non-additive delta (baseline present AND nothing added) is the gate's "prior decisive
+    // verdict holds" signal — see the engine's classification loop.
+    let additive = baseline.is_none() || !changes.is_empty();
+    // Resolution of ADR-0023's "delta gate vs fingerprint gate" open question: the verdict-cache
+    // key is the hash of the FULL-STATE prompt ONLY — it EXCLUDES the "Changes since…" section.
+    // The delta is delta-derived attention, not state; keying on it would make the SAME full state
+    // hash differently as its baseline shifts (extra churn, and a needless re-judge per entry
+    // across a restart since the re-seeded baseline is empty). Excluding it keeps the JEF-390 LRU a
+    // true EXACT-STATE guard (an identical full state always HITS, restart-safe with JEF-301) and
+    // leaves the surface-delta gate as the sole ADDITIVE re-judge driver. `sections` (JEF-387) are
+    // likewise full-state only, so they never depend on `changes`.
+    let (state_prompt, sections) = assemble(entry, &ev, "");
+    let cache_key = prompt_cache_key(&state_prompt);
+    // The prompt SENT to the model carries the full state PLUS the delta section (attention).
+    let prompt = assemble(entry, &ev, &render_changes_block(&changes)).0;
+    DeltaBuild {
+        prompt,
+        cache_key,
+        sections,
+        surface,
+        additive,
+    }
+}
+
+/// The result of a delta-aware prompt build ([`build_delta_prompt_asn`]).
+pub struct DeltaBuild {
+    /// The model's complete input: the full-state prompt with the "Changes since…" section.
+    pub prompt: String,
+    /// The verdict-cache key: the hash of the FULL-STATE prompt (WITHOUT the "Changes since…"
+    /// section), so an identical full state always keys identically regardless of the delta.
+    pub cache_key: String,
+    /// Per-section fingerprints of the full-state prompt (JEF-387) for the churn diagnostic.
+    pub sections: PromptSections,
+    /// This pass's projected surface — snapshotted as the entry's next baseline on a decisive
+    /// verdict.
+    pub surface: JudgedSurface,
+    /// Whether the delta since the baseline is ADDITIVE (re-judge) vs purely subtractive /
+    /// unchanged (the prior decisive verdict holds — no fresh model call).
+    pub additive: bool,
+}
+
+/// The rendered evidence lines behind a prompt — shared by the full-state build and the
+/// delta-aware build so both render byte-identically and the surface projects from the exact
+/// lines the model sees. Every list is deterministic (sorted + deduped, no timestamps /
+/// pod-UIDs / traversal order), so the same evidence yields a byte-identical prompt and cache key.
+struct RenderedEvidence {
+    /// CVE evidence lines (sorted + deduped).
+    cves: Vec<String>,
+    /// Observed runtime behavior lines (provider-grouped INTERNET egress + other behaviors).
+    behavior_lines: Vec<String>,
+    /// Reachable-objective lines with reach/tenancy tags and ATT&CK outcomes.
+    objective_lines: Vec<String>,
+    /// Exposed-secret lines.
+    secret_lines: Vec<String>,
+    /// Static-posture (misconfig + RBAC) lines.
+    posture_lines: Vec<String>,
+}
+
+/// Render an entry's evidence into the deterministic prompt lines ([`RenderedEvidence`]). Split
+/// out of [`build_judgment_prompt_with`] so the delta build reuses the exact same rendering (and
+/// projects the surface from it) without duplicating any logic. The whole rendered prompt is the
+/// verdict-cache key (JEF-350), so every list here is rendered deterministically — sorted +
+/// deduped, no timestamps / pod-UIDs / HashMap iteration order — for a byte-identical cache key.
+fn render_evidence(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    cves: &[String],
+    behaviors: &[Behavior],
+    asn: &AsnDb,
+) -> RenderedEvidence {
+    let mut cves = cves.to_vec();
     // Render the observed behaviors into sorted, deduped prompt lines. Notable execs (shell /
     // package-manager in container, JEF-55) are annotated via engine policy; INTERNET egress
     // is collapsed to a deduped provider set via the offline ASN dataset (JEF-380). See
@@ -135,7 +233,6 @@ pub(super) fn build_judgment_prompt_with(
     // in are the already-budgeted lines; sort+dedup is just for stable ordering.
     cves.sort();
     cves.dedup();
-
     // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
     // high-severity-outcome branches.
@@ -163,12 +260,6 @@ pub(super) fn build_judgment_prompt_with(
             )
         })
         .collect();
-    // No cap on objectives: the model judges every reachable objective. Truncating to a
-    // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
-    // objectives) is exactly the case worth showing in full. A larger prompt is slower on the
-    // CPU Pi (~2 min for a ~110-objective entry) but that latency is amortized by the verdict
-    // cache, and accuracy beats speed for the judgement.
-    let objectives = objective_lines.join("\n");
     // The other trivy-operator report kinds (JEF-244). Exposed secrets are EXPLOITATION
     // evidence — a usable credential baked into the image is a real breach primitive — so they
     // join the CVE/runtime case in the breach definition. Misconfigs + RBAC findings are STATIC
@@ -176,15 +267,41 @@ pub(super) fn build_judgment_prompt_with(
     // breach on their own (the JEF-134 over-promotion guardrail). Both lists are already
     // fenced/capped/budgeted lines from `entry_findings`.
     let (secret_lines, posture_lines) = entry_findings(graph, entry);
+    RenderedEvidence {
+        cves,
+        behavior_lines,
+        objective_lines,
+        secret_lines,
+        posture_lines,
+    }
+}
+
+/// Assemble the final prompt + per-section fingerprints from rendered `ev`. `changes_block` is
+/// spliced in after the reachable-objectives list: empty (`""`) for the full-state prompt (the
+/// non-delta callers — byte-identical to the pre-ADR-0023 prompt), or the rendered "Changes
+/// since…" section for the delta build.
+fn assemble(
+    entry: &NodeKey,
+    ev: &RenderedEvidence,
+    changes_block: &str,
+) -> (String, PromptSections) {
+    // No cap on objectives: the model judges every reachable objective. Truncating to a
+    // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
+    // objectives) is exactly the case worth showing in full. A larger prompt is slower on the
+    // CPU Pi (~2 min for a ~110-objective entry) but that latency is amortized by the verdict
+    // cache, and accuracy beats speed for the judgement.
+    let objectives = ev.objective_lines.join("\n");
     // JEF-387: fingerprint each section from the SAME rendered lines the prompt below
     // interpolates — no re-parsing the rendered string. `objectives` is already the joined
     // objective lines; every other field is hashed from its sorted+deduped line vec, so a
-    // section hash changes iff that section's rendered content changes.
+    // section hash changes iff that section's rendered content changes. The "Changes since…"
+    // section (ADR-0023) is NOT a fingerprinted section: it is delta-derived attention, not new
+    // state — the re-judge decision is the surface-delta gate, not this hash.
     let sections = PromptSections {
-        runtime: section_hash(&behavior_lines),
-        cves: section_hash(&cves),
-        secrets: section_hash(&secret_lines),
-        posture: section_hash(&posture_lines),
+        runtime: section_hash(&ev.behavior_lines),
+        cves: section_hash(&ev.cves),
+        secrets: section_hash(&ev.secret_lines),
+        posture: section_hash(&ev.posture_lines),
         objectives: section_hash_str(&objectives),
         entry: section_hash_str(&entry.0),
     };
@@ -226,7 +343,7 @@ Exposed secrets baked into this image (a usable credential on the path — EXPLO
 Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
-{objectives}
+{objectives}{changes}
 
 Decide:
   "exploitable" — a reached objective WITH exploitation evidence: a CVE from the list above actually running, an alert/hands-on-keyboard runtime signal, OR an exposed secret baked into the image.
@@ -236,13 +353,27 @@ Decide:
 
 Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above — never invent, recall, or copy a CVE id from anywhere else; if the CVE list is "(none)", do not name any CVE."#,
         entry = fence(&entry.0),
-        cves = fence_list(&cves),
-        secrets = fence_list(&secret_lines),
-        runtime = fence_list(&behavior_lines),
-        posture = fence_list(&posture_lines),
+        cves = fence_list(&ev.cves),
+        secrets = fence_list(&ev.secret_lines),
+        runtime = fence_list(&ev.behavior_lines),
+        posture = fence_list(&ev.posture_lines),
         objectives = objectives,
+        changes = changes_block,
     );
     (prompt, sections)
+}
+
+/// Render the "Changes since the last decisive verdict" prompt section (ADR-0023, JEF-391): the
+/// ADDITIONS since the entry's baseline, fenced like all other untrusted evidence (`fence_list`
+/// → `(none)` when nothing was added). The full current state above remains the CONTEXT — this
+/// section only DIRECTS attention to what is NEW; it never replaces the state. Always rendered on
+/// the delta path (with `(none)` when empty), so the model sees a consistent shape. The leading
+/// blank line keeps it visually separated from the objectives list.
+fn render_changes_block(changes: &ChangesSince) -> String {
+    format!(
+        "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list; pay particular attention to whether these NEW elements introduce exploitation evidence or complete an exploitable path): {}",
+        fence_list(&changes.rendered_lines()),
+    )
 }
 
 /// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed

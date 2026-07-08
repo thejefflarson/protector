@@ -14,9 +14,10 @@
 //!
 //! Field meanings the collector relies on:
 //! - `entry`  — the entry key: the per-entry timeline key.
-//! - `fp`     — the whole-prompt hash (the verdict-cache key). UNCHANGED from the entry's prior
-//!   line ⇒ an Uncertain-retry (JEF-234: model verdict churn, not prompt). CHANGED ⇒ prompt
-//!   churn, attributed to whichever `sec_*` field moved.
+//! - `fp`     — the FULL-STATE prompt hash (the verdict-cache key; excludes the delta-only
+//!   "Changes since…" section, JEF-391). UNCHANGED from the entry's prior line ⇒ an
+//!   Uncertain-retry (JEF-234: model verdict churn, not prompt). CHANGED ⇒ state churn,
+//!   attributed to whichever `sec_*` field moved.
 //! - `chain`  — the objective/technique-SET shape hash: entries with the same shape group.
 //! - `sec_*`  — the six per-section fingerprints; the one that changed between two consecutive
 //!   lines for an entry IS the attributed cause.
@@ -105,6 +106,7 @@ mod tests {
                 entry: "e1".into(),
             },
             chain: "ch1".into(),
+            surface: crate::engine::reason::adjudicate::JudgedSurface::default(),
             idxs: vec![],
         };
 
