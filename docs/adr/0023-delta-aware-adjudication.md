@@ -1,6 +1,6 @@
 # 0023. Delta-aware adjudication: the state is the context, the delta is the question
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-08
 
 ## Context
