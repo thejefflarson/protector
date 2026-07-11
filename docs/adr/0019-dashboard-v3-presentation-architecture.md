@@ -1,6 +1,22 @@
 # ADR-0019 — Dashboard v3: the presentation architecture (view_model / component / page split, honesty invariants, light theme)
 
-**Status:** Accepted
+**Status:** Accepted; presentation-*mechanism* **Superseded in part by
+[ADR-0025](0025-dashboard-v4-preact-client-render.md)**
+
+> **Supersession note (ADR-0025, dashboard v4).** ADR-0025 reverses this ADR's
+> presentation *mechanism* only:
+> - **§1 (Server-rendered, zero-egress, light theme)** — the maud server-render + `include_str!`
+>   CSS/JS + same-origin `/fragment` **HTML-partial poll** is **superseded**. The engine now
+>   serves a bundled Preact client that reconciles from a same-origin, read-only **JSON**
+>   snapshot; zero-egress, no-CDN, same-origin, read-only, and the light theme all carry over.
+> - **§2 (the view_model → components → page → routes split)** — the **maud render half**
+>   (`components/` `Props -> Markup`, `page.rs`, `/fragment`) is **superseded**; the
+>   **`view_model`/props half is RETAINED and elevated** to the serde-serialized JSON contract.
+>
+> **What SURVIVES unchanged:** **§3 (the information architecture)** and **§4 (the honesty
+> model — three orthogonal axes)**, plus the **JEF-281 amendment** (finding detail shows all
+> proven paths). These were the product; ADR-0025 preserves them on the new stack. The content
+> below is retained in full for that reason — see ADR-0025 for what is lost vs kept.
 
 ## Context
 
