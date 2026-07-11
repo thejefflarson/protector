@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::state::{Finding, PathStep};
 
+use super::PreactTabs;
 use super::page;
 use super::tests::{breach_finding, judging_readiness};
 use super::view_model::build_findings_view;
@@ -56,7 +57,7 @@ fn finding_detail_shows_all_proven_paths_not_one() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The header pluralizes, and BOTH proven paths render as numbered stacked chains.
     assert!(html.contains("proven paths"), "the header pluralizes");
     assert!(html.contains("path 1"), "the first proven path is labelled");
@@ -80,7 +81,7 @@ fn no_cut_finding_makes_the_redundant_path_reason_legible() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The multiple paths ARE the no-cut explanation, stated in words.
     assert!(html.contains("redundant paths"));
     assert!(
@@ -124,7 +125,7 @@ fn wide_path_fanout_collapses_by_default_but_expands_to_the_full_set() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The overflow (5 - 3 shown) collapses into an expandable disclosure — not an unbounded wall.
     assert!(
         html.contains("class=\"more-paths\""),

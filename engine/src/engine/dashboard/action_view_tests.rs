@@ -14,6 +14,7 @@ use crate::engine::state::{
     RuntimeCoverage, WouldActEntry, derive_readiness,
 };
 
+use super::PreactTabs;
 use super::page;
 use super::tests::{breach_finding, judging_readiness};
 use super::view_model::{
@@ -362,7 +363,7 @@ fn fragment_has_no_document_shell() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let frag = page::findings_fragment(&view).into_string();
+    let frag = page::findings_fragment(&view, PreactTabs::default()).into_string();
     assert!(!frag.contains("<!DOCTYPE"), "a fragment carries no doctype");
     assert!(!frag.contains("<html"), "nor a document element");
     // But it does carry the strip (so a poll refreshes coverage/freshness).

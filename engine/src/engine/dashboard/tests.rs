@@ -10,6 +10,7 @@ use crate::engine::state::{
     RuntimeCoverage, derive_readiness,
 };
 
+use super::PreactTabs;
 use super::page;
 use super::view_model::build_findings_view;
 
@@ -93,7 +94,7 @@ pub(super) fn breach_finding(entry: &str, verdict: Verdict) -> Finding {
 #[test]
 fn warming_empty_never_renders_all_clear() {
     let view = build_findings_view("prod".into(), &[], &[], &warming_readiness(), None);
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         !html.contains("all clear"),
         "a warming dashboard must never claim all-clear"
@@ -114,7 +115,7 @@ fn timed_out_empty_never_renders_all_clear() {
         &timed_out_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(!html.contains("all clear"));
     assert!(html.contains("not answering") || html.contains("unjudged"));
 }
@@ -128,7 +129,7 @@ fn judging_empty_is_the_only_state_that_says_all_clear() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         html.contains("all clear"),
         "an empty list IS all-clear when the model is judging"
@@ -149,7 +150,7 @@ fn judging_but_awaiting_entry_is_watching_not_all_clear() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         !html.contains("all clear"),
         "an awaiting entry forbids the green all-clear"
@@ -172,7 +173,7 @@ fn judging_but_uncertain_entry_is_not_all_clear() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         !html.contains("all clear"),
         "an uncertain entry forbids the green all-clear"
@@ -203,7 +204,7 @@ fn uncertain_and_awaiting_rows_are_not_green() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The uncertain/awaiting rows carry their own (non-cleared) posture tokens.
     assert!(html.contains("rail-uncertain"));
     assert!(html.contains("rail-awaiting"));
@@ -226,7 +227,7 @@ fn awaiting_row_carries_the_elevated_treatment_hooks() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         html.contains("data-posture=\"awaiting\""),
         "the row exposes the awaiting hook the tint CSS targets"
@@ -256,7 +257,7 @@ fn empty_evidence_renders_nothing_not_an_absent_marker() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // No implied-absent text anywhere (row cluster or detail panel).
     assert!(
         !html.contains("no evidence"),
@@ -288,7 +289,7 @@ fn finding_row_has_first_column_expander_toggle() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The expander is a button with aria-expanded (accessibility gate), starting collapsed.
     assert!(
         html.contains("class=\"expander\""),
@@ -322,7 +323,7 @@ fn finding_row_drops_the_old_why_pulldown() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The "why — verdict, path, evidence" summary text is gone.
     assert!(
         !html.contains("verdict, path, evidence"),
@@ -350,7 +351,7 @@ fn proven_path_renders_as_a_vertical_chain_with_marked_cut() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The chain container + node/edge structure (not the old flat hop-list).
     assert!(
         html.contains("class=\"chain\""),
@@ -385,7 +386,7 @@ fn proven_path_is_honest_when_no_cut_exists() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(html.contains("class=\"chain\""), "still a chain diagram");
     assert!(
         !html.contains("chain-edge-cut"),
@@ -424,7 +425,7 @@ fn proven_path_cascades_as_an_indented_staircase() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The entry node sits flush (step 0); each deeper hop carries an increasing step class.
     assert!(html.contains("chain-step-0"), "the entry node is at step 0");
     assert!(
@@ -461,7 +462,7 @@ fn live_column_is_dropped_and_tag_rides_in_the_posture_chip() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // The standalone column header is gone.
     assert!(
         !html.contains("LIVE?"),
@@ -498,7 +499,7 @@ fn non_breach_rows_carry_no_live_subtag() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(!html.contains("subtag-live"));
     assert!(!html.contains("subtag-judged"));
     assert!(!html.contains("subtag-none"));
@@ -519,7 +520,7 @@ fn shadow_mode_renders_the_warning_pill() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(html.contains("mode-shadow warn"), "shadow is the warn pill");
     assert!(html.contains("SHADOW"), "labelled SHADOW");
     assert!(html.contains("\u{26A0}"), "carries the ⚠ warning glyph");
@@ -550,7 +551,7 @@ fn finding_rows_carry_unique_detail_ids() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // Collect every detail-row id; they must all be distinct (no duplicate aria-controls target).
     let ids: Vec<&str> = html
         .match_indices("id=\"detail-")
@@ -585,7 +586,7 @@ fn pod_replicas_render_as_one_workload_row_with_replica_count() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     // One representative row labeled with the workload + the ×3 replica count.
     assert!(
         html.contains("replica-count"),
@@ -624,7 +625,7 @@ fn untrusted_verdict_prose_is_escaped() {
         &judging_readiness(),
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
     assert!(
         !html.contains("<script>alert"),
         "a raw <script> must never reach the output"
