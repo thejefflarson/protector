@@ -20,11 +20,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use axum::Json;
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use serde::Serialize;
 
 use super::journal::DecisionJournal;
 use super::policy_log::PolicyDecisionLog;
@@ -219,6 +221,46 @@ async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>
     Html(markup.into_string())
 }
 
+/// Serialize a view-model's props as a `no-store` JSON response — the read-only snapshot the
+/// Preact client reconciles from (ADR-0025).
+///
+/// This is a THIN serializer over the SAME `*ViewProps` the maud path renders — there is no
+/// second DTO and NO new mapping (ADR-0025 decision (a): serde-props-as-contract), so the JSON
+/// can never drift from the maud render or smuggle a decision the render doesn't make. The
+/// server-derived honesty tokens (`all-clear`/`watching`, per-row `posture`, `is-cleared`, the
+/// blind caveat) are already decided in the props and serialize as decided values — the client
+/// performs zero honesty derivation. `Cache-Control: no-store` mirrors the CSS/JS routes: this is
+/// a per-session-gated, zero-egress snapshot that must never sit in a shared edge cache (JEF-283).
+fn view_json<T: Serialize>(view: T) -> Response {
+    ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
+}
+
+/// `GET /api/findings.json` — the read-only Findings view-model snapshot (ADR-0025). The SAME
+/// props the Findings tab renders; GET-only, `no-store`, no gating field.
+async fn findings_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.findings_view())
+}
+
+/// `GET /api/alerts.json` — the read-only Alerts view-model snapshot (ADR-0025).
+async fn alerts_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.alerts_view())
+}
+
+/// `GET /api/action.json` — the read-only Action view-model snapshot (ADR-0025).
+async fn action_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.action_view())
+}
+
+/// `GET /api/readiness.json` — the read-only Readiness view-model snapshot (ADR-0025).
+async fn readiness_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.readiness_view())
+}
+
+/// `GET /api/admission.json` — the read-only Admission view-model snapshot (ADR-0025).
+async fn admission_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.admission_view())
+}
+
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
 ///
 /// `Cache-Control: no-store` is load-bearing behind Cloudflare Access (JEF-283): Cloudflare
@@ -255,6 +297,14 @@ pub fn router(state: DashboardState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/fragment", get(fragment))
+        // The read-only per-view JSON snapshots the Preact client reconciles from (ADR-0025).
+        // GET-only, same router state/authz as the page routes, `no-store`; each returns the
+        // SAME view-model its tab renders — no write route, no new mapping, no decision field.
+        .route("/api/findings.json", get(findings_json))
+        .route("/api/alerts.json", get(alerts_json))
+        .route("/api/action.json", get(action_json))
+        .route("/api/readiness.json", get(readiness_json))
+        .route("/api/admission.json", get(admission_json))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js))
         .with_state(state)
@@ -281,6 +331,11 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 
 #[cfg(test)]
 mod tests;
+
+// JEF-395: HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025) — same-view-model,
+// GET-only, no-store. In their own file to keep `mod.rs` focused and under the 1,000-line cap.
+#[cfg(test)]
+mod api_json_tests;
 
 // JEF-368: the Action / Readiness secondary-view render tests, split out to keep `tests.rs`
 // under the 1,000-line cap (CLAUDE.md).
