@@ -1,10 +1,11 @@
 //! The proof layer (ADR-0002, Question 2): find **provable** attack chains in the
 //! graph and the single edge that breaks each one.
 //!
-//! This is the deterministic half of "a model may propose; only deterministic
-//! proof may move privilege." It walks the graph directly — no model. Every edge
-//! is a deterministic observation by construction (no hypothesis-grade edges
-//! exist), so a chain it reports is grounded entirely in deterministic facts.
+//! This is the sole source of attack chains: an exhaustive deterministic
+//! enumerator that walks the graph directly — no model, no propose-then-confirm
+//! stage. Every edge is a deterministic observation by construction, so a chain it
+//! reports is grounded entirely in deterministic facts. "Only deterministic proof
+//! may move privilege" holds by construction — there is no other producer of chains.
 //!
 //! ## What "proven" means in this slice
 //!

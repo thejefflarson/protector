@@ -8,9 +8,12 @@
 //! Line shape (tracing's default `key=value` field format, all values space-free):
 //!
 //! ```text
-//! <ts>  INFO protector::engine::churn_diag: ADJ-MISS-DIAG entry=<key> fp=<hash> chain=<hash> \
+//! <ts>  DEBUG protector::engine::churn_diag: ADJ-MISS-DIAG entry=<key> fp=<hash> chain=<hash> \
 //!   sec_runtime=<h> sec_cves=<h> sec_secrets=<h> sec_posture=<h> sec_objectives=<h> sec_entry=<h>
 //! ```
+//!
+//! Emitted at DEBUG (the churn is fixed — JEF-390/JEF-391 — so it's silent by default); raise the
+//! engine to `debug` to collect a fresh window.
 //!
 //! Field meanings the collector relies on:
 //! - `entry`  — the entry key: the per-entry timeline key.
@@ -31,7 +34,10 @@ use super::PendingEntry;
 /// full-prompt dump when `PROTECTOR_ADJ_DIAG_FULL` is set. See the module docs for the format.
 pub(super) fn log_rejudge(pending: &PendingEntry) {
     let sections = &pending.sections;
-    tracing::info!(
+    // DEBUG level: the churn is understood + fixed (JEF-390/JEF-391), so this stays silent in
+    // normal operation. Raise the engine to `debug` to collect a fresh window for
+    // `scripts/churn_analysis.py`.
+    tracing::debug!(
         entry = %pending.entry_key,
         fp = %pending.fingerprint,
         chain = %pending.chain,
@@ -113,7 +119,7 @@ mod tests {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(BufWriter(buf.clone()))
             .finish();
         tracing::subscriber::with_default(subscriber, || log_rejudge(&pending));
