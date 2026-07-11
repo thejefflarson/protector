@@ -12,8 +12,8 @@
 //! Like the Vulnerability port, Health abstracts its source. The richest source is
 //! an SLO system (Prometheus error budgets); the default adapter here derives a
 //! coarse health from **pod status** — a real signal we already observe, no extra
-//! dependency — and a Prometheus-backed provider can replace it behind the same
-//! trait.
+//! dependency — and a Prometheus-backed provider can replace [`PodStatusHealth`] with
+//! its own [`assess`](PodStatusHealth::assess)-shaped adapter when that source lands.
 
 use std::collections::BTreeMap;
 
@@ -85,16 +85,30 @@ impl HealthReport {
     }
 }
 
-/// Answers the health of the cluster's workloads from some source.
-pub trait HealthProvider {
-    fn assess(&self, snapshot: &Snapshot) -> HealthReport;
-}
-
-/// Default provider: derive health from observed pod status. Coarse but real and
-/// dependency-free; an SLO/Prometheus provider replaces it behind the trait.
+/// Default health source: derive each workload's health from observed pod status.
+/// Coarse but real and dependency-free; an SLO/Prometheus source would replace this
+/// with its own [`assess`](Self::assess)-shaped adapter (there is one source today, so
+/// it is used concretely rather than behind a trait).
 pub struct PodStatusHealth;
 
 impl PodStatusHealth {
+    /// Assess the health of every workload in `snapshot` from its pod status,
+    /// keyed exactly like the graph's workload nodes.
+    pub fn assess(&self, snapshot: &Snapshot) -> HealthReport {
+        let mut report = HealthReport::default();
+        for pod in &snapshot.pods {
+            let Some(name) = pod.metadata.name.as_deref() else {
+                continue;
+            };
+            let namespace = pod.metadata.namespace.as_deref().unwrap_or("default");
+            report.insert(
+                NodeKey::workload(namespace, "Pod", name),
+                Self::pod_health(pod),
+            );
+        }
+        report
+    }
+
     fn pod_health(pod: &Pod) -> Health {
         let Some(status) = pod.status.as_ref() else {
             return Health::Halted; // observed but no status yet ⇒ not serving
@@ -126,23 +140,6 @@ impl PodStatusHealth {
             }
             Some(_) => Health::Degraded,
         }
-    }
-}
-
-impl HealthProvider for PodStatusHealth {
-    fn assess(&self, snapshot: &Snapshot) -> HealthReport {
-        let mut report = HealthReport::default();
-        for pod in &snapshot.pods {
-            let Some(name) = pod.metadata.name.as_deref() else {
-                continue;
-            };
-            let namespace = pod.metadata.namespace.as_deref().unwrap_or("default");
-            report.insert(
-                NodeKey::workload(namespace, "Pod", name),
-                Self::pod_health(pod),
-            );
-        }
-        report
     }
 }
 

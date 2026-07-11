@@ -564,14 +564,55 @@ impl VerdictStore {
             .and_then(|e| e.display.clone())
     }
 
-    /// Record the entry's DISPLAY verdict the instant it is decided — making it visible
-    /// on the findings snapshot immediately (the JEF-157 no-lag fix). A live verdict
-    /// supersedes any journal-restored one for the entry.
+    /// Record the entry's DISPLAY verdict UNCONDITIONALLY — a direct setter, no carry-forward
+    /// policy. A live verdict supersedes any journal-restored one for the entry. The judging
+    /// loop goes through [`resolve_display`](Self::resolve_display) (which owns the carry-forward
+    /// precedence and calls this); direct callers (e.g. the dashboard preview seeding fixed
+    /// display states) use this primitive.
     pub fn set_display(&self, entry: &str, verdict: Verdict) {
         self.update(entry, |e| {
             e.display = Some(verdict);
             e.restored = None;
         });
+    }
+
+    /// Resolve AND record what to DISPLAY for an entry given THIS pass's verdict, in one
+    /// place (JEF-371). This is the single owner of the display carry-forward policy — the
+    /// blank-dashboard-incident surface (JEF-157) — collapsing the precedence that used to be
+    /// split between the engine's publish phase and [`set_display`](Self::set_display):
+    ///
+    /// - A DECISIVE verdict this pass is shown as-is and becomes the new displayed verdict.
+    /// - An `Uncertain` this pass (a transient model timeout / outage) does NOT regress the
+    ///   displayed posture: if a prior DECISIVE verdict is on display it is CARRIED FORWARD, so
+    ///   the dashboard keeps showing the last real call rather than blanking to "uncertain"
+    ///   (JEF-234's Uncertain-never-cached discipline lives on the cache path; this is its
+    ///   display twin). With no prior decisive verdict, the `Uncertain` itself is shown.
+    /// - Whatever is chosen becomes the live `display`, which SUPERSEDES any journal-restored
+    ///   summary for the entry (a live verdict always wins over a boot-restored one — JEF-141).
+    ///   A restored summary therefore shows only until the first live verdict lands here.
+    ///
+    /// Returns the resolved verdict so the caller can journal / notify / stamp chains with the
+    /// exact thing on display. The action logic still keys off the raw `this_pass` verdict — this
+    /// governs only what is DISPLAYED (ADR-0016: presentation is a view, never a decision gate).
+    pub fn resolve_display(&self, entry: &str, this_pass: &Verdict) -> Verdict {
+        let mut resolved = None;
+        self.update(entry, |e| {
+            let carry_forward = matches!(this_pass, Verdict::Uncertain(_))
+                && e.display
+                    .as_ref()
+                    .is_some_and(|prior| !matches!(prior, Verdict::Uncertain(_)));
+            if !carry_forward {
+                // A decisive verdict, or an Uncertain with no prior decisive display, lands as
+                // the new displayed verdict and supersedes any journal-restored summary.
+                e.display = Some(this_pass.clone());
+                e.restored = None;
+            }
+            // else: keep the prior decisive `display` (and its already-cleared `restored`) exactly
+            // as they are — the carry-forward. `display` is guaranteed `Some` in both branches, so
+            // the resolved verdict is read out under the SAME lock (no second acquisition).
+            resolved = e.display.clone();
+        });
+        resolved.expect("resolve_display always sets or keeps a display verdict")
     }
 
     /// The last verdict summary journaled/notified for an entry — the dedup key.
