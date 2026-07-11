@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2020",
+    "lib": ["es2020", "dom", "dom.iterable"],
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false
+  },
+  "include": ["src", "test", "build.mjs", "vitest.config.js"]
+}
