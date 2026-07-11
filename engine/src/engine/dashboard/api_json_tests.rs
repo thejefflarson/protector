@@ -159,3 +159,54 @@ async fn an_empty_engine_never_serves_a_false_green() {
         "a warming/blind engine must not ship the green token"
     );
 }
+
+/// Guard: the strict same-origin CSP (ADR-0025) covers the JSON API, not just the page routes.
+///
+/// The `/api/*.json` snapshots serve raw, untrusted evidence (CVE / verdict / advisory text). The
+/// CSP layer wraps the whole [`super::router`], so a snapshot inherits it — this test drives the
+/// REAL router and asserts the header is present and strict on `GET /api/findings.json`. It is the
+/// regression net that a future router edit can't silently drop the layer off the JSON API: pin
+/// `connect-src 'self'` / `script-src 'self'` / `frame-ancestors 'none'` / `form-action 'self'`,
+/// and forbid `'unsafe-inline'` / `'unsafe-eval'` (Finding 1, JEF-395 / JEF-396).
+#[tokio::test]
+async fn the_json_api_carries_the_strict_csp() {
+    let router = super::router(empty_state());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/findings.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let csp = response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("the JSON API must carry a Content-Security-Policy header");
+
+    for directive in [
+        "connect-src 'self'",
+        "script-src 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ] {
+        assert!(
+            csp.contains(directive),
+            "CSP on /api/findings.json must pin `{directive}`, got: {csp:?}"
+        );
+    }
+    assert!(
+        !csp.contains("unsafe-inline"),
+        "CSP on the JSON API must not allow 'unsafe-inline', got: {csp:?}"
+    );
+    assert!(
+        !csp.contains("unsafe-eval"),
+        "CSP on the JSON API must not allow 'unsafe-eval', got: {csp:?}"
+    );
+}
