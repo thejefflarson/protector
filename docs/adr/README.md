@@ -30,5 +30,7 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0020](0020-signature-continuity.md) | Supply-chain trust is signature continuity: observe every image, learn a per-repo TOFU baseline, treat the signed→unsigned / identity-change regression as the signal — not prefix-gated single-identity (amended: JEF-280 baseline-relative downgrade; JEF-275 build-provenance as a second continuity axis) | Accepted |
 | [0021](0021-two-setting-operating-posture.md) | Two-setting operating posture: `mode` (audit default / enforce) + one `enforceScope` arms all three enforcement surfaces (signature + mesh webhooks + engine live cut), fail-closed webhook selector and actuation RBAC derived from it — no per-surface toggle, no wildcard | Accepted |
 | [0022](0022-quarantine-the-entry-is-the-default-containment.md) | Quarantine the internet-facing entry is the default containment (entry-only, additive/reversible default-deny); the surgical edge-cut is the refinement used only when it suffices | Accepted |
+| [0023](0023-delta-aware-adjudication.md) | Delta-aware adjudication: the full cluster state is the context, the change is the question | Accepted |
+| [0024](0024-no-redundant-by-construction-predicates.md) | Corroboration shapes must be load-bearing when merged, not deferred-dead — a predicate whose result is already fixed by an existing arm lands when it bites, not ahead of it | Accepted |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.
