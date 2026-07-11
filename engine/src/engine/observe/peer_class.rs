@@ -110,6 +110,34 @@ pub fn foothold_peer(behavior: &Behavior) -> Option<&'static str> {
     }
 }
 
+/// The resolved namespace of an enriched in-cluster peer — the `namespace` segment of a
+/// JEF-131-resolved `namespace/name:port (raw-ip)` label — or `None` when the peer is not a
+/// resolved cluster peer (a bare `IP:port` internet / unresolved peer has no namespace).
+///
+/// A resolved peer always carries a `namespace/name` label before the first `:`; we take the
+/// segment before the first `/` of that label. A bare `IP:port` (no `/`) resolves to `None`,
+/// so internet egress and unresolved in-cluster traffic never look cross-tenant.
+fn resolved_peer_namespace(peer: &str) -> Option<&str> {
+    let label = peer.split(':').next()?;
+    let (ns, _name) = label.split_once('/')?;
+    (!ns.is_empty()).then_some(ns)
+}
+
+/// Whether an enriched `NetworkConnection` `peer` resolves to a workload in a **different**
+/// namespace than `source_ns` — the cross-tenant lateral-movement shape (JEF-319). A
+/// connection from the proven entry/foothold to a service/pod in another namespace/tenant is
+/// the classic lateral move an attacker makes once they own the front door.
+///
+/// Conservative on purpose (ADR-0011 / ADR-0014): this returns `true` ONLY for a peer that
+/// JEF-131 resolved to a real `namespace/name` label whose namespace differs from the source.
+/// A same-namespace peer, an unresolved `IP:port`, or an internet peer all return `false`, so
+/// ordinary in-cluster and internet traffic never look cross-tenant. Whether this actually
+/// corroborates is gated further upstream (only from the proven internet-facing entry/foothold),
+/// so a legit cross-namespace service call from an ordinary pod is NOT corroborated.
+pub fn is_cross_tenant(source_ns: &str, peer: &str) -> bool {
+    resolved_peer_namespace(peer).is_some_and(|peer_ns| peer_ns != source_ns)
+}
+
 /// The rendered prefix for the collapsed INTERNET-egress line (JEF-380). Kept as a single
 /// constant so the prompt renderer and the tests agree on the exact byte string.
 const INTERNET_EGRESS_PREFIX: &str = "INTERNET egress: ";
@@ -314,6 +342,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(deduped, "INTERNET egress: GitHub [AS36459]");
+    }
+
+    #[test]
+    fn cross_tenant_is_true_only_for_a_resolved_peer_in_a_different_namespace() {
+        // A resolved peer in ANOTHER namespace than the source is cross-tenant (JEF-319).
+        assert!(is_cross_tenant("frontend", "backend/api:8080 (10.42.3.9)"));
+        assert!(is_cross_tenant(
+            "frontend",
+            "kube-system/kube-dns:53 (10.96.0.10)"
+        ));
+        // NEGATIVE: a peer in the SAME namespace as the source is ordinary in-namespace
+        // traffic — never cross-tenant.
+        assert!(!is_cross_tenant(
+            "frontend",
+            "frontend/cache:6379 (10.42.1.4)"
+        ));
+        // NEGATIVE: an unresolved bare IP:port (internet or unresolved in-cluster) has no
+        // namespace — it must never look cross-tenant.
+        assert!(!is_cross_tenant("frontend", "203.0.113.7:443"));
+        assert!(!is_cross_tenant("frontend", "10.42.1.159:8086"));
+        assert!(!is_cross_tenant("frontend", "[2606:4700::1111]:443"));
+        // NEGATIVE: an IMDS peer is a bare IP, not a resolved label — not cross-tenant.
+        assert!(!is_cross_tenant("frontend", "169.254.169.254:80"));
+    }
+
+    #[test]
+    fn resolved_peer_namespace_reads_only_the_label_segment() {
+        assert_eq!(
+            resolved_peer_namespace("backend/api:8080 (10.42.3.9)"),
+            Some("backend")
+        );
+        assert_eq!(
+            resolved_peer_namespace("default/kubernetes:443 (10.96.0.1)"),
+            Some("default")
+        );
+        // Bare IP:port peers carry no namespace.
+        assert_eq!(resolved_peer_namespace("203.0.113.7:443"), None);
+        assert_eq!(resolved_peer_namespace("169.254.169.254:80"), None);
     }
 
     #[test]

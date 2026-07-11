@@ -4,10 +4,38 @@
 //! `corroborated`; they never actuate. `corroborates` is the per-objective seam the ADR
 //! is stated in terms of; `corroborated_for` resolves it for an entry's signals.
 
+use std::time::Duration;
+
 use petgraph::stable_graph::NodeIndex;
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{Behavior, Node, SecurityGraph};
+use crate::engine::graph::{Behavior, Node, RuntimeSignal, SecurityGraph};
+
+/// The context the entry workload provides to the corroboration predicate (JEF-319). The
+/// flat per-behavior [`corroborates`] relation is context-free on purpose (regression-safe);
+/// the two entry-scoped shapes below — cross-tenant lateral and reverse-shell — need MORE
+/// than `behavior + attack`, so they read the entry's own namespace and exposure from here.
+///
+/// Both shapes are scoped to a real internet-facing entry so an ordinary cross-namespace
+/// service call or an ordinary egress from a non-entry pod never corroborates (ADR-0011 /
+/// ADR-0014 conservatism). `source_ns` is the entry workload's namespace; `is_foothold` is
+/// true only when the entry is a proven internet-facing foothold (a critical/KEV front door).
+#[derive(Clone, Copy)]
+pub(super) struct EntryContext<'a> {
+    /// The entry workload's own namespace — the SOURCE side of the cross-tenant comparison.
+    pub source_ns: &'a str,
+    /// Whether the entry is a proven internet-facing foothold (ADR-0009): the gate that
+    /// scopes both new shapes to a real front door, not any workload.
+    pub is_foothold: bool,
+}
+
+/// The tight window in which an outbound egress "closely follows" a notable exec for the
+/// reverse-shell shape (JEF-319). An attacker's `bash → outbound` reverse shell fires within
+/// seconds; we allow a generous-but-bounded 60s so a slightly-lagged sensor still correlates,
+/// yet an unrelated exec minutes earlier does NOT. Kept small on purpose (ADR-0011): a wide
+/// window would re-admit the ordinary "container execs, then later egresses" false positive
+/// the flat predicate deliberately excludes.
+const REVERSE_SHELL_WINDOW: Duration = Duration::from_secs(60);
 
 /// Whether a runtime `behavior` corroborates a chain whose objective has technique
 /// `attack` — the `corroborates(behavior, objective)` relation (ADR-0014). This is the
@@ -98,37 +126,127 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
     }
 }
 
-/// Whether any live signal on `entry` corroborates a chain whose objective has technique
-/// `attack` and whose entry is the proven foothold `foothold` — the `corroborated-now`
-/// predicate (ADR-0009). See [`corroborates`] for the underlying per-behavior relation.
+/// Whether any live signal on the entry corroborates a chain whose objective has technique
+/// `attack`, whose entry is the proven foothold `foothold`, and whose entry has
+/// [`EntryContext`] `entry` — the `corroborated-now` predicate (ADR-0009). See
+/// [`corroborates`] for the underlying per-behavior relation.
 ///
-/// A behavior corroborates if it evidences **either** the objective's tactic **or** the
-/// foothold's tactic (JEF-77). The objective side is the per-objective seam (a SecretRead
-/// corroborates the CredentialAccess objective, an internet egress the Exfiltration one);
-/// the foothold side closes the gap that left the `LibraryLoaded → InitialAccess` arm
-/// dormant — a vuln-matched library load (already pruned by JEF-75) on an internet-facing
-/// entry evidences the *entry* foothold (T1190), never an objective's `attack`. With no
-/// foothold (`None`) only the objective side applies, so an assume-breach chain is
-/// unaffected.
+/// A behavior corroborates via the flat relation if it evidences **either** the objective's
+/// tactic **or** the foothold's tactic (JEF-77). The objective side is the per-objective seam
+/// (a SecretRead corroborates the CredentialAccess objective, an internet egress the
+/// Exfiltration one); the foothold side closes the gap that left the `LibraryLoaded →
+/// InitialAccess` arm dormant — a vuln-matched library load (already pruned by JEF-75) on an
+/// internet-facing entry evidences the *entry* foothold (T1190), never an objective's
+/// `attack`. With no foothold (`None`) only the objective side applies, so an assume-breach
+/// chain is unaffected.
+///
+/// A chain is corroborated if EITHER the context-free per-behavior relation holds for any
+/// signal (the objective's tactic OR the foothold's tactic, JEF-77) OR one of the two
+/// entry-scoped shapes JEF-319 adds fires:
+///  - **cross-tenant lateral:** a connection from the entry to a peer in a DIFFERENT
+///    namespace ([`cross_tenant_lateral`]), scoped to a proven foothold entry, or
+///  - **reverse-shell:** a notable exec closely followed by outbound egress from the entry
+///    ([`reverse_shell_shape`]), scoped to an internet-facing entry.
+///
+/// Both new shapes stay OFF the flat egress predicate: ordinary internet egress and ordinary
+/// in-cluster traffic still corroborate nothing (ADR-0011). Like every arm here this only
+/// sets `corroborated`; it never actuates (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
-    runtime: &[crate::engine::graph::RuntimeSignal],
+    runtime: &[RuntimeSignal],
     attack: &AttackRef,
     foothold: Option<&AttackRef>,
+    entry: EntryContext<'_>,
 ) -> bool {
     runtime.iter().any(|s| {
         corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
+    }) || cross_tenant_lateral(runtime, entry)
+        || reverse_shell_shape(runtime, entry)
+}
+
+/// The cross-tenant lateral-movement shape (JEF-319): a `NetworkConnection` from the entry to
+/// a service/pod in a DIFFERENT namespace corroborates lateral movement — the classic move an
+/// attacker makes after owning the front door.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014): corroborates ONLY when the entry is a proven
+/// internet-facing foothold (`entry.is_foothold`) AND the peer resolved (JEF-131) to a real
+/// `namespace/name` label in a namespace other than the entry's. A same-namespace call, an
+/// unresolved/internet peer, or ANY call from a non-foothold entry returns `false`, so a legit
+/// cross-namespace service call from an ordinary pod never corroborates.
+pub(super) fn cross_tenant_lateral(runtime: &[RuntimeSignal], entry: EntryContext<'_>) -> bool {
+    if !entry.is_foothold {
+        return false;
+    }
+    runtime.iter().any(|s| match &s.behavior {
+        Behavior::NetworkConnection { peer, .. } => {
+            crate::engine::observe::peer_class::is_cross_tenant(entry.source_ns, peer)
+        }
+        _ => false,
+    })
+}
+
+/// The reverse-shell shape (JEF-319): outbound internet egress from an internet-facing entry
+/// CLOSELY FOLLOWING a notable exec (the JEF-117 notable-exec class) corroborates — the
+/// `exec-a-shell → dial-out` signature of a reverse shell.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014): corroborates ONLY when the entry is
+/// internet-facing (`entry.is_foothold`) AND some notable exec is followed by an outbound
+/// (`internet: true`) connection within [`REVERSE_SHELL_WINDOW`], using the timestamps already
+/// on each [`RuntimeSignal`]. Egress with no preceding notable exec, an exec OUTSIDE the
+/// window, or egress from a non-foothold entry all return `false` — so ordinary egress (even
+/// after an unrelated exec) never corroborates.
+///
+/// Relationship to the blanket notable-exec arm (JEF-117): a notable exec already corroborates
+/// ANY objective via the flat [`corroborates`] relation, so today this narrower shape does not
+/// change the `corroborated_for` boolean when an exec is present — it is redundant-but-strict.
+/// It is kept as an explicit, independently-tested predicate because the retire-Falco direction
+/// may narrow that blanket exec arm, at which point this exec+timing correlation becomes the
+/// load-bearing reverse-shell signal. It is unit-tested directly (both ways) rather than only
+/// through `corroborated_for`, where the blanket arm masks it.
+pub(super) fn reverse_shell_shape(runtime: &[RuntimeSignal], entry: EntryContext<'_>) -> bool {
+    if !entry.is_foothold {
+        return false;
+    }
+    // Notable-exec timestamps, and outbound-egress timestamps, on the entry.
+    let execs: Vec<_> = runtime
+        .iter()
+        .filter(|s| crate::engine::observe::exec_class::notable_exec(&s.behavior).is_some())
+        .map(|s| s.provenance.observed_at)
+        .collect();
+    if execs.is_empty() {
+        return false;
+    }
+    runtime.iter().any(|s| match &s.behavior {
+        Behavior::NetworkConnection { internet: true, .. } => {
+            let egress_at = s.provenance.observed_at;
+            // An egress "closely follows" an exec when the exec is at-or-before the egress and
+            // within the window. `duration_since` is `Err` when the exec is AFTER the egress
+            // (clock skew / egress-then-exec) — that ordering is not a reverse shell.
+            execs.iter().any(|&exec_at| {
+                egress_at
+                    .duration_since(exec_at)
+                    .is_ok_and(|gap| gap <= REVERSE_SHELL_WINDOW)
+            })
+        }
+        _ => false,
     })
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
 /// per entry so [`corroborated_for`] doesn't re-look-up the constant entry node on every
 /// objective in the per-objective loop.
-pub(super) fn entry_runtime(
-    graph: &SecurityGraph,
-    entry: NodeIndex,
-) -> &[crate::engine::graph::RuntimeSignal] {
+pub(super) fn entry_runtime(graph: &SecurityGraph, entry: NodeIndex) -> &[RuntimeSignal] {
     match graph.inner().node_weight(entry) {
         Some(Node::Workload(w)) => &w.runtime,
         _ => &[],
+    }
+}
+
+/// The entry workload's own namespace (`""` for a non-workload node) — the SOURCE side of the
+/// cross-tenant comparison (JEF-319). Resolved once per entry alongside [`entry_runtime`] so
+/// the per-objective loop reads it without re-looking-up the constant entry node.
+pub(super) fn entry_namespace(graph: &SecurityGraph, entry: NodeIndex) -> &str {
+    match graph.inner().node_weight(entry) {
+        Some(Node::Workload(w)) => &w.namespace,
+        _ => "",
     }
 }

@@ -251,7 +251,7 @@ use chain::{
     MAX_PROVEN_PATHS, entry_exposed, entry_foothold, is_cuttable_edge, link_of, movement_tree,
     path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
 };
-use corroborate::{corroborated_for, entry_runtime};
+use corroborate::{EntryContext, corroborated_for, entry_namespace, entry_runtime};
 
 /// Find every proven chain in `graph` using the default objective recognizers
 /// (ADR-0005).
@@ -289,6 +289,13 @@ pub fn prove_with(
         // once here rather than re-looking-up the node inside `corroborated_for` per
         // objective.
         let runtime = entry_runtime(graph, entry);
+        // The entry-scoped context for the two JEF-319 corroboration shapes (cross-tenant
+        // lateral, reverse-shell): the entry's own namespace and whether it's a proven
+        // internet-facing foothold. Constant across objectives, so build it once.
+        let entry_ctx = EntryContext {
+            source_ns: entry_namespace(graph, entry),
+            is_foothold: foothold.is_some(),
+        };
         for &(objective, attack) in &objectives {
             if objective == entry || !tree.contains_key(&objective) {
                 continue;
@@ -297,7 +304,7 @@ pub fn prove_with(
             // — plus the entry's foothold tactic, when it has one (JEF-77), so a vuln-matched
             // library load on the front door corroborates the foothold even though no
             // objective is ever tagged INITIAL_ACCESS.
-            let corroborated = corroborated_for(runtime, &attack, foothold.as_ref());
+            let corroborated = corroborated_for(runtime, &attack, foothold.as_ref(), entry_ctx);
             let steps = path_steps(&tree, entry, objective);
             let links = steps
                 .iter()
@@ -342,6 +349,8 @@ pub fn prove_with(
     chains
 }
 
+#[cfg(test)]
+mod corroborate_context_tests;
 #[cfg(test)]
 mod corroborate_objective_tests;
 #[cfg(test)]
