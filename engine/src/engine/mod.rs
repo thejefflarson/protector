@@ -989,3 +989,8 @@ pub mod signing_rekor;
 
 #[cfg(test)]
 mod tests;
+
+// JEF-368: the journal / notifier / persistence tests, split out of `tests.rs` to keep every
+// file under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod journal_tests;

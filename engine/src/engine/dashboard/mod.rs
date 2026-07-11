@@ -282,6 +282,11 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 #[cfg(test)]
 mod tests;
 
+// JEF-368: the Action / Readiness secondary-view render tests, split out to keep `tests.rs`
+// under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod action_view_tests;
+
 // JEF-323: the Alerts view render + honesty tests (escaping / calm-empty / blind-node / path
 // annotation), in their own file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]

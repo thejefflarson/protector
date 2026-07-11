@@ -342,6 +342,8 @@ pub fn prove_with(
 }
 
 #[cfg(test)]
+mod corroborate_objective_tests;
+#[cfg(test)]
 mod corroborate_tests;
 #[cfg(test)]
 mod tests;
