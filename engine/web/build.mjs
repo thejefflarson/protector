@@ -25,9 +25,11 @@ await build({
   minify: true,
   treeShaking: true,
   format: "iife",
-  // Preact's `h`/`Fragment` JSX pragma — no React, no runtime import.
-  jsxFactory: "h",
-  jsxFragment: "Fragment",
+  // Preact's automatic JSX runtime: esbuild auto-imports `jsx`/`Fragment` from
+  // `preact/jsx-runtime`, so source files need no manual `import { h, Fragment }` pragma
+  // (which the language server flagged as "unused" without a jsx-factory config). No React.
+  jsx: "automatic",
+  jsxImportSource: "preact",
   // A modern in-cluster browser reached through the cluster's own ingress (ADR-0025 (d));
   // no legacy transpile target needed.
   target: "es2020",

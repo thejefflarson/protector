@@ -11,7 +11,7 @@
 // the built-bundle guard. Preact auto-escapes all interpolated text; raw-HTML injection
 // (the banned Preact escape hatch) is forbidden in src/ by a source guard.
 
-import { h, render } from "preact";
+import { render } from "preact";
 import { Shell } from "./shell.jsx";
 
 // The maud document keeps a server-rendered mount point (`div id="dash-root"`) inside the

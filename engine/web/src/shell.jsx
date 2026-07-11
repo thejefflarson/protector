@@ -7,7 +7,6 @@
 // already computed. It never recomputes "is this green?" — that stays in the tested
 // props layer. This shell only proves the transport; the real keyed views land later.
 
-import { h, Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
 
 // The same-origin snapshot the client reconciles from (JEF-395 owns the route). Relative,
