@@ -17,19 +17,30 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 /// The strict same-origin policy. Every fetchable directive is `'self'`; `object-src` and
-/// `base-uri` are locked to `'none'`. No `'unsafe-inline'` (every visual is a STYLEGUIDE
-/// class, ADR-0019 §5 / ADR-0025) and no `'unsafe-eval'` (Preact runs without it).
+/// `base-uri` are locked to `'none'`. `frame-ancestors 'none'` forbids embedding the operator
+/// dashboard in any frame and `form-action 'self'` pins form targets same-origin — together
+/// they close the clickjacking / UI-redress gap that `default-src` does NOT cover (framing and
+/// form submission are governed by their own directives, not `default-src`). No `'unsafe-inline'`
+/// (every visual is a STYLEGUIDE class, ADR-0019 §5 / ADR-0025) and no `'unsafe-eval'` (Preact
+/// runs without it).
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
-     style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'";
+     style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; \
+     frame-ancestors 'none'; form-action 'self'";
 
 /// Middleware that stamps the strict CSP on every dashboard response. Applied as a router
 /// `.layer(...)`, so it covers the pages, the assets, and any JSON snapshot route uniformly.
+///
+/// Alongside the CSP `frame-ancestors 'none'`, we also stamp the legacy `X-Frame-Options: DENY`
+/// so anti-framing holds on any client that predates CSP `frame-ancestors` support.
 pub async fn set_csp(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
 }
 
@@ -54,6 +65,10 @@ mod tests {
             "connect-src 'self'",
             "object-src 'none'",
             "base-uri 'none'",
+            // Anti-clickjacking / UI-redress: `default-src` does not cover framing or form
+            // submission, so these must be named explicitly (and must not silently regress).
+            "frame-ancestors 'none'",
+            "form-action 'self'",
         ] {
             assert!(
                 csp.contains(directive),
@@ -94,5 +109,15 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(header, CONTENT_SECURITY_POLICY);
+        // Belt-and-suspenders anti-framing for pre-`frame-ancestors` clients.
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_FRAME_OPTIONS)
+                .expect("X-Frame-Options is present")
+                .to_str()
+                .unwrap(),
+            "DENY"
+        );
     }
 }
