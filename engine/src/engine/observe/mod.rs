@@ -1,10 +1,13 @@
 //! The Observer: the engine's window onto **observed** cluster state (ADR-0002).
 //!
 //! A [`Snapshot`] is the raw material the capability adapters map into the graph
-//! vocabulary. This first slice observes by **listing** the objects the adapters
-//! need; ADR-0004's `list`+`watch` is the incremental optimization that lands
-//! next, but a periodic full list is the resync path the ADR already calls the
-//! source of truth, so it is the honest v0.
+//! vocabulary. The engine observes by **reflector** (ADR-0004's `list`-then-`watch`):
+//! reflectors keep an in-memory store of each watched resource current and the engine
+//! reacts to *events*, so it catches ephemeral workloads a poll between ticks would
+//! miss. See [`run_watch`](crate::engine::run_loop::run_watch) for that default path;
+//! the periodic full relist is the resync floor the ADR calls for, not the steady
+//! state. [`Snapshot::observe`] is the direct-`list` assembler still used where a
+//! one-shot cluster read is wanted (e.g. exercising adapters against a real cluster).
 
 pub mod adapter;
 pub mod alarm_class;
