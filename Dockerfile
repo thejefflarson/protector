@@ -3,6 +3,22 @@
 # the dynamically-linked binary loads on the slim runtime.
 # Pulled via mirror.gcr.io (Google's Docker Hub pull-through cache) — the homelab
 # buildkit's shared IP exhausts Docker Hub's anonymous quota → 429 (JEF-78).
+# Node stage (ADR-0025): build the Preact dashboard bundle from source. The Rust builder
+# `include_str!`s engine/web/dist/dashboard.js, which is gitignored (built, never
+# committed) — so it must be produced here and COPYed in before `cargo build`. This
+# fetches preact+esbuild-wasm from npm exactly as the cargo stages fetch crates from
+# crates.io; zero-egress is scoped to the RUNNING engine, not the build (ADR-0025). Pulled
+# via mirror.gcr.io for the same Docker Hub quota reason as the cargo base (JEF-78).
+# `npm ci --ignore-scripts` kills install hooks; the build uses esbuild-WASM (arch-neutral,
+# so the same command works on the amd64 and arm64 native builders — no per-arch esbuild
+# binary to resolve).
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS web
+WORKDIR /web
+COPY engine/web/package.json engine/web/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY engine/web/ ./
+RUN npm run build
+
 FROM mirror.gcr.io/lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /app
 
@@ -36,6 +52,10 @@ RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked 
 
 # Build application
 COPY . .
+# The Preact bundle is gitignored (built, never committed), so `COPY . .` doesn't carry
+# it — copy it from the node stage so `include_str!("../../../web/dist/dashboard.js")`
+# resolves during `cargo build` (ADR-0025).
+COPY --from=web /web/dist/dashboard.js engine/web/dist/dashboard.js
 RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \

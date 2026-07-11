@@ -58,6 +58,18 @@ jobs:
       # cache, but not the binary, so a plain binstall skips and sccache is absent
       # from PATH (RUSTC_WRAPPER then fails). Force a real install every run.
       run: cargo binstall --no-confirm --force sccache
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: "22"
+    - name: Build dashboard bundle
+      # The engine `include_str!`s engine/web/dist/dashboard.js, which is gitignored
+      # (built from source, never committed — ADR-0025). Build it BEFORE cargo compiles
+      # the engine, or `cargo fmt --check`/`clippy`/`nextest` fail to find it. npm fetches
+      # preact+esbuild-wasm the same way cargo fetches crates; --ignore-scripts kills
+      # install hooks.
+      run: |
+        npm --prefix engine/web ci --ignore-scripts
+        npm --prefix engine/web run build
     - name: Format
       run: cargo fmt --check
     - name: Clippy
@@ -92,6 +104,16 @@ jobs:
         cache-all-crates: "true"
     - name: Install sccache
       run: cargo binstall --no-confirm --force sccache
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: "22"
+    - name: Build dashboard bundle
+      # Same as the lint job: build the gitignored Preact bundle (ADR-0025) before cargo
+      # compiles the engine, which `include_str!`s it. The dashboard guard tests also read
+      # the built bundle, so it must exist before `cargo nextest run`.
+      run: |
+        npm --prefix engine/web ci --ignore-scripts
+        npm --prefix engine/web run build
     - name: Audit dependencies
       run: |
         # binstall a prebuilt binary instead of compiling cargo-audit from source.

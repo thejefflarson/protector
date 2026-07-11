@@ -179,6 +179,22 @@ fn page_composition_emits_no_inline_style() {
     );
 }
 
+#[test]
+fn page_serves_the_preact_bundle_same_origin_with_a_mount_point() {
+    // ADR-0025: the maud shell carries the v4 client mount (`dash-root`) and loads the built
+    // bundle same-origin (no CDN). The server-rendered page stays intact behind it (the
+    // status strip still paints before JS runs).
+    let page = read_engine_src("engine/dashboard/page.rs");
+    assert!(
+        page.contains("dash-root"),
+        "page renders the Preact client mount point (#dash-root)"
+    );
+    assert!(
+        page.contains("/assets/dashboard.js"),
+        "page loads the built bundle from its own origin (no CDN — zero-egress)"
+    );
+}
+
 /// Replace the contents of every `/* … */` block comment with spaces, preserving newlines (so
 /// line numbers are unchanged). CSS has only block comments, so this is sufficient.
 fn strip_block_comments(src: &str) -> String {
@@ -262,51 +278,16 @@ fn stylesheet_uses_tokens_not_stray_raw_px() {
 }
 
 #[test]
-fn served_assets_exist_and_are_same_origin() {
-    // The CSS/JS are served via include_str! from web/dist — they must exist and carry no
-    // off-origin reference (no CDN, no external fetch beyond the same-origin /fragment).
+fn served_stylesheet_exists_and_is_same_origin() {
+    // The CSS is served via include_str! from web/dist — it must exist and carry no off-origin
+    // reference (no CDN, zero-egress). The JS bundle's same-origin guard lives in
+    // `dashboard_web_guards.rs`, which allowlists the W3C XML-namespace URIs the Preact
+    // reconciler embeds (namespace constants, not fetches) — ADR-0025.
     let css = repo_root().join("engine/web/dist/dashboard.css");
-    let js = repo_root().join("engine/web/dist/dashboard.js");
     let css_src = std::fs::read_to_string(&css).unwrap_or_else(|e| panic!("reading {css:?}: {e}"));
-    let js_src = std::fs::read_to_string(&js).unwrap_or_else(|e| panic!("reading {js:?}: {e}"));
     assert!(
         !css_src.contains("@import url(http") && !css_src.contains("//fonts."),
         "the stylesheet imports no third-party CSS (zero-egress)"
-    );
-    // The JS only talks to its own origin's /fragment.
-    assert!(
-        !js_src.contains("http://") && !js_src.contains("https://"),
-        "the client script makes no off-origin request (zero-egress)"
-    );
-    assert!(
-        js_src.contains("/fragment"),
-        "the client script polls the same-origin /fragment"
-    );
-}
-
-#[test]
-fn poll_defers_the_swap_while_a_live_text_selection_is_active() {
-    // Item 1: a poll must not rip away text the operator is selecting/reading. The client checks
-    // window.getSelection() and skips the innerHTML swap while a non-collapsed selection is
-    // anchored inside the live region (deferring to the next tick), and still restores scroll.
-    let js = repo_root().join("engine/web/dist/dashboard.js");
-    let js_src = std::fs::read_to_string(&js).unwrap_or_else(|e| panic!("reading {js:?}: {e}"));
-    assert!(
-        js_src.contains("getSelection"),
-        "the client inspects the active text selection before swapping"
-    );
-    assert!(
-        js_src.contains("isCollapsed") || js_src.contains("collapsed"),
-        "it ignores a collapsed caret (only a real, non-empty selection defers the swap)"
-    );
-    assert!(
-        js_src.contains("contains(range") || js_src.contains(".contains("),
-        "it only defers when the selection is anchored INSIDE the live region"
-    );
-    // The scroll-restore stays (the swap, when it lands, keeps the operator's position).
-    assert!(
-        js_src.contains("scrollTo"),
-        "the existing scroll-restore is preserved"
     );
 }
 
