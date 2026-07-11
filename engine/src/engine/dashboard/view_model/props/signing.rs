@@ -21,7 +21,8 @@
 /// is the explicit transient [`Checking`](Self::Checking), not a fabricated clean. Carried as
 /// colour + glyph + word so meaning never rides on colour alone. [`Invalid`](Self::Invalid) is the
 /// LOUD channel — visually and lexically distinct from a calm [`NotSigned`](Self::NotSigned).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SigningPosture {
     /// Keyless-verified: a signature is present and verifies against Fulcio + Rekor (the signer
     /// rides [`SigningRowProps::signer`]). The one trusted-identity posture. Calm.
@@ -124,7 +125,8 @@ impl SigningPosture {
 ///   * [`Uncertain`](Self::Uncertain) — a regression against a COLD/freshly-learned baseline: a weak
 ///     lead (JEF-280 cold=uncertain). Non-green, but NOT a hard block — honours the cold-baseline
 ///     honesty invariant (a fresh baseline is the weakest evidence, never enforced as breach).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SigningEnforcement {
     /// Continuous vs baseline — a continuity gate would admit. The calm/consistent resting state.
     WouldAdmit,
@@ -209,7 +211,8 @@ impl SigningEnforcement {
 /// SECURITY: only [`Verified`](Self::Verified) confers a trusted build. [`Absent`](Self::Absent) —
 /// the common case today — is calm (like a not-signed image), NEVER an alarm, but never a trusted
 /// build either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProvenancePosture {
     /// A SLSA build-provenance attestation verified against Fulcio + Rekor and yielded a builder
     /// identity (which rides [`SigningRowProps::provenance_info`]). The one trusted-build posture.
@@ -278,7 +281,8 @@ impl ProvenancePosture {
 /// The build provenance learned from a VERIFIED SLSA attestation (only present when
 /// [`ProvenancePosture::Verified`]). Both fields are UNTRUSTED predicate text — the component escapes
 /// them at render (maud auto-escape; NEVER `PreEscaped`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ProvenanceProps {
     /// A short, scannable source-repo label (`org/repo` from `github.com/org/repo`), shown in-row.
     pub source_short: String,
@@ -293,7 +297,8 @@ pub struct ProvenanceProps {
 /// The signer learned from a verified Fulcio cert (only present when [`SigningPosture::Signed`]).
 /// Both the identity and issuer are UNTRUSTED third-party free-text (an attacker-influenceable cert
 /// subject) — the component escapes them at render (maud auto-escape; NEVER `PreEscaped`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SignerProps {
     /// A short, scannable label derived from the Fulcio SAN (a GitHub Actions workflow URI →
     /// `org/repo`; an email kept as-is; otherwise the raw identity, truncated in-row by CSS). Shown
@@ -311,7 +316,8 @@ pub struct SignerProps {
 
 /// One image row in the signing inventory (JEF-262). Plain presentation data only — mapped from the
 /// engine `PolicyDecisionRecord` at the view_model boundary. Every string is UNTRUSTED at render.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SigningRowProps {
     /// A stable, collision-free DOM/fragment id for this image's summary + detail rows — the key
     /// the client toggles/persists across the /fragment poll (mirrors `FindingProps::id`). Derived
@@ -349,7 +355,8 @@ pub struct SigningRowProps {
 /// Rekor transparency log corroborates its history (real provenance) or it rests on local
 /// trust-on-first-sight alone. Surfaced as a small header badge so the operator can weigh a
 /// baseline's evidence honestly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RepoStrength {
     /// The public transparency log vouches for this repo's signing history — a STRONGER baseline.
     LogCorroborated,
@@ -409,7 +416,8 @@ impl RepoStrength {
 /// A repo group in the signing inventory: one registry/repo header with the images observed under
 /// it (JEF-262 — the inventory unit is the image, grouped under its repo), plus an optional loud
 /// signing-regression banner (JEF-264) when the repo's signed history has drifted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SigningRepoProps {
     /// The registry/repo the images share (the group header), untrusted.
     pub repo: String,
@@ -440,7 +448,8 @@ pub struct SigningRepoProps {
 /// Every builder/source string is UNTRUSTED predicate text — the component escapes it via maud
 /// interpolation (NEVER `PreEscaped`, never a `class=`/CSS value). The full identities are shown
 /// deliberately: the point is to show the operator EXACTLY what changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ProvenanceChangeProps {
     /// A stable, collision-free DOM/fragment id (a distinct prefix from image + signing-regression
     /// rows). `[a-z0-9-]` only — safe as an `id`/`data-*`/`aria-controls` value.
@@ -467,7 +476,8 @@ pub struct ProvenanceChangeProps {
 /// Every identity string is UNTRUSTED Fulcio SAN text — the component escapes it via maud
 /// interpolation (NEVER `PreEscaped`, never a `class=`/CSS value). The before→after is shown so the
 /// operator sees EXACTLY what was accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ExceptionAcceptedProps {
     /// A stable, collision-free DOM/fragment id (a distinct prefix from image + regression rows).
     /// `[a-z0-9-]` only — safe as an `id`/`data-*`/`aria-controls` value.
@@ -489,7 +499,8 @@ pub struct ExceptionAcceptedProps {
 /// Which kind of signing regression a repo drifted into (JEF-264) — the presentation mirror of the
 /// engine `signing_drift::RegressionKind`. The LOUD channel: visually + lexically distinct from the
 /// calm [`SigningPosture::NotSigned`]. Carried as glyph + word so meaning never rides on colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RegressionKind {
     /// A repo with signed history now serves an unsigned image.
     Unsigned,
@@ -589,7 +600,8 @@ impl RegressionKind {
 /// interpolation (NEVER `PreEscaped`, never concatenated into markup, never a `class=`/CSS value).
 /// The full identities are shown deliberately (not the shortened `org/repo` label): the point is to
 /// show the operator EXACTLY what changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SigningRegressionProps {
     /// A stable, collision-free DOM/fragment id for the regression's summary + detail rows (the key
     /// the client toggles/persists). Derived in the view_model from the repo, with a distinct
