@@ -293,12 +293,14 @@ pub struct FindingProps {
     /// safety — so the detail renders this caveat. `None` when the node has a live sensor, the
     /// finding is corroborated, or the node isn't known.
     pub blind_node_caveat: Option<String>,
-    /// The live "alarming-now" corroboration signals observed on this chain's entry THIS pass
-    /// (JEF-323) — each a `"drop-and-execute on web (2m ago)"`-style annotation the detail panel
-    /// renders as "corroborated-now by …". EVIDENCE, not a verdict: an alert corroborates, it never
-    /// concludes a breach (ADR-0016). Empty when nothing is alarming on this chain right now. Every
-    /// string is UNTRUSTED (it can carry an attacker-chosen path / rule name) — auto-escaped at
-    /// render. Projected from the SAME per-pass runtime signals the Alerts tab reads.
+    /// The live "alarming-now" signals observed on this chain's entry THIS pass (JEF-323) — each a
+    /// `"drop-and-execute on web (2m ago)"`-style annotation the detail panel renders under
+    /// "alarming activity observed". EVIDENCE, not a verdict: an alarming signal never concludes a
+    /// breach (ADR-0016), and this is deliberately NOT labelled "corroborated" (the engine reserves
+    /// that axis for the Alert-only subset that flips `ProvenChain::corroborated`, ADR-0009; this set
+    /// is broader). Empty when nothing is alarming on this chain right now. Every string is UNTRUSTED
+    /// (it can carry an attacker-chosen path / rule name) — auto-escaped at render. Projected from the
+    /// SAME per-pass runtime signals the Alerts tab reads.
     pub alerts: Vec<AlertProps>,
 }
 
@@ -420,9 +422,9 @@ pub struct CoverageChip {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Findings,
-    /// The live "alarming-now" corroboration view (JEF-323) — a CURRENT-WINDOW list of the
-    /// runtime signals alarming THIS pass, not a persisted audit log. Sits second, next to
-    /// Findings, because it is the same live security story from the corroboration angle.
+    /// The live "alarming-now" activity view (JEF-323) — a CURRENT-WINDOW list of the runtime
+    /// signals alarming THIS pass, not a persisted audit log. Sits second, next to Findings,
+    /// because it is the same live security story from the runtime-activity angle.
     Alerts,
     Action,
     Readiness,
@@ -463,16 +465,18 @@ pub struct FindingsViewProps {
 }
 
 // ---------------------------------------------------------------------------
-// Alerts view (JEF-323) — the live "alarming-now" corroboration surface. A
+// Alerts view (JEF-323) — the live "alarming-now" activity surface. A
 // CURRENT-WINDOW view of the runtime signals alarming THIS pass (runtime
 // signals live one pass then clear — this is NOT a persisted audit log), each
-// attributed to its (informer-resolved) workload, with recency and the
-// objective/chain it corroborates. An alert is EVIDENCE (corroboration), never
-// a verdict (ADR-0016) — the copy never implies a breach conclusion.
+// attributed to its (informer-resolved) workload, with recency and the proven
+// chain it is alarming ON. An alarming signal is EVIDENCE, never a verdict
+// (ADR-0016) — the copy never implies a breach conclusion, and it never claims
+// "corroborated": the engine reserves that axis for the Alert-only subset that
+// flips `ProvenChain::corroborated` (ADR-0009), and this set is broader.
 // ---------------------------------------------------------------------------
 
-/// One alarming-now corroboration event for the Alerts tab (JEF-323). Pure presentation data —
-/// no engine domain type leaks in. Every string is UNTRUSTED at render (the signal can carry an
+/// One alarming-now activity event for the Alerts tab (JEF-323). Pure presentation data — no
+/// engine domain type leaks in. Every string is UNTRUSTED at render (the signal can carry an
 /// attacker-chosen path, the rule an attacker-chosen name, the workload an attacker-influenced
 /// pod name): the component auto-escapes them (maud `{}`, never `PreEscaped`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,13 +490,17 @@ pub struct AlertProps {
     /// The workload the signal was attributed to (informer-resolved short label), untrusted.
     pub workload: String,
     /// How recent the signal is, human-phrased (`"this pass"`, or the entry's age `"2m ago"`).
-    /// Runtime signals are transient (one pass), so recency is the corroborated chain's age — the
+    /// Runtime signals are transient (one pass), so recency is the alarming chain's age — the
     /// honest "how long this has been alarming" — or simply "this pass" when no age is known.
     pub recency: String,
-    /// The objective/chain this alert corroborates, if it lands on a proven breach-relevant chain
-    /// (`"web \u{2192} db-creds"`), else `None` — an alarming signal with no proven chain still
-    /// shows (it is alarming), it just corroborates nothing specific yet. Untrusted.
-    pub corroborates: Option<String>,
+    /// The proven breach-relevant objective/chain this signal is alarming ON, if it lands on one
+    /// (`"web \u{2192} db-creds"`), else `None` — an alarming signal with no proven chain still shows
+    /// (it is alarming), it just lands on no specific chain yet. Untrusted. Deliberately NOT named
+    /// "corroborates": the engine reserves the corroboration axis for the Alert-only subset that
+    /// flips `ProvenChain::corroborated` (ADR-0009), and this set is broader (it includes
+    /// engine-defined CONTEXT signals), so the view never asserts corroboration the engine didn't
+    /// conclude.
+    pub on_chain: Option<String>,
 }
 
 /// The whole Alerts view's props (JEF-323): the persistent strip + the current-window alarming-now

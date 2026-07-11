@@ -1,8 +1,14 @@
 //! Map the engine's live runtime signals into the Alerts view's "alarming-now" props (JEF-323).
 //! This is the data layer: it touches `state::`/`graph::`/`behavior::` domain types; the
 //! components never do. It shares ONE derived seam with the critical-path annotation
-//! ([`alarming_signals_of`]) so the Alerts tab and the findings-view "corroborated-now by …"
+//! ([`alarming_signals_of`]) so the Alerts tab and the findings-view "alarming activity observed"
 //! line can never disagree about what is alarming.
+//!
+//! HONESTY (ADR-0009 / ADR-0016): this surface NEVER uses the word "corroborated". The engine
+//! reserves that axis for the Alert-only subset that flips `ProvenChain::corroborated`; a notable
+//! exec / alarming write / foothold-peer contact is CONTEXT by that definition. The alarming-now
+//! SET here is deliberately broader (it is the operator's "what is alarming now" view), so it is
+//! phrased purely in "alarming" language and never asserts a corroboration the engine didn't reach.
 //!
 //! SCOPE (fixed, JEF-323): runtime signals are TRANSIENT — they live for one observe pass then
 //! clear. So this is a CURRENT-WINDOW view of what is alarming THIS pass, NOT a persisted audit
@@ -67,8 +73,8 @@ fn alarming_now_label(behavior: &Behavior) -> Option<(&'static str, String)> {
 }
 
 /// The recency phrasing for an alert derived from a finding. Runtime signals are transient (one
-/// pass), so the honest recency is the corroborated CHAIN's age (how long this entry has been
-/// present and alarming) — or `"this pass"` when no age is known. Never a fabricated timestamp.
+/// pass), so the honest recency is the alarming CHAIN's age (how long this entry has been present
+/// and alarming) — or `"this pass"` when no age is known. Never a fabricated timestamp.
 fn recency_of(f: &Finding) -> String {
     match f.recency.as_ref().and_then(|r| r.age_secs) {
         Some(secs) => format!("{} ago", human_age(secs)),
@@ -76,9 +82,11 @@ fn recency_of(f: &Finding) -> String {
     }
 }
 
-/// The short "entry \u{2192} objective" label a chain corroborates, for the Alerts row. Only
-/// breach-relevant chains carry it; a non-chain alarming signal shows no corroboration target.
-fn corroborates_of(f: &Finding) -> Option<String> {
+/// The short "entry \u{2192} objective" label of the proven breach-relevant chain a signal is
+/// alarming ON, for the Alerts row. Only breach-relevant chains carry it; a non-chain alarming signal
+/// shows no chain. Deliberately NOT "corroborates": the corroboration axis (ADR-0009) is reserved for
+/// the Alert-only subset that flips `ProvenChain::corroborated`, and this set is broader.
+fn on_chain_of(f: &Finding) -> Option<String> {
     if !f.breach_relevant {
         return None;
     }
@@ -90,13 +98,13 @@ fn corroborates_of(f: &Finding) -> Option<String> {
 }
 
 /// The alarming-now signals observed on ONE finding's entry this pass (JEF-323) — the shared seam
-/// the Alerts tab and the per-finding "corroborated-now by …" annotation both project from. Each is
-/// attributed to the entry's workload (informer-resolved short label) with the chain's recency and
-/// the objective it corroborates.
+/// the Alerts tab and the per-finding "alarming activity observed" annotation both project from. Each
+/// is attributed to the entry's workload (informer-resolved short label) with the chain's recency and
+/// the proven chain it is alarming on.
 pub(super) fn alarming_signals_of(f: &Finding) -> Vec<AlertProps> {
     let workload = NodeKey::short_of(&f.entry).to_string();
     let recency = recency_of(f);
-    let corroborates = corroborates_of(f);
+    let on_chain = on_chain_of(f);
     f.evidence
         .runtime
         .iter()
@@ -106,7 +114,7 @@ pub(super) fn alarming_signals_of(f: &Finding) -> Vec<AlertProps> {
             kind: kind.to_string(),
             workload: workload.clone(),
             recency: recency.clone(),
-            corroborates: corroborates.clone(),
+            on_chain: on_chain.clone(),
         })
         .collect()
 }
@@ -128,7 +136,7 @@ fn blind_caveat_of(readiness: &Readiness) -> Option<String> {
 
 /// Build the whole Alerts view's props from the engine's read-only per-pass state (JEF-323). The
 /// alerts are the alarming-now signals across every finding's entry this pass, most-recent-first
-/// (by the corroborated chain's age); the blind caveat rides the empty/quiet state. Pure given its
+/// (by the alarming chain's age); the blind caveat rides the empty/quiet state. Pure given its
 /// inputs — driveable in tests with no engine.
 pub fn build(
     strip: StatusStripProps,

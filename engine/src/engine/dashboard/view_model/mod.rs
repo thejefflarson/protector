@@ -99,10 +99,10 @@ pub fn build_status_strip(
 }
 
 /// Build the whole Alerts view's props (JEF-323): the persistent strip + the current-window
-/// "alarming-now" corroboration events across every finding's entry this pass, plus the calm
+/// "alarming-now" activity events across every finding's entry this pass, plus the calm
 /// blind-node caveat for the quiet state. A CURRENT-WINDOW view (runtime signals live one pass),
 /// NOT a persisted audit log. Derived from the SAME per-pass findings snapshot the Findings view
-/// reads, so the Alerts tab and the findings-view "corroborated-now by …" line never disagree.
+/// reads, so the Alerts tab and the findings-view "alarming activity observed" line never disagree.
 /// Pure given its inputs.
 pub fn build_alerts_view(
     strip: StatusStripProps,

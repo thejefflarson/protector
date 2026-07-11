@@ -131,7 +131,7 @@ impl DashboardState {
     }
 
     /// Build the Alerts view props (JEF-323): the persistent strip + the live "alarming-now"
-    /// corroboration events derived from the SAME per-pass findings snapshot the Findings view
+    /// activity events derived from the SAME per-pass findings snapshot the Findings view
     /// reads (a current-window view — runtime signals live one pass — not a persisted log) + the
     /// calm blind-node caveat for the quiet state. The strip carries the real findings counts (and
     /// the folded-in signing regressions) so its honesty reading holds on this tab too.

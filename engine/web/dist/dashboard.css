@@ -693,7 +693,7 @@ summary:focus-visible,
 .empty-alerts-blind .empty-head { color: var(--posture-uncertain); }
 
 /* ============================ Alerts view (JEF-323) ============================ */
-/* The live "alarming-now" corroboration list. An alert is EVIDENCE, never a verdict — the
+/* The live "alarming-now" activity list. An alarming signal is EVIDENCE, never a verdict — the
    list is a neutral surface (no loud red "BREACH" framing); the alarm colour rides only the
    kind token, as behaviour lines do elsewhere. */
 .alerts-note { font-size: var(--fs-data); line-height: var(--lh-data); margin: 0 0 var(--space-4); }
@@ -716,12 +716,13 @@ summary:focus-visible,
 }
 .alert-meta { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-1); font-size: var(--fs-data); line-height: var(--lh-data); }
 .alert-label { color: var(--ink-3); }
-.alert-workload, .alert-recency, .alert-corroborates { word-break: break-word; }
+.alert-workload, .alert-recency, .alert-on-chain { word-break: break-word; }
 
-/* the "corroborated-now by …" annotation on a finding's detail panel (JEF-323) */
-.corroborated-now-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-data); line-height: var(--lh-data); }
-.corroborated-now-item { margin: var(--space-1) 0; }
-.corroborated-now-signal { font-weight: var(--fw-bold); word-break: break-word; }
+/* the "alarming activity observed" annotation on a finding's detail panel (JEF-323) — NOT
+   labelled "corroborated": the engine reserves that axis for the Alert-only subset (ADR-0009). */
+.alarming-now-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-data); line-height: var(--lh-data); }
+.alarming-now-item { margin: var(--space-1) 0; }
+.alarming-now-signal { font-weight: var(--fw-bold); word-break: break-word; }
 
 /* ============================ Readiness view (coverage) ============================ */
 /* One row per decision input: a state chip (colour + glyph + word), the live detail, why it
