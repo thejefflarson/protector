@@ -5,7 +5,9 @@
 
 use maud::{Markup, html};
 
-use crate::engine::dashboard::view_model::props::{FindingProps, HopProps, JudgementProps};
+use crate::engine::dashboard::view_model::props::{
+    AlertProps, FindingProps, HopProps, JudgementProps,
+};
 
 use super::evidence::evidence_tables;
 
@@ -14,10 +16,41 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
     html! {
         div class={ "detail rail-" (f.posture.token()) } {
             (verdict_block(f))
+            (alarming_now_block(&f.alerts))
             (path_block(f))
             (evidence_tables(&f.evidence))
             (cut_block(f))
             (model_prompt(&f.id, &f.judgement))
+        }
+    }
+}
+
+/// The "alarming activity observed" annotation (JEF-323): the live alarming-now signals on this
+/// chain's entry THIS pass, each a `"drop-and-execute on web (2m ago)"`-style line. EVIDENCE, not a
+/// verdict — it says a signal is alarming on this chain, never that a breach is concluded or an
+/// action was taken (ADR-0016). Deliberately NOT the word "corroborated": the engine reserves that
+/// axis for the Alert-only subset that flips `ProvenChain::corroborated` (ADR-0009); a notable exec
+/// / alarming write / foothold-peer contact is CONTEXT by that definition, so this surface never
+/// asserts the corroboration axis is set when it isn't. Omitted entirely when nothing is alarming on
+/// this chain right now (no implied-absent text). Every untrusted string is auto-escaped by maud.
+fn alarming_now_block(alerts: &[AlertProps]) -> Markup {
+    if alerts.is_empty() {
+        return html! {};
+    }
+    html! {
+        section.detail-section.alarming-now-block {
+            h3.detail-h { "alarming activity observed" }
+            ul.alarming-now-list {
+                @for a in alerts {
+                    li.alarming-now-item {
+                        span class={ "alert-kind kind-" (a.kind) } { (a.kind) }
+                        span.alarming-now-signal { (a.signal) }
+                        span.alarming-now-where.muted {
+                            " on " (a.workload) " (" (a.recency) ")"
+                        }
+                    }
+                }
+            }
         }
     }
 }
