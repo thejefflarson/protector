@@ -254,22 +254,14 @@ impl Engine {
         for (entry_key, (pending, verdict)) in &outcomes {
             let objectives = &pending.objectives;
             let entry = &pending.entry;
-            // Choose what to DISPLAY: if this pass came back inconclusive (a transient model
-            // timeout — "model unavailable") but we have a prior decisive verdict, keep showing
-            // the decisive one rather than regressing the resolved posture to "uncertain". The
-            // action logic below still uses this pass's real `verdict`.
-            let display = match (verdict, self.verdicts.display_verdict(entry_key)) {
-                (reason::adjudicate::Verdict::Uncertain(_), Some(prior))
-                    if !matches!(prior, reason::adjudicate::Verdict::Uncertain(_)) =>
-                {
-                    prior
-                }
-                _ => verdict.clone(),
-            };
-            // Write the displayed verdict to the single source of truth (JEF-157) the MOMENT
-            // it's decided, so the findings snapshot resolves it immediately (no end-of-pass
-            // re-publish). A live verdict supersedes any journal-restored one (in `set_display`).
-            self.verdicts.set_display(entry_key, display.clone());
+            // Resolve AND record what to DISPLAY for this entry in one place (JEF-371): the store
+            // owns the full carry-forward precedence — a decisive verdict shows as-is; an
+            // inconclusive pass (a transient model timeout) carries the prior decisive verdict
+            // forward rather than regressing the posture to "uncertain"; a live verdict supersedes
+            // any journal-restored summary. It writes the chosen verdict to the single source of
+            // truth (JEF-157) the MOMENT it's decided, so the findings snapshot resolves it with no
+            // end-of-pass re-publish. The action logic below still uses this pass's real `verdict`.
+            let display = self.verdicts.resolve_display(entry_key, verdict);
             // Record this pass's display POSTURE for the Δ / recency column (JEF-201): the
             // store sets `first_seen` on first sight and diffs against the previous pass to
             // derive the Δ glyph. Shares `pass_now` with the JEF-234 backoff (one injected

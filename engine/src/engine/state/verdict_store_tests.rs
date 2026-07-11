@@ -15,6 +15,91 @@ fn decisive(tag: &str) -> Verdict {
     Verdict::Refuted(tag.to_string())
 }
 
+/// An INCONCLUSIVE verdict tagged so distinct outages are distinguishable in assertions.
+fn uncertain(tag: &str) -> Verdict {
+    Verdict::Uncertain(tag.to_string())
+}
+
+/// JEF-371: the display carry-forward now lives entirely in `VerdictStore::resolve_display`.
+/// This exercises the four cases the old split logic (engine publish phase + `set_display`)
+/// produced, asserting each yields the EXACT same displayed verdict — behaviour-neutrality is
+/// the hard requirement for this most-debugged, blank-dashboard-incident surface (JEF-157).
+#[test]
+fn resolve_display_owns_the_full_carry_forward_precedence() {
+    let store = VerdictStore::with_cache_slots(32);
+
+    // (a) A decisive verdict this pass is shown as-is and becomes the displayed verdict.
+    let a = decisive("live-A");
+    assert_eq!(store.resolve_display("e", &a), a);
+    assert_eq!(store.display_verdict("e"), Some(a.clone()));
+
+    // (b) An Uncertain this pass with a prior decisive verdict CARRIES the decisive one FORWARD —
+    // the dashboard keeps showing the last real call rather than blanking to "uncertain".
+    let returned = store.resolve_display("e", &uncertain("model unavailable"));
+    assert_eq!(returned, a, "the prior decisive verdict is carried forward");
+    assert_eq!(
+        store.display_verdict("e"),
+        Some(a),
+        "the carry-forward does not regress the displayed posture"
+    );
+
+    // A later decisive verdict supersedes the carried-forward one (normal progression).
+    let b = decisive("live-B");
+    assert_eq!(store.resolve_display("e", &b), b);
+    assert_eq!(store.display_verdict("e"), Some(b));
+
+    // (b′) An Uncertain this pass with NO prior decisive display shows the Uncertain itself —
+    // there is nothing to carry forward on a fresh entry.
+    let unc = uncertain("cold-start timeout");
+    assert_eq!(store.resolve_display("fresh", &unc), unc);
+    assert_eq!(store.display_verdict("fresh"), Some(unc));
+
+    // (c) A journal-restored entry shows the restored summary until a LIVE verdict supersedes it.
+    let restored_at = Instant::now();
+    store.seed_restored(
+        "boot",
+        "restored: refuted last run".to_string(),
+        restored_at,
+    );
+    assert_eq!(
+        store.display_summary("boot").as_deref(),
+        Some("restored: refuted last run"),
+        "the restored summary shows on boot before any live verdict"
+    );
+    // An Uncertain first pass on a RESTORED entry does NOT carry the restored summary — there is
+    // no prior *live decisive* display, so the Uncertain lands and supersedes the restored summary
+    // (identical to the pre-JEF-371 `set_display` clearing `restored` on any live write).
+    let boot_unc = uncertain("first live pass timed out");
+    assert_eq!(store.resolve_display("boot", &boot_unc), boot_unc);
+    assert_eq!(store.display_verdict("boot"), Some(boot_unc.clone()));
+    assert_eq!(
+        store.display_summary("boot"),
+        Some(boot_unc.summary()),
+        "a live verdict supersedes the restored summary"
+    );
+
+    // (c′) A decisive live verdict on a freshly-restored entry likewise supersedes the summary.
+    store.seed_restored("boot2", "restored: exploitable".to_string(), restored_at);
+    let live = decisive("live decisive after restore");
+    assert_eq!(store.resolve_display("boot2", &live), live);
+    assert_eq!(
+        store.display_summary("boot2"),
+        Some(live.summary()),
+        "the live decisive verdict supersedes the restored summary"
+    );
+
+    // (d) JEF-234 backoff / Uncertain-never-cached is unchanged: resolving an Uncertain for
+    // display neither caches it nor establishes a baseline (the cache path is orthogonal).
+    assert!(
+        store.cached_for("fresh", "any-fp").is_none(),
+        "resolving an Uncertain for display never caches a verdict"
+    );
+    assert!(
+        store.baseline_for("fresh").is_none(),
+        "resolving display never establishes a re-judge baseline"
+    );
+}
+
 /// Model ONE judging pass for `entry` at fingerprint `fp`, mirroring the engine loop
 /// (`engine/src/engine/mod.rs`): serve the cache on a hit; on a miss, honour JEF-234 backoff,
 /// then "judge" — caching only a DECISIVE verdict and arming backoff on an `Uncertain`. Returns

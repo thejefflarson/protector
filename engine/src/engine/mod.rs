@@ -69,7 +69,7 @@ mod adj_pass;
 use graph::delta::GraphSnapshot;
 use observe::Snapshot;
 use observe::adapter::Adapter;
-use observe::health::{Health, HealthProvider, PodStatusHealth};
+use observe::health::{Health, PodStatusHealth};
 use respond::MitigationLedger;
 use respond::actuator::{
     ActionLog, ActuationScope, Actuator, Decision, EnabledActions, decide, predict_blast_radius,
