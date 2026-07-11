@@ -8,7 +8,7 @@
 //! self-hosted Rekor mirror to enable the history/divergence checks while still egressing nothing
 //! to the public log.
 //!
-//! What the lane buys (both consumed by [`signing_rekor`](crate::engine::signing_rekor)):
+//! What the lane buys (both consumed by [`signing_rekor`](crate::engine::supply_chain::signing_rekor)):
 //!
 //!   * **History bootstrap / strength.** A repo whose signed image the public log already carries
 //!     an entry for inherits *real provenance* — its TOFU baseline is marked **log-corroborated**

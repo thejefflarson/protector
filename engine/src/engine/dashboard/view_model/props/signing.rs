@@ -145,8 +145,8 @@ impl SigningEnforcement {
     /// stands for that image (and, when it does, whether the regressed baseline was `established`).
     ///
     /// The drift verdict is the SINGLE source of truth: it is the SAME recorded
-    /// [`SigningDrift::Regression`](crate::engine::signing_drift::SigningDrift) the sweep (JEF-264 /
-    /// JEF-280) classified via [`classify`](crate::engine::signing_drift::classify) and a continuity
+    /// [`SigningDrift::Regression`](crate::engine::supply_chain::signing_drift::SigningDrift) the sweep (JEF-264 /
+    /// JEF-280) classified via [`classify`](crate::engine::supply_chain::signing_drift::classify) and a continuity
     /// gate (JEF-265) would enforce — the view never re-derives it, so the "if enforced" column can
     /// never disagree with what enforcement actually blocks (`block == regression`).
     ///

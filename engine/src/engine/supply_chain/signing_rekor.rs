@@ -28,11 +28,11 @@
 
 use crate::policies::signature::{RekorLane, SigningPosture, repo_key};
 
-use super::journal::DecisionJournal;
-use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use super::signing_baseline_strength::strength_record;
 use super::signing_sweep::REGRESSION_SUBJECT_PREFIX;
-use super::state::{SigningBaseline, SigningBaselineStore};
+use crate::engine::journal::DecisionJournal;
+use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
+use crate::engine::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::PostureMap;
 
 /// A registry↔log disagreement about an image's signature (JEF-266). The two directions are both

@@ -13,8 +13,10 @@ use async_trait::async_trait;
 use super::*;
 use crate::engine::journal::DecisionJournal;
 use crate::engine::policy_log::PolicyDecisionLog;
-use crate::engine::signing_baseline_strength::{CORROBORATED_WORD, STRENGTH_SUBJECT_PREFIX};
 use crate::engine::state::SigningBaselineStore;
+use crate::engine::supply_chain::signing_baseline_strength::{
+    CORROBORATED_WORD, STRENGTH_SUBJECT_PREFIX,
+};
 use crate::policies::signature::{
     PostureMap, RekorClient, RekorHistory, RekorLane, Signer, SigningPosture,
 };
