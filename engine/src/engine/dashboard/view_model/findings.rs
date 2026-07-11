@@ -294,6 +294,9 @@ pub(super) fn finding_props(
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),
         blind_node_caveat: blind_node_caveat(f, blind_nodes),
+        // The live alarming-now signals on this chain's entry (JEF-323) — the same seam the Alerts
+        // tab projects from, so the "alarming activity observed" annotation and the tab agree.
+        alerts: super::alerts::alarming_signals_of(f),
     }
 }
 

@@ -912,6 +912,7 @@ struct PreviewQuery {
 
 fn resolve_tab(tab: Option<&str>) -> Tab {
     match tab {
+        Some("alerts") => Tab::Alerts,
         // The merged Action tab + its legacy soft-aliases (trust/activity), matching production.
         Some("action") | Some("trust") | Some("activity") => Tab::Action,
         Some("readiness") => Tab::Readiness,
@@ -956,6 +957,15 @@ fn preview_action(state: &DashboardState) -> view_model::props::ActionViewProps 
     )
 }
 
+/// Build the live Alerts (alarming-now corroboration) view props through the public render path.
+fn preview_alerts(state: &DashboardState) -> view_model::props::AlertsViewProps {
+    view_model::build_alerts_view(
+        preview_strip(state),
+        &state.findings.snapshot(),
+        &state.readiness(),
+    )
+}
+
 /// Build the Readiness view props through the public render path.
 fn preview_readiness(state: &DashboardState) -> view_model::props::ReadinessViewProps {
     view_model::build_readiness_view(preview_strip(state), &state.readiness())
@@ -970,6 +980,7 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
 fn render_page(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_page(&preview_findings(state)),
+        Tab::Alerts => page::alerts_page(&preview_alerts(state)),
         Tab::Action => page::action_page(&preview_action(state)),
         Tab::Readiness => page::readiness_page(&preview_readiness(state)),
         Tab::Admission => page::admission_page(&preview_admission(state)),
@@ -981,6 +992,7 @@ fn render_page(state: &DashboardState, tab: Tab) -> String {
 fn render_fragment(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_fragment(&preview_findings(state)),
+        Tab::Alerts => page::alerts_fragment(&preview_alerts(state)),
         Tab::Action => page::action_fragment(&preview_action(state)),
         Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),
         Tab::Admission => page::admission_fragment(&preview_admission(state)),

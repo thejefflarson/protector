@@ -67,6 +67,8 @@ fn the_scan_covers_every_component_including_the_secondary_views() {
         "evidence.rs",
         "status_strip.rs",
         "nav.rs",
+        // the live alarming-now corroboration surface (JEF-323):
+        "alerts_view.rs",
         // the merged would-act + audit story:
         "action_view.rs",
         "readiness_view.rs",
