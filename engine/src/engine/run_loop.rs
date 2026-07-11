@@ -328,7 +328,7 @@ pub async fn run_watch(
             // The signing-trust signals (JEF-280) are LIVE — refreshed each pass below (the TUF
             // cache ages, and the unverifiable spike is a per-pass fleet reading). Seeded here from
             // the cache's current age; the spike starts clear until the first sweep.
-            tuf_cache_age_secs: super::signing_trust::tuf_cache_age_secs(
+            tuf_cache_age_secs: super::supply_chain::signing_trust::tuf_cache_age_secs(
                 &tuf_cache_dir(),
                 std::time::SystemTime::now(),
             ),
@@ -405,6 +405,19 @@ pub async fn run_watch(
     // observes every running image's SLSA provenance posture (verified / unverifiable / no-provenance
     // / checking) and folds the verified provenance identity into the SAME per-repo baseline.
     let provenance_scanner = build_provenance_scanner();
+
+    // Bundle the once-built supply-chain observers into the facade's handle (JEF-369). Built once,
+    // borrowed each pass by `supply_chain::run_sweeps`, which sequences the identical
+    // sweep/reconcile/provenance/publish/readiness pipeline the loop drove inline before. The TUF
+    // cache dir is bound here so the facade can borrow it (its freshness is a readiness signal).
+    let tuf_cache = tuf_cache_dir();
+    let sweeps = super::supply_chain::SupplyChainSweeps {
+        signing_observer: signing_observer.as_ref(),
+        rekor_lane: rekor_lane.as_ref(),
+        provenance_scanner: provenance_scanner.as_ref(),
+        exceptions: &signing_exceptions,
+        tuf_cache_dir: &tuf_cache,
+    };
 
     // The durable per-repo TOFU signing baseline (JEF-263, ADR-0020): learned from the sweep's
     // observed postures, persisted to (and, here on boot, replayed from) the SAME decision
@@ -606,78 +619,22 @@ pub async fn run_watch(
             linkerd_authz_policies: linkerd_policies_now,
             linkerd_mtls_auths: linkerd_mtls_now,
         };
-        // Observe the signing posture of every already-running image and record it into the
-        // shared admission-decision log (JEF-261). Bounded by the observer's cache + MAX_IMAGES;
-        // a no-op when no observer is configured. Run before `process` so the inventory reflects
-        // the same snapshot the engine just reasoned over.
-        let signing_map = super::signing_sweep::sweep(
-            signing_observer.as_ref(),
+        // Run the supply-chain sweep pipeline over this snapshot (JEF-369): observe signing posture,
+        // opt-in Rekor reconciliation, opt-in provenance observation, publish the whole-pass
+        // baseline to the webhook, and refresh the LIVE signing-trust readiness signals — the same
+        // sequence, in the same order, that ran inline here before the facade extraction. Run before
+        // `process` so the inventory reflects the same snapshot the engine just reasoned over.
+        let readiness = super::supply_chain::run_sweeps(
+            &sweeps,
             &snapshot,
             &policy_log,
-            Some(&mut signing_baselines),
-            signing_journal.as_ref(),
-            &signing_exceptions,
+            &mut signing_baselines,
+            &signing_journal,
+            &shared_baseline,
+            engine.findings().readiness_config(),
         )
         .await;
-        // Opt-in Rekor reconciliation (JEF-266): corroborate baselines against the public log and
-        // surface registry↔log divergence. A no-op (zero egress) when the lane is off.
-        super::signing_rekor::reconcile(
-            rekor_lane.as_ref(),
-            &signing_map,
-            &policy_log,
-            Some(&mut signing_baselines),
-            signing_journal.as_ref(),
-        )
-        .await;
-        // Observe each running image's SLSA build provenance (JEF-275, ADR-0020 §5) and fold the
-        // verified provenance identity into the SAME per-repo baseline. A no-op (zero extra egress)
-        // when the scanner is off. Runs AFTER the signing sweep so the baseline it augments already
-        // exists (provenance is augment-only).
-        super::provenance_sweep::sweep(
-            provenance_scanner.as_ref(),
-            &snapshot,
-            &policy_log,
-            Some(&mut signing_baselines),
-            signing_journal.as_ref(),
-        )
-        .await;
-
-        // Publish the freshly-updated baseline snapshot for the admission webhook (JEF-265). The
-        // engine is the SOLE writer; this is the ONLY path baselines reach the webhook, and it is
-        // read-only there — so admission can consult signature continuity without ever being able to
-        // teach (poison) it. Done after ALL baseline-mutating sweeps this pass so the webhook always
-        // sees a consistent, whole-pass snapshot.
-        shared_baseline.publish(&signing_baselines);
-
-        // Refresh the LIVE signing-trust readiness signals (JEF-280): the TUF-root cache age (it
-        // ages between passes, and a successful verify this pass may have just refreshed it) and a
-        // fleet-wide spike in `UnverifiableHere` postures (a hint the trust root drifted or is being
-        // starved). Only the two live fields are updated; the boot-captured static coverage fields
-        // are preserved. A no-op read on a clean fleet.
-        {
-            use crate::policies::signature::SigningPosture;
-            let mut total = 0usize;
-            let mut unverifiable = 0usize;
-            for (_, posture) in signing_map.entries() {
-                if posture.is_resting() {
-                    total += 1;
-                    if matches!(posture, SigningPosture::UnverifiableHere) {
-                        unverifiable += 1;
-                    }
-                }
-            }
-            let mut rc = engine.findings().readiness_config();
-            rc.tuf_cache_age_secs = super::signing_trust::tuf_cache_age_secs(
-                &tuf_cache_dir(),
-                std::time::SystemTime::now(),
-            );
-            rc.unverifiable_spike =
-                super::signing_trust::is_unverifiable_spike(unverifiable, total);
-            // How many images this sweep couldn't resolve (JEF-326): stuck in the transient
-            // `Checking` state, so their posture is unknown — surfaced non-green in readiness.
-            rc.checking_images = signing_map.summary().checking;
-            engine.findings().set_readiness_config(rc);
-        }
+        engine.findings().set_readiness_config(readiness);
 
         engine.process(&snapshot).await;
     }

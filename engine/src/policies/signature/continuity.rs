@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use regex::Regex;
 
-use crate::engine::signing_drift::{RegressionKind, SigningDrift, classify};
 use crate::engine::state::SharedSigningBaseline;
+use crate::engine::supply_chain::signing_drift::{RegressionKind, SigningDrift, classify};
 
 use super::posture::{SigningObserver, SigningPosture};
 use super::{normalize_registry_host, repo_key};

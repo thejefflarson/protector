@@ -3,7 +3,7 @@
 //! The webhook observes each *admitted* image; this sweep covers the other half — the pods
 //! **already running** when protector started, which no admission event will ever replay.
 //! It reads the analysis engine's Pod reflector store (the typed `Pod`s in the per-pass
-//! [`Snapshot`](super::observe::Snapshot)) and runs every distinct container image through the
+//! [`Snapshot`](crate::engine::observe::Snapshot)) and runs every distinct container image through the
 //! shared [`SigningObserver`], recording the observed [`SigningPosture`] into the same
 //! [`PolicyDecisionLog`] the webhook writes — so the operator sees one signing inventory
 //! across both admitted and pre-existing workloads.
@@ -28,12 +28,12 @@ use std::time::SystemTime;
 
 use k8s_openapi::api::core::v1::Pod;
 
-use super::journal::DecisionJournal;
-use super::observe::Snapshot;
-use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use super::signing_baseline_strength::strength_record;
 use super::signing_drift::{RegressionKind, SigningDrift, classify};
-use super::state::{SigningBaseline, SigningBaselineStore};
+use crate::engine::journal::DecisionJournal;
+use crate::engine::observe::Snapshot;
+use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
+use crate::engine::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::{
     PostureMap, PostureRank, SigningExceptions, SigningObserver, SigningPosture, repo_key,
 };

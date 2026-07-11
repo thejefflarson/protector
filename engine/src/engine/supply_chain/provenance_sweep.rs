@@ -31,12 +31,12 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::journal::DecisionJournal;
-use super::observe::Snapshot;
-use super::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use super::provenance_drift::{ProvenanceDrift, classify};
 use super::signing_sweep::snapshot_images;
-use super::state::{SigningBaseline, SigningBaselineStore};
+use crate::engine::journal::DecisionJournal;
+use crate::engine::observe::Snapshot;
+use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
+use crate::engine::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::{ProvenanceMap, ProvenancePosture, ProvenanceScanner, repo_key};
 
 /// The subject prefix a per-image provenance observation row is keyed under (`Provenance/<image>`),

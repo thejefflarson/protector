@@ -615,38 +615,13 @@ impl Engine {
 mod run_loop;
 pub use run_loop::run_watch;
 
-// The per-pass signing-posture sweep (ADR-0020 Stage 1, JEF-261): observes the
-// already-running pods' images and records their posture into the shared admission-decision
-// log, complementing the webhook's admit-time observation.
-pub mod signing_sweep;
-
-// The pure signing-drift classifier (ADR-0020 §3, JEF-264): classifies a fresh posture against
-// the repo's learned baseline into continuous / regression / identity-change / new-repo, so the
-// sweep can surface an audit-only signing-regression finding on drift from the baseline.
-pub mod signing_drift;
-
-// The build-provenance drift classifier + sweep (ADR-0020 §5, JEF-275): the provenance twin of
-// signing_drift/signing_sweep — observes each image's SLSA provenance posture, learns the per-repo
-// provenance identity (TOFU), and surfaces an audit-only provenance-change finding when an
-// established repo is built by an unexpected builder/source. OFF by default — zero extra egress.
-pub mod provenance_drift;
-pub mod provenance_sweep;
-
-// TUF trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5, JEF-280): a stale
-// or starved trust root turns genuine signatures into `UnverifiableHere` and can mass-blind signing
-// detection, so its cache age + a fleet-wide unverifiable spike are surfaced (non-green) in
-// readiness. Pure/deterministic signals; never a gate.
-pub mod signing_trust;
-
-// The per-repo signing-baseline strength row (ADR-0020 §4, JEF-266): surfaces whether a repo's
-// baseline is log-corroborated (Rekor vouches for it) or local-only (weaker TOFU) in the inventory.
-pub mod signing_baseline_strength;
-
-// The opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266): after the sweep observes each
-// image, corroborates the repo baseline against the public signing history (marking it stronger
-// than local-only TOFU) and surfaces registry↔log divergence as a finding. OFF by default —
-// zero egress preserved unless the operator enables it.
-pub mod signing_rekor;
+// The supply-chain trust sweeps (ADR-0020): the per-pass signature / Rekor / provenance /
+// trust-root observation the engine runs over the already-running fleet, gathered into one module
+// behind the `run_sweeps` facade `run_watch` drives (JEF-369). The submodules
+// (`signing_sweep`, `signing_drift`, `signing_rekor`, `signing_trust`, `signing_baseline_strength`,
+// `provenance_sweep`, `provenance_drift`) keep their public surface, so external paths resolve as
+// `engine::supply_chain::<module>`.
+pub mod supply_chain;
 
 #[cfg(test)]
 mod tests;
