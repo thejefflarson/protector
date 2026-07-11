@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use super::agent_liveness::{BlindReason, NodeState, RuntimeCoverage};
 use super::verdict_store::{ModelHealth, ReadinessConfig};
-use crate::engine::signing_trust::TUF_STALE_AFTER_SECS;
+use crate::engine::supply_chain::signing_trust::TUF_STALE_AFTER_SECS;
 
 /// The LIVE state of one decision input — present, absent, or degraded. Distinct from a
 /// config echo: an input is `Absent` only when it is genuinely unconfigured/empty, and

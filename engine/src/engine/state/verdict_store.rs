@@ -209,7 +209,7 @@ pub struct ReadinessConfig {
     /// A fleet-wide spike in `UnverifiableHere` postures this pass (JEF-280): a large fraction of
     /// observed images suddenly fail to verify against our trust root — a hint the trust root
     /// drifted or is being starved. Surfaced (non-green) rather than silently swallowed. Computed
-    /// each pass by [`is_unverifiable_spike`](crate::engine::signing_trust::is_unverifiable_spike).
+    /// each pass by [`is_unverifiable_spike`](crate::engine::supply_chain::signing_trust::is_unverifiable_spike).
     pub unverifiable_spike: bool,
     /// How many images were left in the transient
     /// [`Checking`](crate::policies::signature::SigningPosture::Checking) state this pass (JEF-326):

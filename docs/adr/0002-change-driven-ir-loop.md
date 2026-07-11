@@ -257,5 +257,3 @@ Harder / accepted downsides:
 - The small-cluster bound from ADR-0001 still holds: differential scoping widens
   the practical ceiling but does not make multi-hop chain proving scale to
   thousands of workloads. Accepted.
-</content>
-</invoke>

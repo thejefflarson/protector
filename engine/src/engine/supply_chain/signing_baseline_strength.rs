@@ -7,8 +7,8 @@
 //! `SigningStrength/<repo>` row on the same admission-decision log the sweep already writes, so the
 //! view_model reads it with the existing partition/parse machinery and it works with the lane off.
 
-use super::policy_log::PolicyDecisionRecord;
-use super::state::SigningBaseline;
+use crate::engine::policy_log::PolicyDecisionRecord;
+use crate::engine::state::SigningBaseline;
 
 /// The subject prefix a per-repo baseline-strength row is keyed under (`SigningStrength/<repo>`),
 /// one per repo. A signing row (not a webhook decision), so the Admission view_model partitions it

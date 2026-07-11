@@ -145,5 +145,3 @@ holds structurally — the graph contains nothing else. If an untrusted or heuri
 provider is ever admitted (the case the tag anticipated), the seam is reintroducible by
 re-adding the grade and restoring the proof-walk filter (see ADR-0001's JEF-365
 amendment); removing it now is safe because nothing constructs a hypothesis-grade edge.
-</content>
-</invoke>
