@@ -99,7 +99,7 @@ fn alerts_tab_renders_signal_workload_recency_and_alarming_chain() {
     let readiness = judging_readiness();
     let findings = [f];
     let view = build_alerts_view(strip_for(&findings, &readiness), &findings, &readiness);
-    let html = page::alerts_page(&view).into_string();
+    let html = page::alerts_page(&view, PreactTabs::default()).into_string();
 
     // Each alarming-now signal shows, phrased as evidence.
     assert!(
@@ -158,7 +158,7 @@ fn untrusted_signal_text_is_escaped_in_the_alerts_view() {
     );
     let readiness = judging_readiness();
     let view = build_alerts_view(strip_for(&[], &readiness), &[f], &readiness);
-    let html = page::alerts_page(&view).into_string();
+    let html = page::alerts_page(&view, PreactTabs::default()).into_string();
 
     assert!(
         !html.contains("<script>alert"),
@@ -178,7 +178,7 @@ fn untrusted_signal_text_is_escaped_in_the_alerts_view() {
 fn empty_alerts_is_a_calm_state_not_an_alarm() {
     let readiness = judging_readiness();
     let view = build_alerts_view(strip_for(&[], &readiness), &[], &readiness);
-    let html = page::alerts_page(&view).into_string();
+    let html = page::alerts_page(&view, PreactTabs::default()).into_string();
 
     assert!(
         html.contains("no alarming activity right now"),
@@ -204,7 +204,7 @@ fn empty_alerts_is_a_calm_state_not_an_alarm() {
 fn quiet_alerts_with_a_blind_node_caveats_absence_is_not_safety() {
     let readiness = blind_node_readiness();
     let view = build_alerts_view(strip_for(&[], &readiness), &[], &readiness);
-    let html = page::alerts_page(&view).into_string();
+    let html = page::alerts_page(&view, PreactTabs::default()).into_string();
 
     // The honesty caveat replaces the reassuring all-quiet copy.
     assert!(
@@ -296,7 +296,7 @@ fn context_class_signal_on_an_uncorroborated_finding_never_says_corroborated() {
 
     // Both surfaces: the Alerts tab AND the findings-view annotation.
     let alerts = build_alerts_view(strip_for(&findings, &readiness), &findings, &readiness);
-    let alerts_html = page::alerts_page(&alerts).into_string();
+    let alerts_html = page::alerts_page(&alerts, PreactTabs::default()).into_string();
     let findings_view = super::view_model::build_findings_view(
         "prod".into(),
         &findings,

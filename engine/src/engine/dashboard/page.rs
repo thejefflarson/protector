@@ -26,50 +26,69 @@ pub const LIVE_REGION_ID: &str = "live";
 /// unchanged.
 pub fn findings_page(v: &FindingsViewProps, preact: PreactTabs) -> Markup {
     let body = if preact.is_preact(Tab::Findings) {
-        preact_mount(Tab::Findings)
+        preact_mount(Tab::Findings, preact)
     } else {
         findings_view(v)
     };
     document(&v.strip, Tab::Findings, body)
 }
 
-/// The Preact client mount point for a flagged tab (ADR-0025 / JEF-397): the server strip + nav
-/// still frame it (composed by [`document`]); this is only the view BODY the client renders into.
-/// The `data-tab` stamps the mounted tab so the client's first paint matches the document.
-fn preact_mount(tab: Tab) -> Markup {
-    let tab_token = match tab {
-        Tab::Findings => "findings",
-        Tab::Alerts => "alerts",
-        Tab::Action => "action",
-        Tab::Readiness => "readiness",
-        Tab::Admission => "admission",
-    };
+/// The Preact client mount point for a flagged tab (ADR-0025 / JEF-397, JEF-400): the server strip
+/// and nav still frame it (composed by [`document`]); this is only the view BODY the client renders
+/// into. The `data-tab` attribute stamps the mounted tab so the client's first paint matches the
+/// document, and the `data-preact-tabs` attribute lists every Preact-flagged tab (space-separated)
+/// so a client tab-swap is intercepted only among the tabs the server actually client-renders (a
+/// swap to a still-maud tab stays a full server navigation, keeping each per-tab flag reversible).
+fn preact_mount(tab: Tab, preact: PreactTabs) -> Markup {
     html! {
-        div id="dash-root" data-tab=(tab_token) {}
+        div id="dash-root" data-tab=(tab.token()) data-preact-tabs=(preact.enabled_tokens()) {}
     }
 }
 
 /// The full Alerts page (JEF-323): the persistent strip + nav + the live "alarming-now"
-/// corroboration list.
-pub fn alerts_page(v: &AlertsViewProps) -> Markup {
-    document(&v.strip, Tab::Alerts, alerts_view(v))
+/// corroboration list. When `alerts` is Preact-flagged (ADR-0025 / JEF-400) the body is the client
+/// mount point; default OFF ⇒ the maud body, unchanged.
+pub fn alerts_page(v: &AlertsViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Alerts) {
+        preact_mount(Tab::Alerts, preact)
+    } else {
+        alerts_view(v)
+    };
+    document(&v.strip, Tab::Alerts, body)
 }
 
 /// The full Action page: the persistent strip + nav + the merged action story (proposed cuts →
-/// left alone → judgement audit).
-pub fn action_page(v: &ActionViewProps) -> Markup {
-    document(&v.strip, Tab::Action, action_view(v))
+/// left alone → judgement audit). Preact-flaggable (ADR-0025 / JEF-400); default OFF ⇒ maud.
+pub fn action_page(v: &ActionViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Action) {
+        preact_mount(Tab::Action, preact)
+    } else {
+        action_view(v)
+    };
+    document(&v.strip, Tab::Action, body)
 }
 
 /// The full Readiness (coverage) page: the persistent strip + nav + the per-input coverage rows.
-pub fn readiness_page(v: &ReadinessViewProps) -> Markup {
-    document(&v.strip, Tab::Readiness, readiness_view(v))
+/// Preact-flaggable (ADR-0025 / JEF-400); default OFF ⇒ maud.
+pub fn readiness_page(v: &ReadinessViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Readiness) {
+        preact_mount(Tab::Readiness, preact)
+    } else {
+        readiness_view(v)
+    };
+    document(&v.strip, Tab::Readiness, body)
 }
 
 /// The full Admission/policy (webhook floor) page: the persistent strip + nav + the decision
-/// tallies header + the deduped decision rows.
-pub fn admission_page(v: &AdmissionViewProps) -> Markup {
-    document(&v.strip, Tab::Admission, admission_view(v))
+/// tallies header + the deduped decision rows. Preact-flaggable (ADR-0025 / JEF-400); default OFF ⇒
+/// maud.
+pub fn admission_page(v: &AdmissionViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Admission) {
+        preact_mount(Tab::Admission, preact)
+    } else {
+        admission_view(v)
+    };
+    document(&v.strip, Tab::Admission, body)
 }
 
 /// The `/fragment` body for the Findings tab — only the live region's INNER content, for the
@@ -80,7 +99,7 @@ pub fn admission_page(v: &AdmissionViewProps) -> Markup {
 /// client.
 pub fn findings_fragment(v: &FindingsViewProps, preact: PreactTabs) -> Markup {
     let body = if preact.is_preact(Tab::Findings) {
-        preact_mount(Tab::Findings)
+        preact_mount(Tab::Findings, preact)
     } else {
         findings_view(v)
     };
@@ -88,24 +107,45 @@ pub fn findings_fragment(v: &FindingsViewProps, preact: PreactTabs) -> Markup {
 }
 
 /// The `/fragment` body for the Alerts tab (JEF-323) — live-swapped in place so a new alarming-now
-/// signal appears (and a cleared one drops) on the next poll without a full reload.
-pub fn alerts_fragment(v: &AlertsViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Alerts, alerts_view(v))
+/// signal appears (and a cleared one drops) on the next poll without a full reload. Preact-flagged
+/// ⇒ the mount point (keeping a stray legacy poll from re-injecting maud under the client), JEF-400.
+pub fn alerts_fragment(v: &AlertsViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Alerts) {
+        preact_mount(Tab::Alerts, preact)
+    } else {
+        alerts_view(v)
+    };
+    live_region_inner(&v.strip, Tab::Alerts, body)
 }
 
-/// The `/fragment` body for the Action tab.
-pub fn action_fragment(v: &ActionViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Action, action_view(v))
+/// The `/fragment` body for the Action tab. Preact-flagged ⇒ the mount point (JEF-400).
+pub fn action_fragment(v: &ActionViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Action) {
+        preact_mount(Tab::Action, preact)
+    } else {
+        action_view(v)
+    };
+    live_region_inner(&v.strip, Tab::Action, body)
 }
 
-/// The `/fragment` body for the Readiness tab.
-pub fn readiness_fragment(v: &ReadinessViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Readiness, readiness_view(v))
+/// The `/fragment` body for the Readiness tab. Preact-flagged ⇒ the mount point (JEF-400).
+pub fn readiness_fragment(v: &ReadinessViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Readiness) {
+        preact_mount(Tab::Readiness, preact)
+    } else {
+        readiness_view(v)
+    };
+    live_region_inner(&v.strip, Tab::Readiness, body)
 }
 
-/// The `/fragment` body for the Admission tab.
-pub fn admission_fragment(v: &AdmissionViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Admission, admission_view(v))
+/// The `/fragment` body for the Admission tab. Preact-flagged ⇒ the mount point (JEF-400).
+pub fn admission_fragment(v: &AdmissionViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Admission) {
+        preact_mount(Tab::Admission, preact)
+    } else {
+        admission_view(v)
+    };
+    live_region_inner(&v.strip, Tab::Admission, body)
 }
 
 /// The document shell: head with same-origin assets (no third-party CSS/JS), then the live

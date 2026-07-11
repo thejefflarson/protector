@@ -984,10 +984,10 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
 fn render_page(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_page(&preview_findings(state), state.preact_tabs),
-        Tab::Alerts => page::alerts_page(&preview_alerts(state)),
-        Tab::Action => page::action_page(&preview_action(state)),
-        Tab::Readiness => page::readiness_page(&preview_readiness(state)),
-        Tab::Admission => page::admission_page(&preview_admission(state)),
+        Tab::Alerts => page::alerts_page(&preview_alerts(state), state.preact_tabs),
+        Tab::Action => page::action_page(&preview_action(state), state.preact_tabs),
+        Tab::Readiness => page::readiness_page(&preview_readiness(state), state.preact_tabs),
+        Tab::Admission => page::admission_page(&preview_admission(state), state.preact_tabs),
     };
     markup.into_string()
 }
@@ -996,10 +996,10 @@ fn render_page(state: &DashboardState, tab: Tab) -> String {
 fn render_fragment(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
         Tab::Findings => page::findings_fragment(&preview_findings(state), state.preact_tabs),
-        Tab::Alerts => page::alerts_fragment(&preview_alerts(state)),
-        Tab::Action => page::action_fragment(&preview_action(state)),
-        Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),
-        Tab::Admission => page::admission_fragment(&preview_admission(state)),
+        Tab::Alerts => page::alerts_fragment(&preview_alerts(state), state.preact_tabs),
+        Tab::Action => page::action_fragment(&preview_action(state), state.preact_tabs),
+        Tab::Readiness => page::readiness_fragment(&preview_readiness(state), state.preact_tabs),
+        Tab::Admission => page::admission_fragment(&preview_admission(state), state.preact_tabs),
     };
     markup.into_string()
 }

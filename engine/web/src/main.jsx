@@ -16,7 +16,13 @@ import { App } from "./app.jsx";
 const root = document.getElementById("dash-root");
 if (root) {
   // The server stamps the mounted tab via `data-tab` so the first paint's active tab matches the
-  // document without waiting for the first fetch.
+  // document without waiting for the first fetch, and the set of Preact-flagged tabs via
+  // `data-preact-tabs` (a space-separated list) so a client tab-swap is intercepted only among the
+  // tabs the server actually renders on the client — a swap to a still-maud tab stays a full
+  // server navigation (JEF-400). Absent ⇒ just the mounted tab (the conservative self-only case).
   const store = new Store({ activeTab: root.dataset.tab || "findings" });
-  render(<App store={store} />, root);
+  const preactTabs = new Set(
+    (root.dataset.preactTabs || root.dataset.tab || "").split(/\s+/).filter(Boolean),
+  );
+  render(<App store={store} preactTabs={preactTabs} />, root);
 }

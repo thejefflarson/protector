@@ -1,8 +1,10 @@
-// The dashboard v4 app shell (ADR-0025 / JEF-397): the mounted Preact tree below the
+// The dashboard v4 app shell (ADR-0025 / JEF-397, JEF-400): the mounted Preact tree below the
 // SERVER-RENDERED status strip. The strip stays maud for first-paint honesty (a JS failure must
 // never leave a stale green) — this shell renders only the connection banner, the tab nav
 // (progressive-enhancement: real `<a href>` links intercepted for a client-side view swap), and the
-// active view (Findings ported here; the other tabs are a fast-follow behind the per-tab flag).
+// active view. All five views (Findings / Alerts / Action / Readiness / Admission) are now ported;
+// which of them actually mounts is gated per-tab by the server flag (a maud tab emits no
+// `#dash-root`, so this shell never renders for it).
 //
 // The connection banner is the only `aria-live="polite"` region (the STRIP HEADLINE — not the
 // table): first-load says "connecting to the engine…", stale says the load-bearing two-sentence
@@ -11,6 +13,10 @@
 import { useEffect, useState } from "preact/hooks";
 import { startPolling } from "./poll.js";
 import { FindingsView } from "./findings/table.jsx";
+import { AlertsView } from "./alerts/view.jsx";
+import { ActionView } from "./action/view.jsx";
+import { ReadinessView } from "./readiness/view.jsx";
+import { AdmissionView } from "./admission/view.jsx";
 
 const TABS = [
   { id: "findings", label: "Findings", href: "/" },
@@ -23,10 +29,13 @@ const TABS = [
 /**
  * @param {object} props
  * @param {import("./store.js").Store} props.store the client store.
+ * @param {Set<string>} [props.preactTabs] the tabs the SERVER has flagged Preact — a client tab-swap
+ *   is intercepted only among these (a swap to a still-maud tab must be a full server navigation so
+ *   its server body renders). Defaults to just the mounted tab, the conservative self-only case.
  * @param {() => (Node | null)} [props.liveRegion] resolves the DOM node the selection guard checks
  *   (defaults to this app's root once mounted).
  */
-export function App({ store, liveRegion }) {
+export function App({ store, preactTabs, liveRegion }) {
   const [, force] = useState(0);
   useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
 
@@ -42,10 +51,11 @@ export function App({ store, liveRegion }) {
   }, [store, liveRegion]);
 
   const state = store.getState();
+  const enabled = preactTabs || new Set([state.activeTab]);
   return (
     <div id="dash-app" class="dash-app" data-tab={state.activeTab}>
       <ConnectionBanner status={state.status} lastGoodAt={state.lastGoodAt} />
-      <TabNav activeTab={state.activeTab} store={store} />
+      <TabNav activeTab={state.activeTab} store={store} preactTabs={enabled} />
       <ActiveView store={store} state={state} />
     </div>
   );
@@ -82,15 +92,16 @@ function agoSeconds(at) {
  * client-side view swap via `history.pushState`. A plain-navigation modifier (ctrl/⌘/middle-click)
  * is NOT intercepted so open-in-new-tab still works.
  */
-function TabNav({ activeTab, store }) {
+function TabNav({ activeTab, store, preactTabs }) {
   const onClick = (e, tab) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
       return; // let the browser handle a modified click (new tab, etc.)
     }
-    // Only Findings is ported (JEF-397). Leaving Findings for a still-maud tab is a REAL navigation
-    // (the maud page renders that tab); only a client-swap BACK to Findings (or Findings→Findings)
-    // is intercepted. This keeps the per-tab flag reversible and the secondaries untouched.
-    if (tab.id !== "findings") return; // let the browser navigate to the maud page
+    // A client-side view swap is intercepted only for a tab the SERVER has flagged Preact (all five
+    // views are ported — JEF-400 — but each is gated by its own flag). Leaving for a still-maud tab
+    // is a REAL navigation so its server body renders; this keeps every per-tab flag reversible and
+    // the maud secondaries untouched.
+    if (!preactTabs.has(tab.id)) return; // let the browser navigate to the maud page
     e.preventDefault();
     history.pushState({ tab: tab.id }, "", tab.href);
     store.setActiveTab(tab.id);
@@ -129,24 +140,27 @@ export function tabFromLocation() {
 }
 
 /**
- * Render the active view. Findings is ported to Preact (JEF-397); the other four tabs are a
- * fast-follow — until they land, selecting one falls back to a full server navigation (an honest
- * note, not a blank), so the operator still reaches every surface.
+ * Render the active view (all five tabs are ported — JEF-400). Before the active tab's first
+ * snapshot lands (initial mount, or right after a client tab-swap that cleared the previous tab's
+ * data) the body is a quiet placeholder — never a flashed empty table, and never the wrong tab's
+ * stale snapshot. Each view is otherwise a pure `view + store` render.
  */
 function ActiveView({ store, state }) {
-  if (state.activeTab !== "findings") {
-    return (
-      <main class="view view-fallback">
-        <p class="muted">
-          Loading the {state.activeTab} view… (this tab still renders server-side)
-        </p>
-      </main>
-    );
-  }
   if (!state.data) {
-    // First paint before the first snapshot lands — the banner already says "connecting…"; keep the
-    // body quiet rather than flashing an empty table.
-    return <main class="view view-findings" />;
+    // First paint / just after a tab-swap: keep the body quiet (the banner carries any connection
+    // state). A bare view container keeps the layout stable without asserting an empty result.
+    return <main class={`view view-${state.activeTab}`} />;
   }
-  return <FindingsView view={state.data} store={store} />;
+  switch (state.activeTab) {
+    case "alerts":
+      return <AlertsView view={state.data} />;
+    case "action":
+      return <ActionView view={state.data} store={store} />;
+    case "readiness":
+      return <ReadinessView view={state.data} store={store} />;
+    case "admission":
+      return <AdmissionView view={state.data} store={store} />;
+    default:
+      return <FindingsView view={state.data} store={store} />;
+  }
 }

@@ -62,6 +62,25 @@ impl PreactTabs {
             Tab::Admission => self.admission,
         }
     }
+
+    /// The space-separated list of Preact-flagged tab tokens (`"findings alerts"`), stamped on the
+    /// client mount as `data-preact-tabs` (ADR-0025 / JEF-400). The client intercepts a tab-swap
+    /// only among THESE — a swap to a still-maud tab stays a full server navigation, so each per-tab
+    /// flag is independently reversible. Empty when no tab is flagged (the default-dark posture).
+    pub fn enabled_tokens(self) -> String {
+        [
+            Tab::Findings,
+            Tab::Alerts,
+            Tab::Action,
+            Tab::Readiness,
+            Tab::Admission,
+        ]
+        .into_iter()
+        .filter(|&tab| self.is_preact(tab))
+        .map(Tab::token)
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
 }
 
 #[cfg(test)]

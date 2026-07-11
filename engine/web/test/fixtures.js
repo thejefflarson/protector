@@ -64,3 +64,153 @@ export function finding(id, overrides = {}) {
 export function findingsView(findings, stripOverrides = {}) {
   return { strip: strip(stripOverrides), findings };
 }
+
+// ----- JEF-400: fixtures for the four secondary views, shaped exactly like the server serde JSON.
+
+/** One Alerts row (an alarming-now event). No stable id by design — keyed on a content hash. */
+export function alert(overrides = {}) {
+  return {
+    signal: "drop-and-execute: /usr/bin/x",
+    kind: "exec",
+    workload: "web",
+    recency: "this pass",
+    "on-chain": "web \u{2192} db-creds",
+    ...overrides,
+  };
+}
+
+/** A whole Alerts view. `blindCaveat` (server-derived) selects the blind empty register. */
+export function alertsView(alerts, { blindCaveat = null, stripOverrides = {} } = {}) {
+  return { strip: strip(stripOverrides), alerts, "blind-caveat": blindCaveat };
+}
+
+/** One Readiness coverage row. `nodes` populates the per-node runtime-corroboration breakdown. */
+export function readinessRow(id, overrides = {}) {
+  return {
+    id,
+    label: `label-${id}`,
+    state: "present",
+    why: `why ${id} matters`,
+    enable: "",
+    detail: `detail for ${id}`,
+    "weakens-decisions": false,
+    nodes: [],
+    ...overrides,
+  };
+}
+
+/** One per-node runtime-corroboration row. */
+export function nodeRow(node, overrides = {}) {
+  return { node, state: "healthy", detail: "quiet", ...overrides };
+}
+
+/** A whole Readiness view. */
+export function readinessView(rows, stripOverrides = {}) {
+  return { strip: strip(stripOverrides), rows };
+}
+
+/** One Action would-act entry (a still-standing proposed cut). */
+export function wouldAct(entry, overrides = {}) {
+  return {
+    entry,
+    episodes: 2,
+    "would-act-decisions": 3,
+    "max-lifetime": "4m",
+    open: true,
+    "short-lived": false,
+    "coverage-gap": false,
+    "last-verdict": `verdict for ${entry}`,
+    ...overrides,
+  };
+}
+
+/** One Action judgement-audit entry. */
+export function judgement(entry, overrides = {}) {
+  return {
+    entry,
+    objectives: 1,
+    verdict: "Confirmed",
+    prompt: `prompt for ${entry}`,
+    reply: `reply for ${entry}`,
+    ...overrides,
+  };
+}
+
+/** A whole Action view. */
+export function actionView(overrides = {}) {
+  return {
+    strip: strip(),
+    "window-human": "7d",
+    "journal-empty": false,
+    "decisions-in-window": 0,
+    "would-act": [],
+    reversions: [],
+    "left-alone": [],
+    judgements: [],
+    "would-act-count": 0,
+    "short-lived-count": 0,
+    "coverage-gap-count": 0,
+    "left-alone-count": 0,
+    "reverted-count": 0,
+    ...overrides,
+  };
+}
+
+/** One Admission decision row. No stable id — keyed on `(subject, image, decision)`. */
+export function decisionRow(overrides = {}) {
+  return {
+    decision: "allow",
+    subject: "Deployment/web",
+    image: "registry/web:1",
+    namespace: "prod",
+    mesh: "verified",
+    "would-admit": true,
+    reason: "",
+    count: 1,
+    ...overrides,
+  };
+}
+
+/** One signing-inventory image row. */
+export function signingRow(domId, overrides = {}) {
+  return {
+    "dom-id": domId,
+    image: `registry/app@${domId}`,
+    label: domId,
+    posture: "signed",
+    signer: { "identity-short": "org/repo", "identity-full": "org/repo", "issuer-badge": "github actions", "issuer-full": "https://token.actions.githubusercontent.com" },
+    provenance: "absent",
+    "provenance-info": null,
+    detail: "",
+    enforcement: "would-admit",
+    count: 1,
+    ...overrides,
+  };
+}
+
+/** One signing repo group. */
+export function signingRepo(repo, images, overrides = {}) {
+  return {
+    repo,
+    images,
+    regression: null,
+    exception: null,
+    "provenance-change": null,
+    strength: "log-corroborated",
+    ...overrides,
+  };
+}
+
+/** A whole Admission view. */
+export function admissionView(overrides = {}) {
+  return {
+    strip: strip(),
+    admitted: 0,
+    audited: 0,
+    denied: 0,
+    total: 0,
+    signing: [],
+    rows: [],
+    ...overrides,
+  };
+}
