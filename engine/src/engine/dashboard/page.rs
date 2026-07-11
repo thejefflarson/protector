@@ -8,6 +8,7 @@ use maud::{DOCTYPE, Markup, html};
 use super::components::{
     action_view, admission_view, alerts_view, findings_view, nav_bar, readiness_view, status_strip,
 };
+use super::preact_flags::PreactTabs;
 use super::view_model::props::{
     ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps, ReadinessViewProps,
     StatusStripProps, Tab,
@@ -18,8 +19,34 @@ use super::view_model::props::{
 pub const LIVE_REGION_ID: &str = "live";
 
 /// The full Findings page: document shell + assets + the live region (strip + nav + findings).
-pub fn findings_page(v: &FindingsViewProps) -> Markup {
-    document(&v.strip, Tab::Findings, findings_view(v))
+///
+/// When `preact.is_preact(Tab::Findings)` is set (ADR-0025 / JEF-397) the findings BODY is replaced
+/// by a Preact client mount point (`<div id="dash-root" data-tab="findings">`); the status strip
+/// stays server-rendered above it for calm-when-blind first paint. Default OFF ⇒ the maud body,
+/// unchanged.
+pub fn findings_page(v: &FindingsViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Findings) {
+        preact_mount(Tab::Findings)
+    } else {
+        findings_view(v)
+    };
+    document(&v.strip, Tab::Findings, body)
+}
+
+/// The Preact client mount point for a flagged tab (ADR-0025 / JEF-397): the server strip + nav
+/// still frame it (composed by [`document`]); this is only the view BODY the client renders into.
+/// The `data-tab` stamps the mounted tab so the client's first paint matches the document.
+fn preact_mount(tab: Tab) -> Markup {
+    let tab_token = match tab {
+        Tab::Findings => "findings",
+        Tab::Alerts => "alerts",
+        Tab::Action => "action",
+        Tab::Readiness => "readiness",
+        Tab::Admission => "admission",
+    };
+    html! {
+        div id="dash-root" data-tab=(tab_token) {}
+    }
 }
 
 /// The full Alerts page (JEF-323): the persistent strip + nav + the live "alarming-now"
@@ -46,9 +73,18 @@ pub fn admission_page(v: &AdmissionViewProps) -> Markup {
 }
 
 /// The `/fragment` body for the Findings tab — only the live region's INNER content, for the
-/// JS to swap in place (preserving scroll/expansion/filter). No document shell.
-pub fn findings_fragment(v: &FindingsViewProps) -> Markup {
-    live_region_inner(&v.strip, Tab::Findings, findings_view(v))
+/// maud JS to swap in place (preserving scroll/expansion/filter). No document shell. When Findings
+/// is Preact-flagged (ADR-0025 / JEF-397) the body is the client mount point instead of the maud
+/// table — the client reconciles from `/api/findings.json`, not this fragment, but keeping the
+/// fragment consistent means a stray `/fragment` poll never re-injects a maud table under the
+/// client.
+pub fn findings_fragment(v: &FindingsViewProps, preact: PreactTabs) -> Markup {
+    let body = if preact.is_preact(Tab::Findings) {
+        preact_mount(Tab::Findings)
+    } else {
+        findings_view(v)
+    };
+    live_region_inner(&v.strip, Tab::Findings, body)
 }
 
 /// The `/fragment` body for the Alerts tab (JEF-323) — live-swapped in place so a new alarming-now
@@ -88,11 +124,12 @@ fn document(strip: &StatusStripProps, tab: Tab, body: Markup) -> Markup {
                 div id=(LIVE_REGION_ID) data-tab=(tab.label()) {
                     (live_region_inner(strip, tab, body))
                 }
-                // The mount point for the v4 Preact client (ADR-0025). The bundle mounts here
-                // only if the node exists, so the server-rendered maud page above stays intact
-                // and paints (incl. the calm-when-blind strip) before any JS runs. The client
-                // is a proof-of-life shell today; the real keyed views land in later parts.
-                div id="dash-root" {}
+                // The v4 Preact client (ADR-0025 / JEF-397) mounts into the `#dash-root` node the
+                // FINDINGS BODY carries when that tab is Preact-flagged (the mount sits under the
+                // server-rendered strip so the calm-when-blind first paint never depends on JS). On
+                // a maud tab there is no `#dash-root`, so the bundle is inert. The script loads on
+                // every tab (harmless when inert) so a client-flagged tab reached by a full
+                // navigation still hydrates.
                 script src="/assets/dashboard.js" defer {}
             }
         }

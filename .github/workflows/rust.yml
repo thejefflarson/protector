@@ -114,6 +114,11 @@ jobs:
       run: |
         npm --prefix engine/web ci --ignore-scripts
         npm --prefix engine/web run build
+    - name: Dashboard client tests
+      # The v4 Preact client's offline unit + interaction tests (vitest + jsdom, ADR-0025 /
+      # JEF-397): the keyed reconcile, the state-preservation (JEF-351) acceptance test, client
+      # escaping, and the honesty empty-states. `npm ci` above installed the dev toolchain.
+      run: npm --prefix engine/web run test
     - name: Audit dependencies
       run: |
         # binstall a prebuilt binary instead of compiling cargo-audit from source.

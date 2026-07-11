@@ -14,8 +14,11 @@
 
 mod components;
 pub mod page;
+mod preact_flags;
 mod security_headers;
 pub mod view_model;
+
+pub use preact_flags::PreactTabs;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -70,6 +73,10 @@ pub struct DashboardState {
     pub policy_log: Arc<PolicyDecisionLog>,
     /// The cluster label shown in the strip.
     pub cluster: String,
+    /// Which tabs render as the v4 Preact client mount point vs the maud body (ADR-0025 / JEF-397).
+    /// Resolved once at construction from `PROTECTOR_DASHBOARD_PREACT_TABS`; default OFF (all maud),
+    /// so the dashboard ships dark until a tab is explicitly flipped on.
+    pub preact_tabs: PreactTabs,
 }
 
 impl DashboardState {
@@ -199,7 +206,7 @@ impl TabQuery {
 /// `GET /` — the full page for the requested tab (default Findings).
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
-        Tab::Findings => page::findings_page(&state.findings_view()),
+        Tab::Findings => page::findings_page(&state.findings_view(), state.preact_tabs),
         Tab::Alerts => page::alerts_page(&state.alerts_view()),
         Tab::Action => page::action_page(&state.action_view()),
         Tab::Readiness => page::readiness_page(&state.readiness_view()),
@@ -213,7 +220,7 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 /// banner immediately (brief §7).
 async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
-        Tab::Findings => page::findings_fragment(&state.findings_view()),
+        Tab::Findings => page::findings_fragment(&state.findings_view(), state.preact_tabs),
         Tab::Alerts => page::alerts_fragment(&state.alerts_view()),
         Tab::Action => page::action_fragment(&state.action_view()),
         Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
@@ -337,6 +344,11 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 
 #[cfg(test)]
 mod tests;
+
+// JEF-397: the per-tab Preact-flag render tests (mount-point vs maud body; strip stays
+// server-rendered), in their own file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod preact_flag_tests;
 
 // JEF-395: HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025) — same-view-model,
 // GET-only, no-store. In their own file to keep `mod.rs` focused and under the 1,000-line cap.

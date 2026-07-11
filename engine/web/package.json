@@ -6,10 +6,18 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "esbuild-wasm": "0.25.10",
     "preact": "10.29.7"
+  },
+  "devDependencies": {
+    "@testing-library/preact": "^3.2.4",
+    "@vitest/mocker": "^3.2.6",
+    "jsdom": "^25.0.1",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
   }
 }

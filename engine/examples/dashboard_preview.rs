@@ -37,7 +37,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use protector::engine::dashboard::view_model::props::Tab;
-use protector::engine::dashboard::{DashboardState, page, view_model};
+use protector::engine::dashboard::{DashboardState, PreactTabs, page, view_model};
 use protector::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage};
 use protector::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use protector::engine::reason::adjudicate::Verdict;
@@ -577,6 +577,7 @@ fn build_clear() -> DashboardState {
         // The webhook floor: a populated admission log (admits + an audited + an enforced deny).
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
+        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -653,6 +654,7 @@ fn build_watching() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
+        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -812,6 +814,7 @@ fn build_breach() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
+        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -866,6 +869,7 @@ fn build_blind() -> DashboardState {
         // "no admission decisions recorded yet" empty state (the empty case the brief asks for).
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
+        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -979,7 +983,7 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
 /// Render the full page for a tab through the dashboard's PUBLIC render path (all four real).
 fn render_page(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
-        Tab::Findings => page::findings_page(&preview_findings(state)),
+        Tab::Findings => page::findings_page(&preview_findings(state), state.preact_tabs),
         Tab::Alerts => page::alerts_page(&preview_alerts(state)),
         Tab::Action => page::action_page(&preview_action(state)),
         Tab::Readiness => page::readiness_page(&preview_readiness(state)),
@@ -991,7 +995,7 @@ fn render_page(state: &DashboardState, tab: Tab) -> String {
 /// Render the `/fragment` live-region inner content through the public render path.
 fn render_fragment(state: &DashboardState, tab: Tab) -> String {
     let markup = match tab {
-        Tab::Findings => page::findings_fragment(&preview_findings(state)),
+        Tab::Findings => page::findings_fragment(&preview_findings(state), state.preact_tabs),
         Tab::Alerts => page::alerts_fragment(&preview_alerts(state)),
         Tab::Action => page::action_fragment(&preview_action(state)),
         Tab::Readiness => page::readiness_fragment(&preview_readiness(state)),

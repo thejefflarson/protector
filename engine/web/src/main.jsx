@@ -1,24 +1,22 @@
-// Dashboard v4 client entry (ADR-0025) — proof-of-life shell, NOT a real view yet.
+// Dashboard v4 client entry (ADR-0025 / JEF-397). Mounts the Preact app into the server-rendered
+// mount point the maud page emits when the per-tab Preact flag is ON for a tab
+// (`<div id="dash-root" data-tab="…">`). The status strip above the mount stays SERVER-RENDERED, so
+// the calm-when-blind first paint (and the honest banner) never depends on this JS running.
 //
-// This is Foundation #2: it proves the whole pipeline end to end — esbuild bundles
-// Preact from source, the engine serves the bundle same-origin via `include_str!`, the
-// bundle mounts under a strict same-origin CSP, and it reconciles from the same-origin,
-// read-only JSON snapshot (`/api/findings.json`, owned by JEF-395). The real keyed views
-// land in later parts of the rewrite; here we only demonstrate mount + fetch + render.
-//
-// Zero-egress (ADR-0025): the ONLY network call is a same-origin fetch of the JSON
-// snapshot. No CDN, no third-party origin — enforced by the CSP `connect-src 'self'` and
-// the built-bundle guard. Preact auto-escapes all interpolated text; raw-HTML injection
-// (the banned Preact escape hatch) is forbidden in src/ by a source guard.
+// Zero-egress (ADR-0025): the ONLY network call is a same-origin fetch of the JSON snapshot
+// (`/api/{tab}.json`), enforced by the CSP `connect-src 'self'`. Preact auto-escapes all
+// interpolated text; the raw-HTML escape hatch is banned in src/ by a
+// source guard (the JEF-396 test). Mount only when the target exists, so the bundle is inert on any
+// maud page that has NOT opted the tab into Preact (the flag defaults OFF).
 
 import { render } from "preact";
-import { Shell } from "./shell.jsx";
+import { Store } from "./store.js";
+import { App } from "./app.jsx";
 
-// The maud document keeps a server-rendered mount point (`div id="dash-root"`) inside the
-// live region. If JS is disabled the server status strip still paints (ADR-0025 (d)); only
-// this detailed shell needs the mount. Mount only when the target exists so the bundle is
-// inert on any maud page that hasn't opted in yet.
 const root = document.getElementById("dash-root");
 if (root) {
-  render(<Shell />, root);
+  // The server stamps the mounted tab via `data-tab` so the first paint's active tab matches the
+  // document without waiting for the first fetch.
+  const store = new Store({ activeTab: root.dataset.tab || "findings" });
+  render(<App store={store} />, root);
 }

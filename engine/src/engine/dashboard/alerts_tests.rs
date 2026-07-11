@@ -15,6 +15,7 @@ use crate::engine::state::{
     ReadinessConfig, RecencyInfo, RuntimeCoverage, derive_readiness,
 };
 
+use super::PreactTabs;
 use super::page;
 use super::tests::{breach_finding, judging_readiness};
 use super::view_model::{build_alerts_view, build_status_strip};
@@ -241,7 +242,7 @@ fn findings_detail_annotates_the_chain_with_its_alarming_signal() {
         &readiness,
         Some(SystemTime::now()),
     );
-    let html = page::findings_page(&view).into_string();
+    let html = page::findings_page(&view, PreactTabs::default()).into_string();
 
     // The critical-path detail carries the "alarming activity observed" annotation naming the live
     // signal, the workload, and its recency.
@@ -303,7 +304,7 @@ fn context_class_signal_on_an_uncorroborated_finding_never_says_corroborated() {
         &readiness,
         Some(SystemTime::now()),
     );
-    let findings_html = page::findings_page(&findings_view).into_string();
+    let findings_html = page::findings_page(&findings_view, PreactTabs::default()).into_string();
 
     // The signals DO surface (they are alarming) — with alarming language.
     assert!(

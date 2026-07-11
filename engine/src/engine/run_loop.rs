@@ -358,6 +358,10 @@ pub async fn run_watch(
                     policy_log: policy_log.clone(),
                     cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
                         .unwrap_or_else(|_| "cluster".to_string()),
+                    // Which tabs render as the v4 Preact client (ADR-0025 / JEF-397) —
+                    // `PROTECTOR_DASHBOARD_PREACT_TABS`, default OFF (all maud), so the dashboard
+                    // ships dark until a tab is explicitly flipped on.
+                    preact_tabs: dashboard::PreactTabs::from_env(),
                 };
                 tokio::spawn(dashboard::serve_dashboard(addr, state));
             }
