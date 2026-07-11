@@ -88,6 +88,11 @@ fn document(strip: &StatusStripProps, tab: Tab, body: Markup) -> Markup {
                 div id=(LIVE_REGION_ID) data-tab=(tab.label()) {
                     (live_region_inner(strip, tab, body))
                 }
+                // The mount point for the v4 Preact client (ADR-0025). The bundle mounts here
+                // only if the node exists, so the server-rendered maud page above stays intact
+                // and paints (incl. the calm-when-blind strip) before any JS runs. The client
+                // is a proof-of-life shell today; the real keyed views land in later parts.
+                div id="dash-root" {}
                 script src="/assets/dashboard.js" defer {}
             }
         }

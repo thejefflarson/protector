@@ -14,6 +14,7 @@
 
 mod components;
 pub mod page;
+mod security_headers;
 pub mod view_model;
 
 use std::net::SocketAddr;
@@ -251,12 +252,17 @@ async fn dashboard_js() -> Response {
 }
 
 /// Build the dashboard router with the read-only state.
+///
+/// Every response carries the strict same-origin CSP (ADR-0025) via a single
+/// [`security_headers::set_csp`] layer — the layer covers all routes, so a route added
+/// later (e.g. a `/api/*.json` snapshot) inherits it without a per-route edit.
 pub fn router(state: DashboardState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/fragment", get(fragment))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js))
+        .layer(axum::middleware::from_fn(security_headers::set_csp))
         .with_state(state)
 }
 
