@@ -33,8 +33,8 @@ use super::state::{
     default_window_report, derive_readiness,
 };
 use view_model::props::{
-    ActionViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
-    Tab,
+    ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps, ReadinessViewProps,
+    StatusStripProps, Tab,
 };
 
 /// The light-theme stylesheet, generated from the `docs/STYLEGUIDE.md` tokens. Served
@@ -130,6 +130,19 @@ impl DashboardState {
         view
     }
 
+    /// Build the Alerts view props (JEF-323): the persistent strip + the live "alarming-now"
+    /// activity events derived from the SAME per-pass findings snapshot the Findings view
+    /// reads (a current-window view — runtime signals live one pass — not a persisted log) + the
+    /// calm blind-node caveat for the quiet state. The strip carries the real findings counts (and
+    /// the folded-in signing regressions) so its honesty reading holds on this tab too.
+    fn alerts_view(&self) -> AlertsViewProps {
+        let findings = self.findings.snapshot();
+        let readiness = self.readiness();
+        // `status_strip()` already folds in the signing-regression counts, so the Alerts strip
+        // reads honestly (non-green under a standing regression) on this tab too.
+        view_model::build_alerts_view(self.status_strip(), &findings, &readiness)
+    }
+
     /// Build the Action view props (the merged Trust + Activity story): the persistent strip + the
     /// proposed cuts (the would-cut / left-alone diff aggregated read-only over the default window
     /// from the decision journal, plus the self-reverted-cuts ring) + the judgement audit (both
@@ -170,6 +183,7 @@ struct TabQuery {
 impl TabQuery {
     fn resolve(&self) -> Tab {
         match self.tab.as_deref() {
+            Some("alerts") => Tab::Alerts,
             // The merged Action tab + its legacy soft-aliases.
             Some("action") | Some("trust") | Some("activity") => Tab::Action,
             Some("readiness") => Tab::Readiness,
@@ -183,6 +197,7 @@ impl TabQuery {
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_page(&state.findings_view()),
+        Tab::Alerts => page::alerts_page(&state.alerts_view()),
         Tab::Action => page::action_page(&state.action_view()),
         Tab::Readiness => page::readiness_page(&state.readiness_view()),
         Tab::Admission => page::admission_page(&state.admission_view()),
@@ -196,6 +211,7 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_fragment(&state.findings_view()),
+        Tab::Alerts => page::alerts_fragment(&state.alerts_view()),
         Tab::Action => page::action_fragment(&state.action_view()),
         Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
         Tab::Admission => page::admission_fragment(&state.admission_view()),
@@ -265,6 +281,11 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
 
 #[cfg(test)]
 mod tests;
+
+// JEF-323: the Alerts view render + honesty tests (escaping / calm-empty / blind-node / path
+// annotation), in their own file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod alerts_tests;
 
 #[cfg(test)]
 mod path_view_tests;

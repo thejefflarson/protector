@@ -6,11 +6,11 @@
 use maud::{DOCTYPE, Markup, html};
 
 use super::components::{
-    action_view, admission_view, findings_view, nav_bar, readiness_view, status_strip,
+    action_view, admission_view, alerts_view, findings_view, nav_bar, readiness_view, status_strip,
 };
 use super::view_model::props::{
-    ActionViewProps, AdmissionViewProps, FindingsViewProps, ReadinessViewProps, StatusStripProps,
-    Tab,
+    ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps, ReadinessViewProps,
+    StatusStripProps, Tab,
 };
 
 /// The live-region id the JS polls and swaps. The status strip + active view live inside it so
@@ -20,6 +20,12 @@ pub const LIVE_REGION_ID: &str = "live";
 /// The full Findings page: document shell + assets + the live region (strip + nav + findings).
 pub fn findings_page(v: &FindingsViewProps) -> Markup {
     document(&v.strip, Tab::Findings, findings_view(v))
+}
+
+/// The full Alerts page (JEF-323): the persistent strip + nav + the live "alarming-now"
+/// corroboration list.
+pub fn alerts_page(v: &AlertsViewProps) -> Markup {
+    document(&v.strip, Tab::Alerts, alerts_view(v))
 }
 
 /// The full Action page: the persistent strip + nav + the merged action story (proposed cuts →
@@ -43,6 +49,12 @@ pub fn admission_page(v: &AdmissionViewProps) -> Markup {
 /// JS to swap in place (preserving scroll/expansion/filter). No document shell.
 pub fn findings_fragment(v: &FindingsViewProps) -> Markup {
     live_region_inner(&v.strip, Tab::Findings, findings_view(v))
+}
+
+/// The `/fragment` body for the Alerts tab (JEF-323) — live-swapped in place so a new alarming-now
+/// signal appears (and a cleared one drops) on the next poll without a full reload.
+pub fn alerts_fragment(v: &AlertsViewProps) -> Markup {
+    live_region_inner(&v.strip, Tab::Alerts, alerts_view(v))
 }
 
 /// The `/fragment` body for the Action tab.
