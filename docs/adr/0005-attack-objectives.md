@@ -124,5 +124,3 @@ Harder / accepted downsides:
   bar still requires runtime corroboration before any response.
 - **An objective taxonomy is a living artifact.** ATT&CK is versioned and
   changes; our mapping is a maintained translation, not a one-time table.
-</content>
-</invoke>

@@ -82,5 +82,3 @@ Harder / accepted downsides:
   maintained translation, and a technique they add is a gap until we port it.
 - **It would be faster to adopt.** If escape coverage becomes the bottleneck, this
   decision should be revisited via the port boundary it deliberately preserves.
-</content>
-</invoke>

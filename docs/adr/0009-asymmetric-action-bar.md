@@ -83,5 +83,3 @@ Harder / accepted downsides:
 - **This revises ADR-0001's conjunction.** That bar was the right conservative
   starting point; this is the considered refinement once the signals' asymmetry
   and the adjudicator were both in place.
-</content>
-</invoke>

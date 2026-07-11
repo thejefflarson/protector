@@ -94,5 +94,3 @@ Harder / accepted downsides:
 - **Hand-walked queries are code, not declarations.** A new *kind* of reachability
   question is a new walk to write and test. That is the cost of not adopting a
   query engine, and it is the right cost until the rules prove unwieldy.
-</content>
-</invoke>
