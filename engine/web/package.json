@@ -1,0 +1,15 @@
+{
+  "name": "protector-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Protector operator dashboard — a bundled Preact client that reconciles from same-origin, read-only JSON (ADR-0025). Built from source at build time (Docker node stage + CI node step); the bundle is gitignored, never committed.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "esbuild-wasm": "0.25.10",
+    "preact": "10.29.7"
+  }
+}

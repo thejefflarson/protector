@@ -2,8 +2,12 @@
 # Nested crate build dirs (e.g. agent/*/target) — match any target/ anywhere.
 target/
 
-# JS bundle build (vendored output in web/dist is committed)
+# Preact dashboard client (ADR-0025): built from source at build time (Docker node
+# stage + CI node step) and gitignored — source under engine/web/src/ is the single
+# truth, mirroring how compiled Rust artifacts are never committed. dashboard.css is a
+# separately-generated, still-committed asset and is NOT ignored here.
 engine/web/node_modules/
+engine/web/dist/dashboard.js
 
 # Python bytecode cache (e.g. scripts/__pycache__ from judge_bakeoff.py)
 __pycache__/
