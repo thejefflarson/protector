@@ -20,6 +20,11 @@ pub mod tuf_tmpdir;
 #[cfg(test)]
 mod tests;
 
+// JEF-368: the classify_facts posture + admission signing-continuity tests, split out of
+// `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod classify_continuity_tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
