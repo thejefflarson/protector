@@ -73,5 +73,3 @@ Harder / accepted downsides:
 - **Two cut semantics now exist** (edge-deny vs workload-isolation) behind one
   action class; operators must know which mechanism their cluster uses. The env
   switch and logs name it.
-</content>
-</invoke>

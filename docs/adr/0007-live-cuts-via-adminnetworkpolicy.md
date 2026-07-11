@@ -81,5 +81,3 @@ Harder / accepted downsides:
 - **Still only one auto-cuttable class.** ADR-0002's "additive object" vision is,
   in reality, network denials only; everything else is a durable-fix PR. That is a
   narrower live-actuation surface than the vision implied, and the honest one.
-</content>
-</invoke>
