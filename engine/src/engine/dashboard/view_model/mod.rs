@@ -11,6 +11,7 @@ pub mod props;
 
 mod action;
 mod admission;
+mod alerts;
 mod findings;
 mod posture;
 mod readiness;
@@ -23,7 +24,7 @@ use crate::engine::policy_log::PolicyDecisionRecord;
 use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
-    ActionViewProps, AdmissionViewProps, FindingProps, FindingsViewProps, Posture,
+    ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingProps, FindingsViewProps, Posture,
     ReadinessViewProps, StatusStripProps,
 };
 
@@ -95,6 +96,20 @@ pub fn build_status_strip(
     last_pass: Option<SystemTime>,
 ) -> StatusStripProps {
     strip_from_findings(cluster, findings, judgements, readiness, last_pass).0
+}
+
+/// Build the whole Alerts view's props (JEF-323): the persistent strip + the current-window
+/// "alarming-now" corroboration events across every finding's entry this pass, plus the calm
+/// blind-node caveat for the quiet state. A CURRENT-WINDOW view (runtime signals live one pass),
+/// NOT a persisted audit log. Derived from the SAME per-pass findings snapshot the Findings view
+/// reads, so the Alerts tab and the findings-view "corroborated-now by …" line never disagree.
+/// Pure given its inputs.
+pub fn build_alerts_view(
+    strip: StatusStripProps,
+    findings: &[Finding],
+    readiness: &Readiness,
+) -> AlertsViewProps {
+    alerts::build(strip, findings, readiness)
 }
 
 /// Build the whole Readiness view's props (brief §6): the persistent strip + one coverage row per

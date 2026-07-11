@@ -8,6 +8,7 @@
 
 mod action_view;
 mod admission_view;
+mod alerts_view;
 mod evidence;
 mod finding_detail;
 mod finding_row;
@@ -18,6 +19,7 @@ mod status_strip;
 
 pub use action_view::action_view;
 pub use admission_view::admission_view;
+pub use alerts_view::alerts_view;
 pub use findings_view::findings_view;
 pub use nav::nav_bar;
 pub use readiness_view::readiness_view;

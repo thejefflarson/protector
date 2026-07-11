@@ -293,6 +293,13 @@ pub struct FindingProps {
     /// safety — so the detail renders this caveat. `None` when the node has a live sensor, the
     /// finding is corroborated, or the node isn't known.
     pub blind_node_caveat: Option<String>,
+    /// The live "alarming-now" corroboration signals observed on this chain's entry THIS pass
+    /// (JEF-323) — each a `"drop-and-execute on web (2m ago)"`-style annotation the detail panel
+    /// renders as "corroborated-now by …". EVIDENCE, not a verdict: an alert corroborates, it never
+    /// concludes a breach (ADR-0016). Empty when nothing is alarming on this chain right now. Every
+    /// string is UNTRUSTED (it can carry an attacker-chosen path / rule name) — auto-escaped at
+    /// render. Projected from the SAME per-pass runtime signals the Alerts tab reads.
+    pub alerts: Vec<AlertProps>,
 }
 
 /// The three honesty axes the status strip carries (brief §3): decided/judging/covered. Never
@@ -413,6 +420,10 @@ pub struct CoverageChip {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Findings,
+    /// The live "alarming-now" corroboration view (JEF-323) — a CURRENT-WINDOW list of the
+    /// runtime signals alarming THIS pass, not a persisted audit log. Sits second, next to
+    /// Findings, because it is the same live security story from the corroboration angle.
+    Alerts,
     Action,
     Readiness,
     Admission,
@@ -423,6 +434,7 @@ impl Tab {
     pub fn path(self) -> &'static str {
         match self {
             Tab::Findings => "/",
+            Tab::Alerts => "/?tab=alerts",
             Tab::Action => "/?tab=action",
             Tab::Readiness => "/?tab=readiness",
             Tab::Admission => "/?tab=admission",
@@ -433,6 +445,7 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Findings => "Findings",
+            Tab::Alerts => "Alerts",
             Tab::Action => "Action",
             Tab::Readiness => "Readiness",
             Tab::Admission => "Admission",
@@ -447,6 +460,54 @@ pub struct FindingsViewProps {
     pub strip: StatusStripProps,
     /// Findings, already sorted by URGENCY (not severity) — brief §5.
     pub findings: Vec<FindingProps>,
+}
+
+// ---------------------------------------------------------------------------
+// Alerts view (JEF-323) — the live "alarming-now" corroboration surface. A
+// CURRENT-WINDOW view of the runtime signals alarming THIS pass (runtime
+// signals live one pass then clear — this is NOT a persisted audit log), each
+// attributed to its (informer-resolved) workload, with recency and the
+// objective/chain it corroborates. An alert is EVIDENCE (corroboration), never
+// a verdict (ADR-0016) — the copy never implies a breach conclusion.
+// ---------------------------------------------------------------------------
+
+/// One alarming-now corroboration event for the Alerts tab (JEF-323). Pure presentation data —
+/// no engine domain type leaks in. Every string is UNTRUSTED at render (the signal can carry an
+/// attacker-chosen path, the rule an attacker-chosen name, the workload an attacker-influenced
+/// pod name): the component auto-escapes them (maud `{}`, never `PreEscaped`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertProps {
+    /// The signal, human-phrased (`"drop-and-execute: /usr/bin/x"`, `"contacted cloud-metadata"`,
+    /// `"notable exec: bash"`, `"sensor rule fired: <rule>"`). Untrusted.
+    pub signal: String,
+    /// A stable, low-cardinality kind token (`alert`/`exec`/`write`/`peer`) — the CSS/glyph seam
+    /// so a signal carries its kind without colour. Never per-instance payload.
+    pub kind: String,
+    /// The workload the signal was attributed to (informer-resolved short label), untrusted.
+    pub workload: String,
+    /// How recent the signal is, human-phrased (`"this pass"`, or the entry's age `"2m ago"`).
+    /// Runtime signals are transient (one pass), so recency is the corroborated chain's age — the
+    /// honest "how long this has been alarming" — or simply "this pass" when no age is known.
+    pub recency: String,
+    /// The objective/chain this alert corroborates, if it lands on a proven breach-relevant chain
+    /// (`"web \u{2192} db-creds"`), else `None` — an alarming signal with no proven chain still
+    /// shows (it is alarming), it just corroborates nothing specific yet. Untrusted.
+    pub corroborates: Option<String>,
+}
+
+/// The whole Alerts view's props (JEF-323): the persistent strip + the current-window alarming-now
+/// events + the honest calm/blind empty framing. When `alerts` is empty the view renders a CALM
+/// "no alarming activity right now" state (reassuring, not an alarm) — UNLESS a node is blind, in
+/// which case the caveat replaces the reassurance ("absence of a signal is not evidence of safety",
+/// JEF-308). `blind_caveat` is `Some` exactly when at least one expected node has no live sensor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertsViewProps {
+    pub strip: StatusStripProps,
+    /// The alarming-now events this pass, most-recent-first. A CURRENT-WINDOW view, not history.
+    pub alerts: Vec<AlertProps>,
+    /// The blind-node caveat (JEF-308) shown on the empty/quiet state, or `None` when every expected
+    /// node has a live sensor. A quiet Alerts view must NOT read "all clear" while we are blind.
+    pub blind_caveat: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

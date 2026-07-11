@@ -5,7 +5,9 @@
 
 use maud::{Markup, html};
 
-use crate::engine::dashboard::view_model::props::{FindingProps, HopProps, JudgementProps};
+use crate::engine::dashboard::view_model::props::{
+    AlertProps, FindingProps, HopProps, JudgementProps,
+};
 
 use super::evidence::evidence_tables;
 
@@ -14,10 +16,38 @@ pub(super) fn detail_panel(f: &FindingProps) -> Markup {
     html! {
         div class={ "detail rail-" (f.posture.token()) } {
             (verdict_block(f))
+            (corroborated_now_block(&f.alerts))
             (path_block(f))
             (evidence_tables(&f.evidence))
             (cut_block(f))
             (model_prompt(&f.id, &f.judgement))
+        }
+    }
+}
+
+/// The "corroborated-now by …" annotation (JEF-323): the live alarming-now signals on this chain's
+/// entry THIS pass, each a `"drop-and-execute on web (2m ago)"`-style line. EVIDENCE, not a verdict
+/// — it says a signal corroborates the chain, never that a breach is concluded or an action was
+/// taken (ADR-0016). Omitted entirely when nothing is alarming on this chain right now (no
+/// implied-absent text). Every untrusted string (signal / workload) is auto-escaped by maud.
+fn corroborated_now_block(alerts: &[AlertProps]) -> Markup {
+    if alerts.is_empty() {
+        return html! {};
+    }
+    html! {
+        section.detail-section.corroborated-now-block {
+            h3.detail-h { "corroborated-now" }
+            ul.corroborated-now-list {
+                @for a in alerts {
+                    li.corroborated-now-item {
+                        span class={ "alert-kind kind-" (a.kind) } { (a.kind) }
+                        span.corroborated-now-signal { (a.signal) }
+                        span.corroborated-now-where.muted {
+                            " on " (a.workload) " (" (a.recency) ")"
+                        }
+                    }
+                }
+            }
         }
     }
 }
