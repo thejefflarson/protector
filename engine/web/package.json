@@ -9,15 +9,11 @@
     "build": "node build.mjs",
     "test": "vitest run"
   },
-  "dependencies": {
-    "esbuild-wasm": "0.25.10",
-    "preact": "10.29.7"
-  },
   "devDependencies": {
     "@testing-library/preact": "^3.2.4",
-    "@vitest/mocker": "^3.2.6",
+    "esbuild-wasm": "0.25.10",
     "jsdom": "^25.0.1",
-    "vite": "^6.4.3",
+    "preact": "10.29.7",
     "vitest": "^3.2.6"
   }
 }
