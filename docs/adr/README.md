@@ -33,5 +33,6 @@ Copy [`0000-template.md`](0000-template.md) to start one.
 | [0023](0023-delta-aware-adjudication.md) | Delta-aware adjudication: the full cluster state is the context, the change is the question | Accepted |
 | [0024](0024-no-redundant-by-construction-predicates.md) | Corroboration shapes must be load-bearing when merged, not deferred-dead — a predicate whose result is already fixed by an existing arm lands when it bites, not ahead of it | Accepted |
 | [0025](0025-dashboard-v4-preact-client-render.md) | Dashboard v4: a bundled Preact client reconciling from same-origin read-only JSON — supersedes 0019's maud server-render *mechanism* (its IA + honesty axes survive); view_model/props retained as the serde JSON contract, bundle built-from-source + gitignored, honesty stays server-derived | Accepted |
+| [0026](0026-adjudication-judge-qwen3-1.7b.md) | Promote qwen3:1.7b as the adjudication judge (bakeoff: 12/12, the only clean sweep of all three evidence types + every refute; deployed qwen2.5:3b-instruct is 11/12, misses exposed-secret-in-field) — pending Pi latency/RAM validation, strict-JSON on-Pi, the delta-aware prompt path, and in-cluster zero-egress availability | Proposed |
 
 See also [`../VISION.md`](../VISION.md) for the longer-form narrative this ADR realizes.
