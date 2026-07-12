@@ -51,10 +51,11 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
 
     // The whole prompt is small despite the megabyte input — the cap bounds it hard. The
     // bound is on the UNTRUSTED payload, not the static template (the floor here is the
-    // ~4.3 KB static prompt + the per-field-capped title); a megabyte of title would blow
-    // past this by orders of magnitude if the cap failed, so the assertion still proves it.
+    // ~5.5 KB static prompt after the JEF-402 grounding-rule wording + the per-field-capped
+    // title); a megabyte of title would blow past this by orders of magnitude if the cap
+    // failed, so the assertion still proves the payload is capped, not the template.
     assert!(
-        prompt.len() < 5_000,
+        prompt.len() < 8_000,
         "prompt must stay bounded; was {} bytes",
         prompt.len()
     );
@@ -149,8 +150,11 @@ fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
     // The misconfig reaches the static-posture section, framed as context not breach.
     assert!(prompt.contains("Static posture findings"));
     assert!(prompt.contains("KSV017"), "misconfig check id surfaced");
-    // The breach definition now lists exposed secrets as exploitation evidence.
-    assert!(prompt.contains("EXPOSED SECRET"));
+    // The breach definition now lists a credential in the exposed-secrets field as
+    // exploitation evidence.
+    assert!(prompt.contains(
+        "a credential listed in the \"Exposed secrets baked into this image\" field below"
+    ));
     // The fence is balanced (every new section is fenced like the others).
     assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
 }
@@ -408,8 +412,8 @@ fn prompt_clarifies_benign_runtime_activity_is_not_a_live_signal() {
     let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
     let prompt = build_judgment_prompt(&e, &[], &g);
     assert!(
-        prompt.contains("network connections") && prompt.contains("NOT a live signal"),
-        "prompt must say a workload's own network connections are NOT a live signal:\n{prompt}"
+        prompt.contains("outbound connections") && prompt.contains("NOT a live signal"),
+        "prompt must say a workload's own outbound connections are NOT a live signal:\n{prompt}"
     );
     assert!(
         prompt.contains("only an ALERT or hands-on-keyboard action counts"),
@@ -417,23 +421,33 @@ fn prompt_clarifies_benign_runtime_activity_is_not_a_live_signal() {
     );
 }
 
-/// The prompt clarifies that reaching a `secret/…` objective (a Credential-Access OUTCOME
-/// in the reachable-objectives list) is NOT the same as an exposed secret baked into the
-/// image — only a credential in the "Exposed secrets baked into this image" field is
-/// exploitation evidence. (The watcher judge conflated the two.)
+/// The prompt carries the JEF-402 GROUNDING RULE: reaching a `secret/…` objective in the
+/// reachable-objectives list is NEVER exposed-secret evidence, and exposed-secret evidence
+/// exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY (an
+/// empty "(none)" field means NO exposed-secret evidence). This is the language that lost
+/// when argocd-server was falsely promoted: the judge treated a merely-reachable secret
+/// objective as an exposed baked-in secret.
 #[test]
-fn prompt_clarifies_reaching_a_secret_objective_is_not_an_exposed_secret() {
+fn prompt_carries_the_grounding_rule_tying_exposed_secrets_to_a_non_empty_field() {
     let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
     let prompt = build_judgment_prompt(&e, &[], &g);
+    // The hard grounding rule: the field is the sole source of exposed-secret evidence,
+    // and a "(none)" field means none exists.
     assert!(
-        prompt.contains("Reaching a `secret/…` objective")
-            && prompt.contains("is NOT an exposed secret"),
-        "prompt must distinguish reaching a secret objective from an exposed secret:\n{prompt}"
+        prompt.contains(
+            "Exposed-secret evidence exists ONLY when the \"Exposed secrets baked into this \
+             image\" field is NON-EMPTY; if that field is \"(none)\", there is no exposed-secret \
+             evidence"
+        ),
+        "prompt must tie exposed-secret evidence to a non-empty field:\n{prompt}"
     );
+    // A reachable secret objective is never exposed-secret evidence, no matter its label.
     assert!(
-        prompt
-            .contains("only a credential listed in the \"Exposed secrets baked into this image\""),
-        "prompt must point to the exposed-secrets field as the sole secret evidence:\n{prompt}"
+        prompt.contains(
+            "reaching a `secret/…` objective in the reachable-objectives list is NEVER an \
+             exposed secret"
+        ),
+        "prompt must state a reachable secret objective is never exposed-secret evidence:\n{prompt}"
     );
 }
 
@@ -507,4 +521,119 @@ fn sec_key() -> crate::engine::graph::NodeKey {
         name: "trivy-operator-trivy-config".into(),
     })
     .key()
+}
+
+/// The argocd-server shape (JEF-402): an internet-facing entry whose ServiceAccount is
+/// RBAC-granted a secret in another namespace. Returns `(graph, entry_key, objectives)`
+/// with the single Credential-Access secret objective — the exact input that mis-rendered
+/// as "(Credential Access: Unsecured Credentials)" and got hallucinated into an exposed
+/// baked-in secret. No image (no CVE), no runtime (no signal).
+fn rbac_granted_secret_objective() -> (
+    crate::engine::graph::SecurityGraph,
+    NodeKey,
+    Vec<(NodeKey, AttackRef)>,
+) {
+    use crate::engine::graph::attack::CREDENTIAL_ACCESS;
+    use crate::engine::graph::{
+        Edge, Exposure, Identity, Node, Provenance, Relation, SecretRef, SecurityGraph, Workload,
+    };
+    use std::time::SystemTime;
+    let proof = |relation| Edge {
+        relation,
+        provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+    };
+    let mut g = SecurityGraph::new();
+    let entry = Node::Workload(Workload {
+        namespace: "argocd".into(),
+        name: "argocd-server".into(),
+        kind: "Pod".into(),
+        labels: Default::default(),
+        meshed: false,
+        exposure: Exposure::Internet,
+        runtime: Vec::new(),
+        persistent: false,
+        misconfigs: vec![],
+        rbac_findings: vec![],
+    });
+    let entry_key = entry.key();
+    let e = g.upsert_node(entry);
+    let sa = g.upsert_node(Node::Identity(Identity {
+        namespace: "argocd".into(),
+        name: "argocd-server".into(),
+    }));
+    g.add_edge(e, sa, proof(Relation::RunsAs));
+    let secret = Node::Secret(SecretRef {
+        namespace: "security".into(),
+        name: "trivy-operator-trivy-config".into(),
+    });
+    let secret_key = secret.key();
+    let s = g.upsert_node(secret);
+    g.add_edge(
+        sa,
+        s,
+        proof(Relation::CanDo {
+            verb: "get".into(),
+            resource: "secrets".into(),
+        }),
+    );
+    (g, entry_key, vec![(secret_key, CREDENTIAL_ACCESS)])
+}
+
+/// JEF-402 — the false-breach fix. An AUTHORIZED ([RBAC-GRANTED]) reachable secret objective
+/// must NOT render the bare ATT&CK phrase "Unsecured Credentials": that reads as an
+/// already-exposed credential (the exposed-secret evidence category) and contradicts the
+/// authorization tag, which is exactly what tricked the judge into hallucinating an exposed
+/// baked-in secret for argocd-server. It renders as an OUTCOME the attacker would obtain if
+/// the workload were first exploited.
+#[test]
+fn authorized_secret_objective_does_not_render_unsecured_credentials() {
+    let (g, entry, objs) = rbac_granted_secret_objective();
+    let prompt = build_judgment_prompt(&entry, &objs, &g);
+    // The objective is present and tagged authorized-by-design.
+    assert!(
+        prompt.contains("secret/security/trivy-operator-trivy-config [RBAC-GRANTED]"),
+        "the reachable secret objective is rendered with its authorization tag:\n{prompt}"
+    );
+    // But it must NOT carry the bare "Unsecured Credentials" phrase on this authorized reach.
+    assert!(
+        !prompt.contains("Unsecured Credentials"),
+        "an authorized reachable secret objective must not render the exposed-secret-sounding \
+         \"Unsecured Credentials\" phrase:\n{prompt}"
+    );
+    // It reads as a reachable target (an outcome), not a credential already exposed.
+    assert!(
+        prompt.contains("could read a credential store if exploited (Credential Access, T1552)"),
+        "the authorized secret objective must render as an attacker OUTCOME:\n{prompt}"
+    );
+}
+
+/// JEF-402 — the not-observed-CVE header contradiction (same false-breach class). A CVE
+/// tagged `[reachability: not-observed]` is present in the image but NOT observed running,
+/// so the header must NOT present it under an "OBSERVED running (EXPLOITATION EVIDENCE)"
+/// banner — the header must name the tag as the discriminator: only
+/// `[reachability: loaded-at-runtime]` is observed running / evidence; `[not-observed]` is
+/// context.
+#[test]
+fn not_observed_cve_is_not_presented_as_observed_running_evidence() {
+    use crate::engine::graph::Reachability;
+    let mut v = critical_cve("CVE-2021-44228");
+    v.reachability = Reachability::NotObserved;
+    let (g, e) = graph_with_vuln(v);
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    // The CVE is present in the list with its not-observed tag.
+    assert!(
+        prompt.contains("CVE-2021-44228") && prompt.contains("reachability: not-observed"),
+        "the not-observed CVE is present with its reachability tag:\n{prompt}"
+    );
+    // The header must NOT assert the whole CVE list is observed running — it must split the
+    // two tags and name loaded-at-runtime as the evidence discriminator, not-observed as
+    // context.
+    assert!(
+        !prompt.contains("loaded-at-runtime = vulnerable code OBSERVED running here"),
+        "the CVE header must not blanket-claim the list is OBSERVED running:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("[reachability: not-observed] is context only"),
+        "the CVE header must present not-observed CVEs as context, not evidence:\n{prompt}"
+    );
 }

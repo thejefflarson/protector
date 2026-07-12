@@ -6,6 +6,7 @@
 //! single source of truth shared with the findings snapshot), then rendered here.
 
 use super::guards::sanitize;
+use crate::engine::graph::attack::{AttackRef, Tactic};
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
@@ -282,6 +283,37 @@ pub(crate) fn entry_findings(
         .map(|f| finding_evidence_budgeted(f, &mut budget))
         .collect();
     (secret_lines, posture_lines)
+}
+
+/// Render one reachable objective's ATT&CK OUTCOME suffix — what an attacker would OBTAIN
+/// *if this workload were exploited*, NOT a property asserting the target is already
+/// compromised (JEF-402). `reach` is the JEF-79 authorization tag (`MOUNTED`, `RBAC-GRANTED`,
+/// combinations, or `NETWORK`); it decides only the CredentialAccess wording below.
+///
+/// The false-breach this fixes: a reachable secret objective used to render as
+/// `(Credential Access: Unsecured Credentials)` (T1552's ATT&CK name). "Unsecured
+/// Credentials" reads as "an exposed/unprotected credential" — the SAME category as the
+/// "Exposed secrets baked into this image" exploitation-evidence field — and on an
+/// `[RBAC-GRANTED]`/`[MOUNTED]` (authorized-by-design) objective it is self-contradictory
+/// ("unsecured" vs "granted"). A small judge resolved the contradiction toward the scarier
+/// reading and HALLUCINATED an exposed baked-in secret from a merely-reachable one
+/// (argocd-server, v0.3.100). So for an AUTHORIZED Credential-Access objective we render the
+/// OUTCOME — "could read a credential store (Credential Access)" — never the bare "Unsecured
+/// Credentials" phrase. The technique id is still carried so nothing downstream loses the
+/// ATT&CK anchor. Every other tactic keeps its `(tactic: technique)` rendering unchanged.
+pub(crate) fn objective_outcome(reach: &str, attack: &AttackRef) -> String {
+    // An authorized (mounted or RBAC-granted) reach into a credential store is the trap: the
+    // ATT&CK technique name ("Unsecured Credentials") contradicts the authorization tag and
+    // reads as exposed-secret evidence. Render the attacker OUTCOME instead — a target reached,
+    // not a credential already exposed — and keep the technique id as the ATT&CK anchor.
+    let authorized = reach.contains("MOUNTED") || reach.contains("RBAC-GRANTED");
+    if attack.tactic == Tactic::CredentialAccess && authorized {
+        return format!(
+            "could read a credential store if exploited (Credential Access, {})",
+            attack.technique_id
+        );
+    }
+    format!("{}: {}", attack.tactic.name(), attack.technique)
 }
 
 /// The set of CVE ids in an entry's actual evidence — the ground truth the model's
