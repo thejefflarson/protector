@@ -174,10 +174,11 @@ CASES = [
      f"  - secret/analytics/murmurify-aggregator-secret [MOUNTED] ({CRED})"),
 ]
 
-# Fast-field candidates, ordered roughly small->large. Goal: the FASTEST model that scores 3/3.
+# Fast-field candidates, ordered roughly small->large. Goal: the FASTEST model that scores
+# a clean sweep on ALL cases (all three exploitation-evidence types + every refute case).
 DEFAULT_MODELS = [
-    "qwen2.5:3b-instruct",                   # DEPLOYED judge (cluster values.yaml) — the calibration target
-    "qwen3:1.7b",                            # JEF-406 candidate — 12/12 here, standard transformer (cache works)
+    "qwen2.5:3b-instruct",                   # CURRENT DEPLOYED judge (cluster values.yaml) — the calibration target; misses exposed_secret_in_field (11/12)
+    "qwen3:1.7b",                            # JEF-406 LEAD CANDIDATE — 12/12 here (only model to sweep all three evidence types + every refute), standard transformer (KV cache works)
     "ibm/granite4:3b-h",                     # RETIRED from prod: hybrid/recurrent, cache broken, 8–20 min/call on Pis
     "qwen3:4b-instruct",                     # research #1 (instruct-tuned; correct tag)
     "qwen2.5:3b",
