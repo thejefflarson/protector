@@ -327,14 +327,14 @@ fn assemble(
 A deterministic analysis already PROVED this workload can reach every objective listed — reachability is a GIVEN, not the question. Reaching things — however broadly, however many tenants, however high-impact, whether granted by RBAC, mounted, or over the network (same-namespace OR cross-namespace) — is NEVER a breach by itself. Breadth, tenancy, and the severity of what is reached are how BAD it would be if exploited; they are not whether it IS being exploited.
 
 A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one of these three IS exploitation evidence — if ANY one is present, the reached objective is exploitable:
-  - a critical / known-exploited CVE from the CVE list tagged [reachability: loaded-at-runtime] (vulnerable code observed running on the path), OR
+  - a critical / known-exploited CVE from the CVE list tagged [reachability: loaded-at-runtime] — its [reachability: loaded-at-runtime] tag IS the proof that vulnerable code runs on the path, so this is exploitation evidence on its own, even when the matching library-load also appears in the runtime behavior below, OR
   - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now), OR
   - a credential listed in the "Exposed secrets baked into this image" field below (a usable API key, token, or private key committed into the image — an immediately-usable breach primitive).
 If NONE of the three is present, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
 Three traps that are NOT evidence, no matter how they are labeled:
   - a CVE tagged [reachability: not-observed] is present in the image but NOT observed running — CONTEXT, not evidence.
-  - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
+  - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts. This is the LIVE-SIGNAL test ONLY; it does NOT cancel a [reachability: loaded-at-runtime] CVE, which is exploitation evidence in its own right — a "loaded library …" line never downgrades a loaded-at-runtime CVE.
   - reaching a `secret/…` objective in the reachable-objectives list is NEVER an exposed secret — it is a target an attacker could READ only after first exploiting the workload. Exposed-secret evidence exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY; if that field is "(none)", there is no exposed-secret evidence.
 
 Each objective is tagged with HOW it is reached — CONTEXT for how severe a finding would be, NOT a breach signal on its own:
