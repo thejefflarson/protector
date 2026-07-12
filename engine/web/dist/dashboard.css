@@ -300,6 +300,46 @@ summary:focus-visible,
   padding: 0 var(--space-1);
 }
 
+/* ==================== v4 transitional / connection states (ADR-0025, JEF-401) ==================
+   The Preact client (ADR-0025) added states the maud server-render never had: a first-load
+   "connecting…", the load-bearing "not updating" stale banner, and the one-shot cleared-row
+   tombstone. These carried no CSS after the JEF-398 cutover, so they rendered as un-tokenized
+   default text (off colour, no padding). Restyled here from the SAME palette/scale — no new
+   tokens. Honesty invariant (ADR-0016): a connecting/stale state is NEVER the cleared green. */
+
+/* The mounted app subtree below the server-rendered strip + nav; no visual of its own. */
+.dash-app { display: block; }
+
+/* The connection banner — the app's only aria-live region. It sits on the page gutter so its text
+   left-aligns with the view content below it. Empty when live (no chrome, no false reassurance). */
+.dash-conn { padding: 0 var(--page-gutter); }
+.dash-conn-msg { margin: var(--space-3) 0 0; font-size: var(--fs-data); line-height: var(--lh-data); }
+/* connecting… (first load): calm, muted — a plain wait, never green. `.muted` carries the ink. */
+.dash-conn-connecting { color: var(--ink-3); }
+/* "not updating" (stale): must register LOUD and non-green (invariant #1 / ADR-0016) — an amber
+   keyline + soft ochre tint + amber ink, the same warning register the shadow pill uses. It is a
+   connection problem, NOT an all-clear, and must never read as calm body text. */
+.dash-conn-stale {
+  color: var(--posture-uncertain);
+  font-weight: var(--fw-bold);
+  background: var(--posture-awaiting-tint);
+  border-left: var(--rail-strong) solid var(--posture-uncertain);
+  border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
+  padding: var(--space-2) var(--space-3);
+}
+
+/* the one-shot cleared-row tombstone (reconcile.js): a finding the operator had open just cleared.
+   Calm and muted — it is the model working, not an alarm — but padded on the row rhythm so it reads
+   as a deliberate stand-in, not a stray line. A soft cleared keyline marks it as a resolution. */
+.row-tombstone { height: var(--row-h); }
+.row-tombstone td.cell { border-left: var(--rail-soft) solid var(--cov-present); }
+.tombstone {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  color: var(--ink-3);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
+.tombstone::before { content: "\2713"; color: var(--cov-present); font-weight: var(--fw-bold); }
+
 /* ============================ findings table ============================ */
 /* Every view's content sits on the same page gutter as the strip and the nav (JEF-256), so the
    header / nav / content left edges line up. */

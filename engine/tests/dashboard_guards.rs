@@ -365,3 +365,65 @@ fn brand_and_nav_align_to_the_table_expander_glyph() {
         "the tab row's left pad uses the brand indent (item 4)"
     );
 }
+
+/// Extract the declaration block for a selector `sel` (matched as `sel {`) from the
+/// comment-stripped CSS, or panic if the selector is missing.
+fn block<'a>(src: &'a str, sel: &str) -> &'a str {
+    let needle = format!("{sel} {{");
+    let i = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("`{sel}` block exists"));
+    let rest = &src[i..];
+    &rest[..rest.find('}').unwrap()]
+}
+
+#[test]
+fn v4_transitional_states_are_tokenized_and_honest() {
+    // JEF-401: the Preact client (ADR-0025) added states maud never had — a first-load "connecting…",
+    // the load-bearing "not updating" stale banner, and the one-shot cleared-row tombstone. After the
+    // JEF-398 cutover their classes carried NO CSS (off colour, no padding). This pins them to the
+    // token system and to the honesty register: the stale banner is a distinct NON-GREEN warning, and
+    // the calm states never borrow the cleared/green token.
+    let css = repo_root().join("engine/web/dist/dashboard.css");
+    let raw = std::fs::read_to_string(&css).unwrap_or_else(|e| panic!("reading {css:?}: {e}"));
+    let src = strip_block_comments(&raw);
+
+    // Every v4 transitional class the client emits must be styled (not a dangling, unstyled class).
+    for sel in [
+        ".dash-conn",
+        ".dash-conn-msg",
+        ".dash-conn-connecting",
+        ".dash-conn-stale",
+        ".row-tombstone",
+        ".tombstone",
+    ] {
+        assert!(
+            src.contains(&format!("{sel} {{")) || src.contains(&format!("{sel}::")),
+            "the v4 transitional class `{sel}` must be styled (JEF-401)"
+        );
+    }
+
+    // The stale banner is the load-bearing honesty case (ADR-0016 / invariant #1): it must register
+    // as a distinct NON-GREEN warning — an amber keyline + tint + amber ink — never the cleared green
+    // and never plain calm body text. Assert the warning tokens are present and green is absent.
+    let stale = block(&src, ".dash-conn-stale");
+    assert!(
+        stale.contains("var(--posture-uncertain)"),
+        "the stale banner uses the amber warning colour (non-green)"
+    );
+    assert!(
+        stale.contains("border-left") && stale.contains("padding"),
+        "the stale banner has a keyline + padding so it reads as a deliberate warning, not body text"
+    );
+    assert!(
+        !stale.contains("--posture-cleared") && !stale.contains("--cov-present"),
+        "the stale banner must NEVER be the cleared/green token (invariant #1)"
+    );
+
+    // The connecting message is calm/muted — and likewise never the cleared green.
+    let connecting = block(&src, ".dash-conn-connecting");
+    assert!(
+        !connecting.contains("--posture-cleared"),
+        "the connecting message is calm, never a false all-clear green"
+    );
+}
