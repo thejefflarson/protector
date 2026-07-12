@@ -682,8 +682,8 @@ fn prompt_includes_the_chain_evidence() {
     assert!(
         prompt.contains(
             "\"uncertain\"   — ONLY when the evidence is self-contradictory or unintelligible. \
-             Absence of evidence is NOT uncertainty: no CVE running, no live signal, and no \
-             exposed secret is a confident \"refuted\", not \"uncertain\"."
+             Absence of evidence is NOT uncertainty: no loaded-at-runtime CVE, no live signal, \
+             and no exposed secret is a confident \"refuted\", not \"uncertain\"."
         ),
         "absence of evidence is directed to refuted, not the uncertain escape hatch"
     );
