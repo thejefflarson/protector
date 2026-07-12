@@ -130,6 +130,7 @@ fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
                 SystemTime::UNIX_EPOCH,
             )],
         }],
+        static_binary: None,
     }));
     g.add_edge(
         e,
@@ -157,6 +158,25 @@ fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
     ));
     // The fence is balanced (every new section is fenced like the others).
     assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
+}
+
+/// JEF-404 — a CVE in a statically linked binary renders `[reachability: present-static-binary]`,
+/// NOT `[reachability: not-observed]`, so the adjudicator sees "indeterminate" rather than
+/// "observed absent". The distinct tag is what stops absence-of-load reading as reassurance.
+#[test]
+fn static_binary_cve_renders_present_static_binary_tag() {
+    use crate::engine::graph::Reachability;
+    let mut v = critical_cve("CVE-2021-44228");
+    v.reachability = Reachability::PresentStaticBinary;
+    let line = cve_evidence(&v);
+    assert!(
+        line.contains("[reachability: present-static-binary]"),
+        "line: {line}"
+    );
+    assert!(
+        !line.contains("not-observed"),
+        "static-binary CVE must not render as observed-absent: {line}"
+    );
 }
 
 /// JEF-106 — the title cap holds at the PROMPT boundary (defense in depth): an oversized
@@ -656,7 +676,41 @@ fn not_observed_cve_is_not_presented_as_observed_running_evidence() {
         "the CVE header must not blanket-claim the list is OBSERVED running:\n{prompt}"
     );
     assert!(
-        prompt.contains("[reachability: not-observed] is context only"),
+        prompt.contains("[reachability: not-observed]") && prompt.contains("are context only"),
         "the CVE header must present not-observed CVEs as context, not evidence:\n{prompt}"
+    );
+}
+
+/// JEF-404 — a CVE in a statically linked binary is tagged `[reachability: present-static-binary]`
+/// and the prompt must (a) surface that tag on the CVE line and (b) frame it as UNKNOWABLE —
+/// neither exploitation evidence nor reassurance — so absence of a runtime load is not read as
+/// evidence-of-absence the way `not-observed` can be. It must NOT weaken the JEF-402/405 rule
+/// that only `loaded-at-runtime` is CVE evidence.
+#[test]
+fn present_static_binary_cve_is_framed_as_unknowable_not_reassurance() {
+    use crate::engine::graph::Reachability;
+    let mut v = critical_cve("CVE-2021-44228");
+    v.reachability = Reachability::PresentStaticBinary;
+    let (g, e) = graph_with_vuln(v);
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    // The CVE is present in the list with its static-binary tag.
+    assert!(
+        prompt.contains("CVE-2021-44228") && prompt.contains("reachability: present-static-binary"),
+        "the static-binary CVE is present with its reachability tag:\n{prompt}"
+    );
+    // The prompt frames the tag as context-only, alongside not-observed, in the CVE header.
+    assert!(
+        prompt.contains("[reachability: present-static-binary] are context only"),
+        "the CVE header must present static-binary CVEs as context, not evidence:\n{prompt}"
+    );
+    // It must explicitly say the tag is NOT reassurance (do not read absence as safety).
+    assert!(
+        prompt.contains("STATICALLY LINKED") && prompt.contains("NOT reassurance"),
+        "the prompt must frame present-static-binary as unknowable, not reassurance:\n{prompt}"
+    );
+    // The JEF-402/405 core rule is untouched: loaded-at-runtime is still the only CVE evidence.
+    assert!(
+        prompt.contains("[reachability: loaded-at-runtime] is exploitation evidence"),
+        "loaded-at-runtime must remain the sole CVE evidence discriminator:\n{prompt}"
     );
 }

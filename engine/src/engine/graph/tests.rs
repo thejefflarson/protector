@@ -76,6 +76,7 @@ fn node_key_is_stable_across_fact_changes() {
         trust: Trust::Unknown,
         vulnerabilities: vec![],
         exposed_secrets: vec![],
+        static_binary: None,
     });
     let scanned = Node::Image(Image {
         digest: "sha256:abc".into(),
@@ -90,6 +91,7 @@ fn node_key_is_stable_across_fact_changes() {
             ..Default::default()
         }],
         exposed_secrets: vec![],
+        static_binary: None,
     });
     // Identity (digest) drives the key; facts (trust, vulns) do not.
     assert_eq!(clean.key(), scanned.key());
@@ -107,6 +109,7 @@ fn node_key_constructors_match_node_key() {
         trust: Trust::Untrusted,
         vulnerabilities: vec![],
         exposed_secrets: vec![],
+        static_binary: None,
     });
     assert_eq!(NodeKey::image("sha256:abc"), image.key());
 
@@ -134,6 +137,7 @@ fn upsert_replaces_in_place_and_keeps_edges() {
         trust: Trust::Unknown,
         vulnerabilities: vec![],
         exposed_secrets: vec![],
+        static_binary: None,
     }));
     let wl = g.upsert_node(Node::Workload(Workload {
         namespace: "app".into(),
@@ -165,6 +169,7 @@ fn upsert_replaces_in_place_and_keeps_edges() {
             ..Default::default()
         }],
         exposed_secrets: vec![],
+        static_binary: None,
     }));
     assert_eq!(img2, img, "upsert keeps the same index");
     assert_eq!(g.node_count(), 2, "no duplicate node");
@@ -206,5 +211,24 @@ fn relations_map_to_attack_techniques() {
         }
         .technique(),
         None
+    );
+}
+
+#[test]
+fn reachability_labels_are_stable_and_distinct() {
+    // Low-cardinality labels feed the prompt, the verdict fingerprint, and metrics, so each
+    // variant must map to a fixed, distinct token (JEF-51 / JEF-404).
+    assert_eq!(Reachability::Unknown.label(), "unknown");
+    assert_eq!(Reachability::LoadedAtRuntime.label(), "loaded-at-runtime");
+    assert_eq!(Reachability::NotObserved.label(), "not-observed");
+    assert_eq!(
+        Reachability::PresentStaticBinary.label(),
+        "present-static-binary"
+    );
+    // The static-indeterminate state is a DISTINCT token from observed-absent — that
+    // distinction is exactly what stops absence-of-load reading as evidence-of-absence.
+    assert_ne!(
+        Reachability::PresentStaticBinary.label(),
+        Reachability::NotObserved.label()
     );
 }

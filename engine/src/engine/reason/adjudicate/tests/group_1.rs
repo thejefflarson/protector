@@ -910,6 +910,7 @@ fn prompt_hash_changes_with_cve_reachability() {
             trust: crate::engine::graph::Trust::Unknown,
             vulnerabilities: vec![],
             exposed_secrets: vec![],
+            static_binary: None,
         })
         .key();
         let mut graph = graph;

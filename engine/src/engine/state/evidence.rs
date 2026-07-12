@@ -30,7 +30,8 @@ pub struct CveEvidence {
     /// same exploit-likelihood signal the model is shown. `None` when the FIRST.org feed has
     /// no score for this id. Pre-formatted (a `String`) so the projection keeps `Eq`.
     pub epss: Option<String>,
-    /// `unknown` / `loaded-at-runtime` / `not-observed` (from [`graph::Reachability`]).
+    /// `unknown` / `loaded-at-runtime` / `not-observed` / `present-static-binary`
+    /// (from [`graph::Reachability`]).
     pub reachability: String,
     /// A human fix-availability phrase: `no fix available`, `fix available: <ver>`, or
     /// `fix available: <installed> to <fixed>` — the same shape the prompt uses.

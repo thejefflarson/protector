@@ -61,6 +61,7 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
         trust: Trust::Unknown,
         vulnerabilities: vulns,
         exposed_secrets: vec![],
+        static_binary: None,
     }));
     g.add_edge(
         e,
