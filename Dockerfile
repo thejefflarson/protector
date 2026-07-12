@@ -54,6 +54,12 @@ RUN set -eux; ver=0.16.0; \
       | tar -xz -C /usr/local/bin --strip-components=1 "sccache-v${ver}-${a}-unknown-linux-musl/sccache"
 ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 \
     SCCACHE_REDIS=redis://sccache-redis.dev.svc.cluster.local:6379
+# Opt-out for builds that CANNOT reach the in-cluster redis. The github-hosted e2e
+# (scripts/e2e.sh, runs-on: ubuntu-latest) does a plain `docker build` of this Dockerfile and can
+# never reach sccache-redis.dev, so the hard gate would always trip there. Default empty => sccache
+# stays a HARD GATE for the real deploy build on the meshed BuildKit; the e2e passes
+# `--build-arg SCCACHE_DISABLE=1` to build plain (uncached) instead of failing.
+ARG SCCACHE_DISABLE=""
 
 # Build application
 COPY . .
@@ -69,11 +75,15 @@ RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked 
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
     set -e; \
-    export SCCACHE_SERVER_PORT=$(awk 'BEGIN{srand(); print int(20000+rand()*40000)}'); \
-    timeout 10 sccache --start-server; \
+    if [ -n "$SCCACHE_DISABLE" ]; then \
+      echo "sccache disabled (SCCACHE_DISABLE set) — plain build, no redis"; unset RUSTC_WRAPPER; \
+    else \
+      export SCCACHE_SERVER_PORT=$(awk 'BEGIN{srand(); print int(20000+rand()*40000)}'); \
+      timeout 10 sccache --start-server; \
+    fi; \
     cargo build --release; \
     cp /app/target/release/protector ./protector; \
-    sccache --show-stats
+    (sccache --show-stats 2>/dev/null || true)
 
 # Slim runtime. Fixed-UID non-root user (65532) matches the chart's
 # securityContext.runAsUser/runAsGroup so the pod satisfies runAsNonRoot.
