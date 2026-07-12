@@ -1,11 +1,10 @@
-// Unit tests for the poll engine (ADR-0025 / JEF-397): same-origin URL construction, the
-// defer-apply-while-text-selection rule (ported from v3), and stale-not-blank on a failed poll.
+// Unit tests for the poll engine (ADR-0025 / JEF-397 / JEF-411): same-origin URL construction, the
+// defer-apply-while-text-selection rule (ported from v3), and stale-not-blank on a failed poll. The
+// poll takes plain `onSnapshot` / `onStale` callbacks now (no store dependency — JEF-411); tests
+// spy those directly.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { snapshotUrl, startPolling, hasLiveSelection, POLL_MS } from "../src/poll.js";
-import { Store } from "../src/store.js";
-
-beforeEach(() => sessionStorage.clear());
 
 describe("snapshotUrl", () => {
   it("is always a relative, same-origin path per tab", () => {
@@ -26,45 +25,50 @@ function startOnce(opts) {
 }
 
 describe("startPolling", () => {
-  it("applies a fetched snapshot to the store (goes live)", async () => {
-    const store = new Store();
+  it("hands a fetched snapshot to onSnapshot (goes live), never onStale", async () => {
+    const onSnapshot = vi.fn();
+    const onStale = vi.fn();
     startOnce({
-      store,
       tab: () => "findings",
+      onSnapshot,
+      onStale,
       liveRegion: () => null,
       fetchImpl: okFetch({ findings: [{ id: "a" }] }),
     });
-    await vi.waitFor(() => expect(store.getState().status).toBe("live"));
-    expect(store.getState().data).toEqual({ findings: [{ id: "a" }] });
+    await vi.waitFor(() => expect(onSnapshot).toHaveBeenCalledTimes(1));
+    expect(onSnapshot).toHaveBeenCalledWith({ findings: [{ id: "a" }] });
+    expect(onStale).not.toHaveBeenCalled();
   });
 
-  it("marks the store STALE (not blank) on a non-ok response", async () => {
-    const store = new Store();
-    store.applySnapshot({ findings: [{ id: "keep" }] }); // a prior good render
+  it("calls onStale (not onSnapshot) on a non-ok response", async () => {
+    const onSnapshot = vi.fn();
+    const onStale = vi.fn();
     startOnce({
-      store,
       tab: () => "findings",
+      onSnapshot,
+      onStale,
       liveRegion: () => null,
       fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 503 }),
     });
-    await vi.waitFor(() => expect(store.getState().status).toBe("stale"));
-    expect(store.getState().data).toEqual({ findings: [{ id: "keep" }] }); // last-good kept
+    await vi.waitFor(() => expect(onStale).toHaveBeenCalledTimes(1));
+    expect(onSnapshot).not.toHaveBeenCalled();
   });
 
-  it("marks stale on a thrown transport error", async () => {
-    const store = new Store();
-    store.applySnapshot({ findings: [] });
+  it("calls onStale on a thrown transport error", async () => {
+    const onStale = vi.fn();
     startOnce({
-      store,
       tab: () => "findings",
+      onSnapshot: vi.fn(),
+      onStale,
       liveRegion: () => null,
       fetchImpl: vi.fn().mockRejectedValue(new Error("offline")),
     });
-    await vi.waitFor(() => expect(store.getState().status).toBe("stale"));
+    await vi.waitFor(() => expect(onStale).toHaveBeenCalledTimes(1));
   });
 
   it("DEFERS applying a snapshot while a selection is anchored in the live region", async () => {
-    const store = new Store();
+    const onSnapshot = vi.fn();
+    const onStale = vi.fn();
     const region = document.createElement("div");
     region.textContent = "some selectable model verdict";
     document.body.appendChild(region);
@@ -78,15 +82,16 @@ describe("startPolling", () => {
     expect(hasLiveSelection(region)).toBe(true);
 
     startOnce({
-      store,
       tab: () => "findings",
+      onSnapshot,
+      onStale,
       liveRegion: () => region,
       fetchImpl: okFetch({ findings: [{ id: "x" }] }),
     });
-    // The fetch resolves but the apply is deferred — the store stays first-load, NOT stale.
+    // The fetch resolves but the apply is deferred — neither callback fires (not live, not stale).
     await new Promise((r) => setTimeout(r, 5));
-    expect(store.getState().status).toBe("first-load");
-    expect(store.getState().data).toBeNull();
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onStale).not.toHaveBeenCalled();
 
     sel.removeAllRanges();
     document.body.removeChild(region);
@@ -108,8 +113,9 @@ describe("startPolling default interval (JEF-408 regression)", () => {
     // exactly once (only the initial tick()); the recurring interval was dead.
     const fetchImpl = okFetch({ findings: [] });
     const stop = startPolling({
-      store: new Store(),
       tab: () => "findings",
+      onSnapshot: () => {},
+      onStale: () => {},
       liveRegion: () => null,
       fetchImpl,
     });
@@ -128,8 +134,9 @@ describe("startPolling default interval (JEF-408 regression)", () => {
     // operator reported. Assert the FIRST arg to native setInterval is a function, not a number/string.
     const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
     const stop = startPolling({
-      store: new Store(),
       tab: () => "findings",
+      onSnapshot: () => {},
+      onStale: () => {},
       liveRegion: () => null,
       fetchImpl: okFetch({ findings: [] }),
       // No setIntervalImpl override — the default adapter must call native setInterval as (fn, ms).
