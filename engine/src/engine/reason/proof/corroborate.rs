@@ -113,6 +113,13 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         Behavior::FileWrite { .. } => {
             crate::engine::observe::alarm_class::alarming_write(behavior).is_some()
         }
+        // ImageLinkage is a structural per-image fact (JEF-407), NOT a runtime "now" signal —
+        // it never corroborates any objective. It is also diverted by the RuntimeAdapter into
+        // `Image::static_binary` before it becomes workload runtime state, so in practice it
+        // never reaches here; this arm keeps the match exhaustive and the invariant explicit
+        // (only `LoadedAtRuntime` is CVE evidence — a static-linkage fact must never read as
+        // exploitation or reassurance).
+        Behavior::ImageLinkage { .. } => false,
     }
 }
 

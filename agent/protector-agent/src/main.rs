@@ -7,6 +7,11 @@
 //! reversible network cut.
 
 mod coalesce;
+// The linkage classifier (JEF-407) is called only from the ebpf observer's exec path (plus
+// its own unit tests), so gate it like `pod` — the default no-eBPF build doesn't carry it as
+// dead code (the repo treats warnings as errors).
+#[cfg(any(feature = "ebpf", test))]
+mod linkage;
 mod observer;
 #[cfg(any(feature = "ebpf", test))]
 mod pod;

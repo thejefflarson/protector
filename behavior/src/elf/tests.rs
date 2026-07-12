@@ -152,3 +152,25 @@ fn out_of_range_program_header_table_is_unknown() {
     bytes[0x20..0x28].copy_from_slice(&(0xFFFF_FFFFu64).to_le_bytes());
     assert_eq!(elf_static_linkage(&bytes), None);
 }
+
+#[test]
+fn crafted_max_offset_returns_none_without_overflow_panicking() {
+    // JEF-407 hardening: a crafted `e_phoff` near u64::MAX must NOT overflow-panic when the
+    // parser forms `phoff + i*phentsize` and the per-read `off + N` slice — it must return an
+    // honest `None`. Without the `checked_add` in the read helpers this panics on a debug
+    // build (`attempt to add with overflow`); with it, it's a clean unknown.
+    let mut bytes = elf64_le(&[PT_LOAD, PT_LOAD]);
+    // e_phoff = u64::MAX: `phoff + i*phentsize` and every `off + N` inside the read overflow.
+    bytes[0x20..0x28].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        elf_static_linkage(&bytes),
+        None,
+        "a u64::MAX e_phoff is unknown, never a panic"
+    );
+
+    // A large-but-not-MAX e_phoff whose per-entry stride would overflow on a later entry is
+    // likewise a clean None (the second entry's offset wraps past usize::MAX).
+    let mut bytes = elf64_le(&[PT_LOAD, PT_LOAD]);
+    bytes[0x20..0x28].copy_from_slice(&(usize::MAX as u64 - 4).to_le_bytes());
+    assert_eq!(elf_static_linkage(&bytes), None);
+}

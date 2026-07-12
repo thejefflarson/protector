@@ -295,6 +295,131 @@ fn static_binary_still_yields_loaded_at_runtime_on_a_real_load() {
     );
 }
 
+/// JEF-407 end-to-end: build the graph for an image carrying a critical CVE on `pkg`, run
+/// by pod app/web, where the AGENT reported the entrypoint's linkage over the behavioral
+/// wire (an `ImageLinkage` observation, `static_linkage`) — no manual `static_binary` flip.
+/// The full pipeline runs: the RuntimeAdapter maps the linkage report onto `Image::static_binary`,
+/// then the CveReachabilityAdapter reads it. Returns the CVE's resulting reachability, so a
+/// static report → `PresentStaticBinary` while a dynamic report → `NotObserved`, activating the
+/// dormant JEF-404 machinery from a real prod-shaped signal source.
+fn reachability_via_agent_linkage(
+    pkg: &str,
+    static_linkage: bool,
+    loaded_lib: Option<&str>,
+) -> Reachability {
+    let web = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+        "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+    }));
+    let mut runtime_events = vec![RuntimeObservation {
+        attribution: Attribution::by_namespaced_name("app", "web"),
+        source: Some("protector-agent".into()),
+        observed_at_ms: None,
+        node: Some("node-a".into()),
+        behavior: Behavior::ImageLinkage { static_linkage },
+    }];
+    runtime_events.extend(loaded_lib.map(lib));
+    let snap = Snapshot {
+        pods: vec![web],
+        image_vulns: vec![ImageVulnerabilities {
+            image: "web:1".into(),
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2021-44228".into(),
+                severity: crate::engine::graph::Severity::Critical,
+                pkg_name: Some(pkg.into()),
+                ..Default::default()
+            }],
+        }],
+        runtime_events,
+        ..Default::default()
+    };
+    let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+    let img_key = NodeKey::image(&canonical_image("web:1"));
+    let idx = graph.index_of(&img_key).expect("image node exists");
+    match graph.node(idx) {
+        Some(Node::Image(img)) => {
+            // The linkage report must have landed on the Image — this is the plumbing JEF-407
+            // adds. A static report sets Some(true); a dynamic one Some(false).
+            assert_eq!(
+                img.static_binary,
+                Some(static_linkage),
+                "the agent's ImageLinkage report should populate Image::static_binary"
+            );
+            img.vulnerabilities[0].reachability
+        }
+        _ => panic!("expected image node"),
+    }
+}
+
+#[test]
+fn agent_static_linkage_report_activates_present_static_binary() {
+    // JEF-407: a static-linkage report from the agent (the prod byte source) makes a
+    // would-be `not-observed` critical CVE render `present-static-binary` — the JEF-404
+    // feature that was dormant because Image::static_binary was always None in prod.
+    assert_eq!(
+        reachability_via_agent_linkage("openssl", true, None),
+        Reachability::PresentStaticBinary
+    );
+}
+
+#[test]
+fn agent_dynamic_linkage_report_keeps_not_observed() {
+    // A dynamic-linkage report is honestly observed-absent: a dynamically linked workload
+    // WOULD have emitted a `.so` load if the vulnerable code ran, so no load → NotObserved.
+    assert_eq!(
+        reachability_via_agent_linkage("openssl", false, None),
+        Reachability::NotObserved
+    );
+}
+
+#[test]
+fn agent_linkage_report_never_downgrades_a_real_load() {
+    // Even on a static-linkage report, an actual matching library load still wins — real
+    // exploitation evidence (LoadedAtRuntime) is never downgraded (JEF-405).
+    assert_eq!(
+        reachability_via_agent_linkage("log4j-core", true, Some("log4j-core-2.14.jar")),
+        Reachability::LoadedAtRuntime
+    );
+}
+
+#[test]
+fn image_linkage_report_is_not_pushed_onto_workload_runtime() {
+    // The linkage signal is a structural per-image fact, not runtime prompt evidence — it
+    // must be diverted to Image::static_binary and NEVER land on the workload's `runtime`
+    // (it would otherwise pollute the adjudication prompt and the corroboration path).
+    let web = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+        "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+    }));
+    let snap = Snapshot {
+        pods: vec![web],
+        runtime_events: vec![RuntimeObservation {
+            attribution: Attribution::by_namespaced_name("app", "web"),
+            source: Some("protector-agent".into()),
+            observed_at_ms: None,
+            node: None,
+            behavior: Behavior::ImageLinkage {
+                static_linkage: true,
+            },
+        }],
+        ..Default::default()
+    };
+    let graph = super::super::build_graph(&snap, &super::super::default_adapters());
+    let wl_key = NodeKey::workload("app", "Pod", "web");
+    let idx = graph.index_of(&wl_key).expect("workload node exists");
+    match graph.node(idx) {
+        Some(Node::Workload(w)) => assert!(
+            w.runtime
+                .iter()
+                .all(|s| !matches!(s.behavior, Behavior::ImageLinkage { .. })),
+            "ImageLinkage must not land on workload runtime — it is diverted to the Image"
+        ),
+        _ => panic!("expected workload node"),
+    }
+}
+
 /// A `LibraryLoaded` observation on pod app/web (the fixture these tests use).
 fn lib(name: &str) -> RuntimeObservation {
     RuntimeObservation {

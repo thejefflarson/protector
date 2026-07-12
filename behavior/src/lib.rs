@@ -12,6 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod elf;
+pub use elf::elf_static_linkage;
+
 /// An observed runtime **behavior** — what a workload actually did, from any sensor
 /// (the first-party eBPF agent, or any sensor with an adapter) through the tool-agnostic
 /// behavioral port (ADR-0003/0014). Typed so the engine reasons about the *signal*, not the source.
@@ -64,6 +67,21 @@ pub enum Behavior {
     /// corroboration policy (JEF-306 F3), not a property of this shared wire type. The agent
     /// emits the path; the engine classifies. Model evidence only today.
     FileWrite { path: String },
+    /// The workload's entrypoint binary's **static/dynamic linkage** (JEF-407) — read by
+    /// the node-local agent from the executable's ELF header (`/proc/<pid>/exe`, no
+    /// `PT_INTERP` ⇒ statically linked). This is the byte source that ACTIVATES JEF-404's
+    /// static-linkage reachability in prod: the engine has no in-cluster access to the
+    /// entrypoint bytes, so without this signal `Image::static_binary` stays `None` and a
+    /// Go / musl-static CVE renders `not-observed` forever. `static_linkage == true` ⇒ a
+    /// static binary; the engine maps it onto `Image::static_binary` so a would-be
+    /// `not-observed` CVE tags `present-static-binary` (indeterminate, not observed-absent).
+    ///
+    /// It is a *structural* fact about the image, NOT an attack signal — it never
+    /// corroborates ([`Self::is_alert`] is false) and is CONTEXT only. Reported over the
+    /// SAME behavioral channel (ADR-0014), so no new egress (the zero-egress invariant
+    /// holds — the agent already sees `/proc/<pid>/exe`). PURE DATA: the agent classifies
+    /// the bytes; the *reachability* consequence is engine policy (JEF-404).
+    ImageLinkage { static_linkage: bool },
 }
 
 /// How a [`Behavior::SecretRead`] was observed — a type distinction, not a string
@@ -143,6 +161,7 @@ impl Behavior {
             Behavior::PrivilegeChange { .. } => "priv-change",
             Behavior::ProcessExec { .. } => "exec",
             Behavior::FileWrite { .. } => "file-write",
+            Behavior::ImageLinkage { .. } => "image-linkage",
         }
     }
 
@@ -177,6 +196,16 @@ impl Behavior {
             // config tampering) is engine corroboration policy (JEF-306 F3), not a property
             // of this shared wire type — the agent emits the path, the engine classifies.
             Behavior::FileWrite { path } => format!("wrote file {path}"),
+            // A structural linkage fact, not an action. Named so the prompt/dashboard read
+            // it as CONTEXT (why a Go/musl-static CVE can't be library-load-correlated),
+            // never as an event that happened.
+            Behavior::ImageLinkage { static_linkage } => {
+                if *static_linkage {
+                    "entrypoint is a statically linked binary".to_string()
+                } else {
+                    "entrypoint is a dynamically linked binary".to_string()
+                }
+            }
         }
     }
 
@@ -218,6 +247,10 @@ impl Behavior {
             // full path would thrash the verdict cache (mirrors the exec/library basename
             // coarsening, one level up the tree for the higher write volume).
             Behavior::FileWrite { path } => format!("write:{}", dirname(path)),
+            // The linkage is a stable per-image fact (static vs dynamic), so key on the
+            // bool verbatim — the two states are genuinely distinct facts, and it's
+            // low-cardinality by construction (exactly two values).
+            Behavior::ImageLinkage { static_linkage } => format!("linkage:{static_linkage}"),
         }
     }
 }
@@ -531,7 +564,7 @@ mod tests {
     fn variant_label_is_a_stable_low_cardinality_token() {
         // Each variant maps to a fixed token carrying NO per-instance payload (no peer,
         // path, or secret name) — so it's safe as a metric label without cardinality blow-up.
-        let cases: [(Behavior, &str); 8] = [
+        let cases: [(Behavior, &str); 9] = [
             (Behavior::Alert { rule: "x".into() }, "alert"),
             (
                 Behavior::NetworkConnection {
@@ -567,6 +600,12 @@ mod tests {
                     path: "/etc/cron.d/x".into(),
                 },
                 "file-write",
+            ),
+            (
+                Behavior::ImageLinkage {
+                    static_linkage: true,
+                },
+                "image-linkage",
             ),
         ];
         for (behavior, want) in cases {
@@ -797,6 +836,92 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<RuntimeReport>(v).unwrap(),
             obs_only
+        );
+    }
+
+    #[test]
+    fn image_linkage_serializes_to_the_kind_tagged_contract_and_round_trips() {
+        // JEF-407: the linkage signal rides the same `{"kind": "...", ...}` behavioral wire.
+        // A static-linkage report and a dynamic one both round-trip byte-for-byte.
+        let stat = Behavior::ImageLinkage {
+            static_linkage: true,
+        };
+        let v = serde_json::to_value(&stat).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind": "image_linkage", "static_linkage": true})
+        );
+        assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), stat);
+
+        let dynm = Behavior::ImageLinkage {
+            static_linkage: false,
+        };
+        let v = serde_json::to_value(&dynm).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"kind": "image_linkage", "static_linkage": false})
+        );
+        assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), dynm);
+    }
+
+    #[test]
+    fn image_linkage_is_context_not_corroboration() {
+        // A structural fact about the image, never an "attack is happening now" signal —
+        // only Alerts corroborate the action bar (else linkage would fire it, which is wrong).
+        assert!(
+            !Behavior::ImageLinkage {
+                static_linkage: true
+            }
+            .is_alert()
+        );
+        // Distinct summaries and fingerprints for the two linkage states.
+        assert_eq!(
+            Behavior::ImageLinkage {
+                static_linkage: true
+            }
+            .summary(),
+            "entrypoint is a statically linked binary"
+        );
+        assert_eq!(
+            Behavior::ImageLinkage {
+                static_linkage: false
+            }
+            .summary(),
+            "entrypoint is a dynamically linked binary"
+        );
+        assert_ne!(
+            Behavior::ImageLinkage {
+                static_linkage: true
+            }
+            .fingerprint_key(),
+            Behavior::ImageLinkage {
+                static_linkage: false
+            }
+            .fingerprint_key()
+        );
+    }
+
+    #[test]
+    fn image_linkage_observation_round_trips_over_the_wire() {
+        // The full RuntimeObservation the agent POSTs for a static entrypoint — attributed by
+        // pod UID (the eBPF agent's path), source + node stamped — round-trips.
+        let obs = RuntimeObservation {
+            attribution: Attribution::by_pod_uid("uid"),
+            source: Some("protector-agent".into()),
+            observed_at_ms: None,
+            node: Some("node-a".into()),
+            behavior: Behavior::ImageLinkage {
+                static_linkage: true,
+            },
+        };
+        let v = serde_json::to_value(&obs).unwrap();
+        assert_eq!(
+            v["behavior"],
+            serde_json::json!({"kind": "image_linkage", "static_linkage": true})
+        );
+        assert_eq!(
+            serde_json::from_value::<RuntimeObservation>(v).unwrap(),
+            obs
         );
     }
 

@@ -103,6 +103,14 @@ impl Adapter for RuntimeAdapter {
         };
 
         let (mut attached, mut unresolved, mut filtered) = (0usize, 0usize, 0usize);
+        // The static/dynamic linkage the agent reported per workload (JEF-407). Collected
+        // here and applied to the workload's Images AFTER the event loop (a linkage signal
+        // is a structural per-image fact, not runtime prompt evidence, so it does NOT land
+        // on `w.runtime`). `false` overrides `true` for the same workload within a batch:
+        // a workload with any dynamically linked container is treated as dynamic (a
+        // library-load correlation CAN fire there), the conservative choice.
+        let mut linkage_by_workload: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         for event in &snapshot.runtime_events {
             // The resolution rule (a namespace/name attribution always resolves; a cgroup
             // UID resolves iff a pod with that UID is observed) lives on `Attribution`,
@@ -129,6 +137,19 @@ impl Adapter for RuntimeAdapter {
                     (namespace.clone(), pod.clone(), None)
                 }
             };
+            // JEF-407: a linkage report is a structural fact about the workload's image, not
+            // a runtime behavior for the prompt — divert it here (never push to `w.runtime`)
+            // and apply it to the workload's Images after the loop. This is the byte source
+            // that populates `Image::static_binary` in prod so JEF-404's static-linkage
+            // reachability activates. A dynamic report wins ties (see the map's doc).
+            if let Behavior::ImageLinkage { static_linkage } = &event.behavior {
+                let wl_key = NodeKey::workload(&ns, "Pod", &name).0;
+                linkage_by_workload
+                    .entry(wl_key)
+                    .and_modify(|s| *s = *s && *static_linkage)
+                    .or_insert(*static_linkage);
+                continue;
+            }
             // Refine a raw FileRead (a tmpfs open the credential-free agent couldn't
             // classify) into a SecretRead using the pod's secret volumeMounts — or drop
             // it if the path isn't under a Secret mount (most tmpfs reads aren't). Other
@@ -186,13 +207,51 @@ impl Adapter for RuntimeAdapter {
                 }
             });
         }
+        // Apply the reported linkage to each workload's Images (JEF-407). Walk the
+        // `RunsImage` edges of every workload that reported linkage and set
+        // `Image::static_binary` — the field `CveReachabilityAdapter` (which runs after this
+        // adapter) reads to tag a static image's unmatched CVEs `PresentStaticBinary`. Two
+        // passes so the immutable edge walk and the mutable node update don't alias the
+        // borrow: pass 1 gathers the Image keys to set, pass 2 sets them.
+        let mut linked = 0usize;
+        if !linkage_by_workload.is_empty() {
+            let mut set_static: Vec<(NodeKey, bool)> = Vec::new();
+            {
+                let g = graph.inner();
+                for idx in g.node_indices() {
+                    let Some(node @ Node::Workload(_)) = g.node_weight(idx) else {
+                        continue;
+                    };
+                    let Some(&is_static) = linkage_by_workload.get(&node.key().0) else {
+                        continue;
+                    };
+                    for edge in g.edges(idx) {
+                        if matches!(edge.weight().relation, Relation::RunsImage)
+                            && let Some(img_key) = g.node_weight(edge.target()).map(Node::key)
+                        {
+                            set_static.push((img_key, is_static));
+                        }
+                    }
+                }
+            }
+            for (key, is_static) in set_static {
+                graph.update_node(&key, |node| {
+                    if let Node::Image(img) = node {
+                        img.static_binary = Some(is_static);
+                        linked += 1;
+                    }
+                });
+            }
+        }
         // One line per pass so the behavioral pipeline is observable: signals attached,
         // UIDs that didn't resolve (a persistent nonzero means the agent's cgroup UIDs
-        // aren't matching pod metadata.uid), and FileReads dropped as non-secret tmpfs.
+        // aren't matching pod metadata.uid), FileReads dropped as non-secret tmpfs, and
+        // Images whose static/dynamic linkage was set from an agent ELF report (JEF-407).
         tracing::info!(
             attached,
             unresolved,
             filtered,
+            linked,
             events = snapshot.runtime_events.len(),
             "runtime behavioral signals"
         );
