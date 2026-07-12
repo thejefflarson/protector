@@ -5,9 +5,9 @@
 // instruction.
 //
 // Reconcile keying (the only per-view variation): rows key on `ReadinessRowProps.id`, so Preact
-// patches each row in place across a poll. The per-node `<details>` breakdown is KEYED COMPONENT
-// STATE (persisted in the store under `readiness:<row-id>`) so it survives reconcile exactly like
-// the Findings extra-paths disclosure. The client derives no honesty — it renders the
+// patches each row in place across a poll. The per-node `<details>` breakdown is a NATIVE,
+// UNCONTROLLED disclosure (JEF-411) — the DOM owns its open state, so it survives reconcile for free
+// (Preact's keyed diff never disturbs it). The client derives no honesty — it renders the
 // server-decided state tokens verbatim; every untrusted string (node name, detail) is JSX text.
 
 import { NodeBreakdown } from "./nodes.jsx";
@@ -27,9 +27,8 @@ function stateOf(tag) {
 /**
  * @param {object} props
  * @param {any} props.view the Readiness view props (`{ strip, rows }`, serde kebab-case).
- * @param {import("../store.js").Store} props.store the client store (disclosure state).
  */
-export function ReadinessView({ view, store }) {
+export function ReadinessView({ view }) {
   const rows = Array.isArray(view.rows) ? view.rows : [];
   return (
     <main class="view view-readiness">
@@ -41,7 +40,7 @@ export function ReadinessView({ view, store }) {
         </p>
         <ul class="cov-rows">
           {rows.map((r) => (
-            <CoverageRow key={r.id} r={r} store={store} />
+            <CoverageRow key={r.id} r={r} />
           ))}
         </ul>
       </section>
@@ -51,7 +50,7 @@ export function ReadinessView({ view, store }) {
 
 /** One coverage row. An absent/degraded WEAKENING input gets the amber keyline (`cov-row-gap`) and
  *  reads its enablement instruction as an action ("enable with …"). */
-function CoverageRow({ r, store }) {
+function CoverageRow({ r }) {
   const present = r.state === "present";
   const weakGap = r["weakens-decisions"] === true;
   const isGap = weakGap && !present;
@@ -76,7 +75,7 @@ function CoverageRow({ r, store }) {
       </div>
       <p class="cov-detail t-data">{r.detail}</p>
       <p class="cov-why t-body muted">{r.why}</p>
-      {nodes.length > 0 ? <NodeBreakdown rowId={r.id} nodes={nodes} store={store} /> : null}
+      {nodes.length > 0 ? <NodeBreakdown nodes={nodes} /> : null}
       {hasEnable ? (
         <p class={isGap ? "cov-enable t-data cov-enable-action" : "cov-enable t-data"}>
           <span class="cov-enable-label t-micro">{isGap ? "enable with" : "configured via"}</span>{" "}

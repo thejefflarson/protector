@@ -1,9 +1,9 @@
-// The expand-in-place "why" panel for a finding (ADR-0025 / JEF-397) — a 1:1 Preact port of the
-// maud `finding_detail.rs`: the verbatim verdict (+ the LOUD blind-node caveat), the alarming-now
-// signals, the proven-path chain staircase(s), the evidence tables, the proposed cut, and the
-// "show model prompt" disclosure. All free text is auto-escaped (Preact); the disclosures are
-// NATIVE `<details>` so they are keyboard-safe for free and their open state is DOM-owned (the
-// keyed reconcile never disturbs them mid-read).
+// The expand-in-place "why" panel for a finding (ADR-0025 / JEF-397 / JEF-411) — a 1:1 Preact port
+// of the maud `finding_detail.rs`: the verbatim verdict (+ the LOUD blind-node caveat), the
+// alarming-now signals, the proven-path chain staircase(s), the evidence tables, the proposed cut,
+// and the "show model prompt" disclosure. All free text is auto-escaped (Preact); every disclosure
+// is a NATIVE, UNCONTROLLED `<details>` — keyboard-safe for free, its open state DOM-owned so the
+// keyed reconcile never disturbs it mid-read (no client bookkeeping, ephemeral by design).
 
 import { EvidenceTables } from "./evidence.jsx";
 
@@ -13,11 +13,8 @@ const PATHS_SHOWN_OPEN = 3;
 /**
  * @param {object} props
  * @param {any} props.f the finding props (serde kebab-case).
- * @param {boolean} props.promptOpen whether the "show model prompt" disclosure is open (seeded
- *   from the store's persisted set).
- * @param {(open: boolean) => void} props.onPromptToggle persists the disclosure's new open state.
  */
-export function DetailPanel({ f, promptOpen, onPromptToggle }) {
+export function DetailPanel({ f }) {
   return (
     <div class={`detail rail-${f.posture}`}>
       <VerdictBlock f={f} />
@@ -25,7 +22,7 @@ export function DetailPanel({ f, promptOpen, onPromptToggle }) {
       <PathBlock f={f} />
       <EvidenceTables ev={f.evidence} />
       <CutBlock cut={f.cut} />
-      <ModelPrompt judgement={f.judgement} open={promptOpen} onToggle={onPromptToggle} />
+      <ModelPrompt judgement={f.judgement} />
     </div>
   );
 }
@@ -235,15 +232,13 @@ function CutBlock({ cut }) {
   );
 }
 
-function ModelPrompt({ judgement, open, onToggle }) {
+function ModelPrompt({ judgement }) {
   const j = judgement || {};
   return (
-    <details
-      class="model-prompt"
-      open={open}
-      onToggle={(e) => onToggle(e.currentTarget.open)}
-    >
-      <summary class="why-toggle" role="button" aria-expanded={String(open)}>
+    // Native uncontrolled `<details>` (JEF-411): the DOM owns the open state, so it survives a poll
+    // for free (Preact's keyed diff never disturbs it) with no client bookkeeping.
+    <details class="model-prompt">
+      <summary class="why-toggle" role="button">
         show model prompt
       </summary>
       <div class="prompt-body">

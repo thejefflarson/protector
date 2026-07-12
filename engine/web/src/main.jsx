@@ -12,13 +12,11 @@
 // test). Mount only when the target exists, so the bundle is inert if the mount is absent.
 
 import { render } from "preact";
-import { Store } from "./store.js";
 import { App } from "./app.jsx";
 
 const root = document.getElementById("dash-root");
 if (root) {
   // The server stamps the mounted tab via `data-tab` so the first paint's active tab matches the
   // document without waiting for the first fetch.
-  const store = new Store({ activeTab: root.dataset.tab || "findings" });
-  render(<App store={store} />, root);
+  render(<App initialTab={root.dataset.tab || "findings"} />, root);
 }

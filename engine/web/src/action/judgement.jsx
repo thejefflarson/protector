@@ -1,31 +1,22 @@
-// One judgement in the Action tab's judgement-audit section (ADR-0025 / JEF-400) — a 1:1 Preact
-// port of maud `judgement_entry`: a native `<details>` disclosure whose summary is the entry +
-// objectives, opening to the verbatim prompt and reply. Honest when the prompt (the pre-filter
+// One judgement in the Action tab's judgement-audit section (ADR-0025 / JEF-400 / JEF-411) — a 1:1
+// Preact port of maud `judgement_entry`: a native `<details>` disclosure whose summary is the entry
+// + objectives, opening to the verbatim prompt and reply. Honest when the prompt (the pre-filter
 // decided) or reply (the model timed out) is absent.
 //
-// The disclosure's open state is KEYED COMPONENT STATE (persisted in the store under
-// `action:judgement-<i>`) so an operator reading a long prompt keeps it open across a poll — the
-// same survives-reconcile guarantee the Findings "show model prompt" disclosure has. The prompt /
-// reply / verdict are UNTRUSTED third-party text, rendered as JSX text (Preact auto-escapes).
+// The disclosure is NATIVE and UNCONTROLLED (JEF-411): the DOM owns its open state, so an operator
+// reading a long prompt keeps it open across a poll (Preact's keyed diff never disturbs it) with no
+// client bookkeeping. The prompt / reply / verdict are UNTRUSTED third-party text, rendered as JSX
+// text (Preact auto-escapes).
 
 /**
  * @param {object} props
- * @param {number} props.i the judgement's index (the disclosure's stable key seed, matching the
- *   maud `judgement-{i}`).
  * @param {any} props.j the judgement props (serde kebab-case).
- * @param {import("../store.js").Store} props.store the client store (disclosure open state).
  */
-export function JudgementEntry({ i, j, store }) {
-  const key = `action:judgement-${i}`;
-  const open = store.isDisclosureOpen(key);
+export function JudgementEntry({ j }) {
   return (
     <li class="judgement-entry">
-      <details
-        class="model-prompt"
-        open={open}
-        onToggle={(e) => store.setDisclosureOpen(key, e.currentTarget.open)}
-      >
-        <summary class="why-toggle" role="button" aria-expanded={String(open)}>
+      <details class="model-prompt">
+        <summary class="why-toggle" role="button">
           <span class="judgement-entry-key t-data-strong">{j.entry}</span>
           <span class="judgement-entry-meta t-micro muted">
             {" \u{00B7} reaches "}
