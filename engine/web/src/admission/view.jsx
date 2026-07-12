@@ -14,14 +14,13 @@ import { DecisionRows } from "./decisions.jsx";
 /**
  * @param {object} props
  * @param {any} props.view the Admission view props (serde kebab-case).
- * @param {import("../store.js").Store} props.store the client store (signing-row expansion state).
  */
-export function AdmissionView({ view, store }) {
+export function AdmissionView({ view }) {
   const rows = Array.isArray(view.rows) ? view.rows : [];
   return (
     <main class="view view-admission">
       <TalliesHeader v={view} />
-      <SigningInventory signing={view.signing} store={store} />
+      <SigningInventory signing={view.signing} />
       {rows.length === 0 ? <EmptyState /> : <DecisionRows rows={rows} />}
     </main>
   );

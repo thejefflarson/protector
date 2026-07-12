@@ -6,12 +6,14 @@
 // cell is always a definite continuity verdict (would-admit / would-block / uncertain).
 //
 // Reconcile keying: image + regression/exception/provenance-change rows key on their server-supplied
-// `dom-id`, and each row's expand-in-place detail is a store-persisted disclosure keyed on
-// `admission:<dom-id>` (survives a poll, like the Findings row expansion). Every untrusted string
-// (image ref / signer identity / issuer / builder / source) renders via JSX text (Preact
-// auto-escapes; the raw-HTML escape hatch is banned by the guard). The `data-*` tokens are fixed
-// `[a-z0-9-]`, never derived from untrusted text.
+// `dom-id`, and each row's expand-in-place detail is a button-driven expander backed by LOCAL
+// component state (a plain `useState` per row — JEF-411), ephemeral by design. Preact's keyed diff
+// keeps the open row open across a poll (the boring default). Every untrusted string (image ref /
+// signer identity / issuer / builder / source) renders via JSX text (Preact auto-escapes; the
+// raw-HTML escape hatch is banned by the guard). The `data-*` tokens are fixed `[a-z0-9-]`, never
+// derived from untrusted text.
 
+import { useState } from "preact/hooks";
 import {
   posture,
   provenance,
@@ -32,9 +34,8 @@ const COLSPAN = 7;
 /**
  * @param {object} props
  * @param {any[]} props.signing the per-repo signing inventory (serde kebab-case).
- * @param {import("../store.js").Store} props.store the client store (row expansion state).
  */
-export function SigningInventory({ signing, store }) {
+export function SigningInventory({ signing }) {
   const repos = Array.isArray(signing) ? signing : [];
   return (
     <section class="signing-inventory" aria-label="signing inventory">
@@ -75,7 +76,7 @@ export function SigningInventory({ signing, store }) {
           </thead>
           <tbody>
             {repos.map((g) => (
-              <SigningGroup key={`repo-${g.repo}`} g={g} store={store} />
+              <SigningGroup key={`repo-${g.repo}`} g={g} />
             ))}
           </tbody>
         </table>
@@ -86,7 +87,7 @@ export function SigningInventory({ signing, store }) {
 
 /** One repo group: a spanning group-header row, then (when present) the loud regression / calm
  *  exception / loud provenance-change rows, then the repo's image rows. */
-function SigningGroup({ g, store }) {
+function SigningGroup({ g }) {
   const images = Array.isArray(g.images) ? g.images : [];
   return (
     <>
@@ -95,25 +96,21 @@ function SigningGroup({ g, store }) {
           {g.repo}
         </th>
       </tr>
-      {g.regression ? <RegressionRow r={g.regression} store={store} /> : null}
-      {g.exception ? <ExceptionRow r={g.exception} store={store} /> : null}
-      {g["provenance-change"] ? (
-        <ProvenanceChangeRow r={g["provenance-change"]} store={store} />
-      ) : null}
+      {g.regression ? <RegressionRow r={g.regression} /> : null}
+      {g.exception ? <ExceptionRow r={g.exception} /> : null}
+      {g["provenance-change"] ? <ProvenanceChangeRow r={g["provenance-change"]} /> : null}
       {images.map((img) => (
-        <SigningRow key={img["dom-id"]} r={img} strength={g.strength} store={store} />
+        <SigningRow key={img["dom-id"]} r={img} strength={g.strength} />
       ))}
     </>
   );
 }
 
-/** A row expander button + the paired detail row's open state, wired to the store disclosure keyed
- *  on `admission:<dom-id>`. Returns `{ domId, detailId, open, setOpen, expander }`. */
-function useRowDisclosure(domId, store, label) {
-  const key = `admission:${domId}`;
+/** A row expander button + the paired detail row's open state, backed by LOCAL component state (a
+ *  plain `useState` — JEF-411, ephemeral by design). Returns `{ detailId, open, expander }`. */
+function useRowDisclosure(domId, label) {
   const detailId = `detail-${domId}`;
-  const open = store.isDisclosureOpen(key);
-  const setOpen = () => store.setDisclosureOpen(key, !open);
+  const [open, setOpen] = useState(false);
   const expander = (
     <button
       class="expander"
@@ -121,7 +118,7 @@ function useRowDisclosure(domId, store, label) {
       aria-expanded={String(open)}
       aria-controls={detailId}
       aria-label={label}
-      onClick={setOpen}
+      onClick={() => setOpen((v) => !v)}
     >
       <span class="expander-glyph" aria-hidden="true">
         {open ? "\u{2212}" : "+"}
@@ -134,10 +131,9 @@ function useRowDisclosure(domId, store, label) {
 /** One image row: a findings-style summary row (posture chip · image · signer · provenance ·
  *  baseline · continuity verdict) paired with a hidden full-width detail row. An invalid signature
  *  is the loud attention case (a breach keyline). */
-function SigningRow({ r, strength: repoStrength, store }) {
+function SigningRow({ r, strength: repoStrength }) {
   const { detailId, open, expander } = useRowDisclosure(
     r["dom-id"],
-    store,
     "expand image signing detail",
   );
   const attention = isInvalid(r.posture);
@@ -263,7 +259,6 @@ function baselineWord(established) {
  * @param {string} props.image  the untrusted image ref (rendered as JSX text).
  * @param {string} props.label  the expander's aria-label.
  * @param {(open: boolean) => any} props.detail  renders the detail body when open.
- * @param {import("../store.js").Store} props.store
  */
 function BannerRow({
   domId,
@@ -277,9 +272,8 @@ function BannerRow({
   image,
   label,
   detail,
-  store,
 }) {
-  const { detailId, open, expander } = useRowDisclosure(domId, store, label);
+  const { detailId, open, expander } = useRowDisclosure(domId, label);
   return (
     <>
       <tr class={rowClass} id={domId} data-signing={domId} role={role} {...dataAttr}>
@@ -309,7 +303,7 @@ function BannerRow({
 
 /** The loud signing-regression row: a breach-keyline banner with the loud "signing regression"
  *  word (`role="alert"`). */
-function RegressionRow({ r, store }) {
+function RegressionRow({ r }) {
   const kind = regression(r.kind);
   return (
     <BannerRow
@@ -324,13 +318,12 @@ function RegressionRow({ r, store }) {
       image={r.image}
       label="expand signing regression detail"
       detail={() => <RegressionDetail r={r} />}
-      store={store}
     />
   );
 }
 
 /** The loud build-provenance-change row: like the regression row but for a builder/source drift. */
-function ProvenanceChangeRow({ r, store }) {
+function ProvenanceChangeRow({ r }) {
   return (
     <BannerRow
       domId={r["dom-id"]}
@@ -344,14 +337,13 @@ function ProvenanceChangeRow({ r, store }) {
       image={r.image}
       label="expand build-provenance change detail"
       detail={() => <ProvenanceChangeDetail r={r} />}
-      store={store}
     />
   );
 }
 
 /** The CALM exception-accepted row: a muted banner with the distinct word "exception accepted"
  *  (never green-cleared), kept visible. */
-function ExceptionRow({ r, store }) {
+function ExceptionRow({ r }) {
   const kind = regression(r.kind);
   return (
     <BannerRow
@@ -365,7 +357,6 @@ function ExceptionRow({ r, store }) {
       image={r.image}
       label="expand exception-accepted detail"
       detail={() => <ExceptionDetail r={r} />}
-      store={store}
     />
   );
 }

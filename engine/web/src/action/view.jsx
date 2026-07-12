@@ -7,24 +7,23 @@
 // Reconcile keying (the only per-view variation): each row keys on its stable anchor — a would-act
 // / left-alone entry on its `entry` key, a reversion on `(cut, age)`, a judgement on its `entry`
 // (paired with index for stability). Preact patches each row in place across a poll, and the
-// judgement `<details>` open state is KEYED COMPONENT STATE (persisted in the store) so an operator
-// reading a prompt keeps it open. Every untrusted string (entry / verdict / cut / reason / prompt /
-// reply) renders via JSX text interpolation (Preact auto-escapes).
+// judgement `<details>` is a NATIVE, UNCONTROLLED disclosure (JEF-411) so an operator reading a
+// prompt keeps it open (the DOM owns the state). Every untrusted string (entry / verdict / cut /
+// reason / prompt / reply) renders via JSX text interpolation (Preact auto-escapes).
 
 import { JudgementEntry } from "./judgement.jsx";
 
 /**
  * @param {object} props
  * @param {any} props.view the Action view props (serde kebab-case).
- * @param {import("../store.js").Store} props.store the client store (disclosure state).
  */
-export function ActionView({ view, store }) {
+export function ActionView({ view }) {
   return (
     <main class="view view-action">
       <Headline v={view} />
       <ProposedCuts v={view} />
       <LeftAlone v={view} />
-      <JudgementAudit v={view} store={store} />
+      <JudgementAudit v={view} />
     </main>
   );
 }
@@ -250,7 +249,7 @@ function LeftAloneEntry({ l }) {
 
 /** Section 3 — Judgement audit (model debug): the verbatim prompt/reply per model call, as
  *  collapsed disclosures. Honest about an absent prompt/reply. */
-function JudgementAudit({ v, store }) {
+function JudgementAudit({ v }) {
   const judgements = Array.isArray(v.judgements) ? v.judgements : [];
   return (
     <section class="activity-section judgements" aria-label="judgement audit">
@@ -267,7 +266,7 @@ function JudgementAudit({ v, store }) {
       ) : (
         <ul class="judgement-list">
           {judgements.map((j, i) => (
-            <JudgementEntry key={`${j.entry} ${i}`} i={i} j={j} store={store} />
+            <JudgementEntry key={`${j.entry} ${i}`} j={j} />
           ))}
         </ul>
       )}

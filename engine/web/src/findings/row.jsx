@@ -1,13 +1,15 @@
-// One Findings-table row (ADR-0025 / JEF-397) — a 1:1 Preact port of maud `finding_row.rs`: the
-// two-row structure (a summary `<tr.row>` whose expander button drives a paired `<tr.row-detail>`),
-// keyed on the STABLE `finding.id`. Preact's keyed diff keeps this row's exact DOM across a poll —
-// focus, open disclosures, selection — so the reconcile "just works": the boring default IS the
-// whole point of the rewrite (ADR-0025).
+// One Findings-table row (ADR-0025 / JEF-397 / JEF-411) — a 1:1 Preact port of maud `finding_row.rs`:
+// the two-row structure (a summary `<tr.row>` whose expander button drives a paired
+// `<tr.row-detail>`), keyed on the STABLE `finding.id`. Preact's keyed diff keeps this row's exact
+// DOM across a poll — focus, open disclosures, selection — so the reconcile "just works": the boring
+// default IS the whole point of the rewrite (ADR-0025).
 //
 // The expander is a real `<button aria-expanded aria-controls>` and the detail row keeps its
-// `id=detail-{id}` target, so the a11y contract (STYLEGUIDE gate) is preserved. Expansion state
-// comes from the store (persisted across reloads), not from a swap-and-rebind shim.
+// `id=detail-{id}` target, so the a11y contract (STYLEGUIDE gate) is preserved. Expansion is LOCAL
+// component state (JEF-411): a plain `useState`, ephemeral by design — the framework's keyed diff
+// keeps it across a poll, and it does not need to survive a reload.
 
+import { useState } from "preact/hooks";
 import { posture, DELTA } from "./glyphs.js";
 import { DetailPanel } from "./detail.jsx";
 
@@ -16,12 +18,9 @@ const DASH = "\u{2014}"; // —
 /**
  * @param {object} props
  * @param {any} props.f the finding props (serde kebab-case).
- * @param {boolean} props.expanded whether this row is expanded (from the store).
- * @param {() => void} props.onToggle toggle this row's expansion (persists in the store).
- * @param {boolean} props.promptOpen whether the row's model-prompt disclosure is open.
- * @param {(open: boolean) => void} props.onPromptToggle persist the disclosure's open state.
  */
-export function FindingRow({ f, expanded, onToggle, promptOpen, onPromptToggle }) {
+export function FindingRow({ f }) {
+  const [expanded, setExpanded] = useState(false);
   const detailId = `detail-${f.id}`;
   return (
     <>
@@ -30,7 +29,7 @@ export function FindingRow({ f, expanded, onToggle, promptOpen, onPromptToggle }
         id={f.id}
         data-finding={f.id}
         data-posture={f.posture}
-        onClick={onToggle}
+        onClick={() => setExpanded((v) => !v)}
       >
         <td class="cell cell-expand">
           <button
@@ -66,31 +65,10 @@ export function FindingRow({ f, expanded, onToggle, promptOpen, onPromptToggle }
       </tr>
       <tr class="row-detail" id={detailId} data-detail-for={f.id}>
         <td class="detail-host" colspan="7">
-          {expanded ? (
-            <DetailPanel f={f} promptOpen={promptOpen} onPromptToggle={onPromptToggle} />
-          ) : null}
+          {expanded ? <DetailPanel f={f} /> : null}
         </td>
       </tr>
     </>
-  );
-}
-
-/**
- * The one-shot TOMBSTONE row for a finding that cleared while the operator had it open (ADR-0025 /
- * JEF-397). Calm and muted — it is not an alarm; it says the model no longer sees this path — and it
- * renders exactly once before the id is dropped and purged. Keyed on the same id so Preact patches
- * the departing row in place rather than tearing the table.
- * @param {{ id: string }} props
- */
-export function TombstoneRow({ id }) {
-  return (
-    <tr class="row row-tombstone" id={id} data-finding={id} data-tombstone="true">
-      <td class="cell" colspan="7">
-        <span class="tombstone muted">
-          this finding cleared — the model no longer sees this path
-        </span>
-      </td>
-    </tr>
   );
 }
 
