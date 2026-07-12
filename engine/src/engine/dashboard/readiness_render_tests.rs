@@ -4,6 +4,7 @@
 
 use std::time::SystemTime;
 
+use crate::engine::dashboard::PreactTabs;
 use crate::engine::dashboard::page;
 use crate::engine::dashboard::view_model::{build_readiness_view, build_status_strip};
 use crate::engine::state::{
@@ -49,7 +50,7 @@ fn per_node_breakdown_is_a_server_table_and_escapes_node_names() {
     );
     let strip = build_status_strip("prod".into(), &[], &[], &readiness, Some(SystemTime::now()));
     let v = build_readiness_view(strip, &readiness);
-    let html = page::readiness_page(&v).into_string();
+    let html = page::readiness_page(&v, PreactTabs::default()).into_string();
 
     assert!(
         html.contains("Runtime monitoring"),

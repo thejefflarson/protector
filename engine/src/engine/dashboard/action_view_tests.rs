@@ -49,7 +49,7 @@ fn secondary_views_carry_the_persistent_strip_and_nav_without_phase2_badge() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::action_page(&action_view_for(&report)).into_string();
+    let html = page::action_page(&action_view_for(&report), PreactTabs::default()).into_string();
     assert!(!html.contains("phase 2"), "the phase-2 badge is gone");
     assert!(html.contains("Findings"), "the nav still offers Findings");
     assert!(html.contains("Action"), "and the merged Action tab");
@@ -73,7 +73,7 @@ fn action_view_has_the_three_lifecycle_sections_in_order() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::action_page(&action_view_for(&report)).into_string();
+    let html = page::action_page(&action_view_for(&report), PreactTabs::default()).into_string();
     let proposed = html.find("proposed cuts").expect("proposed cuts section");
     let cleared = html
         .find("left alone (cleared)")
@@ -98,7 +98,7 @@ fn action_view_distinguishes_journal_empty_from_none_in_window() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::action_page(&action_view_for(&empty)).into_string();
+    let html = page::action_page(&action_view_for(&empty), PreactTabs::default()).into_string();
     assert!(
         html.contains("no decisions journaled yet"),
         "an empty journal reads as no-history, not all-clear"
@@ -110,7 +110,8 @@ fn action_view_distinguishes_journal_empty_from_none_in_window() {
         journal_empty: false,
         ..empty
     };
-    let html2 = page::action_page(&action_view_for(&none_in_window)).into_string();
+    let html2 =
+        page::action_page(&action_view_for(&none_in_window), PreactTabs::default()).into_string();
     assert!(
         !html2.contains("no decisions journaled yet"),
         "history exists, so it is NOT the journal-empty state"
@@ -152,7 +153,7 @@ fn action_view_renders_proposed_cuts_and_left_alone_with_lifecycle_status() {
             verdict: "not exploitable — internal only".into(),
         }],
     };
-    let html = page::action_page(&action_view_for(&report)).into_string();
+    let html = page::action_page(&action_view_for(&report), PreactTabs::default()).into_string();
     assert!(html.contains("proposed cuts"));
     assert!(html.contains("left alone (cleared)"));
     // Lifecycle status words ride alongside the glyph (meaning never by colour alone).
@@ -191,13 +192,13 @@ fn action_view_renders_reverted_cuts_under_proposed_with_honest_empty() {
         at_ms: now_ms.saturating_sub(90_000),
     }];
     let v = build_action_view(strip_from(&[]), &report, &reversions, &[]);
-    let html = page::action_page(&v).into_string();
+    let html = page::action_page(&v, PreactTabs::default()).into_string();
     assert!(html.contains("reverted"), "the reverted tag");
     assert!(html.contains("breach condition cleared"), "the reason");
 
     // Empty reversions ⇒ the honest "no cuts reverted yet" line, never a blank.
     let v2 = build_action_view(strip_from(&[]), &report, &[], &[]);
-    let html2 = page::action_page(&v2).into_string();
+    let html2 = page::action_page(&v2, PreactTabs::default()).into_string();
     assert!(html2.contains("no cuts reverted yet"));
 }
 
@@ -221,7 +222,7 @@ fn readiness_view_renders_a_row_per_input_with_enable_instruction() {
         &RuntimeCoverage::default(),
     );
     let v = build_readiness_view(strip_from(&[]), &readiness);
-    let html = page::readiness_page(&v).into_string();
+    let html = page::readiness_page(&v, PreactTabs::default()).into_string();
     assert!(html.contains("decision inputs"), "the section heading");
     assert!(html.contains("KEV catalogue"), "the KEV row label");
     // The absent KEV row surfaces the env var to enable it (the per-feed how-to-enable surface).
@@ -254,7 +255,7 @@ fn action_view_renders_judgement_audit_with_honest_empties() {
         reply: None, // timed out ⇒ honest "no reply"
     }];
     let v = build_action_view(strip_from(&[]), &report, &[], &judgements);
-    let html = page::action_page(&v).into_string();
+    let html = page::action_page(&v, PreactTabs::default()).into_string();
     assert!(html.contains("judgement audit"));
     assert!(html.contains("deployment/edge/api"), "the judged entry");
     assert!(
@@ -264,7 +265,7 @@ fn action_view_renders_judgement_audit_with_honest_empties() {
 
     // Empty: the judgement section renders its honest empty state, not a blank.
     let empty = build_action_view(strip_from(&[]), &report, &[], &[]);
-    let html2 = page::action_page(&empty).into_string();
+    let html2 = page::action_page(&empty, PreactTabs::default()).into_string();
     assert!(html2.contains("no judgements recorded"));
 }
 
@@ -296,7 +297,11 @@ fn secondary_view_strip_stays_non_green_when_findings_hold_a_breach() {
         would_act: vec![],
         left_alone: vec![],
     };
-    let html = page::action_page(&build_action_view(strip, &report, &[], &[])).into_string();
+    let html = page::action_page(
+        &build_action_view(strip, &report, &[], &[]),
+        PreactTabs::default(),
+    )
+    .into_string();
     assert!(
         !html.contains("all clear"),
         "the Action tab's strip never reads all-clear while Findings holds a breach"
@@ -340,12 +345,10 @@ fn untrusted_text_is_escaped_in_the_action_view() {
         prompt: Some(format!("prompt {evil}")),
         reply: Some(format!("reply {evil}")),
     }];
-    let html = page::action_page(&build_action_view(
-        strip_from(&[]),
-        &report,
-        &reversions,
-        &judgements,
-    ))
+    let html = page::action_page(
+        &build_action_view(strip_from(&[]), &report, &reversions, &judgements),
+        PreactTabs::default(),
+    )
     .into_string();
     assert!(
         !html.contains("<script>alert"),

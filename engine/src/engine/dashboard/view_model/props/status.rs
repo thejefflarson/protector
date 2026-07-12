@@ -207,4 +207,17 @@ impl Tab {
             Tab::Admission => "Admission",
         }
     }
+
+    /// The stable lowercase tab token (`findings`/`alerts`/…) — the `?tab=` vocabulary and the value
+    /// the Preact client keys its active-tab state on (ADR-0025 / JEF-400). Distinct from
+    /// [`label`](Self::label) (the capitalised nav text).
+    pub fn token(self) -> &'static str {
+        match self {
+            Tab::Findings => "findings",
+            Tab::Alerts => "alerts",
+            Tab::Action => "action",
+            Tab::Readiness => "readiness",
+            Tab::Admission => "admission",
+        }
+    }
 }

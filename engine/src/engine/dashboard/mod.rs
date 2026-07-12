@@ -207,10 +207,10 @@ impl TabQuery {
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_page(&state.findings_view(), state.preact_tabs),
-        Tab::Alerts => page::alerts_page(&state.alerts_view()),
-        Tab::Action => page::action_page(&state.action_view()),
-        Tab::Readiness => page::readiness_page(&state.readiness_view()),
-        Tab::Admission => page::admission_page(&state.admission_view()),
+        Tab::Alerts => page::alerts_page(&state.alerts_view(), state.preact_tabs),
+        Tab::Action => page::action_page(&state.action_view(), state.preact_tabs),
+        Tab::Readiness => page::readiness_page(&state.readiness_view(), state.preact_tabs),
+        Tab::Admission => page::admission_page(&state.admission_view(), state.preact_tabs),
     };
     Html(markup.into_string())
 }
@@ -221,10 +221,10 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
     let markup = match q.resolve() {
         Tab::Findings => page::findings_fragment(&state.findings_view(), state.preact_tabs),
-        Tab::Alerts => page::alerts_fragment(&state.alerts_view()),
-        Tab::Action => page::action_fragment(&state.action_view()),
-        Tab::Readiness => page::readiness_fragment(&state.readiness_view()),
-        Tab::Admission => page::admission_fragment(&state.admission_view()),
+        Tab::Alerts => page::alerts_fragment(&state.alerts_view(), state.preact_tabs),
+        Tab::Action => page::action_fragment(&state.action_view(), state.preact_tabs),
+        Tab::Readiness => page::readiness_fragment(&state.readiness_view(), state.preact_tabs),
+        Tab::Admission => page::admission_fragment(&state.admission_view(), state.preact_tabs),
     };
     Html(markup.into_string())
 }

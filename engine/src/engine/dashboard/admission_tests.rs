@@ -13,6 +13,7 @@ use crate::engine::state::{
     Finding, ModelHealth, ReadinessConfig, RuntimeCoverage, derive_readiness,
 };
 
+use super::PreactTabs;
 use super::page;
 use super::view_model::{build_admission_view, build_status_strip};
 
@@ -86,7 +87,11 @@ fn signing_rec(image: &str, status: &str, reason: &str) -> PolicyDecisionRecord 
 }
 
 fn render(rows: &[PolicyDecisionRecord]) -> String {
-    page::admission_page(&build_admission_view(strip_from(&[]), rows)).into_string()
+    page::admission_page(
+        &build_admission_view(strip_from(&[]), rows),
+        PreactTabs::default(),
+    )
+    .into_string()
 }
 
 #[test]
@@ -214,7 +219,7 @@ fn admission_untrusted_image_and_reason_are_escaped() {
 #[test]
 fn admission_fragment_has_no_document_shell() {
     let v = build_admission_view(strip_from(&[]), &[]);
-    let frag = page::admission_fragment(&v).into_string();
+    let frag = page::admission_fragment(&v, PreactTabs::default()).into_string();
     assert!(!frag.contains("<!DOCTYPE"), "a fragment carries no doctype");
     assert!(!frag.contains("<html"), "nor a document element");
     // It carries the persistent strip (a poll refreshes coverage/freshness on this tab too).

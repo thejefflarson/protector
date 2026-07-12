@@ -17,6 +17,14 @@
 export const EXPANDED_KEY = "protector.expanded";
 /** The sessionStorage key for the set of open "show model prompt" disclosure ids (kept from v3). */
 export const PROMPT_KEY = "protector.prompts";
+/**
+ * The sessionStorage key for the set of open *secondary-view* disclosure keys (JEF-400): the
+ * Readiness per-node `<details>`, the Action judgement-audit `<details>`, and the Admission
+ * signing-inventory row expansions. A single flat set keyed by each disclosure's stable,
+ * view-scoped key (`readiness:runtime-corroboration`, `admission:<dom-id>`, …) so an operator's
+ * open disclosures survive a poll AND a soft reload, exactly like the Findings rows do.
+ */
+export const DISCLOSURE_KEY = "protector.disclosures";
 
 /**
  * A sessionStorage-backed Set of ids: survives a soft reload (not a new session). Tolerates a
@@ -64,6 +72,7 @@ export class Store {
       activeTab: seed.activeTab || "findings",
       expandedRows: loadSet(EXPANDED_KEY),
       openPrompts: loadSet(PROMPT_KEY),
+      disclosures: loadSet(DISCLOSURE_KEY),
       data: null,
       status: "first-load",
       lastGoodAt: null,
@@ -172,13 +181,42 @@ export class Store {
   }
 
   /**
+   * Whether a secondary-view disclosure (Readiness node table, Action judgement, Admission signing
+   * row) is open. Keyed by its stable, view-scoped key. @param {string} key
+   */
+  isDisclosureOpen(key) {
+    return this.state.disclosures.has(key);
+  }
+
+  /**
+   * Set a secondary-view disclosure's open state, persisting to sessionStorage (JEF-400). Called
+   * from the native `<details>` toggle (or a signing-row expander) so the store mirrors the DOM.
+   * @param {string} key
+   * @param {boolean} open
+   */
+  setDisclosureOpen(key, open) {
+    const has = this.state.disclosures.has(key);
+    if (open === has) return;
+    const next = new Set(this.state.disclosures);
+    if (open) next.add(key);
+    else next.delete(key);
+    saveSet(DISCLOSURE_KEY, next);
+    this.state = { ...this.state, disclosures: next };
+    this.emit();
+  }
+
+  /**
    * Switch the active tab (client-side view swap). The caller owns the `history.pushState`; this
    * only moves the state so the render follows.
    * @param {string} tab
    */
   setActiveTab(tab) {
     if (this.state.activeTab === tab) return;
-    this.state = { ...this.state, activeTab: tab };
+    // Drop the previous tab's snapshot: each tab has its own JSON shape, so rendering the old
+    // snapshot under the new view would be wrong. The next poll (repointed to the new tab) lands its
+    // snapshot; until then the view shows its quiet first-paint body, and the status remains LIVE
+    // (this is a local view change, not a connection problem).
+    this.state = { ...this.state, activeTab: tab, data: null };
     this.emit();
   }
 }
