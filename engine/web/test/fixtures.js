@@ -21,6 +21,9 @@ export function strip(overrides = {}) {
     "signing-regression-uncertain": 0,
     "all-clear": false,
     watching: false,
+    // The single server-derived judging-axis token (JEF-408) the client strip switches on. Defaults
+    // to "judging" (model up, nothing green forced); tests override it to exercise each register.
+    "judging-state": "judging",
     ...overrides,
   };
 }
