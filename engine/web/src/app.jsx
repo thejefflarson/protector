@@ -52,10 +52,12 @@ export function App({ store, liveRegion }) {
   const state = store.getState();
   return (
     <div id="dash-app" class="dash-app" data-tab={state.activeTab}>
-      {/* The persistent status strip — the honesty spine on every view. Before the first snapshot
-          lands there is no strip data, so nothing renders here (blank is honest — absent is never a
-          green all-clear; the ConnectionBanner already says "connecting…"). */}
-      <StatusStrip strip={state.data?.strip} />
+      {/* The persistent status strip — the honesty spine on every view. Read from the store's
+          decoupled `strip` (global posture), NOT the per-tab `data`, so a tab-swap never tears it
+          down; it stays mounted and reconciles in place as posture changes. Before the first
+          snapshot there is no strip, so nothing renders (blank is honest — absent is never a green
+          all-clear; the ConnectionBanner already says "connecting…"). */}
+      <StatusStrip strip={state.strip} />
       <ConnectionBanner status={state.status} lastGoodAt={state.lastGoodAt} />
       <TabNav activeTab={state.activeTab} store={store} />
       <ActiveView store={store} state={state} />

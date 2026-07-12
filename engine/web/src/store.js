@@ -67,13 +67,17 @@ export class Store {
     /** @type {Set<() => void>} */
     this.listeners = new Set();
     /** @type {{ activeTab: string, expandedRows: Set<string>, openPrompts: Set<string>,
-     *           data: unknown, status: Status, lastGoodAt: number | null }} */
+     *           data: unknown, strip: unknown, status: Status, lastGoodAt: number | null }} */
     this.state = {
       activeTab: seed.activeTab || "findings",
       expandedRows: loadSet(EXPANDED_KEY),
       openPrompts: loadSet(PROMPT_KEY),
       disclosures: loadSet(DISCLOSURE_KEY),
       data: null,
+      // The persistent status strip (global cluster posture), decoupled from the per-tab `data`
+      // so a tab-swap (which nulls `data`) never tears the header down. Updated on every snapshot;
+      // held across swaps. Null before the first snapshot (blank is honest — absent is never green).
+      strip: null,
       status: "first-load",
       lastGoodAt: null,
     };
@@ -104,7 +108,10 @@ export class Store {
    * @param {unknown} data
    */
   applySnapshot(data) {
-    this.state = { ...this.state, data, status: "live", lastGoodAt: Date.now() };
+    // Refresh the persistent strip from this snapshot's global posture (present in every tab's
+    // payload). Keep the last strip if a snapshot somehow omits it, so the header never blanks.
+    const strip = data && data.strip ? data.strip : this.state.strip;
+    this.state = { ...this.state, data, strip, status: "live", lastGoodAt: Date.now() };
     this.emit();
   }
 
@@ -215,7 +222,8 @@ export class Store {
     // Drop the previous tab's snapshot: each tab has its own JSON shape, so rendering the old
     // snapshot under the new view would be wrong. The next poll (repointed to the new tab) lands its
     // snapshot; until then the view shows its quiet first-paint body, and the status remains LIVE
-    // (this is a local view change, not a connection problem).
+    // (this is a local view change, not a connection problem). `strip` is deliberately NOT cleared —
+    // it is global posture that must persist across the swap so the header never tears down.
     this.state = { ...this.state, activeTab: tab, data: null };
     this.emit();
   }

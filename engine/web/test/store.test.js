@@ -97,3 +97,28 @@ describe("subscribe", () => {
     expect(n).toBe(1);
   });
 });
+
+describe("persistent status strip (JEF-410)", () => {
+  it("updates the strip from each snapshot and holds it across a tab swap", () => {
+    const store = new Store();
+    expect(store.getState().strip).toBe(null); // no snapshot yet — blank is honest
+
+    const strip = { "all-clear": false, "judging-state": "watching" };
+    store.applySnapshot({ strip, rows: [] });
+    expect(store.getState().strip).toBe(strip);
+    expect(store.getState().data).toEqual({ strip, rows: [] });
+
+    // A tab swap drops the per-tab body but MUST NOT tear down the global strip.
+    store.setActiveTab("alerts");
+    expect(store.getState().data).toBe(null); // body cleared for the new tab
+    expect(store.getState().strip).toBe(strip); // header persists — no blank/redraw
+  });
+
+  it("keeps the last strip if a later snapshot omits it", () => {
+    const store = new Store();
+    const strip = { "all-clear": true, "judging-state": "all-clear" };
+    store.applySnapshot({ strip, rows: [] });
+    store.applySnapshot({ rows: [] }); // malformed / strip-less snapshot
+    expect(store.getState().strip).toBe(strip); // never regress the header to blank
+  });
+});
