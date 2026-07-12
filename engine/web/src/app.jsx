@@ -1,15 +1,18 @@
-// The dashboard v4 app shell (ADR-0025): the mounted Preact tree below the SERVER-RENDERED status
-// strip. The strip stays server-rendered for first-paint honesty (a JS failure must never leave a
-// stale green) — this shell renders only the connection banner, the tab nav (progressive-
-// enhancement: real `<a href>` links intercepted for a client-side view swap), and the active view.
-// All five views (Findings / Alerts / Action / Readiness / Admission) are Preact-rendered (JEF-398):
-// the engine is Preact-only, so every tab-swap is a local client view swap — no maud fallback.
+// The dashboard v4 app shell (ADR-0025 / ADR-0027 / ADR-0028): the mounted Preact tree. `App` owns
+// the ONLY shared client state — the active tab, the last-good snapshot, the persistent status
+// strip, the connection status, and the freshness clock — each a plain `useState` (JEF-411: no
+// store, no reducer, no Context). Everything else (which rows are expanded, which disclosures are
+// open) is LOCAL component state, ephemeral by design.
+//
+// The strip is its OWN useState, decoupled from the per-tab `data` (JEF-410): it persists global
+// posture across a tab swap so the header never tears down. Honesty stays server-derived (ADR-0027):
+// the client only displays the strip's tokens; it never recomputes "is this green?".
 //
 // The connection banner is the only `aria-live="polite"` region (the STRIP HEADLINE — not the
 // table): first-load says "connecting to the engine…", stale says the load-bearing two-sentence
 // "Not updating … This is a connection problem, not an all-clear." Live says nothing (no chrome).
 
-import { useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useState } from "preact/hooks";
 import { startPolling } from "./poll.js";
 import { StatusStrip } from "./strip.jsx";
 import { FindingsView } from "./findings/table.jsx";
@@ -28,39 +31,67 @@ const TABS = [
 
 /**
  * @param {object} props
- * @param {import("./store.js").Store} props.store the client store.
+ * @param {string} [props.initialTab] the server-known active tab (from `data-tab`), so the first
+ *   paint's tab matches the document without waiting for a fetch.
  * @param {() => (Node | null)} [props.liveRegion] resolves the DOM node the selection guard checks
  *   (defaults to this app's root once mounted).
  */
-export function App({ store, liveRegion }) {
-  const [, force] = useState(0);
-  useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
+export function App({ initialTab = "findings", liveRegion }) {
+  // The five shared fields, each a plain useState (JEF-411).
+  const [activeTab, setActiveTab] = useState(initialTab);
+  const [data, setData] = useState(null);
+  // The persistent status strip (global cluster posture), its OWN useState decoupled from the
+  // per-tab `data` so a tab swap (which nulls `data`) never tears the header down (JEF-410). Null
+  // before the first snapshot (blank is honest — absent is never a green all-clear).
+  const [strip, setStrip] = useState(null);
+  const [status, setStatus] = useState("first-load");
+  const [lastGoodAt, setLastGoodAt] = useState(null);
 
-  const activeTab = store.getState().activeTab;
-  // Poll the ACTIVE tab; a client tab-swap RESTARTS the poll so the new tab refetches IMMEDIATELY
-  // (fixing the up-to-5s blank after a swap — JEF-408) rather than waiting for the next interval.
-  // The selection guard checks this app's own subtree.
-  useEffect(() => {
-    const stop = startPolling({
-      store,
-      tab: () => store.getState().activeTab,
-      liveRegion: liveRegion || (() => document.getElementById("dash-app")),
-    });
-    return stop;
-  }, [store, liveRegion, activeTab]);
+  // A successful snapshot: go LIVE and reset the freshness clock. Persist the global posture from
+  // this snapshot's `strip` (present in every tab's payload); keep the last strip if a snapshot
+  // omits it, so the header never blanks (JEF-410).
+  const applySnapshot = useCallback((snap) => {
+    setData(snap);
+    setStrip((prev) => (snap && snap.strip ? snap.strip : prev));
+    setStatus("live");
+    setLastGoodAt(Date.now());
+  }, []);
 
-  const state = store.getState();
+  // Mark the connection stale: keep the last-good snapshot on screen (never blank, never a false
+  // all-clear). No-op before the first snapshot — "first-load" (connecting…) is honest then.
+  const markStale = useCallback(() => {
+    setStatus((s) => (s === "first-load" ? s : "stale"));
+  }, []);
+
+  // Poll the ACTIVE tab; a client tab-swap RESTARTS the poll (keyed on [activeTab]) so the new tab
+  // refetches IMMEDIATELY (fixing the up-to-5s blank after a swap — JEF-408) rather than waiting for
+  // the next interval. `() => activeTab` is correct: the effect restarts per swap, re-closing over
+  // the fresh value. The selection guard checks this app's own subtree.
+  useEffect(
+    () =>
+      startPolling({
+        tab: () => activeTab,
+        onSnapshot: applySnapshot,
+        onStale: markStale,
+        liveRegion: liveRegion || (() => document.getElementById("dash-app")),
+      }),
+    [activeTab, applySnapshot, markStale, liveRegion],
+  );
+
+  // Swap the active tab (client-side view swap). Drop the previous tab's snapshot — each tab has its
+  // own JSON shape, so rendering the old snapshot under the new view would be wrong — but do NOT
+  // touch `strip`: it is global posture that persists across the swap (JEF-410).
+  const swapTab = useCallback((tab) => {
+    setActiveTab(tab);
+    setData(null);
+  }, []);
+
   return (
-    <div id="dash-app" class="dash-app" data-tab={state.activeTab}>
-      {/* The persistent status strip — the honesty spine on every view. Read from the store's
-          decoupled `strip` (global posture), NOT the per-tab `data`, so a tab-swap never tears it
-          down; it stays mounted and reconciles in place as posture changes. Before the first
-          snapshot there is no strip, so nothing renders (blank is honest — absent is never a green
-          all-clear; the ConnectionBanner already says "connecting…"). */}
-      <StatusStrip strip={state.strip} />
-      <ConnectionBanner status={state.status} lastGoodAt={state.lastGoodAt} />
-      <TabNav activeTab={state.activeTab} store={store} />
-      <ActiveView store={store} state={state} />
+    <div id="dash-app" class="dash-app" data-tab={activeTab}>
+      <StatusStrip strip={strip} />
+      <ConnectionBanner status={status} lastGoodAt={lastGoodAt} />
+      <TabNav activeTab={activeTab} onSwap={swapTab} />
+      <ActiveView activeTab={activeTab} data={data} />
     </div>
   );
 }
@@ -96,7 +127,7 @@ function agoSeconds(at) {
  * client-side view swap via `history.pushState`. A plain-navigation modifier (ctrl/⌘/middle-click)
  * is NOT intercepted so open-in-new-tab still works.
  */
-function TabNav({ activeTab, store }) {
+function TabNav({ activeTab, onSwap }) {
   const onClick = (e, tab) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
       return; // let the browser handle a modified click (new tab, etc.)
@@ -105,13 +136,13 @@ function TabNav({ activeTab, store }) {
     // full navigation, no maud fallback.
     e.preventDefault();
     history.pushState({ tab: tab.id }, "", tab.href);
-    store.setActiveTab(tab.id);
+    onSwap(tab.id);
   };
   useEffect(() => {
-    const onPop = () => store.setActiveTab(tabFromLocation());
+    const onPop = () => onSwap(tabFromLocation());
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [store]);
+  }, [onSwap]);
 
   return (
     <nav class="tabs" aria-label="dashboard sections">
@@ -144,24 +175,24 @@ export function tabFromLocation() {
  * Render the active view (all five tabs are ported — JEF-400). Before the active tab's first
  * snapshot lands (initial mount, or right after a client tab-swap that cleared the previous tab's
  * data) the body is a quiet placeholder — never a flashed empty table, and never the wrong tab's
- * stale snapshot. Each view is otherwise a pure `view + store` render.
+ * stale snapshot. Each view is a pure `view`-only render (JEF-411 — no store prop).
  */
-function ActiveView({ store, state }) {
-  if (!state.data) {
+function ActiveView({ activeTab, data }) {
+  if (!data) {
     // First paint / just after a tab-swap: keep the body quiet (the banner carries any connection
     // state). A bare view container keeps the layout stable without asserting an empty result.
-    return <main class={`view view-${state.activeTab}`} />;
+    return <main class={`view view-${activeTab}`} />;
   }
-  switch (state.activeTab) {
+  switch (activeTab) {
     case "alerts":
-      return <AlertsView view={state.data} />;
+      return <AlertsView view={data} />;
     case "action":
-      return <ActionView view={state.data} store={store} />;
+      return <ActionView view={data} />;
     case "readiness":
-      return <ReadinessView view={state.data} store={store} />;
+      return <ReadinessView view={data} />;
     case "admission":
-      return <AdmissionView view={state.data} store={store} />;
+      return <AdmissionView view={data} />;
     default:
-      return <FindingsView view={state.data} store={store} />;
+      return <FindingsView view={data} />;
   }
 }
