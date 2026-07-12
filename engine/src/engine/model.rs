@@ -463,15 +463,31 @@ mod tests {
     #[tokio::test]
     async fn timeout_only_client_is_bounded() {
         let client = timeout_only_client(1).expect("fallback client builds");
-        // 10.255.255.1 is a reserved, unroutable address — the connect stalls, so only
-        // the total timeout can end this. If the fallback were unbounded it would hang.
+        // A local black-hole listener: it ACCEPTS the connection but never writes a
+        // response, holding every accepted stream open. The connect succeeds instantly
+        // (localhost), so nothing but the client's own 1s total timeout can end the
+        // request — this proves the bound on a genuinely hung response. Hermetic by
+        // design: it does not depend on any external/unroutable address stalling (runner
+        // fleets vary in how they handle those). If the fallback were unbounded, this
+        // request would hang forever.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind black-hole listener");
+        let addr = listener.local_addr().expect("black-hole listener addr");
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream); // keep it open; never respond
+            }
+        });
+
         let started = std::time::Instant::now();
         let result = client
-            .post("http://10.255.255.1:9/v1/chat/completions")
+            .post(format!("http://{addr}/v1/chat/completions"))
             .json(&json!({"model": "x", "messages": []}))
             .send()
             .await;
-        assert!(result.is_err(), "the request must fail, not succeed");
+        assert!(result.is_err(), "the request must time out, not succeed");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a 1s-timeout client must give up well under 5s, took {:?}",
