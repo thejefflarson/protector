@@ -20,6 +20,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake curl ca-certificates zstd \
     && rm -rf /var/lib/apt/lists/*
 ENV CFLAGS=-std=gnu17
+# sccache (JEF-84) is the dep-caching layer — it shares the rustc object cache with the in-cluster
+# Redis (cluster repo charts/sccache), reached via the meshed BuildKit's own identity, so a
+# workspace dep compiled by ANY repo's image build (or the CI test build) is reused here. sccache
+# is a HARD GATE — if it can't start against Redis the build FAILS (no fallback). The build
+# sandboxes share a netns, so concurrent matrix builds clash on sccache's fixed default port 4226
+# ("Address in use"); the build RUN below sets a unique random SCCACHE_SERVER_PORT to avoid that.
+# CARGO_INCREMENTAL=0 is required (sccache can't cache incremental). The musl sccache binary is
+# static, so it runs on this glibc base (mozilla/sccache ships no x86_64/aarch64 linux-gnu build).
+RUN set -eux; ver=0.16.0; \
+    case "$(uname -m)" in x86_64) a=x86_64 ;; aarch64) a=aarch64 ;; *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; esac; \
+    wget -qO- "https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-${a}-unknown-linux-musl.tar.gz" \
+      | tar -xz -C /usr/local/bin --strip-components=1 "sccache-v${ver}-${a}-unknown-linux-musl/sccache"
+ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 \
+    SCCACHE_REDIS=redis://sccache-redis.dev.svc.cluster.local:6379
 # Prebuilt bpf-linker (sha256-pinned, per-arch) + nightly/rust-src for the bpf target's
 # build-std. Prebuilt so the image build stays light (no LLVM source build).
 # ARCH-AWARE: with native multi-arch builders (JEF-295/#161) this builder stage runs on
@@ -53,8 +67,12 @@ RUN --mount=type=cache,target=/app/agent/target,sharing=locked \
     --mount=type=cache,target=/app/agent/protector-agent-ebpf/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release -p protector-agent --features ebpf \
-    && cp target/release/protector-agent /app/protector-agent-bin
+    set -e; \
+    export SCCACHE_SERVER_PORT=$(awk 'BEGIN{srand(); print int(20000+rand()*40000)}'); \
+    timeout 10 sccache --start-server; \
+    cargo build --release -p protector-agent --features ebpf; \
+    cp target/release/protector-agent /app/protector-agent-bin; \
+    sccache --show-stats
 
 # Slim runtime. The image runs as non-root; the eBPF capabilities it needs are granted
 # at RUNTIME by the DaemonSet's securityContext (chart), not baked in.

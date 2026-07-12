@@ -403,7 +403,7 @@ done
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
 step "2/11  Build + import the protector image"
-docker build -t "$IMAGE" "$(dirname "$0")/.."
+docker build --build-arg SCCACHE_DISABLE=1 -t "$IMAGE" "$(dirname "$0")/.."
 k3d image import "$IMAGE" -c "$CLUSTER"
 
 step "3/11  Install cert-manager ($CM_VERSION) — the pod won't start without its serving cert"
