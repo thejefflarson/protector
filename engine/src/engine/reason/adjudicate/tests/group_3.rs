@@ -421,6 +421,29 @@ fn prompt_clarifies_benign_runtime_activity_is_not_a_live_signal() {
     );
 }
 
+/// JEF-405 regression guard: the "library loads aren't a live signal" trap must be scoped to
+/// the LIVE-SIGNAL test ONLY — it must NOT cancel a `[reachability: loaded-at-runtime]` CVE,
+/// which is exploitation evidence in its own right via its tag. JEF-402's trap wording let the
+/// deployed judge (qwen2.5:3b-instruct) read the log4j case's "loaded library …" runtime line as
+/// "own activity → not a signal → refute" and drop a loaded-at-runtime KEV CVE (a false negative).
+/// The prompt must state both that the tag alone is evidence and that a library-load line never
+/// downgrades it.
+#[test]
+fn prompt_states_a_loaded_at_runtime_cve_is_evidence_a_library_load_line_cannot_cancel() {
+    let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
+    let prompt = build_judgment_prompt(&e, &[], &g);
+    assert!(
+        prompt.contains("exploitation evidence on its own")
+            && prompt.contains("even when the matching library-load also appears"),
+        "prompt must say a loaded-at-runtime CVE is evidence on its own, tag alone:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("LIVE-SIGNAL test ONLY")
+            && prompt.contains("never downgrades a loaded-at-runtime CVE"),
+        "the live-signal trap must be scoped so a library-load line can't cancel the CVE:\n{prompt}"
+    );
+}
+
 /// The prompt carries the JEF-402 GROUNDING RULE: reaching a `secret/…` objective in the
 /// reachable-objectives list is NEVER exposed-secret evidence, and exposed-secret evidence
 /// exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY (an
