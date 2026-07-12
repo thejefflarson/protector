@@ -1,24 +1,26 @@
-//! The server-rendered operator dashboard (ADR-0019): the presentation platform for the
-//! engine's read-only output state. Zero-egress, same-origin only — the security graph and
+//! The operator dashboard (ADR-0019, cut over to Preact by ADR-0025): the presentation platform
+//! for the engine's read-only output state. Zero-egress, same-origin only — the security graph and
 //! evidence never leave the cluster. Presentation is a VIEW, never a decision gate (ADR-0016).
 //!
-//! The module follows the React-like split the repo conventions mandate:
+//! Under the v4 cutover (ADR-0025 / JEF-398) the engine is **Preact-only**: the maud *body*
+//! renderers and the per-tab flag are gone. The server still renders the honest shell — the
+//! persistent status strip + the 5-tab nav — for the calm-when-blind first paint; the view bodies
+//! are rendered by the bundled Preact client reconciling from the `/api/{tab}.json` snapshots.
+//!
+//! The module follows the retained data half of the React-like split:
 //! - [`view_model`] shapes `state::` domain state into plain `Props` (the only layer touching
-//!   `engine::`/`state::`);
-//! - [`components`] are pure `maud` renderers (`Props -> Markup`) importing no domain type;
-//! - [`page`] composes components into pages/fragments + the persistent status strip + the
-//!   4-tab nav shell;
+//!   `engine::`/`state::`) — the JSON contract the client consumes (ADR-0025);
+//! - [`components`] hold the two SERVER-RENDERED shell parts (`status_strip`, `nav_bar`) — pure
+//!   `Props -> Markup` renderers importing no domain type;
+//! - [`page`] composes the shell (head + strip + nav) around the Preact `#dash-root` mount point;
 //! - this `mod.rs` wires the axum routes, holds [`DashboardState`], and serves it
 //!   ([`serve_dashboard`]) behind `PROTECTOR_DASHBOARD_ADDR`, reading the same `state::` handles
 //!   the engine holds.
 
 mod components;
 pub mod page;
-mod preact_flags;
 mod security_headers;
 pub mod view_model;
-
-pub use preact_flags::PreactTabs;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -47,8 +49,10 @@ use view_model::props::{
 /// same-origin via `include_str!` — no third-party CSS (the zero-egress / no-CDN rule).
 const DASHBOARD_CSS: &str = include_str!("../../../web/dist/dashboard.css");
 
-/// The zero-dependency client script: `<details>` expand persistence + `/fragment` polling
-/// that preserves scroll/expansion. Served same-origin.
+/// The bundled Preact client (ADR-0025), built from `engine/web/src/` at build time (gitignored,
+/// never committed). It mounts into the server-rendered `#dash-root` and reconciles each view from
+/// the same-origin `/api/{tab}.json` snapshots. Served same-origin via `include_str!` — the only
+/// client network call is that same-origin fetch (CSP `connect-src 'self'`), no CDN.
 const DASHBOARD_JS: &str = include_str!("../../../web/dist/dashboard.js");
 
 /// The shared, read-only state the dashboard renders from — the SAME `Arc` handles the engine
@@ -73,10 +77,6 @@ pub struct DashboardState {
     pub policy_log: Arc<PolicyDecisionLog>,
     /// The cluster label shown in the strip.
     pub cluster: String,
-    /// Which tabs render as the v4 Preact client mount point vs the maud body (ADR-0025 / JEF-397).
-    /// Resolved once at construction from `PROTECTOR_DASHBOARD_PREACT_TABS`; default OFF (all maud),
-    /// so the dashboard ships dark until a tab is explicitly flipped on.
-    pub preact_tabs: PreactTabs,
 }
 
 impl DashboardState {
@@ -203,29 +203,14 @@ impl TabQuery {
     }
 }
 
-/// `GET /` — the full page for the requested tab (default Findings).
+/// `GET /` — the server-rendered shell for the requested tab (default Findings): head + the
+/// persistent status strip + the 5-tab nav + the Preact `#dash-root` mount point (ADR-0025 /
+/// JEF-398). The client reconciles the view BODY from `/api/{tab}.json`; the strip is server-
+/// rendered so the calm-when-blind honest banner paints before any JS runs. The strip carries the
+/// true cluster posture (findings counts + folded-in signing regressions) on every tab, so it reads
+/// honestly regardless of which tab is mounted first.
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
-    let markup = match q.resolve() {
-        Tab::Findings => page::findings_page(&state.findings_view(), state.preact_tabs),
-        Tab::Alerts => page::alerts_page(&state.alerts_view(), state.preact_tabs),
-        Tab::Action => page::action_page(&state.action_view(), state.preact_tabs),
-        Tab::Readiness => page::readiness_page(&state.readiness_view(), state.preact_tabs),
-        Tab::Admission => page::admission_page(&state.admission_view(), state.preact_tabs),
-    };
-    Html(markup.into_string())
-}
-
-/// `GET /fragment` — only the live-region inner content, for the JS to swap in place
-/// (preserving scroll/expansion). Re-pulls readiness so a model that just went down flips the
-/// banner immediately (brief §7).
-async fn fragment(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
-    let markup = match q.resolve() {
-        Tab::Findings => page::findings_fragment(&state.findings_view(), state.preact_tabs),
-        Tab::Alerts => page::alerts_fragment(&state.alerts_view(), state.preact_tabs),
-        Tab::Action => page::action_fragment(&state.action_view(), state.preact_tabs),
-        Tab::Readiness => page::readiness_fragment(&state.readiness_view(), state.preact_tabs),
-        Tab::Admission => page::admission_fragment(&state.admission_view(), state.preact_tabs),
-    };
+    let markup = page::page(&state.status_strip(), q.resolve());
     Html(markup.into_string())
 }
 
@@ -308,7 +293,6 @@ async fn dashboard_js() -> Response {
 pub fn router(state: DashboardState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/fragment", get(fragment))
         // The read-only per-view JSON snapshots the Preact client reconciles from (ADR-0025).
         // GET-only, same router state/authz as the page routes, `no-store`; each returns the
         // SAME view-model its tab renders — no write route, no new mapping, no decision field.
@@ -342,36 +326,15 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
-// JEF-397: the per-tab Preact-flag render tests (mount-point vs maud body; strip stays
-// server-rendered), in their own file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
-#[cfg(test)]
-mod preact_flag_tests;
-
 // JEF-395: HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025) — same-view-model,
-// GET-only, no-store. In their own file to keep `mod.rs` focused and under the 1,000-line cap.
+// GET-only, no-store, strict CSP, and the never-a-false-green honesty guard at the JSON boundary.
+// These are the retained honesty proof after the v4 cutover (JEF-398): the maud-render honesty
+// tests are gone because their view-model is unchanged and its guarantee is now asserted here (the
+// serialized props the client consumes) + in the client `vitest` suite.
 #[cfg(test)]
 mod api_json_tests;
 
-// JEF-368: the Action / Readiness secondary-view render tests, split out to keep `tests.rs`
-// under the 1,000-line cap (CLAUDE.md).
+// JEF-398: page-shell tests — the Preact-only page emits, for every tab, the server-rendered strip
+// + nav + the `#dash-root` mount point (calm-when-blind first paint stays server-side).
 #[cfg(test)]
-mod action_view_tests;
-
-// JEF-323: the Alerts view render + honesty tests (escaping / calm-empty / blind-node / path
-// annotation), in their own file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
-#[cfg(test)]
-mod alerts_tests;
-
-#[cfg(test)]
-mod path_view_tests;
-
-#[cfg(test)]
-mod admission_tests;
-
-// JEF-308: the runtime-corroboration per-node breakdown render + node-name escaping, in its own
-// file to keep `tests.rs` under the 1,000-line cap (CLAUDE.md).
-#[cfg(test)]
-mod readiness_render_tests;
+mod page_tests;

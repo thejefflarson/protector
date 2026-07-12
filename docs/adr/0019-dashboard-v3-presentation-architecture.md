@@ -17,6 +17,14 @@
 > model — three orthogonal axes)**, plus the **JEF-281 amendment** (finding detail shows all
 > proven paths). These were the product; ADR-0025 preserves them on the new stack. The content
 > below is retained in full for that reason — see ADR-0025 for what is lost vs kept.
+>
+> **Cutover COMPLETED (JEF-398).** The supersession above is now realized in the tree: the maud
+> **body** renderers, the `/fragment` route, and the per-tab Preact flag are **deleted** — the
+> engine is Preact-only. What remains server-rendered from this ADR is the honest first-paint
+> shell only: the persistent **status strip** and the **tab nav** (`components/status_strip.rs`,
+> `components/nav.rs`, `page.rs`). The honesty invariants (§4) are asserted at the JSON-props
+> boundary (`view_model/props/serialize_tests.rs`, `dashboard/api_json_tests.rs`) and in the client
+> `vitest` suite — the seam the client actually consumes.
 
 ## Context
 
