@@ -1,26 +1,17 @@
-//! The **components** layer (ADR-0019): pure `Props -> Markup` renderers. A component imports
-//! ONLY `maud` and the `view_model::props` types — NEVER an `engine::`/`state::` domain type
-//! (invariant #4, guard-tested). It is the presentation half of the React-like split: given
-//! its props, it renders, escaping all untrusted text via maud's auto-escape (invariant #6).
+//! The **components** layer (ADR-0019 §1, retained by ADR-0025): the SERVER-RENDERED shell parts.
 //!
-//! No component emits an inline `<style>`/`style=` attribute (invariant #5) — every visual is
-//! driven by a class mapped to a token in `docs/STYLEGUIDE.md` (served as `dashboard.css`).
+//! Under the v4 cutover (ADR-0025 / JEF-398) the maud *body* renderers are gone — the Preact
+//! client renders every view body from the `/api/*.json` snapshots. What stays server-rendered is
+//! the calm-when-blind first paint: the persistent **status strip** and the **tab nav**. A JS
+//! failure (or the pre-hydration first paint) must never show a stale green, so the strip's honest
+//! banner is emitted by the server before any JS runs (ADR-0025: calm-when-blind first paint).
+//!
+//! These two components are pure `Props -> Markup` renderers importing ONLY `maud` and the
+//! `view_model::props` types — never an `engine::`/`state::` domain type (invariant #4,
+//! guard-tested) — and emit no inline `<style>`/`style=` (invariant #5, CSP-required).
 
-mod action_view;
-mod admission_view;
-mod alerts_view;
-mod evidence;
-mod finding_detail;
-mod finding_row;
-mod findings_view;
 mod nav;
-mod readiness_view;
 mod status_strip;
 
-pub use action_view::action_view;
-pub use admission_view::admission_view;
-pub use alerts_view::alerts_view;
-pub use findings_view::findings_view;
 pub use nav::nav_bar;
-pub use readiness_view::readiness_view;
 pub use status_strip::status_strip;

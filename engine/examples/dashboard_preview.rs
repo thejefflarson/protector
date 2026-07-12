@@ -1,4 +1,5 @@
-//! DEV-ONLY hot-reload preview of the v3 dashboard — a dev artifact, NOT part of the product.
+//! DEV-ONLY hot-reload preview of the v4 (Preact-only) dashboard — a dev artifact, NOT part of the
+//! product.
 //!
 //! Unlike the shipped `serve_dashboard` (which bakes the CSS/JS into the binary via
 //! `include_str!`, so every visual tweak forces a full Rust rebuild), this example mounts its
@@ -7,10 +8,10 @@
 //! - serves `/assets/dashboard.css` and `/assets/dashboard.js` by reading
 //!   `engine/web/dist/*` FROM DISK on every request (path resolved relative to
 //!   `CARGO_MANIFEST_DIR`), so a CSS/JS edit shows on the next browser refresh — no rebuild;
-//! - renders `/` and `/fragment` through the dashboard's PUBLIC render path
-//!   (`view_model::build_findings_view` / `build_status_strip` + `page::*`), over the real
-//!   `state::` handles, exactly as `serve_dashboard` does — so the preview can't drift from
-//!   production rendering;
+//! - renders `/` (the server SHELL: strip + nav + the Preact `#dash-root` mount) and serves the
+//!   per-view `/api/{tab}.json` snapshots through the dashboard's PUBLIC render path
+//!   (`view_model::build_*` + `page::page`), over the real `state::` handles, exactly as
+//!   `serve_dashboard` does — so the Preact-only preview can't drift from production rendering;
 //! - selects which sample state to build via `?scenario=clear|watching|breach|blind`, so every
 //!   honesty state is one URL away with no code edit (default `breach`);
 //! - appends a tiny dev-livereload IIFE to the served JS (kept ONLY here, never written to the
@@ -37,7 +38,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use protector::engine::dashboard::view_model::props::Tab;
-use protector::engine::dashboard::{DashboardState, PreactTabs, page, view_model};
+use protector::engine::dashboard::{DashboardState, page, view_model};
 use protector::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage};
 use protector::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use protector::engine::reason::adjudicate::Verdict;
@@ -577,7 +578,6 @@ fn build_clear() -> DashboardState {
         // The webhook floor: a populated admission log (admits + an audited + an enforced deny).
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
-        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -654,7 +654,6 @@ fn build_watching() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
-        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -814,7 +813,6 @@ fn build_breach() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
-        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -869,7 +867,6 @@ fn build_blind() -> DashboardState {
         // "no admission decisions recorded yet" empty state (the empty case the brief asks for).
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
-        preact_tabs: PreactTabs::from_env(),
     }
 }
 
@@ -980,28 +977,25 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
     view_model::build_admission_view(preview_strip(state), &state.policy_log.snapshot())
 }
 
-/// Render the full page for a tab through the dashboard's PUBLIC render path (all four real).
+/// Render the server-rendered SHELL for a tab through the dashboard's PUBLIC render path (ADR-0025 /
+/// JEF-398): head + the persistent status strip + the 5-tab nav + the Preact `#dash-root` mount. The
+/// view BODY is client-rendered from the `/api/{tab}.json` snapshot (served below), so this preview
+/// exercises the SAME Preact-only path production serves.
 fn render_page(state: &DashboardState, tab: Tab) -> String {
-    let markup = match tab {
-        Tab::Findings => page::findings_page(&preview_findings(state), state.preact_tabs),
-        Tab::Alerts => page::alerts_page(&preview_alerts(state), state.preact_tabs),
-        Tab::Action => page::action_page(&preview_action(state), state.preact_tabs),
-        Tab::Readiness => page::readiness_page(&preview_readiness(state), state.preact_tabs),
-        Tab::Admission => page::admission_page(&preview_admission(state), state.preact_tabs),
-    };
-    markup.into_string()
+    page::page(&preview_strip(state), tab).into_string()
 }
 
-/// Render the `/fragment` live-region inner content through the public render path.
-fn render_fragment(state: &DashboardState, tab: Tab) -> String {
-    let markup = match tab {
-        Tab::Findings => page::findings_fragment(&preview_findings(state), state.preact_tabs),
-        Tab::Alerts => page::alerts_fragment(&preview_alerts(state), state.preact_tabs),
-        Tab::Action => page::action_fragment(&preview_action(state), state.preact_tabs),
-        Tab::Readiness => page::readiness_fragment(&preview_readiness(state), state.preact_tabs),
-        Tab::Admission => page::admission_fragment(&preview_admission(state), state.preact_tabs),
-    };
-    markup.into_string()
+/// Serialize a scenario's per-view props as the `/api/{tab}.json` snapshot the Preact client
+/// reconciles from — the same view-model builders production serves, so the preview can't drift.
+fn render_json(state: &DashboardState, tab: Tab) -> String {
+    match tab {
+        Tab::Findings => serde_json::to_string(&preview_findings(state)),
+        Tab::Alerts => serde_json::to_string(&preview_alerts(state)),
+        Tab::Action => serde_json::to_string(&preview_action(state)),
+        Tab::Readiness => serde_json::to_string(&preview_readiness(state)),
+        Tab::Admission => serde_json::to_string(&preview_admission(state)),
+    }
+    .unwrap_or_else(|e| format!("{{\"error\":\"preview serialize failed: {e}\"}}"))
 }
 
 async fn index(Query(q): Query<PreviewQuery>) -> Html<String> {
@@ -1009,9 +1003,19 @@ async fn index(Query(q): Query<PreviewQuery>) -> Html<String> {
     Html(render_page(&state, resolve_tab(q.tab.as_deref())))
 }
 
-async fn fragment(Query(q): Query<PreviewQuery>) -> Html<String> {
+/// `GET /api/{tab}.json` — the scenario's read-only view-model snapshot, so the Preact client the
+/// preview serves renders the same body production does. The tab is taken from the path segment.
+async fn api_json(
+    axum::extract::Path(file): axum::extract::Path<String>,
+    Query(q): Query<PreviewQuery>,
+) -> Response {
     let state = Scenario::parse(q.scenario.as_deref()).build();
-    Html(render_fragment(&state, resolve_tab(q.tab.as_deref())))
+    let tab = resolve_tab(file.strip_suffix(".json"));
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        render_json(&state, tab),
+    )
+        .into_response()
 }
 
 /// `GET /assets/dashboard.css` — read from disk, per request (the hot-reload point).
@@ -1060,16 +1064,20 @@ fn asset_mtime(name: &str) -> u128 {
 async fn main() {
     let app = Router::new()
         .route("/", get(index))
-        .route("/fragment", get(fragment))
+        // The read-only per-view JSON snapshots the Preact client reconciles from (ADR-0025) — the
+        // preview serves them per scenario so the client renders the same body production does.
+        .route("/api/{file}", get(api_json))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js))
         .route("/dev/reload", get(dev_reload));
 
     let addr = "127.0.0.1:8787";
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    println!("dashboard preview (hot-reload) on http://{addr}/  (Ctrl-C to stop)");
+    println!("dashboard preview (Preact-only, hot-reload) on http://{addr}/  (Ctrl-C to stop)");
     println!("  scenarios: /?scenario=clear | watching | breach | blind  (default: breach)");
-    println!("  tabs:      /?tab=findings | action | readiness | admission  (default: findings)");
+    println!(
+        "  tabs:      /?tab=findings | alerts | action | readiness | admission  (default: findings)"
+    );
     println!(
         "  assets served from disk: {:?}",
         dist_path("dashboard.css")
