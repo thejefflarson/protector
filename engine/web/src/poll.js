@@ -49,7 +49,11 @@ export function hasLiveSelection(container) {
  *   poll without a restart).
  * @param {() => (Node | null)} opts.liveRegion reads the DOM node the selection guard checks.
  * @param {typeof fetch} [opts.fetchImpl] injectable fetch (tests pass a stub; default is global).
- * @param {(ms: number, fn: () => void) => number} [opts.setIntervalImpl]
+ * @param {(ms: number, fn: () => void) => number} [opts.setIntervalImpl] injectable interval, called
+ *   as `(ms, fn)`. The default ADAPTS native `setInterval` (whose signature is `(fn, ms)` — args
+ *   reversed) to this `(ms, fn)` shape. Passing native `setInterval` directly would silently never
+ *   re-fire (it reads `POLL_MS` as the callback and `tick` as the delay), so only the initial
+ *   `tick()` ran and a tab-swap blanked forever — the JEF-408 bug this default fixes.
  * @param {(id: number) => void} [opts.clearIntervalImpl]
  * @returns {() => void} stop
  */
@@ -59,7 +63,7 @@ export function startPolling(opts) {
     tab,
     liveRegion,
     fetchImpl = typeof fetch !== "undefined" ? fetch : undefined,
-    setIntervalImpl = setInterval,
+    setIntervalImpl = (ms, fn) => setInterval(fn, ms),
     clearIntervalImpl = clearInterval,
   } = opts;
   let live = true;

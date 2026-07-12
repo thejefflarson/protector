@@ -977,12 +977,12 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
     view_model::build_admission_view(preview_strip(state), &state.policy_log.snapshot())
 }
 
-/// Render the server-rendered SHELL for a tab through the dashboard's PUBLIC render path (ADR-0025 /
-/// JEF-398): head + the persistent status strip + the 5-tab nav + the Preact `#dash-root` mount. The
-/// view BODY is client-rendered from the `/api/{tab}.json` snapshot (served below), so this preview
-/// exercises the SAME Preact-only path production serves.
+/// Render the ROOT-ONLY document shell for a tab through the dashboard's PUBLIC render path (JEF-408,
+/// superseding ADR-0025's server-rendered strip/nav): the `<head>` + the Preact `#dash-root` mount.
+/// ALL body HTML — the status strip, the tab nav, and the view body — is client-rendered from the
+/// `/api/{tab}.json` snapshot (served below), so this preview exercises the SAME path production serves.
 fn render_page(state: &DashboardState, tab: Tab) -> String {
-    page::page(&preview_strip(state), tab).into_string()
+    page::page(&state.cluster, tab).into_string()
 }
 
 /// Serialize a scenario's per-view props as the `/api/{tab}.json` snapshot the Preact client

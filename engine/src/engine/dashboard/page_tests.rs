@@ -1,27 +1,23 @@
-//! Page-shell tests for the Preact-only dashboard (ADR-0025 / JEF-398).
+//! Page-shell tests for the ROOT-ONLY dashboard document (JEF-408, superseding ADR-0025's
+//! server-rendered strip/nav).
 //!
-//! After the v4 cutover the page emits — for EVERY tab — the SERVER-RENDERED shell (the persistent
-//! status strip + the 5-tab nav) wrapping the Preact `#dash-root` mount point. The view BODY is no
-//! longer server-rendered; the client reconciles it from `/api/{tab}.json`. These tests pin that
-//! contract:
+//! The page now emits — for EVERY tab — a ROOT-ONLY body: just the Preact `#dash-root` mount point
+//! (carrying its `data-tab` token) + the deferred bundle `<script>`. ALL body HTML — the status
+//! strip, the tab nav, and the view body — is client-rendered from `/api/{tab}.json`. These tests
+//! pin that contract:
 //!
-//! - every tab renders the `#dash-root` mount with the right `data-tab` token (no maud body);
-//! - the persistent strip + nav stay SERVER-RENDERED (calm-when-blind first paint never depends on
-//!   JS) — a warming/blind strip NEVER paints the green all-clear in the first document;
+//! - every tab renders the `#dash-root` mount with the right `data-tab` token;
+//! - the body carries NO server-rendered strip (`.strip`) or nav (`.tabs`) — those moved to the
+//!   client (JEF-408);
+//! - the `<head>` still carries the cluster label in the `<title>` (head metadata is not body HTML);
 //! - the shell is flag-free (no `data-preact-tabs`, no maud-vs-Preact branch).
 //!
-//! The per-row / per-view honesty guarantees (never-green-when-blind, empty⇒explicit-none, escaping)
-//! now live at the JSON-props boundary (`view_model::props::serialize_tests`, `api_json_tests`) and
-//! in the client `vitest` suite — the seam the client actually consumes.
-
-use std::time::SystemTime;
+//! The honesty guarantees (never-green-when-blind, all-clear / watching / judging-state tokens) now
+//! live entirely at the JSON-props boundary (`view_model::props::serialize_tests`, `api_json_tests`)
+//! and in the client `vitest` suite — a blank pre-fetch body is honest (absent ≠ green).
 
 use super::page;
-use super::view_model::build_status_strip;
 use super::view_model::props::Tab;
-use crate::engine::state::{
-    ModelHealth, Readiness, ReadinessConfig, RuntimeCoverage, derive_readiness,
-};
 
 const TABS: [Tab; 5] = [
     Tab::Findings,
@@ -31,47 +27,10 @@ const TABS: [Tab; 5] = [
     Tab::Admission,
 ];
 
-/// A fully-covered, actively-judging readiness — the only state that can honestly go green.
-fn judging_readiness() -> Readiness {
-    let config = ReadinessConfig {
-        model_attached: true,
-        kev_count: 5,
-        epss_count: 5,
-        journal_durable: true,
-        armed: false,
-        tuf_cache_age_secs: Some(60),
-        unverifiable_spike: false,
-        checking_images: 0,
-    };
-    derive_readiness(
-        &config,
-        ModelHealth::Ok,
-        Some(SystemTime::now()),
-        &RuntimeCoverage::default(),
-    )
-}
-
-/// A warming (no completed pass) readiness — not honestly calm.
-fn warming_readiness() -> Readiness {
-    derive_readiness(
-        &ReadinessConfig::default(),
-        ModelHealth::Unknown,
-        None,
-        &RuntimeCoverage::default(),
-    )
-}
-
 #[test]
 fn every_tab_renders_the_dash_root_mount_with_its_token() {
-    let strip = build_status_strip(
-        "prod".into(),
-        &[],
-        &[],
-        &judging_readiness(),
-        Some(SystemTime::now()),
-    );
     for tab in TABS {
-        let html = page::page(&strip, tab).into_string();
+        let html = page::page("prod", tab).into_string();
         assert!(
             html.contains("id=\"dash-root\""),
             "{tab:?} must render the Preact mount point"
@@ -84,17 +43,42 @@ fn every_tab_renders_the_dash_root_mount_with_its_token() {
 }
 
 #[test]
-fn the_shell_is_flag_free_and_carries_no_maud_body() {
-    // The per-tab flag is gone (JEF-398): the mount carries no `data-preact-tabs` list — every tab
-    // is client-rendered, so the client intercepts every swap.
-    let strip = build_status_strip(
-        "prod".into(),
-        &[],
-        &[],
-        &judging_readiness(),
-        Some(SystemTime::now()),
+fn the_body_is_root_only_no_server_strip_or_nav() {
+    // JEF-408: the LAST server-rendered body parts (the status strip + the tab nav) moved to the
+    // client. The body must carry NO `.strip` header and NO `.tabs` nav — only the mount + script.
+    for tab in TABS {
+        let html = page::page("prod", tab).into_string();
+        assert!(
+            !html.contains("class=\"strip\""),
+            "{tab:?}: the status strip is client-rendered now — no server `.strip`"
+        );
+        assert!(
+            !html.contains("class=\"tabs\"") && !html.contains("nav.tabs"),
+            "{tab:?}: the tab nav is client-rendered now — no server `.tabs`"
+        );
+        // No server-rendered strip axis / headline leaks into the shell either.
+        assert!(
+            !html.contains("model judging") && !html.contains("all clear"),
+            "{tab:?}: no server-rendered judging axis — the strip is client-only"
+        );
+    }
+}
+
+#[test]
+fn the_head_still_carries_the_cluster_in_the_title() {
+    // Head metadata is NOT body HTML — the `<title>` keeps the cluster label so the browser tab and
+    // history read correctly before any JS runs.
+    let html = page::page("prod-east", Tab::Findings).into_string();
+    assert!(
+        html.contains("<title>protector \u{2014} prod-east</title>"),
+        "the head title carries the cluster label: {html}"
     );
-    let html = page::page(&strip, Tab::Findings).into_string();
+}
+
+#[test]
+fn the_shell_is_flag_free_and_carries_no_maud_body() {
+    // The per-tab flag is gone (JEF-398): no `data-preact-tabs` list — every tab is client-rendered.
+    let html = page::page("prod", Tab::Findings).into_string();
     assert!(
         !html.contains("data-preact-tabs"),
         "no per-tab flag list — every tab is Preact now"
@@ -105,60 +89,16 @@ fn the_shell_is_flag_free_and_carries_no_maud_body() {
 }
 
 #[test]
-fn the_strip_and_nav_stay_server_rendered_on_every_tab() {
-    let strip = build_status_strip(
-        "prod".into(),
-        &[],
-        &[],
-        &judging_readiness(),
-        Some(SystemTime::now()),
-    );
-    for tab in TABS {
-        let html = page::page(&strip, tab).into_string();
-        assert!(
-            html.contains("header"),
-            "{tab:?} server-renders the strip header"
-        );
-        assert!(html.contains("nav"), "{tab:?} server-renders the tab nav");
-        // The active tab is marked in the server nav so the first paint highlights correctly.
-        assert!(
-            html.contains("tab-active"),
-            "{tab:?} marks the active nav tab server-side"
-        );
-    }
-}
-
-#[test]
-fn a_warming_strip_never_paints_a_green_all_clear_in_the_first_document() {
-    // Calm-when-blind first paint (ADR-0025): the SERVER-rendered strip must never claim all-clear
-    // before any JS runs when the model is warming/blind — the safety-critical honesty signal never
-    // depends on the client bundle.
-    let strip = build_status_strip("prod".into(), &[], &[], &warming_readiness(), None);
-    let html = page::page(&strip, Tab::Findings).into_string();
+fn the_shell_loads_the_bundle_same_origin() {
+    // The client bundle is loaded same-origin (no CDN — zero egress) and deferred so the mount
+    // exists when it runs.
+    let html = page::page("prod", Tab::Findings).into_string();
     assert!(
-        !html.contains("all clear"),
-        "a warming dashboard's server first paint must never claim all-clear"
+        html.contains("src=\"/assets/dashboard.js\""),
+        "the shell loads the built bundle from its own origin"
     );
     assert!(
-        html.contains("warming up"),
-        "the honest warming banner paints server-side"
-    );
-}
-
-#[test]
-fn a_judging_empty_strip_can_paint_the_honest_green() {
-    // The complement: an actively-judging, fully-covered strip IS allowed to read all-clear in the
-    // server first paint — greenness is honest only in this state (the token is server-derived).
-    let strip = build_status_strip(
-        "prod".into(),
-        &[],
-        &[],
-        &judging_readiness(),
-        Some(SystemTime::now()),
-    );
-    let html = page::page(&strip, Tab::Findings).into_string();
-    assert!(
-        html.contains("all clear") || html.contains("model judging"),
-        "an actively-judging strip reads the honest calm register server-side"
+        html.contains("href=\"/assets/dashboard.css\""),
+        "the shell links the same-origin stylesheet"
     );
 }
