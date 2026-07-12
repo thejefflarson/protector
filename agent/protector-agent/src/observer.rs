@@ -439,6 +439,13 @@ mod ebpf {
             // Per-pid cache for the FALLBACK `/proc` read only — a table miss from a chatty
             // host pid shouldn't re-read `/proc` per event. Bounded; cleared wholesale at cap.
             let mut fallback_cache: HashMap<u32, PodAttribution> = HashMap::new();
+            // Pod UIDs we've already reported entrypoint linkage for (JEF-407). Linkage is a
+            // stable per-image fact, so we classify `/proc/<pid>/exe` once per pod on its first
+            // exec and never again — one ELF read per pod, not per exec. Bounded like the pid
+            // cache; cleared wholesale at the cap (a re-report on a churned pod is harmless —
+            // the engine's `record()` dedupes an identical linkage signal).
+            let mut linkage_reported: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             loop {
                 let raw = tokio::select! {
                     recv = raw_rx.recv() => match recv {
@@ -469,8 +476,13 @@ mod ebpf {
                         continue;
                     }
                 };
+                // JEF-407: an exec is our chance to classify the workload's ENTRYPOINT linkage
+                // — `/proc/<pid>/exe` is the exec'd binary. Capture the pid before `raw` is
+                // consumed; only an Exec triggers a linkage classification, and only the first
+                // time we see a given pod (linkage is a stable per-image fact).
+                let exec_pid = matches!(raw, RawEvent::Exec { .. }).then_some(attr.pid);
                 let obs = RuntimeObservation {
-                    attribution: Attribution::by_pod_uid(uid),
+                    attribution: Attribution::by_pod_uid(uid.clone()),
                     source: Some(SOURCE.into()),
                     observed_at_ms: now_ms(),
                     // The agent's node (JEF-308) is stamped by the flusher in `main` from `K8S_NODE`
@@ -483,6 +495,34 @@ mod ebpf {
                 }
                 // A signal successfully attributed and forwarded — the rate numerator.
                 signals.fetch_add(1, Ordering::Relaxed);
+
+                // Emit the entrypoint's static/dynamic linkage once per pod (JEF-407). Bounds
+                // the ELF read to one-per-pod, and drops an unknown classification (unreadable
+                // exe / non-ELF) rather than guessing — the engine then keeps its prior
+                // `static_binary == None` behavior for that workload.
+                if let Some(pid) = exec_pid
+                    && !linkage_reported.contains(&uid)
+                {
+                    if linkage_reported.len() >= PID_CACHE_CAP {
+                        linkage_reported.clear();
+                    }
+                    linkage_reported.insert(uid.clone());
+                    if let Some(static_linkage) =
+                        crate::linkage::classify_linkage(crate::linkage::read_exe_head, pid)
+                    {
+                        let linkage = RuntimeObservation {
+                            attribution: Attribution::by_pod_uid(uid),
+                            source: Some(SOURCE.into()),
+                            observed_at_ms: now_ms(),
+                            node: None,
+                            behavior: crate::linkage::linkage_behavior(static_linkage),
+                        };
+                        if tx.send(linkage).await.is_err() {
+                            return; // report receiver gone — shut down
+                        }
+                        signals.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }
 
