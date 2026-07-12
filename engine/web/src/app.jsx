@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "preact/hooks";
 import { startPolling } from "./poll.js";
+import { StatusStrip } from "./strip.jsx";
 import { FindingsView } from "./findings/table.jsx";
 import { AlertsView } from "./alerts/view.jsx";
 import { ActionView } from "./action/view.jsx";
@@ -35,8 +36,10 @@ export function App({ store, liveRegion }) {
   const [, force] = useState(0);
   useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
 
-  // Poll the ACTIVE tab; a client tab-swap repoints the poll (read fresh each tick). The selection
-  // guard checks this app's own subtree.
+  const activeTab = store.getState().activeTab;
+  // Poll the ACTIVE tab; a client tab-swap RESTARTS the poll so the new tab refetches IMMEDIATELY
+  // (fixing the up-to-5s blank after a swap — JEF-408) rather than waiting for the next interval.
+  // The selection guard checks this app's own subtree.
   useEffect(() => {
     const stop = startPolling({
       store,
@@ -44,11 +47,15 @@ export function App({ store, liveRegion }) {
       liveRegion: liveRegion || (() => document.getElementById("dash-app")),
     });
     return stop;
-  }, [store, liveRegion]);
+  }, [store, liveRegion, activeTab]);
 
   const state = store.getState();
   return (
     <div id="dash-app" class="dash-app" data-tab={state.activeTab}>
+      {/* The persistent status strip — the honesty spine on every view. Before the first snapshot
+          lands there is no strip data, so nothing renders here (blank is honest — absent is never a
+          green all-clear; the ConnectionBanner already says "connecting…"). */}
+      <StatusStrip strip={state.data?.strip} />
       <ConnectionBanner status={state.status} lastGoodAt={state.lastGoodAt} />
       <TabNav activeTab={state.activeTab} store={store} />
       <ActiveView store={store} state={state} />

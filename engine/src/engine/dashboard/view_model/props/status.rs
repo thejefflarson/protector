@@ -13,8 +13,9 @@
 /// collapse into one signal.
 ///
 /// The [`serde::Serialize`] impl is HAND-WRITTEN (not derived) so it emits, alongside the raw
-/// fields, the SERVER-DERIVED honesty tokens `all-clear` and `watching` computed from
-/// [`Self::all_clear`]/[`Self::watching`] — the client performs zero honesty derivation (ADR-0025).
+/// fields, the SERVER-DERIVED honesty tokens `all-clear` / `watching` / `judging-state` computed
+/// from [`Self::all_clear`]/[`Self::watching`]/[`Self::judging_state`] — the client performs zero
+/// honesty derivation (ADR-0025): its strip switches on `judging-state` for the whole judging axis.
 /// Deriving them at serialize time (rather than storing them) makes drift structurally impossible:
 /// the wire value IS the derivation, so no constructor can forget to keep them in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +57,15 @@ pub struct StatusStripProps {
 }
 
 impl serde::Serialize for StatusStripProps {
-    /// Serialize the raw fields PLUS the server-derived honesty tokens `all-clear`/`watching`
-    /// (ADR-0025). The tokens are computed here from [`Self::all_clear`]/[`Self::watching`] so the
-    /// JSON the client consumes always carries the DECIDED honesty answer, never the inputs to
-    /// re-derive it — and can never drift from the derivation the maud path uses.
+    /// Serialize the raw fields PLUS the server-derived honesty tokens `all-clear` / `watching` /
+    /// `judging-state` (ADR-0025). The tokens are computed here from
+    /// [`Self::all_clear`]/[`Self::watching`]/[`Self::judging_state`] so the JSON the client consumes
+    /// always carries the DECIDED honesty answer, never the inputs to re-derive it — and can never
+    /// drift from the derivation the (now-client) strip render uses.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        // 15 raw fields + 2 derived honesty tokens.
-        let mut s = serializer.serialize_struct("StatusStripProps", 17)?;
+        // 14 raw fields + 3 derived honesty tokens (all-clear / watching / judging-state).
+        let mut s = serializer.serialize_struct("StatusStripProps", 18)?;
         s.serialize_field("cluster", &self.cluster)?;
         s.serialize_field("armed", &self.armed)?;
         s.serialize_field("model-judging", &self.model_judging)?;
@@ -84,6 +86,10 @@ impl serde::Serialize for StatusStripProps {
         // The server-derived honesty tokens — the cardinal ADR-0025 contract.
         s.serialize_field("all-clear", &self.all_clear())?;
         s.serialize_field("watching", &self.watching())?;
+        // The single judging-axis token (JEF-408): the client strip switches on this ONE string
+        // rather than re-deriving the axis from the raw booleans, keeping the honesty derivation
+        // server-side. It never disagrees with `all-clear`/`watching` — it is the same branch logic.
+        s.serialize_field("judging-state", self.judging_state())?;
         s.end()
     }
 }
@@ -152,6 +158,37 @@ impl StatusStripProps {
             && self.breach_count == 0
             && self.signing_regression_breach == 0
             && !self.all_clear()
+    }
+
+    /// The single judging-axis token (JEF-408) — the ONE string the Preact status strip switches on
+    /// to pick the axis' class + glyph + text, so the honesty DERIVATION stays server-side (ADR-0025)
+    /// and the client never re-computes the axis from the raw booleans. Exactly one of:
+    ///
+    /// | token       | when                                                            | register  |
+    /// |-------------|-----------------------------------------------------------------|-----------|
+    /// | `all-clear` | [`all_clear`](Self::all_clear) — affirmatively cleared          | green     |
+    /// | `watching`  | up + nothing loud yet, OR up with a standing signing regression | calm/amber|
+    /// | `judging`   | model up (a breach is loud in the headline, not the axis)       | calm      |
+    /// | `warming`   | warming up — verdicts still loading                             | non-green |
+    /// | `no-model`  | no model configured                                             | non-green |
+    /// | `blind`     | model attached but not answering                               | non-green |
+    ///
+    /// This is the SAME branch order as `status_strip::judging_axis` (the retired maud renderer), so
+    /// the client render is byte-for-byte the maud one. Only `all-clear` is the honest green.
+    pub fn judging_state(&self) -> &'static str {
+        if self.all_clear() {
+            "all-clear"
+        } else if self.watching() || (self.model_is_up() && self.has_signing_regression()) {
+            "watching"
+        } else if self.model_is_up() {
+            "judging"
+        } else if self.warming_up {
+            "warming"
+        } else if !self.model_attached {
+            "no-model"
+        } else {
+            "blind"
+        }
     }
 }
 

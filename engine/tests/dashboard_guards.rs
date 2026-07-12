@@ -1,14 +1,14 @@
-//! Dashboard honesty / boundary guards (ADR-0019, cut over to Preact by ADR-0025). These are
-//! SOURCE-level guards over the SERVER-RENDERED shell that survives the v4 cutover (JEF-398):
-//! the persistent status strip + the tab nav (the maud view *body* renderers are deleted; the
-//! client renders every body from `/api/*.json`).
+//! Dashboard honesty / boundary guards (ADR-0019, cut over to Preact by ADR-0025, and to a
+//! ROOT-ONLY body by JEF-408). These are SOURCE-level guards over the server-emitted document shell.
 //!
-//! - **#4 component boundary** — a file under `dashboard/components/` must import NO
-//!   `engine::`/`state::`/`graph::`/`reason::` domain type. Components receive only their
-//!   `Props` (the view_model/component split). They may import `crate::engine::dashboard::
-//!   view_model::props` (the props ARE the contract) and `maud`.
-//! - **#5 no inline style** — no component (or the page shell) emits an inline `style=`/`<style>`;
-//!   every visual is a class mapped to a token in `docs/STYLEGUIDE.md`.
+//! Under JEF-408 the LAST server-rendered body parts — the status strip + the tab nav — moved to the
+//! client, so the `dashboard/components/` module (the pure `Props -> Markup` shell renderers) is
+//! deleted: the server now emits a ROOT-ONLY body (`<head>` + the `#dash-root` mount). These guards
+//! therefore pin the SHELL contract:
+//!
+//! - **#5 no inline style** — the page shell emits no inline `style=`/`<style>`; every visual is a
+//!   class mapped to a token in `docs/STYLEGUIDE.md` (the strip's classes now live in `strip.jsx`).
+//! - the body is ROOT-ONLY — no server-rendered strip / nav leaks in (they are client-rendered).
 //!
 //! The file-size cap (#7) is guarded by `file_size_guard.rs`. The honesty invariants (#1 honest-
 //! calm, #2 uncertain/awaiting-not-green, #6 escaping) are asserted at the JSON-props boundary
@@ -31,139 +31,43 @@ fn read_engine_src(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"))
 }
 
-/// Collect every `.rs` file directly under `dashboard/components/`.
-fn component_files() -> Vec<PathBuf> {
+#[test]
+fn the_server_rendered_components_stay_retired() {
+    // JEF-408: the `dashboard/components/` module (the server-rendered status strip + tab nav) is
+    // deleted — the client renders ALL body HTML now. Guard that neither the module nor its renderers
+    // silently regrow a server-rendered body.
     let dir = repo_root().join("engine/src/engine/dashboard/components");
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("reading {dir:?}: {e}"))
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
     assert!(
-        !out.is_empty(),
-        "found no component files under {dir:?} — the guard would pass vacuously"
+        !dir.exists(),
+        "the dashboard/components module must stay deleted (JEF-408) — the strip + nav are \
+         client-rendered ({dir:?} exists)"
     );
-    out
-}
-
-/// Guard against the scan silently missing a component: every SERVER-RENDERED shell component the
-/// boundary checks must be present in the scanned set. After the v4 cutover (JEF-398) the only
-/// server-rendered components are the persistent status strip and the tab nav — the maud view
-/// *body* renderers are deleted (the client renders every body from `/api/*.json`). This still
-/// guards that neither shell component can slip past the no-domain-import + no-inline-style scans.
-#[test]
-fn the_scan_covers_every_server_rendered_shell_component() {
-    let names: Vec<String> = component_files()
-        .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
-        .collect();
-    for required in [
-        // the calm-when-blind first-paint strip:
-        "status_strip.rs",
-        // the tab nav:
-        "nav.rs",
-    ] {
+    let page = read_engine_src("engine/dashboard/page.rs");
+    for gone in ["status_strip", "nav_bar", "components::"] {
         assert!(
-            names.iter().any(|n| n == required),
-            "the component boundary scan must include {required} (found: {names:?})"
-        );
-    }
-    // The maud view-body renderers were deleted in the cutover — assert they are GONE so the shell
-    // never silently regrows a server-rendered body (the client owns bodies now).
-    for gone in [
-        "findings_view.rs",
-        "finding_row.rs",
-        "finding_detail.rs",
-        "evidence.rs",
-        "alerts_view.rs",
-        "action_view.rs",
-        "readiness_view.rs",
-        "admission_view.rs",
-    ] {
-        assert!(
-            !names.iter().any(|n| n == gone),
-            "the maud view-body renderer {gone} must stay deleted (ADR-0025 / JEF-398) — the client \
-             renders every body from /api/*.json; found: {names:?}"
+            !page.contains(gone),
+            "page.rs must not reference the retired server-rendered component `{gone}` (JEF-408)"
         );
     }
 }
 
-/// Strip `//`-line comments from a source line, so an explanatory comment that names a domain
-/// type doesn't trip the import guard. Block comments are not used for domain references here.
-fn strip_line_comment(line: &str) -> &str {
-    match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
-    }
-}
-
 #[test]
-fn components_import_no_domain_types() {
-    // The forbidden module roots. A component must not reach into the engine's domain — only
-    // the props contract (which lives under `view_model::props`).
-    let forbidden = [
-        "engine::graph",
-        "engine::reason",
-        "engine::state",
-        "engine::respond",
-        "engine::observe",
-        "engine::journal",
-        "crate::engine::graph",
-        "crate::engine::reason",
-        "crate::engine::state",
-        "super::super::state",
-        "super::super::graph",
-        // a bare `state::` / `graph::` path
-        "use crate::engine::state",
-        "use crate::engine::graph",
-    ];
-    let mut offenders: Vec<String> = Vec::new();
-    for file in component_files() {
-        let src = std::fs::read_to_string(&file).unwrap();
-        for (n, raw) in src.lines().enumerate() {
-            let line = strip_line_comment(raw);
-            // The one allowed engine path: the props contract.
-            if line.contains("view_model::props") {
-                continue;
-            }
-            for needle in forbidden {
-                if line.contains(needle) {
-                    offenders.push(format!("{}:{}  {}", file.display(), n + 1, raw.trim()));
-                }
-            }
-        }
-    }
+fn the_body_is_root_only_no_server_strip_or_nav() {
+    // JEF-408: the server body is ROOT-ONLY — no `.strip` header and no `.tabs` nav markup. Those
+    // moved to the client (`strip.jsx` / `app.jsx`); the server must not re-emit them.
+    let page = read_engine_src("engine/dashboard/page.rs");
     assert!(
-        offenders.is_empty(),
-        "components must import no engine/state domain type (ADR-0019 invariant #4) — only \
-         `view_model::props`:\n{}",
-        offenders.join("\n")
+        !page.contains("header.strip") && !page.contains("class=\"strip\""),
+        "the status strip must not be server-rendered — it is client-only now (JEF-408)"
     );
-}
-
-#[test]
-fn components_emit_no_inline_style() {
-    let mut offenders: Vec<String> = Vec::new();
-    for file in component_files() {
-        let src = std::fs::read_to_string(&file).unwrap();
-        for (n, raw) in src.lines().enumerate() {
-            let line = strip_line_comment(raw);
-            // maud inline-style would appear as a `style=` attribute or a literal `<style>`.
-            if line.contains("style=") || line.contains("<style") {
-                offenders.push(format!("{}:{}  {}", file.display(), n + 1, raw.trim()));
-            }
-        }
-    }
     assert!(
-        offenders.is_empty(),
-        "components must not emit inline `style=`/`<style>` (invariant #5) — use a class mapped \
-         to a STYLEGUIDE token:\n{}",
-        offenders.join("\n")
+        !page.contains("nav.tabs") && !page.contains("nav_bar"),
+        "the tab nav must not be server-rendered — it is client-only now (JEF-408)"
+    );
+    // The mount is present so the client has somewhere to render the strip + nav + body.
+    assert!(
+        page.contains("dash-root"),
+        "the shell still carries the Preact `#dash-root` mount point"
     );
 }
 
@@ -192,9 +96,8 @@ fn page_composition_emits_no_inline_style() {
 
 #[test]
 fn page_serves_the_preact_bundle_same_origin_with_a_mount_point() {
-    // ADR-0025: the maud shell carries the v4 client mount (`dash-root`) and loads the built
-    // bundle same-origin (no CDN). The server-rendered page stays intact behind it (the
-    // status strip still paints before JS runs).
+    // JEF-408: the ROOT-ONLY shell carries the client mount (`dash-root`) and loads the built bundle
+    // same-origin (no CDN). The client renders ALL body HTML (strip, nav, view) into the mount.
     let page = read_engine_src("engine/dashboard/page.rs");
     assert!(
         page.contains("dash-root"),

@@ -3,21 +3,21 @@
 //! evidence never leave the cluster. Presentation is a VIEW, never a decision gate (ADR-0016).
 //!
 //! Under the v4 cutover (ADR-0025 / JEF-398) the engine is **Preact-only**: the maud *body*
-//! renderers and the per-tab flag are gone. The server still renders the honest shell — the
-//! persistent status strip + the 5-tab nav — for the calm-when-blind first paint; the view bodies
-//! are rendered by the bundled Preact client reconciling from the `/api/{tab}.json` snapshots.
+//! renderers and the per-tab flag are gone. Under JEF-408 (superseding ADR-0025 / see ADR-0027)
+//! the LAST server-rendered body parts — the status strip and the tab nav — moved to the client
+//! too: the server now emits a ROOT-ONLY document shell (`<head>` + the `#dash-root` mount), and the
+//! bundled Preact client renders ALL body HTML (strip, nav, and every view body) reconciling from
+//! the `/api/{tab}.json` snapshots.
 //!
 //! The module follows the retained data half of the React-like split:
 //! - [`view_model`] shapes `state::` domain state into plain `Props` (the only layer touching
-//!   `engine::`/`state::`) — the JSON contract the client consumes (ADR-0025);
-//! - [`components`] hold the two SERVER-RENDERED shell parts (`status_strip`, `nav_bar`) — pure
-//!   `Props -> Markup` renderers importing no domain type;
-//! - [`page`] composes the shell (head + strip + nav) around the Preact `#dash-root` mount point;
+//!   `engine::`/`state::`) — the JSON contract the client consumes (ADR-0025); the honesty tokens
+//!   (all-clear / watching / judging-state) are server-derived here and shipped decided;
+//! - [`page`] composes the ROOT-ONLY document shell (head + the Preact `#dash-root` mount point);
 //! - this `mod.rs` wires the axum routes, holds [`DashboardState`], and serves it
 //!   ([`serve_dashboard`]) behind `PROTECTOR_DASHBOARD_ADDR`, reading the same `state::` handles
 //!   the engine holds.
 
-mod components;
 pub mod page;
 mod security_headers;
 pub mod view_model;
@@ -203,14 +203,14 @@ impl TabQuery {
     }
 }
 
-/// `GET /` — the server-rendered shell for the requested tab (default Findings): head + the
-/// persistent status strip + the 5-tab nav + the Preact `#dash-root` mount point (ADR-0025 /
-/// JEF-398). The client reconciles the view BODY from `/api/{tab}.json`; the strip is server-
-/// rendered so the calm-when-blind honest banner paints before any JS runs. The strip carries the
-/// true cluster posture (findings counts + folded-in signing regressions) on every tab, so it reads
-/// honestly regardless of which tab is mounted first.
+/// `GET /` — the ROOT-ONLY document shell for the requested tab (default Findings): the `<head>`
+/// (cluster-labelled title + css) + the Preact `#dash-root` mount point (JEF-408, superseding
+/// ADR-0025's server-rendered strip/nav). The client renders ALL body HTML — the status strip, the
+/// tab nav, and the view body — reconciling from `/api/{tab}.json`. The honesty tokens (all-clear /
+/// watching / judging-state) stay server-derived in that JSON; a blank before the first fetch is
+/// honest (absent ≠ green). Only the cluster label (for the `<title>`) is needed here.
 async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -> Html<String> {
-    let markup = page::page(&state.status_strip(), q.resolve());
+    let markup = page::page(&state.cluster, q.resolve());
     Html(markup.into_string())
 }
 

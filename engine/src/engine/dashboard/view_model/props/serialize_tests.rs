@@ -188,6 +188,131 @@ fn standing_signing_regression_forbids_the_green_token() {
     assert_eq!(v["signing-regression-breach"], json!(1));
 }
 
+// ---------------------------------------------------------------------------
+// The single judging-axis token `judging-state` (JEF-408): the ONE string the
+// client strip switches on to pick the whole axis. It is server-derived from
+// the SAME branch logic as `all-clear`/`watching`, so it can never disagree.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn judging_state_all_clear_ships_the_green_token() {
+    let v = serde_json::to_value(all_clear_strip()).unwrap();
+    assert_eq!(
+        v["judging-state"],
+        json!("all-clear"),
+        "an affirmatively-cleared strip ships the green judging token"
+    );
+}
+
+#[test]
+fn judging_state_reads_watching_when_something_is_outstanding() {
+    // Model up but an entry still awaiting / uncertain — the calm, NON-green watching token.
+    let mut awaiting = all_clear_strip();
+    awaiting.awaiting_count = 1;
+    assert_eq!(
+        serde_json::to_value(&awaiting).unwrap()["judging-state"],
+        json!("watching")
+    );
+
+    let mut uncertain = all_clear_strip();
+    uncertain.uncertain_count = 1;
+    assert_eq!(
+        serde_json::to_value(&uncertain).unwrap()["judging-state"],
+        json!("watching")
+    );
+
+    // A COLD-baseline signing regression is a weak lead — still up, reads watching (not breach-loud).
+    let cold = all_clear_strip().with_signing_regressions(0, 1);
+    assert_eq!(
+        serde_json::to_value(&cold).unwrap()["judging-state"],
+        json!("watching"),
+        "a cold regression reads the calm watching token"
+    );
+}
+
+#[test]
+fn judging_state_reads_judging_when_up_with_a_breach() {
+    // Model up with a loud breach: the axis is the calm "judging" (the breach is loud in the
+    // headline, not the axis) — NOT watching, NOT green.
+    let mut breach = all_clear_strip();
+    breach.breach_count = 1;
+    assert_eq!(
+        serde_json::to_value(&breach).unwrap()["judging-state"],
+        json!("judging")
+    );
+}
+
+#[test]
+fn judging_state_reads_warming_when_warming_up() {
+    // A completed pass has not landed — verdicts still loading. Non-green.
+    let mut warming = all_clear_strip();
+    warming.warming_up = true;
+    let v = serde_json::to_value(&warming).unwrap();
+    assert_eq!(v["judging-state"], json!("warming"));
+    assert_eq!(v["all-clear"], json!(false), "warming is never green");
+    assert_eq!(v["watching"], json!(false));
+}
+
+#[test]
+fn judging_state_reads_no_model_when_none_attached() {
+    let mut none = all_clear_strip();
+    none.model_judging = false;
+    none.model_attached = false;
+    assert_eq!(
+        serde_json::to_value(&none).unwrap()["judging-state"],
+        json!("no-model")
+    );
+}
+
+#[test]
+fn judging_state_reads_blind_when_the_model_is_down() {
+    // Attached but not answering — the honest blind register (non-green).
+    let mut down = all_clear_strip();
+    down.model_judging = false;
+    let v = serde_json::to_value(&down).unwrap();
+    assert_eq!(v["judging-state"], json!("blind"));
+    assert_eq!(v["all-clear"], json!(false));
+}
+
+#[test]
+fn judging_state_is_all_clear_iff_the_green_token_is() {
+    // The safety-critical alignment: the judging token reads `all-clear` EXACTLY when the `all-clear`
+    // boolean is true — never a green judging axis over a non-green strip. Sweep the honesty states.
+    let cases: Vec<StatusStripProps> = vec![
+        all_clear_strip(),
+        {
+            let mut s = all_clear_strip();
+            s.awaiting_count = 1;
+            s
+        },
+        {
+            let mut s = all_clear_strip();
+            s.breach_count = 2;
+            s
+        },
+        {
+            let mut s = all_clear_strip();
+            s.warming_up = true;
+            s
+        },
+        {
+            let mut s = all_clear_strip();
+            s.model_judging = false;
+            s
+        },
+        all_clear_strip().with_signing_regressions(1, 0),
+    ];
+    for strip in cases {
+        let all_clear = strip.all_clear();
+        let v = serde_json::to_value(&strip).unwrap();
+        assert_eq!(
+            v["judging-state"] == json!("all-clear"),
+            all_clear,
+            "judging-state may read all-clear IFF the strip is all_clear() ({strip:?})"
+        );
+    }
+}
+
 #[test]
 fn cleared_posture_is_the_only_green_row_token() {
     // The per-row honesty token: `is_cleared` — asserted at the JSON boundary via the enum tag the
