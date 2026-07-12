@@ -210,6 +210,16 @@ impl Adapter for RuntimeAdapter {
 /// package, else [`Reachability::NotObserved`]. CVEs with no `pkg_name` stay
 /// [`Reachability::Unknown`] — we can't correlate what the scanner didn't name. This
 /// is evidence for the model only; it never gates or suppresses anything in v1.
+///
+/// One exception the library-load correlation structurally cannot cover (JEF-404): a
+/// **statically linked** image (`Image::static_binary == Some(true)`) has no per-`.so`
+/// loads — everything is compiled into one executable — so `LibraryLoaded` will never name
+/// the vulnerable package and `NotObserved` here would be a false "observed absent". For
+/// such an image a would-be-`NotObserved` CVE is tagged [`Reachability::PresentStaticBinary`]
+/// instead: indeterminate, not absent — its lack of a runtime load is expected, not
+/// reassurance. A `LoadedAtRuntime` match (some static binaries still dlopen a plugin) still
+/// wins, and a dynamically linked image (`Some(false)`) or one with unknown linkage (`None`)
+/// keeps the original `NotObserved` behavior.
 pub struct CveReachabilityAdapter;
 
 impl Adapter for CveReachabilityAdapter {
@@ -266,13 +276,21 @@ impl Adapter for CveReachabilityAdapter {
             let loads = loads_by_image.get(&key.0).cloned().unwrap_or_default();
             graph.update_node(&key, |node| {
                 if let Node::Image(img) = node {
+                    // A statically linked image (JEF-404) can never emit a per-`.so` load, so
+                    // an unmatched CVE is indeterminate, not observed-absent. Captured before
+                    // the borrow of `img.vulnerabilities` below.
+                    let is_static = img.static_binary == Some(true);
                     for vuln in &mut img.vulnerabilities {
                         let Some(pkg) = vuln.pkg_name.as_deref() else {
                             // No package name to correlate — leave it Unknown.
                             continue;
                         };
                         vuln.reachability = if loads.iter().any(|lib| library_matches(lib, pkg)) {
+                            // A real load still wins even on a static image (a dlopen'd plugin).
                             Reachability::LoadedAtRuntime
+                        } else if is_static {
+                            // No load AND the correlation cannot fire → indeterminate, not absent.
+                            Reachability::PresentStaticBinary
                         } else {
                             Reachability::NotObserved
                         };

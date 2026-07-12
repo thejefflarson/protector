@@ -230,6 +230,71 @@ fn loaded_matching_library_is_loaded_at_runtime() {
     );
 }
 
+/// As [`reachability_for`], but the image's main binary is statically linked (JEF-404).
+/// Builds the graph (structural adapters set `static_binary: None`), flips the Image's
+/// `static_binary` flag on, then re-runs ONLY the [`CveReachabilityAdapter`] so the static
+/// case is exercised through the real correlation code, not a reimplementation.
+fn reachability_for_static(pkg: &str, loaded_lib: Option<&str>) -> Reachability {
+    let web = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+        "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+    }));
+    let runtime_events = loaded_lib.map(|name| vec![lib(name)]).unwrap_or_default();
+    let snap = Snapshot {
+        pods: vec![web],
+        image_vulns: vec![ImageVulnerabilities {
+            image: "web:1".into(),
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2021-44228".into(),
+                severity: crate::engine::graph::Severity::Critical,
+                pkg_name: Some(pkg.into()),
+                ..Default::default()
+            }],
+        }],
+        runtime_events,
+        ..Default::default()
+    };
+    let mut graph = super::super::build_graph(&snap, &super::super::default_adapters());
+    let img_key = NodeKey::image(&canonical_image("web:1"));
+    // Mark the image's main binary statically linked — the signal an ELF classification
+    // (engine::observe::elf) would carry — then re-run the reachability correlation.
+    graph.update_node(&img_key, |node| {
+        if let Node::Image(img) = node {
+            img.static_binary = Some(true);
+        }
+    });
+    CveReachabilityAdapter.contribute(&snap, &mut graph);
+    let idx = graph.index_of(&img_key).expect("image node exists");
+    match graph.node(idx) {
+        Some(Node::Image(img)) => img.vulnerabilities[0].reachability,
+        _ => panic!("expected image node"),
+    }
+}
+
+#[test]
+fn static_binary_cve_without_a_load_is_present_static_binary_not_not_observed() {
+    // JEF-404: a Go / musl-static image whose vulnerable package can never emit a per-`.so`
+    // load must NOT read as observed-absent — it is indeterminate (PresentStaticBinary).
+    assert_eq!(
+        reachability_for_static("openssl", None),
+        Reachability::PresentStaticBinary
+    );
+    // And the SAME image if it were dynamically linked stays NotObserved — the two cases
+    // classify differently, which is the whole point of the new state.
+    assert_eq!(reachability_for("openssl", None), Reachability::NotObserved);
+}
+
+#[test]
+fn static_binary_still_yields_loaded_at_runtime_on_a_real_load() {
+    // Some static binaries dlopen a plugin: an actual matching load still wins over the
+    // static-indeterminate tag — real exploitation evidence is never downgraded (JEF-405).
+    assert_eq!(
+        reachability_for_static("log4j-core", Some("log4j-core-2.14.jar")),
+        Reachability::LoadedAtRuntime
+    );
+}
+
 /// A `LibraryLoaded` observation on pod app/web (the fixture these tests use).
 fn lib(name: &str) -> RuntimeObservation {
     RuntimeObservation {

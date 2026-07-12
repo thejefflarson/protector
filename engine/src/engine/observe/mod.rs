@@ -13,6 +13,7 @@ pub mod adapter;
 pub mod alarm_class;
 pub mod asn;
 pub mod audit;
+pub mod elf;
 pub mod epss;
 pub mod exec_class;
 pub mod exploit_intel;

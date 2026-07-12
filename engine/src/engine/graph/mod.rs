@@ -263,6 +263,16 @@ pub struct Image {
     /// Lives on the Image (not the Workload) so it is shared by every workload running the
     /// same digest, exactly like [`Vulnerability`]. Empty when the reports are absent.
     pub exposed_secrets: Vec<ScanFinding>,
+    /// Whether this image's main binary is **statically linked** (JEF-404). `Some(true)` ⇒
+    /// a static ELF (Go, a CGO-disabled/musl-static build): everything is compiled into one
+    /// executable, so the runtime library-load correlation can never fire and a `NotObserved`
+    /// CVE on this image is really [`Reachability::PresentStaticBinary`] — indeterminate, not
+    /// observed-absent. `Some(false)` ⇒ dynamically linked (a `NotObserved` CVE IS
+    /// observed-absent). `None` ⇒ linkage unknown (no ELF signal available), the default:
+    /// reachability then behaves exactly as before this field existed. Populated from an ELF
+    /// header classification (see `engine::observe::elf`); never egresses, purely a per-image
+    /// structural fact.
+    pub static_binary: Option<bool>,
 }
 
 /// A cluster node / host.
@@ -376,8 +386,19 @@ pub enum Reachability {
     /// The vulnerable package was observed loaded at runtime (a `LibraryLoaded`
     /// signal matched its package name) — the strongest dynamic-reachability signal.
     LoadedAtRuntime,
-    /// The correlation pass ran but no matching runtime load was observed.
+    /// The correlation pass ran but no matching runtime load was observed — the CVE's
+    /// package was NOT seen loaded. This is *observed absent*: the workload dynamically
+    /// links its libraries, so a load would have fired if the vulnerable code ran.
     NotObserved,
+    /// The workload's main binary is **statically linked** (Go, a CGO-disabled/musl-static
+    /// build, …), so the library-load correlation *cannot* fire — the vulnerable package is
+    /// compiled INTO the one executable, never dlopen'd, so no per-`.so` `LibraryLoaded`
+    /// event will ever name it (JEF-404). Reachability is therefore **indeterminate**, NOT
+    /// observed-absent: the CVE is present in a running static binary and we simply can't
+    /// observe it this way. It is CONTEXT (never exploitation evidence — only
+    /// `LoadedAtRuntime` is that), but its absence-of-a-load must NOT be read as
+    /// evidence-of-absence the way `NotObserved` can be.
+    PresentStaticBinary,
 }
 
 impl Reachability {
@@ -387,6 +408,7 @@ impl Reachability {
             Reachability::Unknown => "unknown",
             Reachability::LoadedAtRuntime => "loaded-at-runtime",
             Reachability::NotObserved => "not-observed",
+            Reachability::PresentStaticBinary => "present-static-binary",
         }
     }
 }
