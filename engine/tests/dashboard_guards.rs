@@ -1,18 +1,19 @@
-//! Dashboard honesty / boundary guards (ADR-0019, design brief §9). These are SOURCE-level
-//! guards that complement the render-level invariant tests in the dashboard module:
+//! Dashboard honesty / boundary guards (ADR-0019, cut over to Preact by ADR-0025). These are
+//! SOURCE-level guards over the SERVER-RENDERED shell that survives the v4 cutover (JEF-398):
+//! the persistent status strip + the tab nav (the maud view *body* renderers are deleted; the
+//! client renders every body from `/api/*.json`).
 //!
 //! - **#4 component boundary** — a file under `dashboard/components/` must import NO
 //!   `engine::`/`state::`/`graph::`/`reason::` domain type. Components receive only their
 //!   `Props` (the view_model/component split). They may import `crate::engine::dashboard::
 //!   view_model::props` (the props ARE the contract) and `maud`.
-//! - **#5 no inline style** — no component (or any served asset/markup source) emits an inline
-//!   `style=`/`<style>`; every visual is a class mapped to a token in `docs/STYLEGUIDE.md`.
+//! - **#5 no inline style** — no component (or the page shell) emits an inline `style=`/`<style>`;
+//!   every visual is a class mapped to a token in `docs/STYLEGUIDE.md`.
 //!
-//! The file-size cap (#7) is guarded by `file_size_guard.rs`. The remaining invariants
-//! (#1 honest-calm, #2 uncertain/awaiting-not-green, #6 escaping) are asserted at render in
-//! `engine/src/engine/dashboard/tests.rs`. (The former per-finding "no-blank-evidence" rule was
-//! dropped — a finding with no evidence now renders nothing rather than an implied-absent marker;
-//! the model-judging / coverage honesty invariants are unaffected.)
+//! The file-size cap (#7) is guarded by `file_size_guard.rs`. The honesty invariants (#1 honest-
+//! calm, #2 uncertain/awaiting-not-green, #6 escaping) are asserted at the JSON-props boundary
+//! (`engine/src/engine/dashboard/view_model/props/serialize_tests.rs`, `dashboard/api_json_tests.rs`)
+//! and in the client `vitest` suite — the seam the Preact client consumes.
 
 use std::path::{Path, PathBuf};
 
@@ -50,34 +51,44 @@ fn component_files() -> Vec<PathBuf> {
     out
 }
 
-/// Guard against the scan silently missing a component: every component the boundary checks must
-/// be present in the scanned set. Covers the merged Action view (the former Trust + Activity tabs),
-/// Readiness, and the Admission/policy view (the webhook floor) so a new view can never slip past
-/// the no-domain-import + no-inline-style scans.
+/// Guard against the scan silently missing a component: every SERVER-RENDERED shell component the
+/// boundary checks must be present in the scanned set. After the v4 cutover (JEF-398) the only
+/// server-rendered components are the persistent status strip and the tab nav — the maud view
+/// *body* renderers are deleted (the client renders every body from `/api/*.json`). This still
+/// guards that neither shell component can slip past the no-domain-import + no-inline-style scans.
 #[test]
-fn the_scan_covers_every_component_including_the_secondary_views() {
+fn the_scan_covers_every_server_rendered_shell_component() {
     let names: Vec<String> = component_files()
         .iter()
         .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
         .collect();
     for required in [
-        "findings_view.rs",
-        "finding_row.rs",
-        "finding_detail.rs",
-        "evidence.rs",
+        // the calm-when-blind first-paint strip:
         "status_strip.rs",
+        // the tab nav:
         "nav.rs",
-        // the live alarming-now corroboration surface (JEF-323):
-        "alerts_view.rs",
-        // the merged would-act + audit story:
-        "action_view.rs",
-        "readiness_view.rs",
-        // the webhook floor:
-        "admission_view.rs",
     ] {
         assert!(
             names.iter().any(|n| n == required),
             "the component boundary scan must include {required} (found: {names:?})"
+        );
+    }
+    // The maud view-body renderers were deleted in the cutover — assert they are GONE so the shell
+    // never silently regrows a server-rendered body (the client owns bodies now).
+    for gone in [
+        "findings_view.rs",
+        "finding_row.rs",
+        "finding_detail.rs",
+        "evidence.rs",
+        "alerts_view.rs",
+        "action_view.rs",
+        "readiness_view.rs",
+        "admission_view.rs",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == gone),
+            "the maud view-body renderer {gone} must stay deleted (ADR-0025 / JEF-398) — the client \
+             renders every body from /api/*.json; found: {names:?}"
         );
     }
 }

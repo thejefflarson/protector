@@ -320,7 +320,7 @@ pub struct SignerProps {
 #[serde(rename_all = "kebab-case")]
 pub struct SigningRowProps {
     /// A stable, collision-free DOM/fragment id for this image's summary + detail rows — the key
-    /// the client toggles/persists across the /fragment poll (mirrors `FindingProps::id`). Derived
+    /// the client toggles/persists across a poll reconcile (mirrors `FindingProps::id`). Derived
     /// in the view_model from the FULL image ref (a readable slug + a short hash of the ref, so two
     /// images that slugify alike still get distinct ids). Never untrusted free-text: it is
     /// `[a-z0-9-]` only, so it is safe as an `id`/`data-*`/`aria-controls` value.

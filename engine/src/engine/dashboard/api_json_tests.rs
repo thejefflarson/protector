@@ -27,7 +27,6 @@ fn empty_state() -> DashboardState {
         decision_journal: Arc::new(DecisionJournal::disabled()),
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-test".into(),
-        preact_tabs: super::PreactTabs::default(),
     }
 }
 

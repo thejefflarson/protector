@@ -1,10 +1,9 @@
-// The dashboard v4 app shell (ADR-0025 / JEF-397, JEF-400): the mounted Preact tree below the
-// SERVER-RENDERED status strip. The strip stays maud for first-paint honesty (a JS failure must
-// never leave a stale green) — this shell renders only the connection banner, the tab nav
-// (progressive-enhancement: real `<a href>` links intercepted for a client-side view swap), and the
-// active view. All five views (Findings / Alerts / Action / Readiness / Admission) are now ported;
-// which of them actually mounts is gated per-tab by the server flag (a maud tab emits no
-// `#dash-root`, so this shell never renders for it).
+// The dashboard v4 app shell (ADR-0025): the mounted Preact tree below the SERVER-RENDERED status
+// strip. The strip stays server-rendered for first-paint honesty (a JS failure must never leave a
+// stale green) — this shell renders only the connection banner, the tab nav (progressive-
+// enhancement: real `<a href>` links intercepted for a client-side view swap), and the active view.
+// All five views (Findings / Alerts / Action / Readiness / Admission) are Preact-rendered (JEF-398):
+// the engine is Preact-only, so every tab-swap is a local client view swap — no maud fallback.
 //
 // The connection banner is the only `aria-live="polite"` region (the STRIP HEADLINE — not the
 // table): first-load says "connecting to the engine…", stale says the load-bearing two-sentence
@@ -29,13 +28,10 @@ const TABS = [
 /**
  * @param {object} props
  * @param {import("./store.js").Store} props.store the client store.
- * @param {Set<string>} [props.preactTabs] the tabs the SERVER has flagged Preact — a client tab-swap
- *   is intercepted only among these (a swap to a still-maud tab must be a full server navigation so
- *   its server body renders). Defaults to just the mounted tab, the conservative self-only case.
  * @param {() => (Node | null)} [props.liveRegion] resolves the DOM node the selection guard checks
  *   (defaults to this app's root once mounted).
  */
-export function App({ store, preactTabs, liveRegion }) {
+export function App({ store, liveRegion }) {
   const [, force] = useState(0);
   useEffect(() => store.subscribe(() => force((n) => n + 1)), [store]);
 
@@ -51,11 +47,10 @@ export function App({ store, preactTabs, liveRegion }) {
   }, [store, liveRegion]);
 
   const state = store.getState();
-  const enabled = preactTabs || new Set([state.activeTab]);
   return (
     <div id="dash-app" class="dash-app" data-tab={state.activeTab}>
       <ConnectionBanner status={state.status} lastGoodAt={state.lastGoodAt} />
-      <TabNav activeTab={state.activeTab} store={store} preactTabs={enabled} />
+      <TabNav activeTab={state.activeTab} store={store} />
       <ActiveView store={store} state={state} />
     </div>
   );
@@ -92,16 +87,13 @@ function agoSeconds(at) {
  * client-side view swap via `history.pushState`. A plain-navigation modifier (ctrl/⌘/middle-click)
  * is NOT intercepted so open-in-new-tab still works.
  */
-function TabNav({ activeTab, store, preactTabs }) {
+function TabNav({ activeTab, store }) {
   const onClick = (e, tab) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
       return; // let the browser handle a modified click (new tab, etc.)
     }
-    // A client-side view swap is intercepted only for a tab the SERVER has flagged Preact (all five
-    // views are ported — JEF-400 — but each is gated by its own flag). Leaving for a still-maud tab
-    // is a REAL navigation so its server body renders; this keeps every per-tab flag reversible and
-    // the maud secondaries untouched.
-    if (!preactTabs.has(tab.id)) return; // let the browser navigate to the maud page
+    // Every tab is Preact-rendered (JEF-398), so every swap is a local client-side view swap — no
+    // full navigation, no maud fallback.
     e.preventDefault();
     history.pushState({ tab: tab.id }, "", tab.href);
     store.setActiveTab(tab.id);
