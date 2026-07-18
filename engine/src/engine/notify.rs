@@ -96,6 +96,103 @@ pub struct BreachNotice<'a> {
     pub enforcement: Enforcement,
 }
 
+/// Which runtime-coverage transition to notify on (JEF-427). The counts-only operator push that
+/// fires when protector's OWN runtime sensors collapse (a was-covering fleet goes fully dark past
+/// the debounce) or recover — the gap the breach notifier can't cover (it fires only on breach
+/// *decisions*, and a blind engine makes none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageEvent {
+    /// A was-covering runtime fleet has gone fully blind past the stall debounce (JEF-421). One push.
+    Degraded,
+    /// A previously stalled runtime fleet is reporting again. One push.
+    Restored,
+}
+
+/// One runtime-coverage transition to notify on (JEF-427) — the inputs to the counts-only redacted
+/// push. UNLIKE [`BreachNotice`], this carries NO cluster-derived strings at all: the feed label is
+/// our own `'static` constant and everything else is a COUNT, so there is no topology, secret, peer,
+/// or CVE surface to redact — the ADR-0018 posture is upheld by construction.
+pub struct CoverageNotice {
+    /// Whether the fleet just went dark or just recovered.
+    pub event: CoverageEvent,
+    /// Expected sensor-node count (M) — the size of the runtime fleet in scope this pass.
+    pub expected: usize,
+    /// Blind node count (N). Equals `expected` at a full collapse; `< expected` on recovery.
+    pub blind: usize,
+    /// A coarse "N ago" for when the fleet was last observed live — surfaced on `Degraded` only.
+    pub last_observation: Option<String>,
+}
+
+impl From<super::state::CoverageEdge> for CoverageNotice {
+    /// Map the cross-pass coverage transition (JEF-421 edge) onto the redaction inputs: a collapse
+    /// → `Degraded` (carrying the last-observed time), a recovery → `Restored`.
+    fn from(edge: super::state::CoverageEdge) -> Self {
+        use super::state::CoverageEdge;
+        match edge {
+            CoverageEdge::Collapsed {
+                blind,
+                expected,
+                last_observation,
+            } => Self {
+                event: CoverageEvent::Degraded,
+                expected,
+                blind,
+                last_observation,
+            },
+            CoverageEdge::Recovered { blind, expected } => Self {
+                event: CoverageEvent::Restored,
+                expected,
+                blind,
+                last_observation: None,
+            },
+        }
+    }
+}
+
+/// Build the **redacted** JSON payload for a runtime-coverage transition (JEF-427). Counts only —
+/// no node names, no topology, no secrets, no CVEs — so it is redacted by construction (there is no
+/// untrusted cluster string in it to sanitize). Pure and unit-tested for a stable wire shape.
+pub fn redacted_coverage_payload(notice: &CoverageNotice) -> Value {
+    let (event, message) = match notice.event {
+        CoverageEvent::Degraded => (
+            "runtime_coverage_degraded",
+            format!(
+                "protector runtime coverage degraded — {} of {} sensor node{} blind (protector's own sensors went dark; paths on these nodes are no longer watched)",
+                notice.blind,
+                notice.expected,
+                if notice.expected == 1 { "" } else { "s" },
+            ),
+        ),
+        CoverageEvent::Restored => (
+            "runtime_coverage_restored",
+            format!(
+                "protector runtime coverage restored — {} of {} sensor node{} reporting again",
+                notice.expected.saturating_sub(notice.blind),
+                notice.expected,
+                if notice.expected == 1 { "" } else { "s" },
+            ),
+        ),
+    };
+    let mut payload = json!({
+        // A stable, low-cardinality event tag — never free text.
+        "event": event,
+        // The feed this concerns — our own constant, mirrors the strip's `Runtime` chip.
+        "feed": "Runtime",
+        // Counts only: how many of how many expected sensor nodes are blind.
+        "blind": notice.blind,
+        "expected": notice.expected,
+        // A ready-to-read line for a human sink (ntfy/gotify).
+        "message": message,
+    });
+    // Only meaningful for the degradation event — when the fleet was last live.
+    if notice.event == CoverageEvent::Degraded
+        && let Some(last) = &notice.last_observation
+    {
+        payload["last_observation"] = json!(last);
+    }
+    payload
+}
+
 /// Build the **redacted** JSON payload for a breach decision (ADR-0018 §2). Pure and
 /// unit-tested: given the decision, it surfaces the decision summary ONLY — never the
 /// topology, secret names, the peer graph, or the CVE list. `verbose` adds the
@@ -342,6 +439,36 @@ impl BreachNotifier {
                 tracing::warn!(
                     entry = %notice.entry, %error,
                     "breach notification POST failed (dropped; best-effort)"
+                );
+            }
+        }
+    }
+
+    /// POST a redacted runtime-coverage transition (JEF-427), best-effort. A no-op when disabled
+    /// (zero outbound calls — byte-identical to today). The caller fires this ONCE per edge (a
+    /// was-covering fleet going dark past the debounce, or recovering), never per pass — the same
+    /// edge-dedup discipline as the breach notice. Shares the same bounded client and the same
+    /// fail-safe posture: a failure is logged once and dropped; it never touches a verdict, an
+    /// actuation, or the journal.
+    pub async fn notify_coverage(&self, notice: &CoverageNotice) {
+        let (Some(url), Some(client)) = (&self.url, &self.client) else {
+            return; // disabled: byte-identical to today, no outbound call.
+        };
+        let payload = redacted_coverage_payload(notice);
+        match client.post(url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {
+                tracing::debug!(?notice.event, "coverage notification delivered");
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    ?notice.event, status = %response.status(),
+                    "coverage notification rejected by sink (dropped; dashboard/metrics remain source of truth)"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?notice.event, %error,
+                    "coverage notification POST failed (dropped; best-effort)"
                 );
             }
         }
@@ -647,5 +774,103 @@ mod tests {
         for no in ["0", "false", "no", "off", "", "maybe"] {
             assert!(!is_truthy(no), "{no:?} should be falsy");
         }
+    }
+
+    /// The coverage-degradation payload (JEF-427) is COUNTS-ONLY: the event tag, the feed, N of M,
+    /// the last-observed time, and a human message — and nothing else. No node names, no topology,
+    /// no secrets, no CVEs (the ADR-0018 posture, upheld by construction).
+    #[test]
+    fn coverage_degraded_payload_is_counts_only() {
+        let payload = redacted_coverage_payload(&CoverageNotice {
+            event: CoverageEvent::Degraded,
+            expected: 4,
+            blind: 4,
+            last_observation: Some("3m ago".into()),
+        });
+        assert_eq!(payload["event"], "runtime_coverage_degraded");
+        assert_eq!(payload["feed"], "Runtime");
+        assert_eq!(payload["blind"], 4);
+        assert_eq!(payload["expected"], 4);
+        assert_eq!(payload["last_observation"], "3m ago");
+        assert!(payload["message"].as_str().unwrap().contains("4 of 4"));
+        // Exactly these keys — no room for a node name / topology / secret / CVE field to ride out.
+        let mut keys: Vec<&str> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "blind",
+                "event",
+                "expected",
+                "feed",
+                "last_observation",
+                "message"
+            ]
+        );
+    }
+
+    /// The recovery payload drops `last_observation` (only meaningful for the outage) and reports
+    /// the healthy count honestly (M − blind of M reporting again).
+    #[test]
+    fn coverage_restored_payload_reports_recovery() {
+        let payload = redacted_coverage_payload(&CoverageNotice {
+            event: CoverageEvent::Restored,
+            expected: 4,
+            blind: 1,
+            last_observation: Some("ignored on recovery".into()),
+        });
+        assert_eq!(payload["event"], "runtime_coverage_restored");
+        assert!(
+            payload.get("last_observation").is_none(),
+            "restored omits last_observation"
+        );
+        let msg = payload["message"].as_str().unwrap();
+        assert!(msg.contains("3 of 4"), "3 of 4 reporting again: {msg}");
+    }
+
+    /// The JEF-421 stall edge maps onto the notice: a collapse → `Degraded` (carrying the
+    /// last-observed time), a recovery → `Restored` (no last-observed).
+    #[test]
+    fn coverage_edge_maps_to_notice() {
+        use crate::engine::state::CoverageEdge;
+        let degraded: CoverageNotice = CoverageEdge::Collapsed {
+            blind: 2,
+            expected: 2,
+            last_observation: Some("5m ago".into()),
+        }
+        .into();
+        assert_eq!(degraded.event, CoverageEvent::Degraded);
+        assert_eq!((degraded.blind, degraded.expected), (2, 2));
+        assert_eq!(degraded.last_observation.as_deref(), Some("5m ago"));
+
+        let restored: CoverageNotice = CoverageEdge::Recovered {
+            blind: 0,
+            expected: 3,
+        }
+        .into();
+        assert_eq!(restored.event, CoverageEvent::Restored);
+        assert_eq!((restored.blind, restored.expected), (0, 3));
+        assert!(restored.last_observation.is_none());
+    }
+
+    /// A disabled notifier makes ZERO outbound calls for a coverage push too — the "no URL =
+    /// byte-identical to today" guarantee extends to JEF-427. With no client it cannot call out.
+    #[tokio::test]
+    async fn disabled_notifier_makes_no_coverage_call() {
+        let notifier = BreachNotifier::disabled();
+        assert!(!notifier.is_enabled());
+        notifier
+            .notify_coverage(&CoverageNotice {
+                event: CoverageEvent::Degraded,
+                expected: 4,
+                blind: 4,
+                last_observation: None,
+            })
+            .await;
     }
 }

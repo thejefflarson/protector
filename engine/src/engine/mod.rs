@@ -486,10 +486,19 @@ impl Engine {
         // disagree. Counts only, no per-node label dimension: node names are attacker-
         // influenceable, so a per-node series would be a cardinality/DoS vector.
         if let Some(liveness) = &self.agent_liveness {
-            self.findings
+            let edge = self
+                .findings
                 .stamp_runtime_coverage(liveness, &snapshot.pods);
             self.metrics
                 .record_coverage(&self.findings.runtime_coverage());
+            // JEF-427: push the operator ONCE on a coverage collapse/recovery EDGE — the gap the
+            // breach notifier can't cover (a blind engine makes no breach decisions, so it stays
+            // silent exactly when its own sensors have gone dark). Edge-triggered (not per pass),
+            // reusing JEF-421's stall hysteresis; best-effort, bounded, redacted counts-only; a
+            // no-op when the notifier is disabled (zero outbound calls).
+            if let Some(edge) = edge {
+                self.notifier.notify_coverage(&edge.into()).await;
+            }
         }
 
         // One `now` for the whole pass so every backoff/breaker decision shares a single clock
