@@ -300,11 +300,15 @@ pub(super) fn finding_props(
     }
 }
 
-/// The blind-node caveat for a finding (JEF-308), or `None`. Applies when the finding is NOT
-/// live-corroborated AND runs on a node with no live sensor: its calm propose-only reading would be
-/// dishonest there, because we can't see whether the path is being exploited — absence of a signal
-/// is not evidence of safety. A corroborated finding already has a live signal, and a finding whose
-/// node is unknown or sensored gets no caveat.
+/// The finding-level "runtime-blind on this node" caveat (JEF-424, from the JEF-308 coverage), or
+/// `None`. Applies when the finding is NOT live-corroborated AND its workload sits on a node with no
+/// live sensor: its calm propose-only reading would be dishonest there, because we can't see whether
+/// the path is being exploited — blind ≠ green, absence of a signal is not evidence of safety. This
+/// is PRESENTATION METADATA ONLY: it is derived from the SAME `blind_node_set` the Readiness
+/// runtime-corroboration row reads (so the two never disagree), and it never touches the verdict,
+/// the proposed action, or the report — the finding's decision is unchanged (ADR-0016). A
+/// corroborated finding already has a live signal, and a finding whose node is unknown or sensored
+/// gets no caveat.
 fn blind_node_caveat(f: &Finding, blind_nodes: &HashSet<String>) -> Option<String> {
     if f.corroborated {
         return None;
@@ -314,7 +318,7 @@ fn blind_node_caveat(f: &Finding, blind_nodes: &HashSet<String>) -> Option<Strin
         return None;
     }
     Some(format!(
-        "no live runtime sensor on node {node} \u{2014} absence of a signal here is not evidence of safety"
+        "runtime-blind on {node} \u{2014} no live sensor here, so absence of a signal is not evidence of safety"
     ))
 }
 
