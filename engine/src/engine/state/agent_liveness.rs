@@ -231,6 +231,25 @@ impl RuntimeCoverage {
             .collect()
     }
 
+    /// How many expected nodes are blind — the count-only companion to [`blind_nodes`], for the
+    /// OTLP mirror (JEF-422) which needs the number, not the names.
+    ///
+    /// [`blind_nodes`]: Self::blind_nodes
+    pub fn blind_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.state.is_blind()).count()
+    }
+
+    /// How many expected nodes are reporting only partial probes — the count-only companion to
+    /// [`degraded_nodes`], for the OTLP mirror (JEF-422).
+    ///
+    /// [`degraded_nodes`]: Self::degraded_nodes
+    pub fn degraded_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|n| matches!(n.state, NodeState::DegradedProbes { .. }))
+            .count()
+    }
+
     /// How many expected nodes are fully healthy (probes loaded; quiet counts).
     pub fn healthy_count(&self) -> usize {
         self.nodes

@@ -152,6 +152,24 @@ like Cilium/Calico).
 `POST /validate` (webhook `:8443`) · `GET /healthz` `/readyz` `/metrics` ·
 `POST /behavior` (runtime-evidence ingest `:9999`)
 
+### Metrics
+
+`/metrics` exposes the engine's OTLP instruments (no-op unless an OTLP endpoint is
+configured). Among them, the **runtime-corroboration coverage** gauges mirror the same
+per-node liveness classification the dashboard readiness row reads (JEF-308 →
+[JEF-422]), so an operator watching only `/metrics` sees the same blind count the UI
+does. They are **counts only — no per-node label dimension** (node names are
+attacker-influenceable, so a per-node series would be a cardinality/DoS vector), and
+they exclude out-of-scope reporters (nodes the agent isn't scheduled on):
+
+| Metric | Meaning |
+|--------|---------|
+| `protector.engine.coverage_expected_nodes` | In-scope expected agent nodes this pass (the agent DaemonSet's own pods). `= healthy + degraded + blind`. |
+| `protector.engine.coverage_healthy_nodes` | Expected nodes reporting with their probes loaded (a quiet node still counts as healthy). |
+| `protector.engine.coverage_degraded_nodes` | Expected nodes reporting only partial probes (degraded coverage). |
+| `protector.engine.coverage_blind_nodes` | Expected nodes with no live corroboration — not reporting, or Ready-but-blind (probes failed to attach). |
+| `protector.engine.agent_signals_this_pass` | Total agent signals emitted across healthy nodes this pass (summed, no per-node dimension). |
+
 ## Honest bounds
 
 - **Small to mid-size clusters by design** — multi-hop proving is tractable because

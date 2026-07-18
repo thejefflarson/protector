@@ -480,10 +480,16 @@ impl Engine {
         bake.corroborations = corroborations;
         self.findings.set_bake(bake);
 
-        // Runtime-corroboration coverage per node (JEF-308) for the readiness row.
+        // Runtime-corroboration coverage per node (JEF-308) for the readiness row, and its
+        // OTLP mirror (JEF-422). Reading the coverage back after stamping means the gauges are
+        // sourced from the SAME `derive_runtime_coverage` the dashboard reads — they can never
+        // disagree. Counts only, no per-node label dimension: node names are attacker-
+        // influenceable, so a per-node series would be a cardinality/DoS vector.
         if let Some(liveness) = &self.agent_liveness {
             self.findings
                 .stamp_runtime_coverage(liveness, &snapshot.pods);
+            self.metrics
+                .record_coverage(&self.findings.runtime_coverage());
         }
 
         // One `now` for the whole pass so every backoff/breaker decision shares a single clock

@@ -2,6 +2,8 @@
 //! CLAUDE.md). A cohesive unit: the counters/gauges/histograms the engine records against the
 //! global meter, and their one-shot construction. `pub(super)` so the engine core reads the fields.
 
+use crate::engine::state::RuntimeCoverage;
+
 /// OTLP instruments for the engine, recorded against the global meter (see
 /// [`crate::telemetry`]). When no OTLP endpoint is configured the global meter is a
 /// no-op, so these calls cost nothing — the engine is instrumented unconditionally.
@@ -68,6 +70,24 @@ pub(super) struct EngineMetrics {
     /// Shadow report headline: would-acts made during an enrichment-coverage gap (no CVE
     /// backing) — the ones to scrutinize first.
     pub(super) report_coverage_gap: opentelemetry::metrics::Gauge<u64>,
+    /// Runtime-corroboration coverage (JEF-308) mirrored from the SAME
+    /// [`derive_runtime_coverage`](crate::engine::state::derive_runtime_coverage) the dashboard
+    /// reads (they must never disagree). In-scope expected nodes as of this pass — the agent
+    /// DaemonSet's own pods, matching `RuntimeCoverage::expected_count`; out-of-scope reporters are
+    /// excluded. Counts ONLY, with NO per-node label dimension: node names are attacker-influenceable,
+    /// so a per-node series would be a cardinality/DoS vector (see `agent_liveness`).
+    pub(super) coverage_expected: opentelemetry::metrics::Gauge<u64>,
+    /// Expected nodes reporting with their probes loaded this pass (quiet counts as healthy).
+    pub(super) coverage_healthy: opentelemetry::metrics::Gauge<u64>,
+    /// Expected nodes reporting only partial probes this pass (degraded coverage).
+    pub(super) coverage_degraded: opentelemetry::metrics::Gauge<u64>,
+    /// Expected nodes with no live corroboration this pass (not reporting, or Ready-but-blind).
+    /// A sustained nonzero value means a blind spot the dashboard would show — mirrored here so an
+    /// operator watching only /metrics sees the same blind count.
+    pub(super) coverage_blind: opentelemetry::metrics::Gauge<u64>,
+    /// Total agent signals emitted across healthy nodes this pass — the shadow view of live
+    /// corroboration volume, summed (no per-node dimension).
+    pub(super) coverage_signals: opentelemetry::metrics::Gauge<u64>,
 }
 
 impl EngineMetrics {
@@ -154,6 +174,150 @@ impl EngineMetrics {
                 .u64_gauge("protector.engine.report_coverage_gap")
                 .with_description("Shadow report: would-acts during an enrichment-coverage gap.")
                 .build(),
+            coverage_expected: m
+                .u64_gauge("protector.engine.coverage_expected_nodes")
+                .with_description("Runtime coverage: in-scope expected agent nodes this pass.")
+                .build(),
+            coverage_healthy: m
+                .u64_gauge("protector.engine.coverage_healthy_nodes")
+                .with_description("Runtime coverage: expected nodes healthy (probes loaded).")
+                .build(),
+            coverage_degraded: m
+                .u64_gauge("protector.engine.coverage_degraded_nodes")
+                .with_description("Runtime coverage: expected nodes with only partial probes.")
+                .build(),
+            coverage_blind: m
+                .u64_gauge("protector.engine.coverage_blind_nodes")
+                .with_description("Runtime coverage: expected nodes with no live corroboration.")
+                .build(),
+            coverage_signals: m
+                .u64_gauge("protector.engine.agent_signals_this_pass")
+                .with_description("Runtime coverage: agent signals across healthy nodes this pass.")
+                .build(),
         }
+    }
+
+    /// Mirror this pass's runtime-corroboration coverage (JEF-422) into the OTLP gauges. A pure
+    /// mirror of already-derived state: it takes the SAME [`RuntimeCoverage`] the dashboard reads
+    /// (the caller passes back what `stamp_runtime_coverage` just stored), so the two can never
+    /// disagree. Counts ONLY — no per-node label dimension, because node names are
+    /// attacker-influenceable and a per-node series would be a cardinality/DoS vector.
+    pub(super) fn record_coverage(&self, coverage: &RuntimeCoverage) {
+        let CoverageGaugeValues {
+            expected,
+            healthy,
+            degraded,
+            blind,
+            signals,
+        } = coverage_gauge_values(coverage);
+        self.coverage_expected.record(expected, &[]);
+        self.coverage_healthy.record(healthy, &[]);
+        self.coverage_degraded.record(degraded, &[]);
+        self.coverage_blind.record(blind, &[]);
+        self.coverage_signals.record(signals, &[]);
+    }
+}
+
+/// The five runtime-coverage gauge values (JEF-422), derived from a [`RuntimeCoverage`]. Kept as a
+/// pure function so the mirror's arithmetic is unit-testable without an OTLP reader — the gauges
+/// [`EngineMetrics::record_coverage`] emits are exactly these values.
+struct CoverageGaugeValues {
+    expected: u64,
+    healthy: u64,
+    degraded: u64,
+    blind: u64,
+    signals: u64,
+}
+
+/// Derive the runtime-coverage gauge values from the SAME `RuntimeCoverage` the dashboard reads.
+/// Excludes out-of-scope reporters (via `expected_count` / `healthy_count`), matching the readiness
+/// row exactly. `expected == healthy + degraded + blind` by construction.
+fn coverage_gauge_values(coverage: &RuntimeCoverage) -> CoverageGaugeValues {
+    CoverageGaugeValues {
+        expected: coverage.expected_count() as u64,
+        healthy: coverage.healthy_count() as u64,
+        degraded: coverage.degraded_count() as u64,
+        blind: coverage.blind_count() as u64,
+        signals: coverage.agent_signals(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::coverage_gauge_values;
+    use crate::engine::state::{LiveNode, derive_runtime_coverage};
+
+    /// Build a `RuntimeCoverage` from the SAME `derive_runtime_coverage` the dashboard uses, so the
+    /// mirror is tested against the real derivation, not a hand-built stand-in.
+    fn coverage(expected: &[&str], live: &[(&str, LiveNode)]) -> super::RuntimeCoverage {
+        let expected: BTreeSet<String> = expected.iter().map(|n| (*n).into()).collect();
+        let live: BTreeMap<String, LiveNode> =
+            live.iter().map(|(n, l)| ((*n).into(), *l)).collect();
+        derive_runtime_coverage(&expected, &live)
+    }
+
+    fn node(probes_loaded: u32, probes_total: u32, signals: u64) -> LiveNode {
+        LiveNode {
+            probes_loaded,
+            probes_total,
+            signals,
+        }
+    }
+
+    #[test]
+    fn all_blind_mirrors_blind_equals_expected_and_no_healthy_no_signals() {
+        // Two expected nodes, neither reporting → every gauge but expected/blind is zero.
+        let cov = coverage(&["node-a", "node-b"], &[]);
+        let v = coverage_gauge_values(&cov);
+        assert_eq!(v.expected, 2);
+        assert_eq!(v.blind, 2, "all-blind → blind == expected");
+        assert_eq!(v.healthy, 0);
+        assert_eq!(v.degraded, 0);
+        assert_eq!(v.signals, 0, "no healthy node → no signals");
+    }
+
+    #[test]
+    fn healthy_case_mirrors_healthy_and_summed_signals() {
+        // Two healthy nodes (probes loaded), one quiet — signals sum across healthy nodes.
+        let cov = coverage(
+            &["node-a", "node-b"],
+            &[("node-a", node(6, 6, 4)), ("node-b", node(6, 6, 0))],
+        );
+        let v = coverage_gauge_values(&cov);
+        assert_eq!(v.expected, 2);
+        assert_eq!(v.healthy, 2);
+        assert_eq!(v.blind, 0);
+        assert_eq!(v.degraded, 0);
+        assert_eq!(v.signals, 4, "quiet node contributes 0, healthy node its 4");
+    }
+
+    #[test]
+    fn mixed_case_partitions_expected_across_healthy_degraded_blind() {
+        // healthy + degraded + blind == expected; an out-of-scope reporter is excluded entirely.
+        let cov = coverage(
+            &["node-a", "node-b", "node-c"],
+            &[
+                ("node-a", node(6, 6, 3)), // healthy
+                ("node-b", node(4, 6, 1)), // degraded (partial probes)
+                ("node-x", node(6, 6, 99)), // out-of-scope: not expected
+                                           // node-c: no report → blind
+            ],
+        );
+        let v = coverage_gauge_values(&cov);
+        assert_eq!(v.expected, 3, "out-of-scope reporter is excluded");
+        assert_eq!(v.healthy, 1);
+        assert_eq!(v.degraded, 1);
+        assert_eq!(v.blind, 1);
+        assert_eq!(
+            v.healthy + v.degraded + v.blind,
+            v.expected,
+            "the three states partition the expected set"
+        );
+        assert_eq!(
+            v.signals, 3,
+            "only healthy-node signals count; the out-of-scope node's 99 is excluded"
+        );
     }
 }

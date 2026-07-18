@@ -23,7 +23,7 @@ mod signing_baseline;
 mod verdict_store;
 
 pub use agent_liveness::{
-    AgentLivenessStore, BlindReason, NodeCoverage, NodeState, RuntimeCoverage,
+    AgentLivenessStore, BlindReason, LiveNode, NodeCoverage, NodeState, RuntimeCoverage,
     derive_runtime_coverage, expected_agent_nodes,
 };
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
