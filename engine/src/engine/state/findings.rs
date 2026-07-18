@@ -24,6 +24,31 @@ use super::evidence::EntryEvidence;
 use super::recency::RecencyInfo;
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictStore};
 
+/// The cross-pass runtime-coverage **transition** a single [`stamp_runtime_coverage`] observed —
+/// the edge the operator push (JEF-427) fires on. `None` on every steady-state pass (staying
+/// covered, staying stalled, or a partial degrade that never crossed the stall edge), so the caller
+/// notifies EXACTLY ONCE per collapse and once per recovery, never per pass. Reuses JEF-421's stall
+/// hysteresis: `Collapsed` fires only after the fleet has been fully dark past the debounce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverageEdge {
+    /// A was-covering fleet has JUST gone fully dark past the stall debounce — the collapse edge.
+    Collapsed {
+        /// Blind node count at collapse (equals `expected` — the whole fleet is dark).
+        blind: usize,
+        /// Expected sensor-node count in scope this pass.
+        expected: usize,
+        /// A coarse "N ago" for when the fleet was last observed live.
+        last_observation: Option<String>,
+    },
+    /// A previously stalled fleet is reporting again — the recovery edge.
+    Recovered {
+        /// Blind node count now (`< expected`; may be 0 for a full recovery).
+        blind: usize,
+        /// Expected sensor-node count in scope this pass.
+        expected: usize,
+    },
+}
+
 /// One ENTRY-rooted proven attack path, its evidence, and the model's typed verdict — the
 /// unit the engine publishes per pass (JEF-255). It carries the proven facts (topology, cut),
 /// the model's inputs (evidence), and its TYPED [`Verdict`] — the single source of truth for
@@ -293,8 +318,12 @@ impl Findings {
     /// the resulting runtime-corroboration coverage. The expected set is exactly the agent
     /// DaemonSet's pods in `pods` — the scheduler already honoured the agent's nodeSelector/
     /// tolerations, so a node the agent isn't scheduled on is out-of-scope, never blind.
-    pub fn stamp_runtime_coverage(&self, liveness: &AgentLivenessStore, pods: &[Pod]) {
-        self.stamp_runtime_coverage_at(liveness, pods, SystemTime::now());
+    pub fn stamp_runtime_coverage(
+        &self,
+        liveness: &AgentLivenessStore,
+        pods: &[Pod],
+    ) -> Option<CoverageEdge> {
+        self.stamp_runtime_coverage_at(liveness, pods, SystemTime::now())
     }
 
     /// The `now`-injected seam behind [`stamp_runtime_coverage`](Self::stamp_runtime_coverage) — the
@@ -307,7 +336,7 @@ impl Findings {
         liveness: &AgentLivenessStore,
         pods: &[Pod],
         now: SystemTime,
-    ) {
+    ) -> Option<CoverageEdge> {
         let expected = expected_agent_nodes(pods);
         let coverage = derive_runtime_coverage(&expected, &liveness.snapshot());
 
@@ -317,16 +346,19 @@ impl Findings {
             .expect("stall-tracker mutex poisoned")
             .observe(&coverage, now);
 
-        // Swap in the new register under one lock, keeping the previous one to fire the warn on the
-        // EDGE only (not every pass while stalled): a was-covering fleet has JUST gone dark.
+        // Swap in the new register under one lock, keeping the previous one to fire the warn +
+        // operator push (JEF-427) on the EDGE only (not every pass while stalled): a was-covering
+        // fleet has JUST gone dark, or a stalled fleet has JUST recovered.
         let mut cell = self
             .coverage_state
             .lock()
             .expect("coverage-state mutex poisoned");
         let was_stalled = matches!(&*cell, CoverageState::Stalled(_));
-        if let CoverageState::Stalled(alert) = &state
+        let is_stalled = matches!(&state, CoverageState::Stalled(_));
+        let edge = if let CoverageState::Stalled(alert) = &state
             && !was_stalled
         {
+            // Collapse edge: warn once, and hand the caller a counts-only push (JEF-427).
             let blind = coverage.blind_nodes().len();
             tracing::warn!(
                 feed = %alert.feed_label,
@@ -336,11 +368,30 @@ impl Findings {
                 "runtime-observation coverage degraded ({blind} of {} nodes blind — protector's own sensors went dark)",
                 coverage.expected_count(),
             );
-        }
+            Some(CoverageEdge::Collapsed {
+                blind,
+                expected: coverage.expected_count(),
+                last_observation: alert.last_observation.clone(),
+            })
+        } else if was_stalled && !is_stalled {
+            // Recovery edge: the stalled fleet is reporting again — one "restored" push.
+            tracing::info!(
+                blind = coverage.blind_nodes().len(),
+                expected = coverage.expected_count(),
+                "runtime-observation coverage recovered — protector's sensors are reporting again",
+            );
+            Some(CoverageEdge::Recovered {
+                blind: coverage.blind_nodes().len(),
+                expected: coverage.expected_count(),
+            })
+        } else {
+            None
+        };
         *cell = state;
         drop(cell);
 
         self.set_runtime_coverage(coverage);
+        edge
     }
 
     /// The most recent server-derived coarse coverage register (JEF-421) — covered / degraded /
@@ -589,5 +640,88 @@ mod tests {
             !finding.breach_relevant,
             "the internal chain is not breach-relevant, yet is quarantined"
         );
+    }
+
+    /// JEF-427: the coverage EDGE fires EXACTLY ONCE per collapse and once per recovery — never
+    /// per pass. A was-covering fleet that goes dark past the JEF-421 stall debounce yields one
+    /// `Collapsed`; the following still-dark passes yield `None`; a recovery yields one `Recovered`.
+    #[test]
+    fn coverage_edge_fires_once_per_collapse_and_recovery() {
+        use crate::engine::state::CoverageEdge;
+        use crate::engine::state::agent_liveness::AgentLivenessStore;
+        use protector_behavior::AgentReport;
+        use std::time::{Duration, Instant, SystemTime};
+
+        fn agent_pod(node: &str) -> Pod {
+            serde_json::from_value(json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {
+                    "name": format!("agent-{node}"), "namespace": "protector",
+                    "labels": {"app.kubernetes.io/component": "agent"}
+                },
+                "spec": {"nodeName": node, "containers": [{"name": "agent", "image": "agent:1"}]}
+            }))
+            .unwrap()
+        }
+        fn report(node: &str, probes_loaded: u32) -> AgentReport {
+            AgentReport {
+                node: node.into(),
+                probes_loaded,
+                probes_total: 6,
+                signals_emitted: 0,
+                observed_at_ms: None,
+            }
+        }
+
+        let findings = Findings::new();
+        let pods = vec![agent_pod("node-a")];
+        let store = AgentLivenessStore::new(Duration::from_secs(120));
+        // Beacons recorded at strictly increasing instants (newest supersedes); all within TTL of
+        // the real clock `snapshot()` reads, so they stay fresh through the test.
+        let mut rec = Instant::now();
+        let mut record = |loaded: u32| {
+            rec += Duration::from_secs(1);
+            store.record_at(rec, report("node-a", loaded));
+        };
+        let mut clk = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut tick = |findings: &Findings| {
+            clk += Duration::from_secs(1);
+            findings.stamp_runtime_coverage_at(&store, &pods, clk)
+        };
+
+        // A covering pass latches "was covering" — no edge.
+        record(6);
+        assert_eq!(tick(&findings), None);
+
+        // Go fully dark and stay dark. The JEF-421 stall debounce holds the loud edge for a few
+        // passes, then fires it — but EXACTLY ONCE across the whole dark stretch (edge-triggered,
+        // never per-pass). Ticking well past the hold window must still surface a single Collapsed.
+        record(0);
+        let edges: Vec<CoverageEdge> = (0..8).filter_map(|_| tick(&findings)).collect();
+        assert!(
+            matches!(
+                edges.as_slice(),
+                [CoverageEdge::Collapsed {
+                    blind: 1,
+                    expected: 1,
+                    ..
+                }]
+            ),
+            "expected exactly one Collapsed across the dark passes, got {edges:?}",
+        );
+
+        // Recovery fires EXACTLY ONE `Recovered`.
+        record(6);
+        assert_eq!(
+            tick(&findings),
+            Some(CoverageEdge::Recovered {
+                blind: 0,
+                expected: 1
+            })
+        );
+
+        // Steady covered — no repeat.
+        record(6);
+        assert_eq!(tick(&findings), None);
     }
 }

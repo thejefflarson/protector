@@ -27,7 +27,7 @@ pub use agent_liveness::{
     NodeState, RuntimeCoverage, derive_runtime_coverage, expected_agent_nodes,
 };
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
-pub use findings::{Finding, Findings, PathStep};
+pub use findings::{CoverageEdge, Finding, Findings, PathStep};
 pub use judgement::{Judgement, JudgementLog};
 pub use readiness::{InputState, NodeCoverageRow, NodeCoverageState, Readiness, ReadinessRow};
 // The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's

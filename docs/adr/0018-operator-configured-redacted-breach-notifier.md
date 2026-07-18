@@ -126,3 +126,24 @@ Harder / accepted:
   on the journal's decision identity so one decision is one notification.
 - **An unbounded reqwest client.** Rejected: a hung sink would stall the single engine
   loop — the exact failure `model.rs` bounds against. Reuse the timeout-only client.
+
+## Extension — runtime-coverage collapse (JEF-427)
+
+The breach notice fires only on breach *decisions*. But when protector's OWN runtime
+sensors go dark, a blind engine makes no breach decisions — so the one moment the
+operator most needs a push, the notifier stays silent. JEF-427 adds a second, narrow
+event on this same sanctioned path: an edge-triggered **runtime-coverage** notice.
+
+- **Same posture, same plumbing.** Off unless `PROTECTOR_ENGINE_NOTIFY_URL` is set
+  (zero outbound calls when disabled); same bounded, in-cluster-validated, fail-safe
+  client; a failure is logged once and dropped. It never touches a verdict, an
+  actuation, or the journal.
+- **Edge-triggered, not per-pass.** Fires exactly once when a was-covering fleet goes
+  fully dark past the JEF-421 stall debounce (`runtime_coverage_degraded`), and once
+  when it recovers (`runtime_coverage_restored`) — reusing JEF-421's hysteresis so a
+  routine DaemonSet roll never strobes it.
+- **Counts-only, redacted by construction.** The payload carries the event tag, the
+  feed label (`Runtime`, our own constant), and COUNTS — N of M sensor nodes blind —
+  plus a last-observed age. No node names, no topology, no secrets, no CVEs: there is
+  no untrusted cluster string in it to leak. The ADR-0018 redaction posture holds
+  without needing to sanitize anything.
