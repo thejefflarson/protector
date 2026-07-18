@@ -15,6 +15,7 @@ fn strip() -> StatusStripProps {
         warming_up: false,
         model_attached: true,
         coverage: vec![],
+        coverage_alert: None,
         last_pass: None,
         breach_count: 0,
         awaiting_count: 0,

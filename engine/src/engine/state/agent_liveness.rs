@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 use k8s_openapi::api::core::v1::Pod;
 use protector_behavior::AgentReport;
 
+mod stall;
+pub use stall::{CoverageAlert, CoverageStallTracker, CoverageState};
+
 /// The label the agent DaemonSet's pods carry (chart helper `protector.agentLabels`). We pick the
 /// agent's OWN pods out of the pod informer by it, so the expected-node set is exactly the nodes
 /// the scheduler placed the agent on — respecting its nodeSelector/tolerations by construction,

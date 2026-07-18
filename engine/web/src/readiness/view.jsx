@@ -16,6 +16,8 @@ const STATE = {
   present: { glyph: "\u{2713}", word: "present" }, // ✓
   absent: { glyph: "\u{2014}", word: "absent" }, // —
   degraded: { glyph: "\u{25D0}", word: "degraded" }, // ◐
+  // JEF-421: a WAS-COVERING input that went dark — the loud stall register, distinct from absent.
+  stalled: { glyph: "\u{26A0}", word: "stalled" }, // ⚠
 };
 
 /** Look up a coverage state's presentation, defaulting to `absent` (never present/green) for an
@@ -52,13 +54,18 @@ export function ReadinessView({ view }) {
  *  reads its enablement instruction as an action ("enable with …"). */
 function CoverageRow({ r }) {
   const present = r.state === "present";
+  const stalled = r.state === "stalled";
   const weakGap = r["weakens-decisions"] === true;
   const isGap = weakGap && !present;
   const s = stateOf(r.state);
   const nodes = Array.isArray(r.nodes) ? r.nodes : [];
   const hasEnable = typeof r.enable === "string" && r.enable.length > 0;
+  // A stalled row (JEF-421) escalates PAST the amber weakening-gap keyline to the loud breach
+  // keyline — a fleet that went dark is louder than a never-enabled gap. The server puts the
+  // last-observation time in `r.detail`, so it renders there.
+  const rowCls = stalled ? "cov-row cov-row-stalled" : isGap ? "cov-row cov-row-gap" : "cov-row";
   return (
-    <li class={isGap ? "cov-row cov-row-gap" : "cov-row"} data-input={r.id} data-state={r.state}>
+    <li class={rowCls} data-input={r.id} data-state={r.state}>
       <div class="cov-row-head">
         <span class={`cov-state cov-${r.state}`}>
           <span class="cov-state-glyph" aria-hidden="true">

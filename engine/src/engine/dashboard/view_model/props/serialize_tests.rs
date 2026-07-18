@@ -24,7 +24,9 @@ fn all_clear_strip() -> StatusStripProps {
             label: "kev".into(),
             present: true,
             degraded: false,
+            stalled: false,
         }],
+        coverage_alert: None,
         last_pass: Some("12s ago".into()),
         breach_count: 0,
         awaiting_count: 0,
@@ -186,6 +188,92 @@ fn standing_signing_regression_forbids_the_green_token() {
         "an established regression is louder than watching"
     );
     assert_eq!(v["signing-regression-breach"], json!(1));
+}
+
+// ---------------------------------------------------------------------------
+// The coverage-stall register (JEF-421): the loud, server-derived was-covering
+// → now-silent edge. `stalled` is DISTINCT from `absent`/`degraded`, forbids the
+// green all-clear, and ships a `coverage-alert` banner ONLY when a feed stalled.
+// ---------------------------------------------------------------------------
+
+/// An all-clear strip whose ONLY coverage chip is a live Runtime feed — the baseline the stall
+/// overlay flips to loud.
+fn runtime_covered_strip() -> StatusStripProps {
+    let mut strip = all_clear_strip();
+    strip.coverage = vec![CoverageChip {
+        label: "Runtime".into(),
+        present: true,
+        degraded: false,
+        stalled: false,
+    }];
+    strip
+}
+
+/// The stall alert payload for the `Runtime` feed.
+fn runtime_alert() -> StripCoverageAlert {
+    StripCoverageAlert {
+        feed_label: "Runtime".into(),
+        last_observation: Some("2m ago".into()),
+        message: "runtime corroboration stalled — all 2 sensor nodes went dark".into(),
+    }
+}
+
+#[test]
+fn input_state_stalled_serializes_distinctly() {
+    // The row-level state tag: `stalled` is its OWN string, never collapsing into absent/degraded.
+    assert_eq!(
+        serde_json::to_value(InputStateProps::Stalled).unwrap(),
+        json!("stalled")
+    );
+    assert_ne!(
+        serde_json::to_value(InputStateProps::Stalled).unwrap(),
+        serde_json::to_value(InputStateProps::Absent).unwrap()
+    );
+    assert_ne!(
+        serde_json::to_value(InputStateProps::Stalled).unwrap(),
+        serde_json::to_value(InputStateProps::Degraded).unwrap()
+    );
+}
+
+#[test]
+fn a_stalled_feed_forbids_the_green_token_and_ships_the_alert() {
+    // A covering Runtime feed that stalled: the chip goes `stalled`, green is forbidden, and the
+    // strip-level `coverage-alert` banner ships (present ONLY because a covering feed stalled).
+    let strip = runtime_covered_strip().with_coverage_stall(Some(runtime_alert()));
+    let v = serde_json::to_value(&strip).unwrap();
+    assert_eq!(
+        v["all-clear"],
+        json!(false),
+        "a stalled feed can never ship the green all-clear"
+    );
+    let chip = &v["coverage"][0];
+    assert_eq!(chip["stalled"], json!(true), "the chip reads stalled");
+    assert_eq!(
+        chip["present"],
+        json!(false),
+        "a stalled feed is not present"
+    );
+    assert_eq!(chip["degraded"], json!(false), "stalled is not degraded");
+    // The banner is present with its feed label + last-observation + message.
+    assert_eq!(v["coverage-alert"]["feed-label"], json!("Runtime"));
+    assert_eq!(v["coverage-alert"]["last-observation"], json!("2m ago"));
+    assert!(
+        v["coverage-alert"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stalled")
+    );
+}
+
+#[test]
+fn no_stall_ships_a_null_coverage_alert() {
+    // The common case: no feed stalled ⇒ the additive `coverage-alert` is `null` (never synthesized).
+    let v = serde_json::to_value(runtime_covered_strip()).unwrap();
+    assert_eq!(
+        v["coverage-alert"],
+        json!(null),
+        "no stall means no banner — the client never synthesizes one"
+    );
 }
 
 // ---------------------------------------------------------------------------

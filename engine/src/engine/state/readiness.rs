@@ -10,7 +10,9 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use super::agent_liveness::{BlindReason, NodeState, RuntimeCoverage};
+use super::agent_liveness::{
+    BlindReason, CoverageAlert, CoverageState, NodeState, RuntimeCoverage,
+};
 use super::verdict_store::{ModelHealth, ReadinessConfig};
 use crate::engine::supply_chain::signing_trust::TUF_STALE_AFTER_SECS;
 
@@ -28,6 +30,12 @@ pub enum InputState {
     /// Configured but not currently healthy — e.g. the model is attached but its last call
     /// timed out, or signals were expected this pass but none arrived.
     Degraded,
+    /// A WAS-COVERING input has STALLED (JEF-421) — it was reporting and has now gone fully dark
+    /// (held past the debounce). The loud, cross-pass edge: DISTINCT from `Absent` (never enabled)
+    /// and `Degraded` (partial). Applied only to the runtime-corroboration row, and only by the
+    /// server-side stall overlay ([`Readiness::with_coverage_stall`]); [`derive_readiness`] never
+    /// produces it (per-pass derivation can't see the cross-pass edge).
+    Stalled,
 }
 
 /// One readiness row: a decision input, its LIVE state, a one-line "why it matters", the
@@ -122,6 +130,25 @@ impl Readiness {
     #[allow(dead_code)]
     pub fn has_unmet(&self) -> bool {
         self.unmet_count() > 0
+    }
+
+    /// Overlay the coverage-stall register (JEF-421) onto the runtime-corroboration row. The stall is
+    /// a CROSS-PASS edge (`state::CoverageState`) the per-pass [`derive_readiness`] can't see, so the
+    /// caller (`DashboardState::readiness`) folds it in here: when a covering runtime feed has gone
+    /// dark past the debounce, the row escalates to [`InputState::Stalled`] and its detail names the
+    /// last time the sensors were observed live. Every other register leaves the row untouched — a
+    /// never-enabled feed stays honestly `Absent`, a partial one `Degraded`. Builder-style.
+    pub fn with_coverage_stall(mut self, state: &CoverageState) -> Self {
+        if let CoverageState::Stalled(alert) = state
+            && let Some(row) = self
+                .inputs
+                .iter_mut()
+                .find(|r| r.id == "runtime-corroboration")
+        {
+            row.state = InputState::Stalled;
+            row.detail = stalled_detail(alert);
+        }
+        self
     }
 
     /// Whether a model adjudicator is CONFIGURED at all (JEF-255) — the model row is anything
@@ -380,6 +407,16 @@ fn humanize_age(secs: u64) -> String {
         format!("{}m", secs / MIN)
     } else {
         format!("{secs}s")
+    }
+}
+
+/// The escalated detail line for a STALLED runtime-corroboration row (JEF-421): the honest "went
+/// dark" message plus the last time the sensors were observed live, so an operator sees at a glance
+/// how long the fleet has been silent.
+fn stalled_detail(alert: &CoverageAlert) -> String {
+    match &alert.last_observation {
+        Some(ago) => format!("STALLED: {} (last observed {ago})", alert.message),
+        None => format!("STALLED: {}", alert.message),
     }
 }
 
