@@ -370,6 +370,13 @@ agent:
   #   podAnnotations:
   #     linkerd.io/inject: enabled
   podAnnotations: {}
+  # Rolling-update surge for the DaemonSet. The k8s default (maxUnavailable:1,
+  # maxSurge:0) waits for each node's old pod to terminate before starting the new one,
+  # so a single stuck/cordoned node stalls the whole roll and drops runtime coverage to
+  # zero fleet-wide. maxSurge:1 brings a replacement pod up on healthy nodes without first
+  # tearing down the old one, so the roll proceeds past a bad node — coverage never dips
+  # below the running fleet during an upgrade. Set 0 to restore the default in-place roll.
+  maxSurge: 1
   # RAM-tight for arm64: in-kernel aggregation is cheap; userspace is a thin batcher.
   resources:
     requests:
