@@ -17,6 +17,7 @@ fn input_state(state: InputState) -> InputStateProps {
         InputState::Present => InputStateProps::Present,
         InputState::Absent => InputStateProps::Absent,
         InputState::Degraded => InputStateProps::Degraded,
+        InputState::Stalled => InputStateProps::Stalled,
     }
 }
 

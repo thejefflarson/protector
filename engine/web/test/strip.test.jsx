@@ -167,6 +167,56 @@ describe("StatusStrip coverage chips", () => {
     expect(chips[2].classList.contains("cov-absent")).toBe(true);
     expect(chips[2].querySelector(".cov-glyph").textContent).toBe("—");
   });
+
+  it("renders a STALLED feed loud (breach chip + ⚠), distinct from present/degraded/absent (JEF-421)", () => {
+    const container = mount({
+      coverage: [{ label: "Runtime", present: false, degraded: false, stalled: true }],
+    });
+    const chip = container.querySelector(".cov");
+    // The loud register: the breach `cov-stalled` class + the ⚠ glyph + the feed word.
+    expect(chip.classList.contains("cov-stalled")).toBe(true);
+    expect(chip.classList.contains("cov-present")).toBe(false);
+    expect(chip.classList.contains("cov-degraded")).toBe(false);
+    expect(chip.classList.contains("cov-absent")).toBe(false);
+    expect(chip.querySelector(".cov-glyph").textContent).toBe("⚠");
+    expect(chip.querySelector(".cov-label").textContent).toBe("Runtime");
+  });
+
+  it("an ABSENT feed stays muted (— glyph), never the loud stalled register (JEF-421)", () => {
+    const container = mount({
+      coverage: [{ label: "Runtime", present: false, degraded: false, stalled: false }],
+    });
+    const chip = container.querySelector(".cov");
+    expect(chip.classList.contains("cov-absent")).toBe(true);
+    expect(chip.classList.contains("cov-stalled")).toBe(false);
+    expect(chip.querySelector(".cov-glyph").textContent).toBe("—");
+  });
+});
+
+describe("StatusStrip coverage-stall banner (JEF-421)", () => {
+  const alert = {
+    "feed-label": "Runtime",
+    "last-observation": "2m ago",
+    message: "runtime corroboration stalled — all 2 sensor nodes went dark",
+  };
+
+  it("renders the banner as a POLITE live region (aria-live=polite, not assertive)", () => {
+    const container = mount({ "coverage-alert": alert });
+    const banner = container.querySelector(".strip-coverage-alert");
+    expect(banner, "the banner is present when a feed stalled").toBeTruthy();
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.getAttribute("aria-live")).toBe("polite");
+    expect(banner.getAttribute("aria-live")).not.toBe("assertive");
+    // It carries the feed label, the server message, and the last-observed time (all server copy).
+    expect(banner.textContent).toContain("Runtime");
+    expect(banner.textContent).toContain("stalled");
+    expect(banner.textContent).toContain("2m ago");
+  });
+
+  it("renders NO banner when the server ships no coverage-alert (never synthesized)", () => {
+    expect(mount({}).querySelector(".strip-coverage-alert")).toBeNull();
+    expect(mount({ "coverage-alert": null }).querySelector(".strip-coverage-alert")).toBeNull();
+  });
 });
 
 describe("StatusStrip headline counts", () => {

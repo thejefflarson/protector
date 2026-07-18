@@ -80,6 +80,39 @@ describe("Readiness honesty (blind nodes)", () => {
   });
 });
 
+describe("Readiness coverage-stall register (JEF-421)", () => {
+  it("renders a STALLED runtime row loud + non-green: breach keyline, ⚠ glyph, stalled word", () => {
+    const row = readinessRow("runtime-corroboration", {
+      state: "stalled",
+      "weakens-decisions": true,
+      detail:
+        "STALLED: runtime corroboration stalled — all 2 sensor nodes went dark (last observed 2m ago)",
+    });
+    const { container } = render(<ReadinessView view={readinessView([row])} />);
+    const li = container.querySelector('li[data-input="runtime-corroboration"]');
+    // The row escalates to the loud breach keyline (past the amber weakening-gap keyline).
+    expect(li.classList.contains("cov-row-stalled")).toBe(true);
+    expect(li.dataset.state).toBe("stalled");
+    // The state carries colour + glyph + word (never colour alone) — and it's the stalled register.
+    const stateWord = li.querySelector(".cov-state-word");
+    expect(stateWord.textContent).toBe("stalled");
+    expect(li.querySelector(".cov-state-glyph").textContent).toBe("⚠");
+    expect(li.querySelector(".cov-state").classList.contains("cov-stalled")).toBe(true);
+    // The last-observation time (server copy) surfaces in the detail.
+    expect(li.textContent).toContain("last observed 2m ago");
+  });
+
+  it("an ABSENT input still renders MUTED (— glyph, absent word), never the stalled register", () => {
+    const row = readinessRow("kev", { state: "absent", "weakens-decisions": true });
+    const { container } = render(<ReadinessView view={readinessView([row])} />);
+    const li = container.querySelector('li[data-input="kev"]');
+    expect(li.classList.contains("cov-row-stalled")).toBe(false);
+    expect(li.querySelector(".cov-state-word").textContent).toBe("absent");
+    expect(li.querySelector(".cov-state-glyph").textContent).toBe("—");
+    expect(li.querySelector(".cov-state").classList.contains("cov-stalled")).toBe(false);
+  });
+});
+
 describe("Readiness escaping", () => {
   it("renders an XSS node name as inert text", () => {
     window.__pwned = undefined;

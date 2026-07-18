@@ -242,6 +242,36 @@ summary:focus-visible,
 .cov-present { color: var(--cov-present); border-color: var(--cov-present); }
 .cov-degraded { color: var(--cov-degraded); border-color: var(--cov-degraded); }
 .cov-absent { color: var(--cov-absent); }
+/* JEF-421: a WAS-COVERING feed that went dark — the loud breach palette, filled so it can't read
+   as a calm absence; the ⚠ glyph + feed word carry it without relying on colour alone. Scoped to
+   `.cov` (the strip chip) so it doesn't collide with the readiness `.cov-stalled` state word. */
+.cov.cov-stalled {
+  color: var(--surface);
+  background: var(--posture-breach);
+  border-color: var(--posture-breach);
+  font-weight: var(--fw-bold);
+}
+
+/* JEF-421: the strip-level coverage-stall banner — a POLITE live region under the axes. Breach
+   keyline + a soft breach tint so a stalled fleet is unmissable, composed from the palette. */
+.strip-coverage-alert {
+  display: flex; align-items: flex-start; gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid var(--posture-breach);
+  border-left: var(--rail-strong) solid var(--posture-breach);
+  background: var(--surface);
+  color: var(--ink-1);
+  font-size: var(--fs-data); line-height: var(--lh-data);
+}
+.strip-coverage-alert-glyph { color: var(--posture-breach); font-weight: var(--fw-bold); }
+.strip-coverage-alert-body { display: flex; flex-direction: column; gap: var(--space-1); }
+.strip-coverage-alert-head {
+  color: var(--posture-breach); font-weight: var(--fw-bold);
+  letter-spacing: var(--track-micro);
+}
+.strip-coverage-alert-last { color: var(--ink-3); font-size: var(--fs-micro); line-height: var(--lh-micro); }
 
 .freshness { color: var(--ink-2); }
 .muted { color: var(--ink-3); }
@@ -779,6 +809,9 @@ summary:focus-visible,
 .cov-row:last-child { margin-bottom: 0; }
 /* a weakening input that isn't present: an amber keyline draws the eye to the gap. */
 .cov-row-gap { border-left: var(--rail-strong) solid var(--cov-degraded); }
+/* JEF-421: a STALLED runtime row escalates PAST the amber gap to the loud breach keyline — a fleet
+   that went dark is louder than a never-enabled gap. */
+.cov-row-stalled { border-left: var(--rail-strong) solid var(--posture-breach); }
 .cov-row-head {
   display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-3);
   margin-bottom: var(--space-1);
@@ -792,6 +825,8 @@ summary:focus-visible,
 .cov-present { color: var(--cov-present); }
 .cov-degraded { color: var(--cov-degraded); }
 .cov-absent { color: var(--cov-absent); }
+/* JEF-421: the stalled state word/glyph reads in the breach palette — loud, never a calm absence. */
+.cov-stalled { color: var(--posture-breach); font-weight: var(--fw-bold); }
 .cov-row-label { color: var(--ink-1); }
 .cov-weakens {
   color: var(--ink-3);

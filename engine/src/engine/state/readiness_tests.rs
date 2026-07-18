@@ -1,7 +1,9 @@
 //! Tests for the readiness aggregation (JEF-160) and the collapsed runtime-corroboration row
 //! (JEF-308). Extracted to keep `readiness.rs` under the 1,000-line cap (CLAUDE.md).
 
-use super::super::agent_liveness::{BlindReason, NodeCoverage, NodeState, RuntimeCoverage};
+use super::super::agent_liveness::{
+    BlindReason, CoverageAlert, CoverageState, NodeCoverage, NodeState, RuntimeCoverage,
+};
 use super::*;
 
 fn covered_config() -> ReadinessConfig {
@@ -62,6 +64,65 @@ fn fully_covered_model_judging_has_no_unmet_inputs() {
     assert!(!readiness.has_unmet());
     assert_eq!(readiness.unmet_count(), 0);
     assert!(!readiness.warming_up);
+}
+
+#[test]
+fn coverage_stall_escalates_the_runtime_row_to_stalled() {
+    // JEF-421: a covering fleet whose stall edge fired escalates the runtime row to `Stalled`
+    // (distinct from the per-pass Absent/Degraded), and the detail names the last-observed time.
+    let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
+    let stalled = CoverageState::Stalled(CoverageAlert {
+        feed_label: "Runtime".into(),
+        last_observation: Some("2m ago".into()),
+        message: "runtime corroboration stalled — all 1 sensor node went dark".into(),
+    });
+    let readiness = derive_readiness(
+        &covered_config(),
+        ModelHealth::Ok,
+        Some(SystemTime::now()),
+        &cov,
+    )
+    .with_coverage_stall(&stalled);
+    let row = runtime_row(&readiness);
+    assert_eq!(
+        row.state,
+        InputState::Stalled,
+        "the row escalates to stalled"
+    );
+    assert!(row.detail.contains("STALLED"));
+    assert!(
+        row.detail.contains("2m ago"),
+        "the escalated detail names the last-observed time"
+    );
+    // A stalled input is unmet (never reads as covered/present).
+    assert!(readiness.has_unmet());
+}
+
+#[test]
+fn coverage_absent_does_not_escalate_the_runtime_row() {
+    // JEF-421: the honest known-absence (Absent) never manufactures a stall — the row keeps its
+    // per-pass state, unchanged by the overlay.
+    let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
+    let before = derive_readiness(
+        &covered_config(),
+        ModelHealth::Ok,
+        Some(SystemTime::now()),
+        &cov,
+    );
+    let before_state = runtime_row(&before).state;
+    let after = derive_readiness(
+        &covered_config(),
+        ModelHealth::Ok,
+        Some(SystemTime::now()),
+        &cov,
+    )
+    .with_coverage_stall(&CoverageState::Absent);
+    assert_eq!(
+        runtime_row(&after).state,
+        before_state,
+        "an Absent register leaves the row untouched"
+    );
+    assert_ne!(runtime_row(&after).state, InputState::Stalled);
 }
 
 #[test]

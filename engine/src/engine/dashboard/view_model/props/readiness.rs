@@ -24,6 +24,9 @@ pub enum InputStateProps {
     Absent,
     /// Configured but not currently answering — a real, ambiguity-introducing gap.
     Degraded,
+    /// A WAS-COVERING input has STALLED (JEF-421) — was reporting, now fully dark past the debounce.
+    /// The loud edge, DISTINCT from `Absent` (never enabled). Serialized as `"stalled"`.
+    Stalled,
 }
 
 impl InputStateProps {
@@ -33,6 +36,7 @@ impl InputStateProps {
             InputStateProps::Present => "present",
             InputStateProps::Absent => "absent",
             InputStateProps::Degraded => "degraded",
+            InputStateProps::Stalled => "stalled",
         }
     }
 
@@ -42,6 +46,7 @@ impl InputStateProps {
             InputStateProps::Present => "\u{2713}",  // ✓
             InputStateProps::Absent => "\u{2014}",   // —
             InputStateProps::Degraded => "\u{25D0}", // ◐
+            InputStateProps::Stalled => "\u{26A0}",  // ⚠
         }
     }
 
@@ -51,6 +56,7 @@ impl InputStateProps {
             InputStateProps::Present => "present",
             InputStateProps::Absent => "absent",
             InputStateProps::Degraded => "degraded",
+            InputStateProps::Stalled => "stalled",
         }
     }
 

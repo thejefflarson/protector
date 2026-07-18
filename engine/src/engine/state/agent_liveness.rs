@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 use k8s_openapi::api::core::v1::Pod;
 use protector_behavior::AgentReport;
 
+mod stall;
+pub use stall::{CoverageAlert, CoverageStallTracker, CoverageState};
+
 /// The label the agent DaemonSet's pods carry (chart helper `protector.agentLabels`). We pick the
 /// agent's OWN pods out of the pod informer by it, so the expected-node set is exactly the nodes
 /// the scheduler placed the agent on — respecting its nodeSelector/tolerations by construction,
@@ -229,6 +232,25 @@ impl RuntimeCoverage {
             .filter(|n| matches!(n.state, NodeState::DegradedProbes { .. }))
             .map(|n| n.node.as_str())
             .collect()
+    }
+
+    /// How many expected nodes are blind — the count-only companion to [`blind_nodes`], for the
+    /// OTLP mirror (JEF-422) which needs the number, not the names.
+    ///
+    /// [`blind_nodes`]: Self::blind_nodes
+    pub fn blind_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.state.is_blind()).count()
+    }
+
+    /// How many expected nodes are reporting only partial probes — the count-only companion to
+    /// [`degraded_nodes`], for the OTLP mirror (JEF-422).
+    ///
+    /// [`degraded_nodes`]: Self::degraded_nodes
+    pub fn degraded_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|n| matches!(n.state, NodeState::DegradedProbes { .. }))
+            .count()
     }
 
     /// How many expected nodes are fully healthy (probes loaded; quiet counts).
