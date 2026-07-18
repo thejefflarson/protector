@@ -39,9 +39,10 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
     }
 }
 
-/// JEF-308: a latent / propose-only finding on a BLIND node carries the "no live sensor" caveat —
-/// its calm propose-only reading would be dishonest, so the detail says absence of a signal isn't
-/// evidence of safety. A corroborated finding, or one on a sensored node, gets no caveat.
+/// JEF-424 (from JEF-308 coverage): a latent / propose-only finding whose workload sits on a BLIND
+/// node carries the finding-level "runtime-blind on <node>" caveat — its calm propose-only reading
+/// would be dishonest (blind ≠ green), so the detail says absence of a signal isn't evidence of
+/// safety AND NAMES the node. A corroborated finding, or one on a sensored node, gets no caveat.
 #[test]
 fn latent_finding_on_a_blind_node_carries_the_caveat() {
     let mut latent = finding("workload/app/Pod/web-1", "secret/app/db", None);
@@ -54,8 +55,9 @@ fn latent_finding_on_a_blind_node_carries_the_caveat() {
     let caveat = props
         .blind_node_caveat
         .expect("a latent finding on a blind node carries the caveat");
-    assert!(caveat.contains("node-b"));
-    assert!(caveat.contains("not evidence of safety"));
+    // The caveat NAMES the blind node and reads "runtime-blind on <node>" (JEF-424).
+    assert!(caveat.contains("runtime-blind on node-b"), "{caveat}");
+    assert!(caveat.contains("not evidence of safety"), "{caveat}");
 
     // The SAME finding on a sensored node (not in the blind set) gets no caveat.
     assert!(
@@ -72,6 +74,43 @@ fn latent_finding_on_a_blind_node_carries_the_caveat() {
             .blind_node_caveat
             .is_none()
     );
+}
+
+/// JEF-424 honesty invariant: the caveat is PRESENTATION METADATA ONLY. Adding it (the finding is on
+/// a blind node) must NOT change the verdict, the proposed action (cut), or the report content — the
+/// SAME finding mapped with and without its node in the blind set is identical except for the
+/// `blind_node_caveat` field. The verdict is unchanged (ADR-0016: presentation is a view, never a
+/// gate).
+#[test]
+fn blind_node_caveat_does_not_change_the_verdict_action_or_report() {
+    let mut f = finding(
+        "workload/app/Pod/api-0",
+        "secret/app/db",
+        Some(Verdict::Refuted("internal — no exploit path".into())),
+    );
+    f.node = Some("node-x".into());
+    f.cut = Some("workload/app/Pod/api-0 -[reaches/Tcp/5432]-> secret/app/db".into());
+    let blind: HashSet<String> = ["node-x".to_string()].into_iter().collect();
+
+    let with_caveat = finding_props(&f, &[], &blind);
+    let without_caveat = finding_props(&f, &[], &no_blind());
+
+    // The caveat IS present only on the blind mapping — that is the one and only difference.
+    assert!(with_caveat.blind_node_caveat.is_some());
+    assert!(without_caveat.blind_node_caveat.is_none());
+
+    // The VERDICT is unchanged: same posture, same live-tag, same verbatim verdict summary.
+    assert_eq!(with_caveat.posture, without_caveat.posture);
+    assert_eq!(with_caveat.live_tag, without_caveat.live_tag);
+    assert_eq!(with_caveat.verdict_summary, without_caveat.verdict_summary);
+    // The proposed ACTION (cut) is unchanged.
+    assert_eq!(with_caveat.cut, without_caveat.cut);
+    assert_eq!(with_caveat.disposition, without_caveat.disposition);
+    // The rest of the REPORT (evidence, paths, judgement) is byte-for-byte identical: clearing the
+    // one caveat field on the blind mapping makes the two props fully equal.
+    let mut normalized = with_caveat.clone();
+    normalized.blind_node_caveat = None;
+    assert_eq!(normalized, without_caveat);
 }
 
 #[test]
