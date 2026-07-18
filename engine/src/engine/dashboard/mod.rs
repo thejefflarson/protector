@@ -91,7 +91,11 @@ impl DashboardState {
         let health: ModelHealth = self.findings.model_health();
         let last_pass: Option<SystemTime> = self.findings.last_pass();
         let runtime = self.findings.runtime_coverage();
+        // Overlay the cross-pass coverage-stall register (JEF-421): a covering runtime feed that has
+        // gone dark past the debounce escalates the runtime row to `stalled`. Per-pass derivation
+        // can't see the edge, so it's folded in here from the stall tracker's decided state.
         derive_readiness(&config, health, last_pass, &runtime)
+            .with_coverage_stall(&self.findings.coverage_state())
     }
 
     /// Build the persistent status strip carrying the TRUE findings counts (brief §3/§4). The
@@ -110,7 +114,12 @@ impl DashboardState {
             self.findings.last_pass(),
         );
         let (breach, uncertain) = self.signing_regression_counts();
-        strip.with_signing_regressions(breach, uncertain)
+        // Overlay the cross-pass coverage-stall register (JEF-421) so a stalled runtime feed reads
+        // loud (and forbids green) on EVERY tab, exactly like a standing signing regression.
+        let alert = view_model::coverage_stall_alert(&self.findings.coverage_state());
+        strip
+            .with_signing_regressions(breach, uncertain)
+            .with_coverage_stall(alert)
     }
 
     /// The standing signing-regression counts `(established, cold)` from the admission-decision log
@@ -136,7 +145,11 @@ impl DashboardState {
         // admission-decision log's counts so the Findings strip is non-green when a regression
         // stands too (the honesty invariant holds on every tab).
         let (breach, uncertain) = self.signing_regression_counts();
-        view.strip = view.strip.with_signing_regressions(breach, uncertain);
+        let alert = view_model::coverage_stall_alert(&self.findings.coverage_state());
+        view.strip = view
+            .strip
+            .with_signing_regressions(breach, uncertain)
+            .with_coverage_stall(alert);
         view
     }
 

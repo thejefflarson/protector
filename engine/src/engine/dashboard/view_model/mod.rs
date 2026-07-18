@@ -21,11 +21,11 @@ mod strip;
 use std::time::SystemTime;
 
 use crate::engine::policy_log::PolicyDecisionRecord;
-use crate::engine::state::{Finding, Judgement, Readiness, Report, ReversionRecord};
+use crate::engine::state::{CoverageState, Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
     ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingProps, FindingsViewProps, Posture,
-    ReadinessViewProps, StatusStripProps,
+    ReadinessViewProps, StatusStripProps, StripCoverageAlert,
 };
 
 /// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
@@ -151,4 +151,21 @@ pub fn build_admission_view(
 /// pipeline. Pure given its input.
 pub fn signing_regression_counts(rows: &[PolicyDecisionRecord]) -> (usize, usize) {
     signing_inventory::counts(rows)
+}
+
+/// Map the server-derived coverage-stall register (JEF-421) into the strip-level `coverage-alert`
+/// banner payload — `Some` ONLY for [`CoverageState::Stalled`] (a covering feed went dark past the
+/// debounce). Every other register (`Covered`/`Degraded`/`Absent`) yields `None`: the stall banner
+/// is exclusively the loud was-covering → now-silent edge, never the honest known-absence. The caller
+/// folds the result into the strip via [`StatusStripProps::with_coverage_stall`], which also marks the
+/// matching coverage chip stalled so the strip can never read green while a feed is dark.
+pub fn coverage_stall_alert(state: &CoverageState) -> Option<StripCoverageAlert> {
+    match state {
+        CoverageState::Stalled(alert) => Some(StripCoverageAlert {
+            feed_label: alert.feed_label.clone(),
+            last_observation: alert.last_observation.clone(),
+            message: alert.message.clone(),
+        }),
+        CoverageState::Covered | CoverageState::Degraded | CoverageState::Absent => None,
+    }
 }

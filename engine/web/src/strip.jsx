@@ -40,8 +40,37 @@ export function StatusStrip({ strip }) {
           <span class="axis freshness muted">no pass yet</span>
         )}
       </div>
+      <CoverageAlert alert={strip["coverage-alert"]} />
       <Headline strip={strip} />
     </header>
+  );
+}
+
+/**
+ * The strip-level coverage-stall banner (JEF-421): shown ONLY when the server decided a covering
+ * feed STALLED (went dark past the debounce) — the client never synthesizes it. It is a POLITE live
+ * region (`role="status" aria-live="polite"`, NOT assertive) so a stall is announced without hijacking
+ * a screen reader mid-utterance. All text is server-decided copy, auto-escaped by Preact.
+ */
+function CoverageAlert({ alert }) {
+  if (!alert) return null;
+  return (
+    <div class="strip-coverage-alert" role="status" aria-live="polite">
+      <span class="strip-coverage-alert-glyph" aria-hidden="true">
+        {"⚠"}
+      </span>
+      <span class="strip-coverage-alert-body">
+        <span class="strip-coverage-alert-head">
+          {alert["feed-label"]} coverage stalled
+        </span>
+        <span class="strip-coverage-alert-msg">{alert.message}</span>
+        {alert["last-observation"] ? (
+          <span class="strip-coverage-alert-last">
+            last observed {alert["last-observation"]}
+          </span>
+        ) : null}
+      </span>
+    </div>
   );
 }
 
@@ -132,13 +161,19 @@ function CoverageAxes({ coverage }) {
   );
 }
 
-/** One coverage chip. present / degraded / absent are distinct AND carry a glyph + feed word. */
+/**
+ * One coverage chip. stalled / present / degraded / absent are DISTINCT AND carry a glyph + feed
+ * word (never colour alone). `stalled` (JEF-421) is the LOUD, server-decided was-covering → now-dark
+ * edge — rendered in the breach palette with a ⚠, checked FIRST so it never reads as a calm absence.
+ */
 function CoverageChip({ chip }) {
-  const { cls, glyph } = chip.present
-    ? { cls: "cov cov-present", glyph: "✓" } // ✓
-    : chip.degraded
-      ? { cls: "cov cov-degraded", glyph: "◐" } // ◐
-      : { cls: "cov cov-absent", glyph: "—" }; // —
+  const { cls, glyph } = chip.stalled
+    ? { cls: "cov cov-stalled", glyph: "⚠" } // ⚠ — loud
+    : chip.present
+      ? { cls: "cov cov-present", glyph: "✓" } // ✓
+      : chip.degraded
+        ? { cls: "cov cov-degraded", glyph: "◐" } // ◐
+        : { cls: "cov cov-absent", glyph: "—" }; // —
   return (
     <span class={cls}>
       <span class="cov-label">{chip.label}</span>

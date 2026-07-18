@@ -52,7 +52,7 @@ pub use signing::{
     RegressionKind, RepoStrength, SignerProps, SigningEnforcement, SigningPosture,
     SigningRegressionProps, SigningRepoProps, SigningRowProps,
 };
-pub use status::{CoverageChip, StatusStripProps, Tab};
+pub use status::{CoverageChip, StatusStripProps, StripCoverageAlert, Tab};
 
 #[cfg(test)]
 mod serialize_tests;

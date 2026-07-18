@@ -33,6 +33,11 @@ pub struct StatusStripProps {
     pub model_attached: bool,
     /// Coverage chips for the enrichment feeds (KEV/EPSS/runtime corroboration).
     pub coverage: Vec<CoverageChip>,
+    /// The strip-level **coverage-alert** (JEF-421) — `Some` ONLY when a covering runtime feed has
+    /// STALLED (was corroborating → now fully dark, past the debounce). Server-derived: the client
+    /// renders it verbatim as the `.strip-coverage-alert` banner and NEVER synthesizes it. `None`
+    /// (the common case) means no feed has stalled, so no banner is shown.
+    pub coverage_alert: Option<StripCoverageAlert>,
     /// Human "last pass NNs ago", or `None` before the first pass.
     pub last_pass: Option<String>,
     /// The headline counts (breach / awaiting / uncertain / cleared) for the findings summary
@@ -64,14 +69,17 @@ impl serde::Serialize for StatusStripProps {
     /// drift from the derivation the (now-client) strip render uses.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        // 14 raw fields + 3 derived honesty tokens (all-clear / watching / judging-state).
-        let mut s = serializer.serialize_struct("StatusStripProps", 18)?;
+        // 15 raw fields + 3 derived honesty tokens (all-clear / watching / judging-state).
+        let mut s = serializer.serialize_struct("StatusStripProps", 19)?;
         s.serialize_field("cluster", &self.cluster)?;
         s.serialize_field("armed", &self.armed)?;
         s.serialize_field("model-judging", &self.model_judging)?;
         s.serialize_field("warming-up", &self.warming_up)?;
         s.serialize_field("model-attached", &self.model_attached)?;
         s.serialize_field("coverage", &self.coverage)?;
+        // The stall banner (JEF-421) — additive; `None` (no stall) still serializes as `null` so the
+        // client's `#[serde(default)]`-shaped read is uniform and never has to guess.
+        s.serialize_field("coverage-alert", &self.coverage_alert)?;
         s.serialize_field("last-pass", &self.last_pass)?;
         s.serialize_field("breach-count", &self.breach_count)?;
         s.serialize_field("awaiting-count", &self.awaiting_count)?;
@@ -107,6 +115,28 @@ impl StatusStripProps {
         self
     }
 
+    /// Overlay the coverage-stall register (JEF-421): mark the `Runtime` coverage chip STALLED (the
+    /// loud, was-covering → now-dark edge) and attach the strip-level `coverage-alert` banner. The
+    /// stall is SERVER-decided (`state::CoverageState::Stalled`); the caller (`DashboardState`) maps
+    /// it to `(alert)` and folds it in here so the pure strip builders keep their minimal signatures.
+    /// `None` is a no-op (no feed stalled), so the common case leaves the strip untouched.
+    ///
+    /// Marking the chip stalled forbids the green all-clear via [`fully_covered`](Self::fully_covered)
+    /// — a fleet that went dark can never read green.
+    pub fn with_coverage_stall(mut self, alert: Option<StripCoverageAlert>) -> Self {
+        if let Some(alert) = alert {
+            for chip in &mut self.coverage {
+                if chip.label == alert.feed_label {
+                    chip.stalled = true;
+                    chip.present = false;
+                    chip.degraded = false;
+                }
+            }
+            self.coverage_alert = Some(alert);
+        }
+        self
+    }
+
     /// Whether any signing regression stands (established or cold) — the honesty side: a standing
     /// regression forbids the green all-clear (JEF-264 acceptance criterion).
     pub fn has_signing_regression(&self) -> bool {
@@ -124,7 +154,7 @@ impl StatusStripProps {
     /// A feed that is simply absent (never deployed, e.g. the optional eBPF agent) is an honest
     /// known-absence, not a degradation, so it does not by itself block the all-clear.
     pub fn fully_covered(&self) -> bool {
-        self.model_is_up() && self.coverage.iter().all(|c| !c.degraded)
+        self.model_is_up() && self.coverage.iter().all(|c| !c.degraded && !c.stalled)
     }
 
     /// Whether the overall **green/all-clear** is HONEST: the model has affirmatively cleared
@@ -200,6 +230,26 @@ pub struct CoverageChip {
     pub present: bool,
     /// `true` when the feed is degraded (configured but not answering) — distinct from absent.
     pub degraded: bool,
+    /// `true` when a WAS-COVERING feed has STALLED (JEF-421) — went fully dark past the debounce.
+    /// Server-derived and DISTINCT from `degraded` (partial) and absent (never-enabled): the loud
+    /// register. The client renders the chip in `--posture-breach` with a ⚠ glyph. Additive — an
+    /// older client that doesn't read it still sees the chip non-present (honest).
+    #[serde(default)]
+    pub stalled: bool,
+}
+
+/// The strip-level **coverage-alert** banner payload (JEF-421), serialized under `coverage-alert`
+/// and present ONLY when a covering feed stalled. Untrusted strings ship raw (the client escapes).
+/// The props-layer mirror of `state::CoverageAlert`, so the wire shape lives with the wire type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct StripCoverageAlert {
+    /// The stalled feed's human label (`Runtime`).
+    pub feed_label: String,
+    /// A human "N ago" for when the sensors were last observed live, or `null`.
+    pub last_observation: Option<String>,
+    /// The honest one-line message (how many of how many nodes went dark).
+    pub message: String,
 }
 
 /// Which top-level tab is active (the 4-tab nav shell). **Action** sits second (the old Trust

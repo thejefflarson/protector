@@ -17,7 +17,8 @@ use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::reason::proof::ProvenChain;
 
 use super::agent_liveness::{
-    AgentLivenessStore, RuntimeCoverage, derive_runtime_coverage, expected_agent_nodes,
+    AgentLivenessStore, CoverageStallTracker, CoverageState, RuntimeCoverage,
+    derive_runtime_coverage, expected_agent_nodes,
 };
 use super::evidence::EntryEvidence;
 use super::recency::RecencyInfo;
@@ -241,6 +242,15 @@ pub struct Findings {
     /// agent-liveness beacons. The readiness aggregation reads it to build the collapsed
     /// "Runtime corroboration" row. Defaults to empty (no expected nodes) until the first pass.
     runtime_coverage: Mutex<RuntimeCoverage>,
+    /// The cross-pass coverage-stall tracker (JEF-421): remembers whether the runtime fleet was ever
+    /// corroborating and how long it has been fully dark, so the loud `stalled` edge fires only on a
+    /// was-covering → now-silent transition held past the debounce. Updated in lock-step with
+    /// `runtime_coverage` each pass.
+    stall_tracker: Mutex<CoverageStallTracker>,
+    /// The most recent server-derived coarse coverage register (JEF-421) — the strip chip's
+    /// covered/degraded/absent/stalled reading, decided by the [`stall_tracker`](Self::stall_tracker)
+    /// this pass. Defaults to `Absent` (coverage not yet observed).
+    coverage_state: Mutex<CoverageState>,
 }
 
 impl Findings {
@@ -284,8 +294,63 @@ impl Findings {
     /// DaemonSet's pods in `pods` — the scheduler already honoured the agent's nodeSelector/
     /// tolerations, so a node the agent isn't scheduled on is out-of-scope, never blind.
     pub fn stamp_runtime_coverage(&self, liveness: &AgentLivenessStore, pods: &[Pod]) {
+        self.stamp_runtime_coverage_at(liveness, pods, SystemTime::now());
+    }
+
+    /// The `now`-injected seam behind [`stamp_runtime_coverage`](Self::stamp_runtime_coverage) — the
+    /// deterministic clock the stall-edge tests drive. Besides publishing this pass's per-node
+    /// coverage, it advances the cross-pass [`CoverageStallTracker`] (JEF-421): when a was-covering
+    /// fleet has been fully dark past the debounce, the derived [`CoverageState::Stalled`] is stamped
+    /// and a loud `tracing::warn!` is emitted ONCE on the transition into the stall.
+    pub fn stamp_runtime_coverage_at(
+        &self,
+        liveness: &AgentLivenessStore,
+        pods: &[Pod],
+        now: SystemTime,
+    ) {
         let expected = expected_agent_nodes(pods);
-        self.set_runtime_coverage(derive_runtime_coverage(&expected, &liveness.snapshot()));
+        let coverage = derive_runtime_coverage(&expected, &liveness.snapshot());
+
+        let state = self
+            .stall_tracker
+            .lock()
+            .expect("stall-tracker mutex poisoned")
+            .observe(&coverage, now);
+
+        // Swap in the new register under one lock, keeping the previous one to fire the warn on the
+        // EDGE only (not every pass while stalled): a was-covering fleet has JUST gone dark.
+        let mut cell = self
+            .coverage_state
+            .lock()
+            .expect("coverage-state mutex poisoned");
+        let was_stalled = matches!(&*cell, CoverageState::Stalled(_));
+        if let CoverageState::Stalled(alert) = &state
+            && !was_stalled
+        {
+            let blind = coverage.blind_nodes().len();
+            tracing::warn!(
+                feed = %alert.feed_label,
+                blind,
+                expected = coverage.expected_count(),
+                last_observation = ?alert.last_observation,
+                "runtime-observation coverage degraded ({blind} of {} nodes blind — protector's own sensors went dark)",
+                coverage.expected_count(),
+            );
+        }
+        *cell = state;
+        drop(cell);
+
+        self.set_runtime_coverage(coverage);
+    }
+
+    /// The most recent server-derived coarse coverage register (JEF-421) — covered / degraded /
+    /// absent / stalled, decided by the stall tracker on the last pass. `Absent` until the first
+    /// pass stamps coverage.
+    pub fn coverage_state(&self) -> CoverageState {
+        self.coverage_state
+            .lock()
+            .expect("coverage-state mutex poisoned")
+            .clone()
     }
 
     /// The current findings, each with its verdict resolved from the shared verdict

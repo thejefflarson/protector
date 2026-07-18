@@ -34,6 +34,9 @@ fn coverage_chips(readiness: &Readiness) -> Vec<CoverageChip> {
                 label: label.to_string(),
                 present: row.state == InputState::Present,
                 degraded: row.state == InputState::Degraded,
+                // The stall register is a CROSS-PASS edge the readiness row can't see (it's derived
+                // per-pass); it's overlaid later via `StatusStripProps::with_coverage_stall`.
+                stalled: false,
             })
         })
         .collect()
@@ -70,6 +73,8 @@ pub(super) fn status_strip(
         warming_up: readiness.warming_up,
         model_attached: readiness.model_attached(),
         coverage: coverage_chips(readiness),
+        // Overlaid later by the caller with the cross-pass stall register (JEF-421).
+        coverage_alert: None,
         last_pass: last_pass.map(last_pass_age),
         breach_count,
         awaiting_count,
@@ -96,9 +101,10 @@ fn last_pass_age(at: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::dashboard::view_model::coverage_stall_alert;
     use crate::engine::state::{
-        BlindReason, ModelHealth, NodeCoverage, NodeState, ReadinessConfig, RuntimeCoverage,
-        derive_readiness,
+        BlindReason, CoverageAlert, CoverageState, ModelHealth, NodeCoverage, NodeState,
+        ReadinessConfig, RuntimeCoverage, derive_readiness,
     };
 
     fn covered() -> ReadinessConfig {
@@ -176,6 +182,63 @@ mod tests {
             !strip.all_clear(),
             "a degraded feed forbids the green all-clear"
         );
+    }
+
+    /// JEF-421: a covering Runtime feed that STALLED (server-derived `CoverageState::Stalled`)
+    /// marks the chip stalled, forbids the green all-clear, ships the strip-level coverage-alert —
+    /// and leaves the JUDGING axis independent (the model is still judging; a coverage stall must
+    /// NOT downgrade "model judging" to blind).
+    #[test]
+    fn a_stalled_runtime_feed_is_loud_but_leaves_judging_independent() {
+        let cov = coverage(&[("node-a", NodeState::Healthy { signals: 1 })]);
+        let stalled = CoverageState::Stalled(CoverageAlert {
+            feed_label: "Runtime".into(),
+            last_observation: Some("2m ago".into()),
+            message: "runtime corroboration stalled — all 1 sensor node went dark".into(),
+        });
+        // The readiness overlay escalates the runtime row; the strip overlay marks the chip + banner.
+        let r = derive_readiness(&covered(), ModelHealth::Ok, Some(SystemTime::now()), &cov)
+            .with_coverage_stall(&stalled);
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
+            .with_coverage_stall(coverage_stall_alert(&stalled));
+
+        let runtime = strip
+            .coverage
+            .iter()
+            .find(|c| c.label == "Runtime")
+            .unwrap();
+        assert!(runtime.stalled, "the covering feed reads stalled");
+        assert!(!runtime.present && !runtime.degraded);
+        assert!(
+            !strip.all_clear(),
+            "a stalled feed forbids the green all-clear"
+        );
+        assert!(strip.coverage_alert.is_some(), "the banner ships");
+        // The JUDGING axis is independent: the model is still up/judging (not blind/no-model).
+        assert!(
+            strip.model_is_up(),
+            "a coverage stall does not downgrade model judging"
+        );
+        assert_ne!(strip.judging_state(), "blind");
+        assert_ne!(strip.judging_state(), "no-model");
+    }
+
+    /// JEF-421: an ABSENT (never-enabled) coverage feed stays muted/honest — no stall banner, and
+    /// its known-absence does NOT by itself forbid the green all-clear.
+    #[test]
+    fn absent_coverage_is_muted_not_stalled() {
+        // A never-covering fleet ⇒ CoverageState::Absent ⇒ no alert overlay.
+        let absent = CoverageState::Absent;
+        assert!(coverage_stall_alert(&absent).is_none());
+        // With an all-healthy fleet + Absent state overlay, the strip stays all-clear (absent state
+        // makes no change — the honest known-absence never manufactures a stall).
+        let cov = coverage(&[("node-a", NodeState::Healthy { signals: 1 })]);
+        let r = derive_readiness(&covered(), ModelHealth::Ok, Some(SystemTime::now()), &cov)
+            .with_coverage_stall(&absent);
+        let strip = status_strip("prod".into(), &r, Some(SystemTime::now()), 0, 0, 0, 3, 0)
+            .with_coverage_stall(coverage_stall_alert(&absent));
+        assert!(strip.coverage_alert.is_none());
+        assert!(strip.all_clear());
     }
 
     #[test]
