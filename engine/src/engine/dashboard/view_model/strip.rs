@@ -34,6 +34,9 @@ fn coverage_chips(readiness: &Readiness) -> Vec<CoverageChip> {
                 label: label.to_string(),
                 present: row.state == InputState::Present,
                 degraded: row.state == InputState::Degraded,
+                // Expected-but-wholly-dark this pass (cold start / crash-loop): loud, forbids green,
+                // DISTINCT from absent (never enabled). The per-pass companion to `stalled`.
+                blind: row.state == InputState::Blind,
                 // The stall register is a CROSS-PASS edge the readiness row can't see (it's derived
                 // per-pass); it's overlaid later via `StatusStripProps::with_coverage_stall`.
                 stalled: false,

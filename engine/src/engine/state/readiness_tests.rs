@@ -349,8 +349,9 @@ fn probes_failed_node_reads_blind_despite_reporting() {
         &cov,
     );
     let row = runtime_row(&readiness);
-    // The single expected node is dark ⇒ wholly BLIND (Absent).
-    assert_eq!(row.state, InputState::Absent);
+    // The single EXPECTED node is dark ⇒ wholly BLIND (distinct from Absent/never-enabled — it
+    // forbids the green all-clear).
+    assert_eq!(row.state, InputState::Blind);
     assert!(row.detail.contains("BLIND"));
     let a = row.nodes.iter().find(|n| n.node == "node-a").unwrap();
     assert!(a.detail.contains("probes failed"));

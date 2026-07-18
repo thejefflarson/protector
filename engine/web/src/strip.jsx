@@ -168,12 +168,14 @@ function CoverageAxes({ coverage }) {
  */
 function CoverageChip({ chip }) {
   const { cls, glyph } = chip.stalled
-    ? { cls: "cov cov-stalled", glyph: "⚠" } // ⚠ — loud
-    : chip.present
-      ? { cls: "cov cov-present", glyph: "✓" } // ✓
-      : chip.degraded
-        ? { cls: "cov cov-degraded", glyph: "◐" } // ◐
-        : { cls: "cov cov-absent", glyph: "—" }; // —
+    ? { cls: "cov cov-stalled", glyph: "⚠" } // ⚠ — loud (was covering → dark)
+    : chip.blind
+      ? { cls: "cov cov-blind", glyph: "●" } // ● — loud (expected fleet wholly dark this pass)
+      : chip.present
+        ? { cls: "cov cov-present", glyph: "✓" } // ✓
+        : chip.degraded
+          ? { cls: "cov cov-degraded", glyph: "◐" } // ◐
+          : { cls: "cov cov-absent", glyph: "—" }; // —
   return (
     <span class={cls}>
       <span class="cov-label">{chip.label}</span>

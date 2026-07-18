@@ -251,6 +251,15 @@ summary:focus-visible,
   border-color: var(--posture-breach);
   font-weight: var(--fw-bold);
 }
+/* An EXPECTED feed wholly dark this pass (cold start / crash-loop) — same loud breach palette as
+   stalled (both mean "no live sensor on an expected fleet"), so it can never read as a calm absence.
+   The ● glyph + feed word carry it without relying on colour alone. */
+.cov.cov-blind {
+  color: var(--surface);
+  background: var(--posture-breach);
+  border-color: var(--posture-breach);
+  font-weight: var(--fw-bold);
+}
 
 /* JEF-421: the strip-level coverage-stall banner — a POLITE live region under the axes. Breach
    keyline + a soft breach tint so a stalled fleet is unmissable, composed from the palette. */
@@ -827,6 +836,8 @@ summary:focus-visible,
 .cov-absent { color: var(--cov-absent); }
 /* JEF-421: the stalled state word/glyph reads in the breach palette — loud, never a calm absence. */
 .cov-stalled { color: var(--posture-breach); font-weight: var(--fw-bold); }
+/* An expected-but-wholly-dark feed reads loud too — same breach palette as stalled. */
+.cov-blind { color: var(--posture-breach); font-weight: var(--fw-bold); }
 .cov-row-label { color: var(--ink-1); }
 .cov-weakens {
   color: var(--ink-3);
