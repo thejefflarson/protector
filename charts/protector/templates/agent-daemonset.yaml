@@ -26,6 +26,18 @@ metadata:
   labels:
     {{- include "protector.agentLabels" . | nindent 4 }}
 spec:
+  # A stuck node (cordoned, disk-pressure, a wedged kernel that won't unload the old
+  # eBPF probes) must NOT stall the whole roll. The DaemonSet default —
+  # maxUnavailable:1, maxSurge:0 — waits for each node's old pod to terminate before the
+  # next starts, so ONE unkillable pod drops runtime coverage to zero fleet-wide until an
+  # operator intervenes. maxSurge:1 lets a replacement pod come up on healthy nodes
+  # WITHOUT first tearing down the old one, so the roll proceeds past the bad node instead
+  # of blocking on it. Surge (not a higher maxUnavailable) keeps every reachable node
+  # observed throughout the upgrade — coverage never dips below the running fleet.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.agent.maxSurge }}
   selector:
     matchLabels:
       {{- include "protector.agentSelectorLabels" . | nindent 6 }}
