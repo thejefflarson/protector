@@ -24,6 +24,7 @@ fn all_clear_strip() -> StatusStripProps {
             label: "kev".into(),
             present: true,
             degraded: false,
+            blind: false,
             stalled: false,
         }],
         coverage_alert: None,
@@ -204,6 +205,7 @@ fn runtime_covered_strip() -> StatusStripProps {
         label: "Runtime".into(),
         present: true,
         degraded: false,
+        blind: false,
         stalled: false,
     }];
     strip
@@ -273,6 +275,53 @@ fn no_stall_ships_a_null_coverage_alert() {
         v["coverage-alert"],
         json!(null),
         "no stall means no banner — the client never synthesizes one"
+    );
+}
+
+#[test]
+fn a_wholly_blind_expected_feed_forbids_the_green_token() {
+    // The cold-start / crash-loop hole the security audit found: an EXPECTED runtime fleet that is
+    // wholly dark this pass (never `was_covering`, so no stall edge fires) must NOT read green. It is
+    // DISTINCT from an `absent` feed (never enabled), which is an honest known-absence that may stay
+    // green. Before the fix, both collapsed to `present:false` and `fully_covered` ignored it → green.
+    let mut blind = all_clear_strip();
+    blind.coverage = vec![CoverageChip {
+        label: "Runtime".into(),
+        present: false,
+        degraded: false,
+        blind: true,
+        stalled: false,
+    }];
+    assert!(
+        !blind.all_clear(),
+        "a wholly-blind EXPECTED feed must forbid the green all-clear"
+    );
+    assert_ne!(
+        blind.judging_state(),
+        "all-clear",
+        "and its judging token is not the green one"
+    );
+    let v = serde_json::to_value(&blind).unwrap();
+    assert_eq!(
+        v["coverage"][0]["blind"],
+        json!(true),
+        "the chip reads blind on the wire"
+    );
+    assert_eq!(v["all-clear"], json!(false));
+
+    // Contrast — an `absent` feed (never enabled, expected==0) is an honest known-absence and DOES
+    // NOT block the all-clear: the exact distinction the fix preserves.
+    let mut absent = all_clear_strip();
+    absent.coverage = vec![CoverageChip {
+        label: "Runtime".into(),
+        present: false,
+        degraded: false,
+        blind: false,
+        stalled: false,
+    }];
+    assert!(
+        absent.all_clear(),
+        "an absent (never-enabled) feed is an honest known-absence — it does not block the all-clear"
     );
 }
 

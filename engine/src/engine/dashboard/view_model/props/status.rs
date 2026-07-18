@@ -130,6 +130,9 @@ impl StatusStripProps {
                     chip.stalled = true;
                     chip.present = false;
                     chip.degraded = false;
+                    // `stalled` (was-covering→dark) is the more specific loud register; it subsumes
+                    // the per-pass `blind`. Both forbid green, so this never re-opens the all-clear.
+                    chip.blind = false;
                 }
             }
             self.coverage_alert = Some(alert);
@@ -154,7 +157,11 @@ impl StatusStripProps {
     /// A feed that is simply absent (never deployed, e.g. the optional eBPF agent) is an honest
     /// known-absence, not a degradation, so it does not by itself block the all-clear.
     pub fn fully_covered(&self) -> bool {
-        self.model_is_up() && self.coverage.iter().all(|c| !c.degraded && !c.stalled)
+        self.model_is_up()
+            && self
+                .coverage
+                .iter()
+                .all(|c| !c.degraded && !c.stalled && !c.blind)
     }
 
     /// Whether the overall **green/all-clear** is HONEST: the model has affirmatively cleared
@@ -230,6 +237,12 @@ pub struct CoverageChip {
     pub present: bool,
     /// `true` when the feed is degraded (configured but not answering) — distinct from absent.
     pub degraded: bool,
+    /// `true` when the feed is EXPECTED but wholly dark this pass (cold start / crash-loop — every
+    /// expected node blind, never `was_covering` so the stall edge can't catch it). Loud, DISTINCT
+    /// from `absent` (never enabled). Like `stalled`, it FORBIDS the green all-clear
+    /// ([`fully_covered`](StatusStripProps::fully_covered)) — a wholly-dark expected fleet is not green.
+    #[serde(default)]
+    pub blind: bool,
     /// `true` when a WAS-COVERING feed has STALLED (JEF-421) — went fully dark past the debounce.
     /// Server-derived and DISTINCT from `degraded` (partial) and absent (never-enabled): the loud
     /// register. The client renders the chip in `--posture-breach` with a ⚠ glyph. Additive — an

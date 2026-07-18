@@ -24,6 +24,10 @@ pub enum InputStateProps {
     Absent,
     /// Configured but not currently answering — a real, ambiguity-introducing gap.
     Degraded,
+    /// EXPECTED but wholly dark this pass — configured with expected nodes, every one blind. Loud,
+    /// DISTINCT from `Absent` (never enabled, may stay green) and `Stalled` (the cross-pass edge).
+    /// Serialized as `"blind"`; forbids the green all-clear.
+    Blind,
     /// A WAS-COVERING input has STALLED (JEF-421) — was reporting, now fully dark past the debounce.
     /// The loud edge, DISTINCT from `Absent` (never enabled). Serialized as `"stalled"`.
     Stalled,
@@ -36,6 +40,7 @@ impl InputStateProps {
             InputStateProps::Present => "present",
             InputStateProps::Absent => "absent",
             InputStateProps::Degraded => "degraded",
+            InputStateProps::Blind => "blind",
             InputStateProps::Stalled => "stalled",
         }
     }
@@ -46,6 +51,7 @@ impl InputStateProps {
             InputStateProps::Present => "\u{2713}",  // ✓
             InputStateProps::Absent => "\u{2014}",   // —
             InputStateProps::Degraded => "\u{25D0}", // ◐
+            InputStateProps::Blind => "\u{25CF}",    // ● — wholly dark
             InputStateProps::Stalled => "\u{26A0}",  // ⚠
         }
     }
@@ -56,6 +62,7 @@ impl InputStateProps {
             InputStateProps::Present => "present",
             InputStateProps::Absent => "absent",
             InputStateProps::Degraded => "degraded",
+            InputStateProps::Blind => "blind",
             InputStateProps::Stalled => "stalled",
         }
     }

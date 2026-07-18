@@ -30,6 +30,12 @@ pub enum InputState {
     /// Configured but not currently healthy — e.g. the model is attached but its last call
     /// timed out, or signals were expected this pass but none arrived.
     Degraded,
+    /// EXPECTED but wholly dark — the input IS configured (nodes are expected) and EVERY expected
+    /// node is blind this pass. DISTINCT from `Absent` (never enabled — an honest known-absence that
+    /// may stay green) and from `Stalled` (the cross-pass was-covering→dark edge): a per-pass "the
+    /// sensor fleet exists but has no live signal right now", which must FORBID the green all-clear.
+    /// This is the cold-start / crash-loop case the stall edge can't catch (never `was_covering`).
+    Blind,
     /// A WAS-COVERING input has STALLED (JEF-421) — it was reporting and has now gone fully dark
     /// (held past the debounce). The loud, cross-pass edge: DISTINCT from `Absent` (never enabled)
     /// and `Degraded` (partial). Applied only to the runtime-corroboration row, and only by the
@@ -471,10 +477,11 @@ fn runtime_corroboration_row(
         );
     }
 
-    // Every expected node is dark → wholly blind.
+    // Every expected node is dark → wholly blind. DISTINCT from Absent (never enabled): the fleet
+    // IS expected, it just has no live sensor right now — must forbid the green all-clear.
     if blind.len() == expected {
         return (
-            InputState::Absent,
+            InputState::Blind,
             format!(
                 "BLIND: all {expected} expected node{} dark ({}) — corroboration has no live sensor",
                 plural(expected as u64),
