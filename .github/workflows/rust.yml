@@ -53,6 +53,7 @@ jobs:
         # starting from the previous lockfile). sccache is the fallback for real misses.
         shared-key: protector
         cache-all-crates: "true"
+        cache-targets: false
     - name: Install sccache
       # --force: rust-cache restores cargo's "already installed" metadata on a warm
       # cache, but not the binary, so a plain binstall skips and sccache is absent
@@ -102,6 +103,7 @@ jobs:
         # Same shared-key as `lint` so both jobs restore the one warm target/.
         shared-key: protector
         cache-all-crates: "true"
+        cache-targets: false
     - name: Install sccache
       run: cargo binstall --no-confirm --force sccache
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
