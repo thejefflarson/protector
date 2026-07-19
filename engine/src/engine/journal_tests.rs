@@ -293,30 +293,26 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
     }
 }
 
-/// JEF-234 — while an entry backs off, the resolved posture keeps its last DECISIVE
-/// verdict (no regression to "uncertain"), and once the model recovers a decisive verdict
-/// is cached and shown. We can't fast-forward the injected clock across `process()` here,
-/// so we assert the no-regression display property directly: a decisive verdict shows, and
-/// a same-evidence Uncertain re-judge attempt does not blank or downgrade it.
+/// JEF-445 — the model's own positive (`Exploitable`) is RE-VERIFIED every pass; it is never
+/// served from the verdict cache, so a one-time temp-0 tail-flip can't freeze into a permanent
+/// false breach. With a model that keeps affirming the breach, every pass re-judges (one model
+/// call per pass, NOT one total) and the exploitable verdict stays shown — proving the re-verify
+/// is continuous, not a cache hit. (A NEGATIVE decisive verdict still caches — see the JEF-301
+/// replay tests — this re-verify is scoped to the fabricable positive.)
 #[tokio::test]
-async fn backing_off_entry_keeps_showing_the_last_decisive_verdict() {
-    // First call decisive, every later call Uncertain — a model that answered once then
-    // went down. The first pass (CVE present) judges decisively; the second pass over the
-    // SAME evidence is a cache HIT (decisive verdicts ARE cached), so it never re-calls —
-    // proving the decisive path's correctness is unchanged by the backoff gate.
+async fn exploitable_is_reverified_every_pass_not_cached() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine_with_adjudicator(Box::new(RecoversAfter {
         calls: calls.clone(),
-        down_for: 0, // decisive immediately
+        down_for: 0, // always decisive Exploitable
     }));
-    engine.process(&exposed_snapshot(true)).await;
-    for _ in 0..5 {
+    for _ in 0..6 {
         engine.process(&exposed_snapshot(true)).await;
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        1,
-        "a decisive verdict is cached: the same evidence is never re-judged"
+        6,
+        "an Exploitable is re-verified every pass (JEF-445), never served from the cache"
     );
     assert!(
         engine
@@ -326,7 +322,7 @@ async fn backing_off_entry_keeps_showing_the_last_decisive_verdict() {
             .any(|f| f.breach_relevant
                 && f.verdict.as_ref().map(|v| v.summary()).as_deref()
                     == Some("exploitable — RCE reaches the secret")),
-        "the decisive verdict is shown and stays shown"
+        "the re-affirmed exploitable verdict stays shown"
     );
 }
 
@@ -380,22 +376,15 @@ fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
     );
 }
 
-/// JEF-301: decisive verdicts persist across a restart, so an UNCHANGED entry is served from
-/// the replayed cache with NO fresh model call — the biggest request-volume cut when a
-/// protector/Ollama restart would otherwise re-judge the whole fleet. A persisted BREACH
-/// (Exploitable) replays as the EXACT prior decision (never downgraded), and a CHANGED
-/// fingerprint still forces a fresh judge (a stale verdict is never served for new evidence).
+/// JEF-301 + JEF-445: decisive verdicts persist across a restart and re-seed the verdict cache on
+/// boot with NO fresh model call (JEF-141) — the request-volume cut. BUT a persisted POSITIVE
+/// (`Exploitable`) is RE-VERIFIED on the first pass rather than replayed blind (JEF-445): if the
+/// model now REFUTES it (the temp-0 tail-flip is gone), the display SELF-HEALS to refuted instead
+/// of freezing the stale breach. This is the fix for the frozen-false-exploitable — a persisted
+/// NEGATIVE would still serve from the cache (see `journal_restores_findings_and_freshness…`).
 #[tokio::test]
-async fn decisive_verdicts_persist_across_a_restart_and_skip_re_judging() {
-    // A unique temp journal path (no temp-file crate), cleaned up at the end.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "protector-jef301-{}-{nanos}.jsonl",
-        std::process::id()
-    ));
+async fn a_persisted_exploitable_is_reverified_on_restart_and_self_heals() {
+    let path = temp_journal_path("jef445-reverify");
 
     // Pre-restart: a model that decisively judges Exploitable. Attaching the (writable) journal
     // enables durable writes, so the decisive verdict + its fingerprint land on disk.
@@ -407,36 +396,33 @@ async fn decisive_verdicts_persist_across_a_restart_and_skip_re_judging() {
         engine.process(&exposed_snapshot(true)).await;
     }
 
-    // Restart: a fresh engine whose adjudicator COUNTS calls (and would return Refuted if
-    // consulted). Replaying the journal must re-seed the verdict cache.
+    // Restart: a fresh engine whose (counting) adjudicator now returns Refuted — the flip is gone.
+    // Replaying the journal re-seeds the verdict cache with the persisted Exploitable.
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine_with(calls.clone()).with_journal(journal::DecisionJournal::open(&path));
 
-    // Same evidence ⇒ unchanged fingerprint ⇒ served from the replayed cache: NO model call,
-    // and the persisted BREACH replays EXACTLY (Exploitable — NOT the counting adjudicator's
-    // Refuted, which would prove a re-judge AND a downgrade).
+    // First pass over the SAME evidence: the replayed POSITIVE is RE-VERIFIED (JEF-445), so the
+    // model IS consulted (one fresh call — unlike a cached negative), and its fresh Refuted
+    // supersedes the stale breach on the display. The frozen false-exploitable self-heals.
     engine.process(&exposed_snapshot(true)).await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        0,
-        "an unchanged entry is served from the replayed cache with no fresh model call"
+        1,
+        "a persisted Exploitable is re-verified on restart (one fresh call), not served blind"
+    );
+    let snapshot = engine.findings().snapshot();
+    assert!(
+        snapshot.iter().any(|f| f.breach_relevant
+            && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                == Some("not exploitable — counted")),
+        "the re-verified verdict (now Refuted) supersedes the stale Exploitable — the self-heal"
     );
     assert!(
-        engine
-            .findings()
-            .snapshot()
+        !snapshot
             .iter()
-            .any(|f| f.breach_relevant
-                && f.verdict.as_ref().map(|v| v.summary()).as_deref()
-                    == Some("exploitable — RCE reaches the secret")),
-        "a persisted BREACH replays as the EXACT prior decision, never downgraded"
-    );
-
-    // Changed evidence (no CVE) ⇒ different fingerprint ⇒ cache miss ⇒ a fresh judge fires.
-    engine.process(&exposed_snapshot(false)).await;
-    assert!(
-        calls.load(Ordering::SeqCst) >= 1,
-        "a changed fingerprint invalidates the persisted verdict and re-judges"
+            .any(|f| f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                == Some("exploitable — RCE reaches the secret")),
+        "the frozen false breach is gone from the display"
     );
 
     let _ = std::fs::remove_file(&path);
