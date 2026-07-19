@@ -4,7 +4,7 @@
 //! purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]
 
-use super::super::guards::{ns_marker, objective_reach};
+use super::super::guards::{guard_fabricated_reachability_tag, ns_marker, objective_reach};
 use super::super::*;
 use super::{critical_cve, entry_reaching_db, graph_with_vuln, objectives_of};
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
@@ -334,4 +334,68 @@ async fn real_model_judges_toxic_vs_unevidenced() {
              exploit evidence is authorized-by-design and must be Refuted, got {argo_verdict:?} \
              from {model}"
     );
+}
+
+/// JEF-451 (G1): the model cites a REAL CVE id but fabricates its `[reachability: loaded-at-runtime]`
+/// TAG — the exact protector flip. `guard_fabricated_cve` passes (the id is real); the tag guard
+/// downgrades the promotion to the skeptic `Uncertain` because no evidence line carries that tag.
+#[test]
+fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
+    // Evidence with all CVEs `not-observed` — the protector shape. The guard reads the rendered
+    // CVE strings (which carry the tag), exactly as the model_call site passes them.
+    let not_observed = vec![
+        "CVE-2023-45853 [severity: critical] [reachability: not-observed] [cvss: 9.8]".to_string(),
+        "CVE-2026-13221 [severity: critical] [reachability: not-observed] [cvss: 9.1]".to_string(),
+    ];
+    let has_loaded =
+        vec!["CVE-2021-44228 [severity: critical] [reachability: loaded-at-runtime]".to_string()];
+    let none: Vec<String> = vec![];
+
+    // The live flip: Exploitable claiming loaded-at-runtime over all-not-observed evidence → skeptic.
+    let v = guard_fabricated_reachability_tag(
+        Verdict::Exploitable(
+            "Critical CVEs with [reachability: loaded-at-runtime] tags (CVE-2023-45853) indicate \
+             exploitation evidence despite not being observed running."
+                .into(),
+        ),
+        &not_observed,
+    );
+    assert!(matches!(v, Verdict::Uncertain(_)) && !v.promotes());
+
+    // The spaced prose form ("loaded at runtime") is caught too.
+    assert!(matches!(
+        guard_fabricated_reachability_tag(
+            Verdict::Exploitable("the vulnerable code is loaded at runtime".into()),
+            &not_observed,
+        ),
+        Verdict::Uncertain(_)
+    ));
+
+    // A GENUINE loaded-at-runtime CVE in the evidence → the claim is grounded → preserved.
+    assert!(matches!(
+        guard_fabricated_reachability_tag(
+            Verdict::Exploitable("CVE-2021-44228 [reachability: loaded-at-runtime] runs".into()),
+            &has_loaded,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // An Exploitable resting on a DIFFERENT anchor that never claims loaded-at-runtime → untouched
+    // (a real exposed-secret / live-signal breach), even with no CVE evidence.
+    assert!(matches!(
+        guard_fabricated_reachability_tag(
+            Verdict::Exploitable("AWS key baked into the image is an immediate primitive".into()),
+            &none,
+        ),
+        Verdict::Exploitable(_)
+    ));
+
+    // Never touches a non-Exploitable verdict (Refuted mentioning the tag in passing).
+    assert!(matches!(
+        guard_fabricated_reachability_tag(
+            Verdict::Refuted("no loaded-at-runtime CVE, so not a breach".into()),
+            &not_observed,
+        ),
+        Verdict::Refuted(_)
+    ));
 }

@@ -77,3 +77,38 @@ guard, not the former; and it adds no new guards.
   actually sends.
 - If tail flips ever become frequent enough to matter operationally, the response is a model change
   (evaluated via the bakeoff) — a bounded, reversible knob — never a deterministic gate on the verdict.
+
+## Amendment (2026-07-19): tag-grounding is grounding, not a verdict gate (JEF-451)
+
+The tail flip recurred on protector's own pod, and a full audit (fable architect, 2026-07-19;
+`scratchpad/false-positive-audit.md`) isolated its dominant shape: the model cites a **real** CVE id
+(so `guard_fabricated_cve` passes) but attributes the `[reachability: loaded-at-runtime]` **tag** to
+it — a tag **no evidence line carries** (every CVE is `not-observed`). The audit's root cause R1: the
+phrase `loaded-at-runtime` is the most-primed n-gram in the prompt (≈10× in the instructions, 0× in
+the evidence), so a 1.7B judge copy-completes it. The reason strings are self-contradictory (*"…
+[reachability: loaded-at-runtime] tags … despite not being observed running"*) — the model is
+referencing a tag that isn't there, exactly the failure `guard_fabricated_cve` was built for, one
+token deeper.
+
+We therefore add **`guard_fabricated_reachability_tag`** under the scope note's **preserved
+grounding/integrity class**, NOT the forbidden breach-decision class. It is admissible under this ADR
+because it re-derives no breach and steers no judgement:
+
+- It is a **string-membership test over a closed three-value vocabulary the engine itself renders**
+  (`graph::Reachability::label` → `loaded-at-runtime | not-observed | present-static-binary`). The
+  vocabulary cannot grow adversarially, so it is not the unbounded whack-a-mole this ADR rejects.
+- It weighs **no severity**, inspects **no breadth**, and can **never fire toward a breach**. It only
+  ever fires on an `Exploitable` whose *reason* asserts a `loaded-at-runtime` tag the *evidence* does
+  not contain, and it downgrades to the skeptic **`Uncertain`** (re-judged next pass), **never
+  `Refuted`** — so it decides nothing about breach in either direction, identical to
+  `guard_fabricated_cve`.
+- A genuine `Exploitable` that cites a truly loaded-at-runtime CVE, or rests on a live signal /
+  exposed secret and never claims the tag, passes through untouched.
+
+The forbidden classes stand unchanged: no guard may downgrade an `Exploitable` to `Refuted` on a
+*judgement* basis (does present evidence amount to a breach), and no evidence is capped or summarized.
+The **primary** remedy for this flip class remains the model/prompt layer — an evidence-shaping prompt
+restructuring is being planned (split the CVE field by tag; rename the `[reachability:]` axis so the
+"reachability is a GIVEN" assertion can't transfer onto CVE tags), bakeoff-validated A/B. This guard
+is the deterministic backstop for the *grounding* failure the prompt fixes shrink but cannot
+guarantee, not a substitute for them.

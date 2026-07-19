@@ -1,8 +1,9 @@
 //! The fence/sanitize prompt-injection defenses and the anti-fabrication backstop. Split
 //! out of the adjudicate module root purely to keep every file under the 1,000-line cap
 //! (repo CLAUDE.md). These are pure helpers: `sanitize`/`fence` neutralize untrusted text,
-//! and `guard_fabricated_cve` is the sole remaining deterministic backstop (it never
-//! decides breach). The cross-pass verdict cache no longer keys on a predicted-input
+//! and the anti-fabrication backstops (`guard_fabricated_cve` for a fabricated CVE *id*,
+//! `guard_fabricated_reachability_tag` for a fabricated `loaded-at-runtime` *tag* — JEF-451)
+//! are grounding/integrity checks that never decide breach. The cross-pass verdict cache no longer keys on a predicted-input
 //! fingerprint; it keys on a hash of the deterministic prompt (JEF-350, see
 //! `prompt::prompt_cache_key`).
 
@@ -102,6 +103,44 @@ pub(crate) fn guard_fabricated_cve(
                 "model cited CVE(s) not in the evidence (possible hallucination): {}",
                 fabricated.join(", ")
             ))
+        })
+    })
+}
+
+/// Tag-grounding guard (JEF-451 / G1): the sibling of [`guard_fabricated_cve`] one token deeper.
+/// A small CPU judge can cite a REAL CVE id (so the id guard passes) yet attribute the
+/// `[reachability: loaded-at-runtime]` tag to it — the single tag that IS exploitation evidence —
+/// when NO evidence line carries that tag (every CVE is `not-observed`). The two live protector
+/// flips did exactly this: *"Critical CVEs with [reachability: loaded-at-runtime] tags
+/// (CVE-2023-45853, …)"* over evidence that tags all four `not-observed`. The audit's R1 explains
+/// why: `loaded-at-runtime` is the most-primed phrase in the prompt (≈10× in the instructions,
+/// 0× in the evidence), so the model copy-completes it.
+///
+/// **This is a GROUNDING/integrity check, not a breach-decision gate (ADR-0029 scope-note).** It
+/// is a string-membership test over the CLOSED three-value reachability vocabulary *our own code*
+/// renders ([`graph::Reachability::label`]) — it weighs no severity, re-derives no breach, and can
+/// never fire toward a breach. Like [`guard_fabricated_cve`] it acts ONLY on an `Exploitable` and
+/// downgrades to the skeptic `Uncertain` (never `Refuted`), so the entry is simply re-judged next
+/// pass. It fires only when the `Exploitable` reason ASSERTS a loaded-at-runtime tag the evidence
+/// does not contain; an `Exploitable` that cites a genuinely loaded-at-runtime CVE, or cites no
+/// such tag at all (a real exposed-secret / live-signal breach), passes through untouched.
+pub(crate) fn guard_fabricated_reachability_tag(verdict: Verdict, cves: &[String]) -> Verdict {
+    // The exact tag the prompt renders for a genuinely-running CVE. If ANY evidence CVE line
+    // carries it, a loaded-at-runtime claim is grounded — leave the verdict alone.
+    const TAG: &str = "reachability: loaded-at-runtime";
+    let evidence_has_loaded = cves.iter().any(|c| c.contains(TAG));
+    guard_exploitable(verdict, |reason| {
+        // The model's free prose may write the tag with or without the surrounding brackets, and
+        // with either the hyphenated (`loaded-at-runtime`) or spaced (`loaded at runtime`) form.
+        let lower = reason.to_ascii_lowercase();
+        let reason_claims_loaded =
+            lower.contains("loaded-at-runtime") || lower.contains("loaded at runtime");
+        (reason_claims_loaded && !evidence_has_loaded).then(|| {
+            Verdict::Uncertain(
+                "model asserted a [reachability: loaded-at-runtime] exploitation tag that no CVE \
+                 in the evidence carries (fabricated reachability tag)"
+                    .to_string(),
+            )
         })
     })
 }
