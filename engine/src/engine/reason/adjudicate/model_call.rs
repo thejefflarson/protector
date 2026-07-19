@@ -9,7 +9,9 @@ use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 
 use super::evidence::{cve_ids_of, entry_evidence, entry_findings};
-use super::guards::{guard_fabricated_cve, guard_unsupported_exploitable};
+use super::guards::{
+    guard_fabricated_cve, guard_fabricated_reachability_tag, guard_unsupported_exploitable,
+};
 use super::prompt::parse_verdict;
 use super::{Adjudicator, Verdict};
 
@@ -115,6 +117,11 @@ impl Adjudicator for ModelAdjudicator {
                     // breach). Order is harmless: the fabrication guard only fires when a CVE is
                     // cited, the unsupported guard only when no anchor exists.
                     let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
+                    // JEF-451 (G1): a cited-real-id Exploitable that fabricates the
+                    // `[reachability: loaded-at-runtime]` TAG the evidence doesn't carry → skeptic.
+                    // Grounding/integrity, not a breach gate (ADR-0029 scope-note); reads the same
+                    // rendered `cves` strings the prompt shows.
+                    let verdict = guard_fabricated_reachability_tag(verdict, &cves);
                     let verdict = guard_unsupported_exploitable(
                         verdict,
                         &cves,
