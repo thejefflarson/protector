@@ -191,18 +191,34 @@ function SigningRow({ r, strength: repoStrength }) {
           )}
         </td>
         <td class="cell cell-provenance" data-provenance={prov.token}>
-          <span class={`gate-chip prov-${prov.token}`}>
-            <span class="glyph" aria-hidden="true">
-              {prov.glyph}
+          {r.provenance === "absent" ? (
+            // Almost no image ships a SLSA build-provenance attestation, so an "absent" chip would
+            // shout "no provenance" on nearly every row — pure noise. The calm default reads as a
+            // quiet muted dash (mirroring the no-signer cell); the loud chip is kept only for the
+            // meaningful states (verified / unverifiable / checking). The expandable detail still
+            // explains the absence for anyone who looks.
+            <span
+              class="t-micro muted"
+              title="no SLSA build-provenance attestation for this image — calm, not an alarm"
+            >
+              {"\u{2014}"}
             </span>
-            <span class="gate-word">{prov.word}</span>
-          </span>
-          {provInfo ? (
-            <span class="provenance-by t-micro" title={provInfo["builder-full"]}>
-              {" \u{00B7} "}
-              {provInfo["builder-short"]}
-            </span>
-          ) : null}
+          ) : (
+            <>
+              <span class={`gate-chip prov-${prov.token}`}>
+                <span class="glyph" aria-hidden="true">
+                  {prov.glyph}
+                </span>
+                <span class="gate-word">{prov.word}</span>
+              </span>
+              {provInfo ? (
+                <span class="provenance-by t-micro" title={provInfo["builder-full"]}>
+                  {" \u{00B7} "}
+                  {provInfo["builder-short"]}
+                </span>
+              ) : null}
+            </>
+          )}
         </td>
         <td class="cell cell-baseline">
           {repoStrength === "unknown" ? (
