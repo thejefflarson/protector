@@ -15,6 +15,14 @@
 //! 3. **Breaker / backoff skip (JEF-234)** — the model looks down (global breaker) or this entry
 //!    is in inconclusive-adjudication backoff; synthesize an Uncertain and send nothing.
 //! 4. Otherwise **re-judge** — a genuine cache miss with new (additive) surface.
+//!
+//! **Positive re-verify (JEF-445):** layers 1 and 2 do NOT apply to the model's own positive
+//! (`Exploitable`) — it is always re-verified against the live model (falling to layer 3/4). That
+//! verdict is the one the temp-0 judge occasionally fabricates (the argocd loaded-at-runtime
+//! tail-flip, accepted at the model layer per ADR-0029); serving it from cache would freeze a
+//! one-time flip into a permanent false breach, replayed whenever the entry's oscillating surface
+//! fingerprint recurs. It is rare and action-gating, so re-judging it every pass is cheap and
+//! self-heals the flip. Negatives keep the cache hit; a corroborated `Confirmed` stays cached.
 
 use super::graph;
 use super::state;
@@ -97,17 +105,36 @@ pub(super) fn classify_adjudication(
     now: std::time::Instant,
 ) -> AdjGate {
     use reason::adjudicate::Verdict;
-    // 1. Exact-fingerprint LRU hit (JEF-390): byte-identical input, serve the cached verdict.
-    if let Some(verdict) = verdicts.cached_for(&pending.entry_key, &pending.fingerprint) {
+    // The model's OWN positive verdict — `Exploitable` — is never served from the cache or the
+    // subtractive hold: it is re-verified against the live model every pass (JEF-445). It is the
+    // one verdict the temp-0 judge occasionally FABRICATES (the argocd loaded-at-runtime tail-flip,
+    // accepted at the model layer per ADR-0029); replaying it from cache would FREEZE a one-time
+    // flip into a permanent false breach, replayed every time the entry's oscillating surface
+    // fingerprint recurs (the `judgement` shows the fresh Refuted while the display stays
+    // exploitable). It is rare and action-gating, so always re-judging it is cheap and self-heals
+    // on the next pass. Negatives (`Refuted`) keep the cheap cache hit; a corroborated `Confirmed`
+    // (backed by live evidence, not the model's own positive) is left cached — re-judging it would
+    // let a model `Refuted` veto a live attack.
+    let must_reverify = |v: &Verdict| matches!(v, Verdict::Exploitable(_));
+
+    // 1. Exact-fingerprint LRU hit (JEF-390): byte-identical input, serve the cached verdict —
+    //    unless it is a positive that must be re-verified (fall through to the re-judge path).
+    if let Some(verdict) = verdicts.cached_for(&pending.entry_key, &pending.fingerprint)
+        && !must_reverify(&verdict)
+    {
         return AdjGate::Resolved {
             verdict,
             held: false,
         };
     }
     // 2. Purely-subtractive / unchanged delta since a decisive baseline (JEF-391): the prior
-    //    verdict holds. `!additive` implies a baseline exists; a defensive absent baseline falls
-    //    through to a re-judge (never suppress a judgment on possibly-new surface).
-    if !additive && let Some(b) = baseline {
+    //    verdict holds — again unless it is a positive that must be re-verified. `!additive`
+    //    implies a baseline exists; a defensive absent baseline falls through to a re-judge (never
+    //    suppress a judgment on possibly-new surface).
+    if !additive
+        && let Some(b) = baseline
+        && !must_reverify(&b.verdict)
+    {
         verdicts.cache_decisive(
             &pending.entry_key,
             pending.fingerprint.clone(),
