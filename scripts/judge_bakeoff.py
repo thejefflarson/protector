@@ -34,6 +34,12 @@ Usage:
     python3 scripts/judge_bakeoff.py --pull   # phase 0: download any missing models (idle)
     python3 scripts/judge_bakeoff.py          # phase 1: bench the default shortlist
     python3 scripts/judge_bakeoff.py M1 M2    # bench specific models
+    python3 scripts/judge_bakeoff.py --flip [--n 20] [--case NAME] [--model qwen3:1.7b]
+                                              # FLIP-RATE: run ONE case N times, tally verdicts.
+                                              # The bench runs each case once, which hides a rare
+                                              # temp-0 tail-flip; this measures the actual rate.
+                                              # HTTP-only — point :11434 at the deployed cluster
+                                              # ollama (port-forward) to measure the DEPLOYED judge.
 """
 import json
 import re
@@ -220,7 +226,7 @@ _PROTECTOR_DELTA = (
 )
 # The 4 critical CVEs on the real entry — ALL [reachability: not-observed], verbatim from the live prompt.
 _PROTECTOR_CVES = (
-    "<<<CVE-2023-45853 [severity: critical] [reachability: not-observed] [no fix available] [cvss: 5.3] "
+    "<<<CVE-2023-45853 [severity: critical] [reachability: not-observed] [no fix available] [cvss: 9.8] "
     "[epss: 0.03] — zlib: integer overflow and resultant heap-based buffer overflow in zipOpenNewFileInZip4_6, "
     "CVE-2026-13221 [severity: critical] [reachability: not-observed] [no fix available] [cvss: 9.1] — "
     "Perl versions through 5.43.9 produce silently incorrect regular expres ..., "
@@ -532,10 +538,50 @@ def bench(models):
         print(f"{m:<36}" + "".join(f"{j.get(n,'?'):<18}" for n in names) + f"{j['score']:>7}")
 
 
+def flip_run(model, case_name, n):
+    """FLIP-RATE mode: run ONE case `n` times against `model` and tally the verdicts. The bench
+    runs each case once, which hides a RARE tail-flip (a temp-0 model that refutes 19/20 and flips
+    exploitable once reads as a clean pass). This measures the actual rate. HTTP-only (no ollama
+    subprocess management) so it runs against a REMOTE ollama over a port-forward — point localhost
+    :11434 at the deployed cluster ollama to measure the DEPLOYED judge on the DEPLOYED prompt."""
+    from collections import Counter
+
+    case = next((c for c in CASES if c[0] == case_name), None)
+    if case is None:
+        print(f"no such case: {case_name}\n  cases: {', '.join(c[0] for c in CASES)}")
+        return
+    name, exp, entry, cves, secrets, runtime, objs = case[:7]
+    posture = case[7] if len(case) > 7 else "(none)"
+    changes = case[8] if len(case) > 8 else ""
+    prompt = SYS.format(entry=entry, cves=cves, secrets=secrets, runtime=runtime,
+                        posture=posture, objectives=objs, changes=changes)
+    print(f"FLIP-RATE  model={model}  case={case_name}  expected={exp}  n={n}  num_ctx={NUM_CTX}")
+    print(f"prompt length: {len(prompt)} chars\n")
+    tally = Counter()
+    for i in range(n):
+        res = chat(model, prompt)
+        v = res.get("verdict", res.get("err", "?"))
+        tally[v] += 1
+        ok = v == exp
+        print(f"  [{i + 1:>2}/{n}] {'OK' if ok else 'XX'}  {v:<14} ({res.get('wall', 0):.0f}s)")
+    wrong = n - tally.get(exp, 0)
+    print(f"\n  tally: {dict(tally)}")
+    print(f"  FLIP RATE: {wrong}/{n} = {100 * wrong / n:.0f}% NOT '{exp}'  "
+          f"(expected all '{exp}')")
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a != "--pull"]
+    argv = sys.argv[1:]
+    if "--flip" in argv:
+        def opt(flag, default):
+            return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
+        flip_run(opt("--model", "qwen3:1.7b"),
+                 opt("--case", "protector_notobserved_cves_broad_rbac"),
+                 int(opt("--n", "20")))
+        return
+    args = [a for a in argv if a != "--pull"]
     models = args or DEFAULT_MODELS
-    if "--pull" in sys.argv[1:]:
+    if "--pull" in argv:
         print("=== PHASE 0: pull (sequential, idle — do not run alongside a bench) ===")
         pull_phase(models)
         return
