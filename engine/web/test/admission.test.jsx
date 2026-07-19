@@ -85,6 +85,44 @@ describe("Admission honesty", () => {
   });
 });
 
+describe("Provenance column is quiet by default", () => {
+  // Almost no image ships a SLSA attestation, so an "absent" chip on every row is pure noise — the
+  // calm default reads as a muted dash, never the loud "no provenance" chip.
+  it("renders an ABSENT-provenance image as a muted dash, not the no-provenance chip", () => {
+    const { container } = render(
+      <AdmissionView
+        view={admissionView({ signing: [signingRepo("registry/app", [signingRow("img-a", { provenance: "absent" })])] })}
+      />,
+    );
+    const cell = container.querySelector('tr[data-signing="img-a"] .cell-provenance');
+    expect(cell).toBeTruthy();
+    expect(cell.getAttribute("data-provenance")).toBe("absent"); // still honestly tagged
+    expect(cell.querySelector(".gate-chip")).toBeNull(); // but no loud chip
+    expect(cell.textContent).not.toContain("no provenance");
+    expect(cell.textContent).toContain("—"); // a quiet dash
+  });
+
+  it("still renders the loud chip for a VERIFIED build provenance", () => {
+    const { container } = render(
+      <AdmissionView
+        view={admissionView({
+          signing: [
+            signingRepo("registry/app", [
+              signingRow("img-a", {
+                provenance: "verified",
+                "provenance-info": { "builder-short": "org/repo", "builder-full": "https://github.com/org/repo/.github/workflows/x.yml" },
+              }),
+            ]),
+          ],
+        })}
+      />,
+    );
+    const cell = container.querySelector('tr[data-signing="img-a"] .cell-provenance');
+    expect(cell.querySelector(".gate-chip.prov-verified")).toBeTruthy();
+    expect(cell.textContent).toContain("org/repo");
+  });
+});
+
 describe("Admission escaping", () => {
   it("renders an XSS subject/image/signer identity as inert text", () => {
     window.__pwned = undefined;
