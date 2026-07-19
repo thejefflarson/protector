@@ -413,12 +413,15 @@ async fn a_persisted_exploitable_is_reverified_on_restart_and_self_heals() {
     let snapshot = engine.findings().snapshot();
     assert!(
         snapshot.iter().any(|f| f.breach_relevant
-            && f.verdict.as_ref().map(|v| v.summary()).as_deref() == Some("not exploitable — counted")),
+            && f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                == Some("not exploitable — counted")),
         "the re-verified verdict (now Refuted) supersedes the stale Exploitable — the self-heal"
     );
     assert!(
-        !snapshot.iter().any(|f| f.verdict.as_ref().map(|v| v.summary()).as_deref()
-            == Some("exploitable — RCE reaches the secret")),
+        !snapshot
+            .iter()
+            .any(|f| f.verdict.as_ref().map(|v| v.summary()).as_deref()
+                == Some("exploitable — RCE reaches the secret")),
         "the frozen false breach is gone from the display"
     );
 
