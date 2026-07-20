@@ -51,6 +51,10 @@ describe("Admission signing-row expansion survives a poll", () => {
     fireEvent.click(expander);
     expect(expander.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector("#detail-img-a .detail")).toBeTruthy();
+    // The row MUST gain the `open` class — the detail row is `display:none` and is revealed only
+    // by the CSS sibling selector `.row.open + .row-detail`. Without it the `+` does nothing
+    // visible (jsdom applies no CSS, so DOM presence alone can't catch that regression).
+    expect(container.querySelector('tr[data-signing="img-a"]').classList.contains("open")).toBe(true);
 
     // A poll re-delivers the inventory; the expanded detail must remain mounted (local useState kept
     // by the keyed diff on the row's dom-id).
