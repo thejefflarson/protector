@@ -107,7 +107,7 @@ fn bare_cve_renders_legacy_line_shape() {
     let bare = critical_cve("CVE-2021-44228");
     assert_eq!(
         cve_evidence(&bare),
-        "CVE-2021-44228 [severity: critical] [reachability: unknown] [no fix available]"
+        "CVE-2021-44228 [severity: critical] [reachability: loaded-at-runtime] [no fix available]"
     );
     assert!(bare.score.is_none());
     assert!(bare.title.is_none());
@@ -174,7 +174,9 @@ fn untrusted_title_cannot_inject_prompt_structure() {
     let prompt = build_judgment_prompt(&e, &[], &g);
     // Extract the CONTENT inside the CVE list's <<< >>> fence; the fence delimiters
     // themselves are `<`/`>`, so we check only what the model would read as data.
-    let line_start = prompt.find("Critical / known-exploited").unwrap();
+    let line_start = prompt
+        .find("reachable path (exploitation evidence")
+        .unwrap();
     let line_end = prompt[line_start..].find('\n').unwrap() + line_start;
     let line = &prompt[line_start..line_end];
     let inner = line
@@ -596,6 +598,9 @@ fn prompt_includes_the_chain_evidence() {
                 installed_version: Some("2.14.0".into()),
                 fixed_version: Some("2.17.0".into()),
                 title: Some("Remote code execution via JNDI lookup".into()),
+                // Observed loading at runtime — the JEF-453 filter only shows reachable CVEs to
+                // the judge, so a chain-evidence prompt must carry a loaded-at-runtime CVE.
+                reachability: crate::engine::graph::Reachability::LoadedAtRuntime,
                 sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
                 ..Default::default()
             }],
@@ -629,9 +634,10 @@ fn prompt_includes_the_chain_evidence() {
         prompt.contains("refuted"),
         "offers the skeptic refuted verdict"
     );
-    // JEF-51: the CVE is tagged with its reachability (here Unknown — no pkg_name).
+    // JEF-51: the CVE is tagged with its reachability (here loaded-at-runtime — the only
+    // reachability the JEF-453 filter shows the judge).
     assert!(
-        prompt.contains("reachability:"),
+        prompt.contains("reachability: loaded-at-runtime"),
         "tags each CVE with its reachability"
     );
     // JEF-66: the CVE evidence carries severity, fix-availability, and the (fenced)
@@ -682,7 +688,7 @@ fn prompt_includes_the_chain_evidence() {
     assert!(
         prompt.contains(
             "\"uncertain\"   — ONLY when the evidence is self-contradictory or unintelligible. \
-             Absence of evidence is NOT uncertainty: no loaded-at-runtime CVE, no live signal, \
+             Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, \
              and no exposed secret is a confident \"refuted\", not \"uncertain\"."
         ),
         "absence of evidence is directed to refuted, not the uncertain escape hatch"

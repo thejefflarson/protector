@@ -9,8 +9,8 @@
 use super::*;
 use crate::engine::graph::attack::{AttackRef, EXPLOIT_PUBLIC_FACING};
 use crate::engine::graph::{
-    Behavior, Edge, Exposure, Image, Node, NodeKey, Provenance, Relation, SecurityGraph, Severity,
-    Trust, Vulnerability, Workload,
+    Behavior, Edge, Exposure, Image, Node, NodeKey, Provenance, Reachability, Relation,
+    SecurityGraph, Severity, Trust, Vulnerability, Workload,
 };
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -105,10 +105,16 @@ pub(super) fn graph_with_behaviors(behaviors: Vec<Behavior>) -> (SecurityGraph, 
     (g, entry_key)
 }
 
+/// A critical CVE observed LOADING AT RUNTIME. Loaded-at-runtime is the ONLY reachability the
+/// JEF-453 filter keeps in the judge prompt (it is the only CVE category that is exploitation
+/// evidence), so the shared fixture is loaded-at-runtime — a prompt-content test asserting a CVE
+/// line renders needs the CVE to survive the filter. A test that specifically wants a
+/// context/omitted CVE sets `.reachability` explicitly (see the not-observed / static-binary tests).
 pub(super) fn critical_cve(id: &str) -> Vulnerability {
     Vulnerability {
         id: id.into(),
         severity: Severity::Critical,
+        reachability: Reachability::LoadedAtRuntime,
         ..Default::default()
     }
 }
