@@ -145,7 +145,10 @@ function SigningRow({ r, strength: repoStrength }) {
   return (
     <>
       <tr
-        class={attention ? "row signing-row signing-row-attention" : "row signing-row"}
+        // `open` is load-bearing: the detail row is `.row-detail { display: none }`, revealed only
+        // by the CSS sibling selector `.row.open + .row-detail`. Without it, clicking the expander
+        // toggles state but the detail stays hidden (the findings rows already do this).
+        class={`row signing-row${attention ? " signing-row-attention" : ""}${open ? " open" : ""}`}
         id={r["dom-id"]}
         data-signing={r["dom-id"]}
         data-posture={p.token}
@@ -292,7 +295,14 @@ function BannerRow({
   const { detailId, open, expander } = useRowDisclosure(domId, label);
   return (
     <>
-      <tr class={rowClass} id={domId} data-signing={domId} role={role} {...dataAttr}>
+      {/* `open` gates the CSS sibling selector `.row.open + .row-detail` that reveals the detail. */}
+      <tr
+        class={open ? `${rowClass} open` : rowClass}
+        id={domId}
+        data-signing={domId}
+        role={role}
+        {...dataAttr}
+      >
         <td class="cell cell-expand">{expander}</td>
         <td class="cell cell-regression" colspan="6">
           <span class={`${headClass}-head`}>
