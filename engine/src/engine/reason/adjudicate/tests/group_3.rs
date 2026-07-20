@@ -15,10 +15,10 @@ use crate::engine::graph::{Behavior, NodeKey, Severity, Vulnerability};
 
 /// The content inside the CVE list's `<<< >>>` fence in an assembled prompt — what the
 /// model reads as data. Panics if the fence is missing (which is itself the failure we
-/// guard against). The CVE list is the line after the "Critical / known-exploited" label.
+/// guard against). The CVE list is the line after the "Critical CVEs observed loading at runtime" label.
 fn fenced_cve_data(prompt: &str) -> String {
     let label = prompt
-        .find("Critical / known-exploited")
+        .find("reachable path (exploitation evidence")
         .expect("prompt has a CVE list line");
     let line_end = prompt[label..]
         .find('\n')
@@ -268,7 +268,7 @@ fn structured_fields_are_present_independent_of_prose() {
     v.score = Some(8.1);
     let line = cve_evidence(&v);
     assert!(line.contains("[severity: critical]"));
-    assert!(line.contains("[reachability: unknown]"));
+    assert!(line.contains("[reachability: loaded-at-runtime]"));
     assert!(line.contains("[cvss: 8.1]"), "score token present: {line}");
     // No fence/structure chars in the structured tokens.
     for c in "<>{}`".chars() {
@@ -441,26 +441,23 @@ fn prompt_clarifies_benign_runtime_activity_is_not_a_live_signal() {
     );
 }
 
-/// JEF-405 regression guard: the "library loads aren't a live signal" trap must be scoped to
-/// the LIVE-SIGNAL test ONLY — it must NOT cancel a `[reachability: loaded-at-runtime]` CVE,
-/// which is exploitation evidence in its own right via its tag. JEF-402's trap wording let the
-/// deployed judge (qwen2.5:3b-instruct) read the log4j case's "loaded library …" runtime line as
-/// "own activity → not a signal → refute" and drop a loaded-at-runtime KEV CVE (a false negative).
-/// The prompt must state both that the tag alone is evidence and that a library-load line never
-/// downgrades it.
+/// JEF-453: any CVE in the "observed loading at runtime" list is exploitation evidence on its own.
+/// The prompt says so, and — unlike the old prompt (JEF-405) — it no longer needs the "a
+/// library-load runtime line can't cancel the CVE" caveat: the CVE field IS the loaded-at-runtime
+/// list, so a CVE's membership is itself the proof the vulnerable code runs. `critical_cve` is
+/// loaded-at-runtime, so it appears in the field.
 #[test]
-fn prompt_states_a_loaded_at_runtime_cve_is_evidence_a_library_load_line_cannot_cancel() {
+fn prompt_states_a_loaded_at_runtime_cve_is_evidence_on_its_own() {
     let (g, e) = graph_with_vuln(critical_cve("CVE-2021-44228"));
     let prompt = build_judgment_prompt(&e, &[], &g);
     assert!(
-        prompt.contains("exploitation evidence on its own")
-            && prompt.contains("even when the matching library-load also appears"),
-        "prompt must say a loaded-at-runtime CVE is evidence on its own, tag alone:\n{prompt}"
+        prompt.contains("observed LOADING AT RUNTIME")
+            && prompt.contains("exploitation evidence on its own"),
+        "prompt must say a loaded-at-runtime CVE is evidence on its own:\n{prompt}"
     );
     assert!(
-        prompt.contains("LIVE-SIGNAL test ONLY")
-            && prompt.contains("never downgrades a loaded-at-runtime CVE"),
-        "the live-signal trap must be scoped so a library-load line can't cancel the CVE:\n{prompt}"
+        prompt.contains("CVE-2021-44228 [severity: critical] [reachability: loaded-at-runtime]"),
+        "the loaded-at-runtime CVE is shown to the judge:\n{prompt}"
     );
 }
 
@@ -650,67 +647,49 @@ fn authorized_secret_objective_does_not_render_unsecured_credentials() {
     );
 }
 
-/// JEF-402 — the not-observed-CVE header contradiction (same false-breach class). A CVE
-/// tagged `[reachability: not-observed]` is present in the image but NOT observed running,
-/// so the header must NOT present it under an "OBSERVED running (EXPLOITATION EVIDENCE)"
-/// banner — the header must name the tag as the discriminator: only
-/// `[reachability: loaded-at-runtime]` is observed running / evidence; `[not-observed]` is
-/// context.
+/// JEF-453 — a CVE tagged `[reachability: not-observed]` is present in the image but NOT observed
+/// running: context, never exploitation evidence. It is OMITTED from the judge prompt entirely (it
+/// stays on the dashboard for operators). So there is no non-evidence CVE for a small model to
+/// fabricate a `loaded-at-runtime` tag onto — the root of the recurring false `exploitable`
+/// (JEF-451). An all-not-observed entry's CVE field reads `(none)`.
 #[test]
-fn not_observed_cve_is_not_presented_as_observed_running_evidence() {
+fn not_observed_cve_is_omitted_from_the_judge_prompt() {
     use crate::engine::graph::Reachability;
     let mut v = critical_cve("CVE-2021-44228");
     v.reachability = Reachability::NotObserved;
     let (g, e) = graph_with_vuln(v);
     let prompt = build_judgment_prompt(&e, &[], &g);
-    // The CVE is present in the list with its not-observed tag.
+    // The not-observed CVE is NOT shown to the judge.
     assert!(
-        prompt.contains("CVE-2021-44228") && prompt.contains("reachability: not-observed"),
-        "the not-observed CVE is present with its reachability tag:\n{prompt}"
+        !prompt.contains("CVE-2021-44228"),
+        "a not-observed CVE must be omitted from the judge prompt:\n{prompt}"
     );
-    // The header must NOT assert the whole CVE list is observed running — it must split the
-    // two tags and name loaded-at-runtime as the evidence discriminator, not-observed as
-    // context.
+    // The CVE field is the loaded-at-runtime-only field, and the prompt says only reachable CVEs
+    // are shown (present-but-not-running is context, deliberately withheld).
     assert!(
-        !prompt.contains("loaded-at-runtime = vulnerable code OBSERVED running here"),
-        "the CVE header must not blanket-claim the list is OBSERVED running:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("[reachability: not-observed]") && prompt.contains("are context only"),
-        "the CVE header must present not-observed CVEs as context, not evidence:\n{prompt}"
+        prompt.contains("Critical CVEs observed loading at runtime")
+            && prompt.contains("NOT observed loading at runtime is deliberately NOT shown here"),
+        "the prompt must state only reachable CVEs are shown to the judge:\n{prompt}"
     );
 }
 
-/// JEF-404 — a CVE in a statically linked binary is tagged `[reachability: present-static-binary]`
-/// and the prompt must (a) surface that tag on the CVE line and (b) frame it as UNKNOWABLE —
-/// neither exploitation evidence nor reassurance — so absence of a runtime load is not read as
-/// evidence-of-absence the way `not-observed` can be. It must NOT weaken the JEF-402/405 rule
-/// that only `loaded-at-runtime` is CVE evidence.
+/// JEF-453 — a CVE in a statically linked binary (`[reachability: present-static-binary]`) has
+/// UNKNOWABLE reachability: it is not exploitation evidence (only `loaded-at-runtime` is), so like a
+/// not-observed CVE it is OMITTED from the judge prompt (kept on the dashboard). Same class as the
+/// not-observed omit — a context CVE the small model cannot relabel as running.
 #[test]
-fn present_static_binary_cve_is_framed_as_unknowable_not_reassurance() {
+fn present_static_binary_cve_is_omitted_from_the_judge_prompt() {
     use crate::engine::graph::Reachability;
     let mut v = critical_cve("CVE-2021-44228");
     v.reachability = Reachability::PresentStaticBinary;
     let (g, e) = graph_with_vuln(v);
     let prompt = build_judgment_prompt(&e, &[], &g);
-    // The CVE is present in the list with its static-binary tag.
     assert!(
-        prompt.contains("CVE-2021-44228") && prompt.contains("reachability: present-static-binary"),
-        "the static-binary CVE is present with its reachability tag:\n{prompt}"
+        !prompt.contains("CVE-2021-44228"),
+        "a static-binary CVE must be omitted from the judge prompt:\n{prompt}"
     );
-    // The prompt frames the tag as context-only, alongside not-observed, in the CVE header.
     assert!(
-        prompt.contains("[reachability: present-static-binary] are context only"),
-        "the CVE header must present static-binary CVEs as context, not evidence:\n{prompt}"
-    );
-    // It must explicitly say the tag is NOT reassurance (do not read absence as safety).
-    assert!(
-        prompt.contains("STATICALLY LINKED") && prompt.contains("NOT reassurance"),
-        "the prompt must frame present-static-binary as unknowable, not reassurance:\n{prompt}"
-    );
-    // The JEF-402/405 core rule is untouched: loaded-at-runtime is still the only CVE evidence.
-    assert!(
-        prompt.contains("[reachability: loaded-at-runtime] is exploitation evidence"),
-        "loaded-at-runtime must remain the sole CVE evidence discriminator:\n{prompt}"
+        prompt.contains("Critical CVEs observed loading at runtime"),
+        "the CVE field shows only loaded-at-runtime CVEs:\n{prompt}"
     );
 }

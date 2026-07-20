@@ -112,3 +112,26 @@ restructuring is being planned (split the CVE field by tag; rename the `[reachab
 "reachability is a GIVEN" assertion can't transfer onto CVE tags), bakeoff-validated A/B. This guard
 is the deterministic backstop for the *grounding* failure the prompt fixes shrink but cannot
 guarantee, not a substitute for them.
+
+## Amendment (2026-07-20): the judge sees only reachable CVEs — not-evidence, not capping (JEF-453)
+
+The prompt now shows the judge ONLY `[reachability: loaded-at-runtime]` CVEs — the sole CVE category
+that is exploitation evidence. `not-observed`, `present-static-binary`, and `unknown`-reachability
+CVEs are context ("how bad IF exploited"), kept on the dashboard for operators but **omitted from the
+judge prompt** (filter in `prompt.rs::render_evidence`, prompt layer only — the anti-fabrication
+guards keep their full-evidence view). If no CVE is reachable, the field is `(none)`.
+
+**This is not the evidence-capping this ADR forbids.** That prohibition protects the
+**reachable-objectives breadth** — breadth *is* part of the breach judgement, so hiding objectives
+could change a correct verdict (§Decision names "the reachable-objectives list"). A not-observed CVE
+is categorically different: by the prompt's own definition it is context, **never evidence**, so
+omitting it from the *judge* cannot hide a breach or change a correct call. This is "do not feed the
+judge non-evidence," not "cap the evidence" — the objective list is still shown in full, uncapped.
+
+Why it matters: the audit's root cause R1 for the recurring false `exploitable` was that
+`loaded-at-runtime` is the most-primed phrase in the prompt while the judge is shown not-observed
+CVEs — a non-evidence target to fabricate the tag onto. Removing that target is the source-level fix
+the guard (JEF-451) backstops. Measured on the deployed qwen3:1.7b, A/B old-vs-new: the temp-0.8
+boundary-mass on the protector flip prompt collapses **15% → 0%** with no false negatives (log4j /
+live-signal / exposed-secret all still flag). Bakeoff-validated per the discipline; the bakeoff SYS +
+fixtures are resynced and gain a `--temp` boundary-mass A/B mode.

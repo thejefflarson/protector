@@ -68,6 +68,10 @@ pub(super) fn exposed_snapshot(with_cve: bool) -> Snapshot {
                     severity: Severity::Critical,
                     exploited_in_wild: true,
                     epss: None,
+                    // Observed loading at runtime — the JEF-453 filter only shows the judge
+                    // reachable CVEs, so this exploitation-evidence CVE must be loaded-at-runtime
+                    // to reach the prompt (and to change it, busting the verdict cache).
+                    reachability: crate::engine::graph::Reachability::LoadedAtRuntime,
                     sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
                     ..Default::default()
                 }],

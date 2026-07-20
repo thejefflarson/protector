@@ -12,3 +12,6 @@ engine/web/dist/dashboard.js
 # Python bytecode cache (e.g. scripts/__pycache__ from judge_bakeoff.py)
 __pycache__/
 *.pyc
+
+# session scratch artifacts (audit reports, experiment scripts) — never source
+/scratchpad/
