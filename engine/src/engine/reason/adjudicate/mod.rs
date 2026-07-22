@@ -152,11 +152,11 @@ pub use prompt::{
 };
 pub use surface::JudgedSurface;
 // The cross-module helpers the rest of the crate imports by the stable
-// `reason::adjudicate::` path (the prompt sanitizer). The verdict cache
-// keys on `prompt_cache_key` (a hash of the deterministic prompt, JEF-350). The remaining
-// submodule helpers are internal to this module and are imported directly from their
-// submodule (including by the tests).
-pub(crate) use guards::sanitize;
+// `reason::adjudicate::` path. The verdict cache keys on `prompt_cache_key` (a hash of the
+// deterministic prompt, JEF-350). The prompt sanitizer now lives in the shared
+// `engine::redact` module (ADR-0031, JEF-486) — `guards` re-exports it for in-module use.
+// The remaining submodule helpers are internal to this module and are imported directly from
+// their submodule (including by the tests).
 
 #[cfg(test)]
 mod tests;

@@ -43,6 +43,10 @@ pub mod observe;
 // file-split refactor of this orchestrator.
 pub mod policy_log;
 pub mod reason;
+// Shared redaction primitives (ADR-0031): the egress-safety scrubbers lifted out of the
+// breach notifier (`notify`, ADR-0018) so the notifier and the read-only MCP server share
+// ONE implementation of "what is safe to emit off-cluster."
+pub mod redact;
 pub mod respond;
 // The engine's output-state domain layer: the proven-chain findings, the per-entry
 // verdict store, the judgement/reversion logs, the behavioral-bake snapshot, and the
