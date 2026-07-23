@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -16,7 +16,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 
 use super::claims::{Claims, Tier};
-use super::jwks::JwksFetcher;
+use super::jwks::{HttpJwksFetcher, JwksFetcher, JwksStore};
 use super::{
     AuthError, ConfigError, Identity, OidcConfig, SigningAlgorithm, Verifier, require_oidc,
 };
@@ -168,12 +168,14 @@ async fn tampered_signature_rejects_distinctly() {
     let (verifier, _fetcher) = verifier_with_key_a();
     let token = sign(KEY_A_PEM, KID_A, &base_claims());
 
-    // Flip the last character of the signature segment — still valid base64url, wrong signature.
+    // Flip the FIRST character of the signature segment — still valid base64url, but it always
+    // changes the top bits of the first signature byte (unlike the last char, whose low bits are
+    // ignored padding), so the decoded signature bytes always differ → deterministic mismatch.
     let mut segments: Vec<String> = token.split('.').map(String::from).collect();
     let signature = &segments[2];
-    let last = signature.chars().last().unwrap();
-    let replacement = if last == 'A' { 'B' } else { 'A' };
-    segments[2] = format!("{}{replacement}", &signature[..signature.len() - 1]);
+    let first = signature.chars().next().unwrap();
+    let replacement = if first == 'A' { 'B' } else { 'A' };
+    segments[2] = format!("{replacement}{}", &signature[1..]);
     let tampered = segments.join(".");
 
     assert_eq!(
@@ -266,7 +268,16 @@ async fn alg_confusion_hs256_with_the_public_key_is_rejected() {
 
 #[tokio::test]
 async fn jwks_is_cached_and_refetched_on_unknown_kid_rotation() {
-    let (verifier, fetcher) = verifier_with_key_a();
+    // End-to-end through the Verifier, over a store with a short refresh interval so a genuine
+    // rotation can cross it deterministically (the default interval would throttle the immediate
+    // rotation in a fast test).
+    let fetcher = Arc::new(TestFetcher::new(jwk_set(&[(KID_A, KEY_A_N)])));
+    let store = JwksStore::with_policy(
+        fetcher.clone(),
+        Duration::from_secs(300),
+        Duration::from_millis(50),
+    );
+    let verifier = Verifier::with_store(test_config(), store);
 
     // First verification fetches once and caches.
     let token_a = sign(KEY_A_PEM, KID_A, &base_claims());
@@ -280,15 +291,89 @@ async fn jwks_is_cached_and_refetched_on_unknown_kid_rotation() {
         .expect("key-a still verifies");
     assert_eq!(fetcher.call_count(), 1, "a known kid is served from cache");
 
-    // The IdP rotates to key-b. A token with the new (unknown) kid triggers exactly one refetch,
-    // and then verifies against the freshly fetched key — all without a process restart.
+    // The IdP rotates to key-b. Once the refresh interval has elapsed, a token with the new
+    // (unknown) kid triggers exactly one refetch and verifies against the freshly fetched key —
+    // all without a process restart.
     fetcher.rotate(jwk_set(&[(KID_B, KEY_B_N)]));
+    tokio::time::sleep(Duration::from_millis(60)).await;
     let token_b = sign(KEY_B_PEM, KID_B, &base_claims());
     verifier
         .verify(&token_b)
         .await
         .expect("rotated key-b verifies");
-    assert_eq!(fetcher.call_count(), 2, "an unknown kid refetches once");
+    assert_eq!(
+        fetcher.call_count(),
+        2,
+        "an unknown kid refetches once past the interval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_kid_burst_is_rate_limited_to_one_fetch_per_interval() {
+    // The kid is attacker-controlled (read from the UNSIGNED header before any signature check), so
+    // a stream of distinct unknown kids must drive at most ONE network fetch per interval — whether
+    // the misses arrive concurrently or sequentially — while a genuine rotation still resolves once
+    // the interval elapses. This closes the sequential-miss stampede the single-flight lock alone
+    // does not cover.
+    let fetcher = Arc::new(TestFetcher::new(jwk_set(&[(KID_A, KEY_A_N)])));
+    let store = Arc::new(JwksStore::with_policy(
+        fetcher.clone(),
+        Duration::from_secs(300),
+        Duration::from_millis(150),
+    ));
+
+    // Warm the cache with the real key (one fetch), which also starts the interval clock.
+    store
+        .decoding_key(Some(KID_A))
+        .await
+        .expect("key-a resolves");
+    assert_eq!(fetcher.call_count(), 1);
+
+    // Sequential unknown-kid spray: each misses the fresh cache, but the throttle denies it
+    // without egress — the fetch count does not move.
+    for i in 0..20 {
+        let kid = format!("attacker-seq-{i}");
+        assert_eq!(
+            store.decoding_key(Some(&kid)).await.unwrap_err(),
+            AuthError::UnknownKey
+        );
+    }
+    assert_eq!(
+        fetcher.call_count(),
+        1,
+        "a sequential unknown-kid burst drives no extra fetch"
+    );
+
+    // Concurrent unknown-kid spray: the same guarantee under load.
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let store = store.clone();
+        handles.push(tokio::spawn(async move {
+            let kid = format!("attacker-conc-{i}");
+            store.decoding_key(Some(&kid)).await
+        }));
+    }
+    for handle in handles {
+        assert_eq!(handle.await.unwrap().unwrap_err(), AuthError::UnknownKey);
+    }
+    assert_eq!(
+        fetcher.call_count(),
+        1,
+        "a concurrent unknown-kid burst drives no extra fetch"
+    );
+
+    // A genuine rotation still resolves once the interval has elapsed — exactly one further fetch.
+    fetcher.rotate(jwk_set(&[(KID_B, KEY_B_N)]));
+    tokio::time::sleep(Duration::from_millis(170)).await;
+    store
+        .decoding_key(Some(KID_B))
+        .await
+        .expect("rotated key-b resolves past the interval");
+    assert_eq!(
+        fetcher.call_count(),
+        2,
+        "one fetch per interval: rotation resolves after the wait"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -589,4 +674,64 @@ fn from_env_models_unconfigured_configured_and_errors() {
     );
 
     clear();
+}
+
+// ---------------------------------------------------------------------------------------------
+// HTTP JWKS fetch: response-body size cap over a loopback OIDC server (no external egress).
+// ---------------------------------------------------------------------------------------------
+
+/// Spin a localhost (loopback-only, no external egress) OIDC discovery + JWKS server serving
+/// `jwks_body` at its `jwks_uri`. Returns the issuer base URL and the server task handle.
+async fn spawn_oidc_server(jwks_body: String) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::Router;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::routing::get;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let discovery = json!({ "jwks_uri": format!("{base}/jwks") }).to_string();
+    let app = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let discovery = discovery.clone();
+                async move { ([(CONTENT_TYPE, "application/json")], discovery) }
+            }),
+        )
+        .route(
+            "/jwks",
+            get(move || {
+                let jwks_body = jwks_body.clone();
+                async move { ([(CONTENT_TYPE, "application/json")], jwks_body) }
+            }),
+        );
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+    (base, handle)
+}
+
+#[tokio::test]
+async fn oversized_jwks_body_is_rejected_fail_closed() {
+    // A 2 MiB JWKS body exceeds the 1 MiB cap → rejected before parse (fail closed), never OOM.
+    let (base, _server) = spawn_oidc_server("x".repeat(2 * 1024 * 1024)).await;
+    let fetcher = HttpJwksFetcher::new(base);
+    assert_eq!(
+        fetcher.fetch().await.unwrap_err(),
+        AuthError::JwksUnreachable
+    );
+}
+
+#[tokio::test]
+async fn normal_size_jwks_body_parses() {
+    let body = json!({
+        "keys": [{ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID_A, "n": KEY_A_N, "e": E }]
+    })
+    .to_string();
+    let (base, _server) = spawn_oidc_server(body).await;
+    let fetcher = HttpJwksFetcher::new(base);
+    let keys = fetcher.fetch().await.expect("a normal-size JWKS parses");
+    assert!(keys.find(KID_A).is_some(), "the served key is present");
 }

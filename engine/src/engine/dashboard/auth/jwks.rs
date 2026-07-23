@@ -6,9 +6,22 @@
 //! rotation) or after a **TTL**. Only **one** refresh is ever in flight — a cold `kid` under load
 //! coalesces onto a single fetch instead of stampeding the IdP.
 //!
-//! Per ADR-0030 §6 this store is **fail-closed**: a discovery/JWKS fetch failure is an
-//! [`AuthError`], never a bypass. The [`JwksFetcher`] seam lets tests serve a set in-memory with
-//! zero egress (and leaves room for the ADR's mounted-JWKS air-gap source on the same interface).
+//! **Anti-stampede.** The `kid` is read from the token's UNSIGNED header before any signature
+//! check, so an unauthenticated attacker can spray tokens each carrying a distinct random `kid`.
+//! The single-flight lock alone only collapses *concurrent* misses, not *sequential* ones — so a
+//! rotation-triggered refetch is additionally rate-limited to at most one network fetch per
+//! [`min_refresh_interval`](JwksStore::min_refresh_interval): an unknown `kid` on an otherwise
+//! fresh cache refetches only if the interval has elapsed since the last attempt, else it denies
+//! immediately with no network. A genuine rotation still resolves within `min_refresh_interval`.
+//!
+//! **Bounded body.** The discovery and JWKS responses are read under a hard byte budget
+//! ([`MAX_JWKS_BODY_BYTES`]) so a compromised / MITM / buggy issuer cannot OOM the engine with an
+//! unbounded body.
+//!
+//! Per ADR-0030 §6 this store is **fail-closed**: a discovery/JWKS fetch failure — including an
+//! over-large body or a throttled miss — is an [`AuthError`], never a bypass. The [`JwksFetcher`]
+//! seam lets tests serve a set in-memory with zero egress (and leaves room for the ADR's
+//! mounted-JWKS air-gap source on the same interface).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,6 +43,16 @@ const DEFAULT_TTL_SECS: u64 = 300;
 /// `PROTECTOR_OIDC_JWKS_TIMEOUT_SECS`. Short by design: verification must fail closed fast on an
 /// unreachable IdP rather than hang the request.
 const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 5;
+
+/// Minimum wall-clock between rotation-triggered network refetches, overridable via
+/// `PROTECTOR_OIDC_MIN_REFRESH_SECS`. Caps how fast an attacker-controlled unknown-`kid` stream
+/// can drive outbound JWKS fetches: at most one per interval, regardless of concurrency or
+/// sequencing. A genuine rotation still resolves within this interval.
+const DEFAULT_MIN_REFRESH_SECS: u64 = 5;
+
+/// Hard cap on the discovery / JWKS response body we will buffer (1 MiB — a JWKS is a handful of
+/// public keys, kilobytes at most). An over-large body fails closed rather than risk an OOM.
+const MAX_JWKS_BODY_BYTES: usize = 1024 * 1024;
 
 /// Source of the issuer's current JWK set. Abstracted as a trait so production fetches over HTTPS
 /// while tests inject an in-memory set (no egress) — and so the ADR-0030 air-gap "mounted JWKS"
@@ -93,21 +116,40 @@ impl JwksFetcher for HttpJwksFetcher {
     }
 }
 
-/// GET `url` and deserialize a 2xx JSON body. Any failure — unreachable, non-2xx, or unparsable
-/// body — collapses to [`AuthError::JwksUnreachable`] so a fetch failure denies, never bypasses.
+/// GET `url` and deserialize a 2xx JSON body **under a hard byte budget**. Any failure —
+/// unreachable, non-2xx, an over-large body, or an unparsable one — collapses to
+/// [`AuthError::JwksUnreachable`] so a fetch failure denies, never bypasses.
 async fn get_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<T, AuthError> {
-    client
+    let mut response = client
         .get(url)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| AuthError::JwksUnreachable)?
-        .json()
+        .map_err(|_| AuthError::JwksUnreachable)?;
+    // Reject an over-large ADVERTISED body up front (the cheap path).
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_JWKS_BODY_BYTES as u64)
+    {
+        return Err(AuthError::JwksUnreachable);
+    }
+    // Read with a running byte BUDGET so a missing or lying Content-Length can't OOM the engine:
+    // a compromised / MITM / buggy issuer must not be able to stream an unbounded body at us.
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| AuthError::JwksUnreachable)
+        .map_err(|_| AuthError::JwksUnreachable)?
+    {
+        if body.len() + chunk.len() > MAX_JWKS_BODY_BYTES {
+            return Err(AuthError::JwksUnreachable);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| AuthError::JwksUnreachable)
 }
 
 /// A cached key set plus when it was fetched (for the TTL check).
@@ -123,35 +165,56 @@ impl Cached {
     }
 }
 
-/// The cached, rotation-aware, single-flight JWKS store.
+/// The cached, rotation-aware, single-flight, rate-limited JWKS store.
 pub struct JwksStore {
     fetcher: Arc<dyn JwksFetcher>,
     cache: ArcSwapOption<Cached>,
     /// Serializes refreshes so only ONE fetch is in flight for a cold `kid` (no IdP stampede).
     refresh_lock: Mutex<()>,
+    /// When a network refetch was last ATTEMPTED (success or failure). Only ever touched while
+    /// `refresh_lock` is held; a std mutex keeps it `Sync`. Drives the anti-stampede rate limit.
+    last_refresh: std::sync::Mutex<Option<Instant>>,
     ttl: Duration,
+    /// The minimum wall-clock between rotation-triggered network refetches (anti-stampede).
+    min_refresh_interval: Duration,
 }
 
 impl JwksStore {
-    /// A store over `fetcher` with the default rotation-freshness TTL.
+    /// A store over `fetcher` with the default TTL and refresh interval (`PROTECTOR_OIDC_TTL` is
+    /// fixed; the refresh interval honors `PROTECTOR_OIDC_MIN_REFRESH_SECS`).
     pub fn new(fetcher: Arc<dyn JwksFetcher>) -> Self {
-        Self::with_ttl(fetcher, Duration::from_secs(DEFAULT_TTL_SECS))
+        let min_refresh = std::env::var("PROTECTOR_OIDC_MIN_REFRESH_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(DEFAULT_MIN_REFRESH_SECS);
+        Self::with_policy(
+            fetcher,
+            Duration::from_secs(DEFAULT_TTL_SECS),
+            Duration::from_secs(min_refresh),
+        )
     }
 
-    /// A store with an explicit TTL (used by tests to exercise the TTL-refetch path).
-    pub fn with_ttl(fetcher: Arc<dyn JwksFetcher>, ttl: Duration) -> Self {
+    /// A store with an explicit TTL and refresh interval — the seam tests use to exercise the
+    /// TTL-refetch and anti-stampede rate-limit paths on short, deterministic timings.
+    pub fn with_policy(
+        fetcher: Arc<dyn JwksFetcher>,
+        ttl: Duration,
+        min_refresh_interval: Duration,
+    ) -> Self {
         Self {
             fetcher,
             cache: ArcSwapOption::empty(),
             refresh_lock: Mutex::new(()),
+            last_refresh: std::sync::Mutex::new(None),
             ttl,
+            min_refresh_interval,
         }
     }
 
     /// Resolve a [`DecodingKey`] for the token's `kid`. Serves from cache when the set is fresh
-    /// and already contains the `kid`; otherwise refreshes (single-flight) and retries. An
-    /// unknown `kid` after a fresh refresh is [`AuthError::UnknownKey`]; a fetch failure is
-    /// [`AuthError::JwksUnreachable`] — either way it denies (ADR-0030 §6), never bypasses.
+    /// and already contains the `kid`; otherwise refreshes (single-flight, rate-limited) and
+    /// retries. An unknown `kid` is [`AuthError::UnknownKey`]; a fetch failure (or an empty cache
+    /// under throttle) is [`AuthError::JwksUnreachable`] — either way it denies (ADR-0030 §6).
     pub async fn decoding_key(&self, kid: Option<&str>) -> Result<DecodingKey, AuthError> {
         // Fast path: a fresh cache that already carries the requested key.
         if let Some(cached) = self.cache.load_full()
@@ -160,7 +223,7 @@ impl JwksStore {
         {
             return decoding_key_from_jwk(jwk);
         }
-        // Unknown `kid`, or a stale / empty cache: refresh (single-flight) then retry once.
+        // Unknown `kid`, or a stale / empty cache: refresh (single-flight, rate-limited).
         let cached = self.refresh(kid).await?;
         match find_key(&cached.keys, kid) {
             Some(jwk) => decoding_key_from_jwk(jwk),
@@ -168,18 +231,33 @@ impl JwksStore {
         }
     }
 
-    /// Perform a single-flight refresh. Concurrent callers block on `refresh_lock`; the first
-    /// fetches and swaps the cache, and the rest re-check under the lock and return the now-fresh
-    /// set WITHOUT a second fetch — so a cold `kid` under load hits the IdP exactly once.
+    /// Perform a single-flight, rate-limited refresh. Concurrent callers block on `refresh_lock`;
+    /// the first may fetch and swap the cache, and the rest re-check under the lock. A network
+    /// fetch happens ONLY if the cache still lacks what we need AND `min_refresh_interval` has
+    /// elapsed since the last attempt — otherwise we serve the current cache without egress (the
+    /// caller's `find_key` then denies an absent `kid`). So an unknown-`kid` stream drives at most
+    /// one fetch per interval, whether the misses arrive concurrently or in sequence.
     async fn refresh(&self, kid: Option<&str>) -> Result<Arc<Cached>, AuthError> {
         let _guard = self.refresh_lock.lock().await;
-        // Re-check under the lock: another task may have just refreshed what we need.
-        if let Some(cached) = self.cache.load_full()
+        let current = self.cache.load_full();
+        // Re-check under the lock: a concurrent caller may have just refreshed what we need.
+        if let Some(cached) = &current
             && cached.fresh(self.ttl)
             && find_key(&cached.keys, kid).is_some()
         {
-            return Ok(cached);
+            return Ok(cached.clone());
         }
+        // Anti-stampede: throttle rotation-triggered network refetches. Within the interval,
+        // serve the current cache (a present `kid` still resolves; an absent one denies) — but
+        // make NO outbound call. The empty-cache-under-throttle case fails closed.
+        if let Some(last) = *self.last_refresh.lock().unwrap()
+            && last.elapsed() < self.min_refresh_interval
+        {
+            return current.ok_or(AuthError::JwksUnreachable);
+        }
+        // We are the single flight for this interval. Record the attempt BEFORE the await so a
+        // FAILED fetch also counts against the interval (never hammer a flapping/hostile IdP).
+        *self.last_refresh.lock().unwrap() = Some(Instant::now());
         let keys = self.fetcher.fetch().await?;
         let cached = Arc::new(Cached {
             keys,

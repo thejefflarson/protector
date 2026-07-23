@@ -277,6 +277,13 @@ impl Verifier {
         }
     }
 
+    /// Build a verifier over an explicitly-configured [`JwksStore`] — lets tests exercise the
+    /// full verify path against a store with a short TTL / refresh interval.
+    #[cfg(test)]
+    pub(crate) fn with_store(config: OidcConfig, jwks: JwksStore) -> Self {
+        Self::new(config, jwks)
+    }
+
     /// The configuration this verifier enforces.
     pub fn config(&self) -> &OidcConfig {
         &self.config
