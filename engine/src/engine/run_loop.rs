@@ -43,12 +43,30 @@ fn build_dashboard_auth() -> Option<(
 )> {
     match dashboard::auth::OidcConfig::from_env() {
         Ok(Some(config)) => {
-            tracing::info!(
-                issuer = %config.issuer,
-                "dashboard OIDC enforcement ENABLED (fail-closed, ADR-0030)"
-            );
-            let enforcer = std::sync::Arc::new(dashboard::auth::enforce::Enforcer::new(config));
-            Some((Some(enforcer), dashboard::AuthMode::Oidc))
+            let issuer = config.issuer.clone();
+            // A MISconfigured enforcement policy (e.g. a mistyped min-tier) is a loud ConfigError,
+            // fail-closed exactly like a bad audience/algorithm: refuse to serve rather than mount a
+            // gate that silently degrades to allow-all.
+            match dashboard::auth::enforce::Enforcer::new(config) {
+                Ok(enforcer) => {
+                    tracing::info!(
+                        %issuer,
+                        "dashboard OIDC enforcement ENABLED (fail-closed, ADR-0030)"
+                    );
+                    Some((
+                        Some(std::sync::Arc::new(enforcer)),
+                        dashboard::AuthMode::Oidc,
+                    ))
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "dashboard OIDC enforcement policy is MISCONFIGURED — dashboard NOT served \
+                         (fail-closed, never silently degraded to allow-all)"
+                    );
+                    None
+                }
+            }
         }
         Ok(None) => {
             tracing::warn!(
@@ -711,6 +729,62 @@ mod tests {
     use k8s_openapi::api::core::v1::Secret;
     use kube::Resource;
     use kube::core::PartialObjectMeta;
+
+    /// JEF-487: the dashboard's app-level OIDC gate must fail LOUD on a mistyped minimum-tier config
+    /// (dashboard NOT served), never silently degrade to allow-all — while a valid or absent value
+    /// still serves the enforcing gate. Drives the real `build_dashboard_auth` over the env.
+    #[test]
+    fn dashboard_oidc_min_tier_config_fails_loud_but_serves_on_valid_or_absent() {
+        // Serialize with the other PROTECTOR_DASHBOARD_OIDC_* env test (`from_env`) via the shared
+        // lock, since env is process-global under cargo's parallel test threads.
+        let _env = crate::engine::dashboard::auth::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        const ISSUER: &str = "PROTECTOR_DASHBOARD_OIDC_ISSUER";
+        const AUDIENCE: &str = "PROTECTOR_DASHBOARD_OIDC_AUDIENCE";
+        const MIN_TIER: &str = "PROTECTOR_DASHBOARD_OIDC_MIN_TIER";
+        let clear = || unsafe {
+            for key in [
+                ISSUER,
+                AUDIENCE,
+                MIN_TIER,
+                "PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM",
+                "PROTECTOR_DASHBOARD_OIDC_ALGORITHM",
+                "PROTECTOR_DASHBOARD_OIDC_LOGIN_URL",
+            ] {
+                std::env::remove_var(key);
+            }
+        };
+        clear();
+
+        // A configured issuer + audience with a MISTYPED min-tier → ConfigError → dashboard NOT
+        // served (the HIGH fix: fail loud, never silently allow-all).
+        unsafe {
+            std::env::set_var(ISSUER, "https://issuer.example");
+            std::env::set_var(AUDIENCE, "protector");
+            std::env::set_var(MIN_TIER, "operator"); // not a real tier
+        }
+        assert!(
+            super::build_dashboard_auth().is_none(),
+            "a mistyped MIN_TIER must fail loud (dashboard not served), never silently allow-all"
+        );
+
+        // A VALID min-tier serves, enforcing (Oidc).
+        unsafe { std::env::set_var(MIN_TIER, "raw") };
+        let (auth, mode) = super::build_dashboard_auth().expect("a valid config serves");
+        assert!(auth.is_some(), "a valid config mounts the enforcer");
+        assert_eq!(mode, crate::engine::dashboard::AuthMode::Oidc);
+
+        // MIN_TIER UNSET → the Redacted default (allow all authenticated); still serves, enforcing.
+        unsafe { std::env::remove_var(MIN_TIER) };
+        let (auth, mode) =
+            super::build_dashboard_auth().expect("an absent min-tier defaults and serves");
+        assert!(auth.is_some());
+        assert_eq!(mode, crate::engine::dashboard::AuthMode::Oidc);
+
+        clear();
+    }
 
     /// The reflected element type asks the apiserver for metadata only. `metadata_api()`
     /// is what drives both `watcher(Api::<PartialObjectMeta<Secret>>, _)` and

@@ -502,8 +502,11 @@ async fn layer_returns_503_when_jwks_unreachable() {
 
 #[test]
 fn from_env_models_unconfigured_configured_and_errors() {
-    // Env is process-global; keep all mutation inside this one test (no other test reads these
-    // vars) and restore a clean slate at each step to avoid cross-assertion bleed.
+    // Env is process-global; serialize with the other PROTECTOR_DASHBOARD_OIDC_* env test
+    // (`build_dashboard_auth`) via the shared lock, and restore a clean slate at each step.
+    let _env = super::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let keys = [
         super::ENV_ISSUER,
         super::ENV_AUDIENCE,

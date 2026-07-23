@@ -30,7 +30,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use super::claims::Tier;
-use super::{AuthError, Identity, OidcConfig, Verifier, authenticate, non_empty_env};
+use super::{AuthError, ConfigError, Identity, OidcConfig, Verifier, authenticate, non_empty_env};
 
 /// The tiny JSON body for a `401` — no graph data, no stack, no which-check-failed detail (ADR-0030
 /// §6: which check failed is not the caller's business).
@@ -65,14 +65,17 @@ pub struct Enforcer {
 impl Enforcer {
     /// Build the production gate from a configured [`OidcConfig`]: a verifier that fetches the
     /// issuer's keys over HTTPS, the login redirect (configured URL, else the issuer), and the
-    /// minimum tier (env escape hatch, else the most-restricted default).
-    pub fn new(config: OidcConfig) -> Self {
+    /// minimum tier (env escape hatch, else the most-restricted default). A MISTYPED minimum tier is
+    /// a loud [`ConfigError`] — fail-closed exactly like a bad audience/algorithm, so `run_loop`
+    /// refuses to serve rather than silently degrade the gate to allow-all.
+    pub fn new(config: OidcConfig) -> Result<Self, ConfigError> {
         let login_redirect = login_redirect(&config);
-        Self {
+        let min_tier = configured_min_tier()?;
+        Ok(Self {
             verifier: Verifier::from_config(config),
             login_redirect,
-            min_tier: configured_min_tier(),
-        }
+            min_tier,
+        })
     }
 
     /// Assemble a gate from explicit parts — the seam tests use to inject a [`Verifier`] built over
@@ -221,12 +224,25 @@ fn login_redirect(config: &OidcConfig) -> String {
     non_empty_env(ENV_LOGIN_URL).unwrap_or_else(|| config.issuer.clone())
 }
 
-/// The configured minimum viewing tier, or the most-restricted default (which permits every
-/// verified identity). An unknown label maps to the floor (fail-safe, never permissive).
-fn configured_min_tier() -> Tier {
-    non_empty_env(ENV_MIN_TIER)
-        .map(|value| Tier::from_claim_str(&value))
-        .unwrap_or_default()
+/// The configured minimum viewing tier from the environment, or the most-restricted default (which
+/// permits every verified identity) when unset/blank. A non-empty but UNRECOGNIZED value is a loud
+/// [`ConfigError`], never a silent degrade to allow-all (the HIGH fix).
+fn configured_min_tier() -> Result<Tier, ConfigError> {
+    parse_min_tier(non_empty_env(ENV_MIN_TIER).as_deref())
+}
+
+/// Strictly interpret an operator's minimum-tier config value: unset/blank ⇒ the most-restricted
+/// default (`Redacted`, allow every authenticated identity); a recognized tier ⇒ that threshold; a
+/// non-empty UNRECOGNIZED value ⇒ [`ConfigError::UnsupportedTier`] (fail loud). Uses the strict
+/// [`Tier::parse_config`], NOT the lenient token-claim parser — a mistyped threshold must not
+/// silently admit everyone.
+fn parse_min_tier(value: Option<&str>) -> Result<Tier, ConfigError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(Tier::default()),
+        Some(value) => {
+            Tier::parse_config(value).ok_or_else(|| ConfigError::UnsupportedTier(value.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,5 +354,38 @@ mod tests {
                 "a forbidden identity is not re-challenged with a redirect"
             );
         }
+    }
+
+    #[test]
+    fn min_tier_config_parses_the_three_tiers_case_insensitively() {
+        assert_eq!(parse_min_tier(Some("redacted")).unwrap(), Tier::Redacted);
+        assert_eq!(parse_min_tier(Some("forensic")).unwrap(), Tier::Forensic);
+        assert_eq!(parse_min_tier(Some("raw")).unwrap(), Tier::Raw);
+        // Mixed case + surrounding whitespace still resolve to the right threshold.
+        assert_eq!(parse_min_tier(Some("RAW")).unwrap(), Tier::Raw);
+        assert_eq!(parse_min_tier(Some("  Forensic ")).unwrap(), Tier::Forensic);
+    }
+
+    #[test]
+    fn min_tier_config_unset_or_blank_defaults_to_redacted_allow_all() {
+        assert_eq!(parse_min_tier(None).unwrap(), Tier::Redacted);
+        assert_eq!(parse_min_tier(Some("")).unwrap(), Tier::Redacted);
+        assert_eq!(parse_min_tier(Some("   ")).unwrap(), Tier::Redacted);
+    }
+
+    #[test]
+    fn min_tier_config_fails_loud_on_a_typo_never_silently_allow_all() {
+        // The crux of the HIGH fix: a mistyped operator threshold must be a loud ConfigError, NOT a
+        // silent degrade to Redacted (allow-all). Contrast the token-claim parser, which correctly
+        // floors an unknown *token* tier to Redacted — that path is deliberately left unchanged.
+        for typo in ["raww", "operator", "admin", "superuser"] {
+            assert_eq!(
+                parse_min_tier(Some(typo)),
+                Err(ConfigError::UnsupportedTier(typo.to_string())),
+                "a mistyped min-tier `{typo}` must fail loud, not degrade to allow-all"
+            );
+        }
+        // The token-claim parser is UNCHANGED: an unknown *token* tier still floors to Redacted.
+        assert_eq!(Tier::from_claim_str("operator"), Tier::Redacted);
     }
 }

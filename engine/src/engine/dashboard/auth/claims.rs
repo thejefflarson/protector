@@ -26,14 +26,31 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// Map a claim string to a tier, case-insensitively. Any unrecognized value maps to the
-    /// most-restricted [`Tier::Redacted`] (fail-safe — an unknown label is never permissive).
+    /// Map a *token claim* string to a tier, case-insensitively. Any unrecognized value maps to the
+    /// most-restricted [`Tier::Redacted`] (fail-safe — an unknown label in an attacker-influenced
+    /// token is never permissive). This leniency is CORRECT for a token claim and WRONG for an
+    /// operator config threshold — use [`Tier::parse_config`] for the latter (it fails loud).
     pub fn from_claim_str(value: &str) -> Tier {
         match value.trim().to_ascii_lowercase().as_str() {
             "raw" => Tier::Raw,
             "forensic" => Tier::Forensic,
             // "redacted" and everything else (incl. unknown labels) map to the floor.
             _ => Tier::Redacted,
+        }
+    }
+
+    /// Strictly parse an OPERATOR-CONFIGURED tier threshold: an exact match on
+    /// `redacted`/`forensic`/`raw` (case-insensitive), or `None` for any other value so the caller
+    /// FAILS LOUD. This is the deliberate opposite of [`Tier::from_claim_str`]: a mistyped config
+    /// threshold (e.g. `raww`, `admin`) must never silently degrade the gate to the least-restrictive
+    /// `Redacted` (allow-all) — an operator who typos `raw` must get a loud misconfiguration, not a
+    /// dashboard that quietly admits every authenticated identity.
+    pub fn parse_config(value: &str) -> Option<Tier> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "redacted" => Some(Tier::Redacted),
+            "forensic" => Some(Tier::Forensic),
+            "raw" => Some(Tier::Raw),
+            _ => None,
         }
     }
 

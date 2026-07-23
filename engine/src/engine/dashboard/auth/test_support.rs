@@ -16,6 +16,12 @@ use serde_json::{Value, json};
 use super::jwks::JwksFetcher;
 use super::{AuthError, OidcConfig, SigningAlgorithm, Verifier};
 
+/// Serializes the tests that mutate the process-global `PROTECTOR_DASHBOARD_OIDC_*` env — the
+/// verifier's `from_env` and the dashboard's `build_dashboard_auth` — so cargo's parallel test
+/// threads can't interleave their env writes and read each other's half-set state. Acquire it
+/// (`ENV_LOCK.lock()...`) at the top of any such test.
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) const ISSUER: &str = "https://issuer.example";
 pub(crate) const AUDIENCE: &str = "protector";
 pub(crate) const KID_A: &str = "key-a";

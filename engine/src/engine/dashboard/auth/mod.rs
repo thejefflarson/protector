@@ -123,6 +123,12 @@ pub enum ConfigError {
     /// `PROTECTOR_DASHBOARD_OIDC_ALGORITHM` is something other than a supported asymmetric algorithm.
     #[error("{ENV_ALGORITHM} `{0}` is not a supported asymmetric algorithm (RS256, ES256)")]
     UnsupportedAlgorithm(String),
+    /// `PROTECTOR_DASHBOARD_OIDC_MIN_TIER` is a non-empty value that is not one of the recognized
+    /// tiers — a loud misconfiguration (never silently degraded to the least-restrictive allow-all).
+    #[error(
+        "PROTECTOR_DASHBOARD_OIDC_MIN_TIER `{0}` is not a recognized tier (redacted, forensic, raw)"
+    )]
+    UnsupportedTier(String),
 }
 
 impl OidcConfig {
