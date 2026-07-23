@@ -7,7 +7,7 @@
 use super::super::evidence::{cve_evidence, cve_ids_of, entry_evidence};
 use super::super::guards::{
     extract_cve_ids, fence, fence_list, guard_fabricated_cve, guard_unsupported_exploitable,
-    ns_marker, objective_reach,
+    ns_marker, objective_reach, sanitize,
 };
 use super::super::*;
 use super::{

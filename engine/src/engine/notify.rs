@@ -28,12 +28,13 @@
 //!   an unbounded `reqwest::Client::new()`), so a hung sink can't stall the engine loop;
 //!   a POST failure is logged once and dropped — it never touches a verdict or actuation.
 
-use std::collections::BTreeSet;
-
 use serde_json::{Value, json};
 
 use super::graph::attack::AttackRef;
-use super::reason::adjudicate::{Verdict, sanitize};
+use super::reason::adjudicate::Verdict;
+// The redaction primitives are shared with the read-only MCP server (ADR-0031); they live in
+// `super::redact` so the two egress paths cannot drift in what they consider safe to emit.
+use super::redact::{redacted_attack_outcome, sanitize, scrub_cve_tokens, scrub_decision_names};
 
 /// Total timeout (seconds) for one notification POST. Short by design: this is a
 /// fire-and-forget alert, not a request whose answer we need, so it must give up fast
@@ -202,32 +203,23 @@ pub fn redacted_coverage_payload(notice: &CoverageNotice) -> Value {
 /// untrusted third-party prose (trivy's CVE title, JEF-66) can't smuggle structure into the
 /// sink.
 pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
-    // Distinct ATT&CK references reached — the "outcome", as low-cardinality IDs. A
-    // BTreeSet dedups and orders them deterministically (stable payloads = stable tests).
-    let mut attack: BTreeSet<(&'static str, &'static str, &'static str)> = BTreeSet::new();
-    for (_objective, a) in notice.objectives {
-        attack.insert((a.tactic.id(), a.technique_id, a.technique));
-    }
-    let attack_outcome: Vec<Value> = attack
-        .into_iter()
-        .take(ATTACK_CAP)
-        .map(|(tactic, technique_id, technique)| {
-            // The technique name is a `'static` constant from our own ATT&CK table, not
-            // cluster data; sanitize it anyway so the payload is uniformly structure-safe.
-            json!({
-                "tactic": tactic,
-                "technique_id": technique_id,
-                "technique": sanitize(technique),
-            })
-        })
-        .collect();
+    // Distinct ATT&CK references reached — the "outcome" as low-cardinality IDs, never the
+    // per-objective targets (the shared counts-only reducer, ADR-0031 §2).
+    let attack_outcome = redacted_attack_outcome(
+        notice.objectives.iter().map(|(_objective, a)| a),
+        ATTACK_CAP,
+    );
 
     // The verdict text can carry untrusted third-party prose (trivy's CVE title, JEF-66) —
     // sanitize it before egress so it's inert data in the operator's sink. `sanitize` strips
     // STRUCTURE (fences/braces) but not SEMANTICS: the model can echo a secret/peer name
     // or a CVE id it was shown into its free-text reason, which would then egress around
-    // the ADR-0018 redaction. So also scrub those names/tokens out (Fix 6).
-    let verdict_text = scrub_decision_names(&sanitize(&notice.verdict.summary()), notice);
+    // the ADR-0018 redaction. So also scrub those names/tokens out (Fix 6), composing the
+    // shared name + CVE scrubbers exactly as the MCP `redacted` tier does.
+    let verdict_text = scrub_cve_tokens(&scrub_decision_names(
+        &sanitize(&notice.verdict.summary()),
+        &decision_names(notice),
+    ));
 
     let mut payload = json!({
         // The decision kind — a stable, low-cardinality label, never free text.
@@ -274,60 +266,22 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
     payload
 }
 
-/// The placeholder substituted for any decision-input name or CVE id scrubbed from the
-/// model's free-text verdict prose before egress.
-const REDACTED: &str = "[redacted]";
-
-/// Scrub the model's free-text verdict prose (Fix 6) of the very names that fed the
-/// decision — so a secret/peer name or CVE id the model *echoed* into its reason can't
-/// egress around the ADR-0018 redaction. Replaces, with a placeholder:
-///
-/// - the entry workload key,
-/// - each objective `NodeKey` (the decision's targets) AND the last `/`-segment of each
-///   (the bare secret/peer name, e.g. `db-password`),
-/// - any `CVE-<year>-<seq>` token (case-insensitive).
-///
-/// Order matters: longer, more-specific names are replaced first so a substring match
-/// (`secret/app/Secret/db-password` then `db-password`) doesn't leave a fragment behind.
-fn scrub_decision_names(text: &str, notice: &BreachNotice<'_>) -> String {
-    // Collect the names to scrub, longest first (so a full key is removed before its
-    // bare-name suffix, and no shorter name leaves a longer one half-scrubbed).
-    let mut names: Vec<String> = Vec::new();
-    let mut push = |s: &str| {
-        let s = s.trim();
-        if !s.is_empty() {
-            names.push(s.to_string());
-        }
-    };
-    push(notice.entry);
+/// The decision's own names to scrub from the model's free-text verdict prose (Fix 6): the
+/// entry workload key, each objective `NodeKey` (the decision's targets), AND the bare last
+/// `/`-segment of each key (the secret/peer name, e.g. `db-password`). This is the
+/// notifier's domain knowledge of the decision's shape; it hands the flat name list to the
+/// shared [`scrub_decision_names`], which knows only "replace these strings." The shared
+/// scrubber orders them longest-first, so a full key is removed before its bare suffix.
+fn decision_names<'a>(notice: &'a BreachNotice<'a>) -> Vec<&'a str> {
+    let mut names: Vec<&str> = Vec::new();
+    names.push(notice.entry);
     for (objective, _attack) in notice.objectives {
-        push(&objective.0);
+        names.push(&objective.0);
         if let Some((_, bare)) = objective.0.rsplit_once('/') {
-            push(bare);
+            names.push(bare);
         }
     }
-    names.sort_by_key(|b| std::cmp::Reverse(b.len()));
-    names.dedup();
-
-    let mut out = text.to_string();
-    for name in names {
-        if out.contains(&name) {
-            out = out.replace(&name, REDACTED);
-        }
-    }
-    scrub_cve_tokens(&out)
-}
-
-/// Replace every `CVE-<4-digit year>-<4+ digit sequence>` token (case-insensitive) with
-/// the redaction placeholder. The model can name a CVE it was shown in evidence; the CVE
-/// inventory is crown-jewel data ADR-0018 keeps in-cluster, so it must not ride out in
-/// the prose either.
-fn scrub_cve_tokens(text: &str) -> String {
-    static CVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = CVE.get_or_init(|| {
-        regex::Regex::new(r"(?i)CVE-\d{4}-\d{4,}").expect("static CVE regex compiles")
-    });
-    re.replace_all(text, REDACTED).into_owned()
+    names
 }
 
 /// The breach notifier. `Some(url)` when `PROTECTOR_ENGINE_NOTIFY_URL` is configured,
@@ -592,6 +546,36 @@ mod tests {
         assert!(
             payload["verdict"].as_str().unwrap().contains("[redacted]"),
             "scrubbed names are replaced with a placeholder"
+        );
+    }
+
+    /// BYTE-IDENTICAL guarantee (JEF-486): lifting the scrubbers into the shared
+    /// `engine::redact` module must not change a single byte of what the notifier emits.
+    /// These are the exact serialized payloads captured from the pre-refactor code for a
+    /// fixture that exercises every scrubber (structure chars, a CVE token, a full node-key
+    /// AND its bare secret name) across the default, verbose, and armed shapes. If the
+    /// refactor drifts, one of these fails.
+    #[test]
+    fn redacted_payload_is_byte_identical_to_pre_refactor() {
+        let verdict = Verdict::Exploitable(
+            "CVE-2021-44228 in web reaches secret/app/Secret/db-password (db-password) see <<<x>>> `y`"
+                .into(),
+        );
+        let objectives = secret_objectives();
+        let notice = sample_notice(&verdict, &objectives, Enforcement::Shadow);
+
+        assert_eq!(
+            serde_json::to_string(&redacted_payload(&notice, false)).unwrap(),
+            r#"{"attack":[{"tactic":"TA0001","technique":"Exploit Public-Facing Application","technique_id":"T1190"},{"tactic":"TA0006","technique":"Unsecured Credentials","technique_id":"T1552"}],"decision":"exploitable","enforcement":"shadow","entry":"workload/app/Pod/web","message":"protector would isolate workload/app/Pod/web (exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y )","objectives_reached":2,"verdict":"exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y "}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&redacted_payload(&notice, true)).unwrap(),
+            r#"{"attack":[{"tactic":"TA0001","technique":"Exploit Public-Facing Application","technique_id":"T1190"},{"tactic":"TA0006","technique":"Unsecured Credentials","technique_id":"T1552"}],"attack_detail":[{"tactic":"TA0006","technique":"Unsecured Credentials","technique_id":"T1552"},{"tactic":"TA0001","technique":"Exploit Public-Facing Application","technique_id":"T1190"}],"decision":"exploitable","enforcement":"shadow","entry":"workload/app/Pod/web","message":"protector would isolate workload/app/Pod/web (exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y )","objectives_reached":2,"verdict":"exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y "}"#,
+        );
+        let armed = sample_notice(&verdict, &objectives, Enforcement::Armed);
+        assert_eq!(
+            serde_json::to_string(&redacted_payload(&armed, false)).unwrap(),
+            r#"{"attack":[{"tactic":"TA0001","technique":"Exploit Public-Facing Application","technique_id":"T1190"},{"tactic":"TA0006","technique":"Unsecured Credentials","technique_id":"T1552"}],"decision":"exploitable","enforcement":"armed","entry":"workload/app/Pod/web","message":"protector isolated workload/app/Pod/web (exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y )","objectives_reached":2,"verdict":"exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y "}"#,
         );
     }
 
