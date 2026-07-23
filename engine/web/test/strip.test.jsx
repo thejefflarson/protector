@@ -127,7 +127,8 @@ describe("StatusStrip honesty — green iff all-clear (ADR-0016/0019)", () => {
 describe("StatusStrip mode pill", () => {
   it("armed → ENFORCE (calm, no warn glyph)", () => {
     const container = mount({ armed: true });
-    const pill = container.querySelector(".pill");
+    // Target the mode pill specifically — the strip now carries a sibling auth-mode `.pill` too.
+    const pill = container.querySelector(".mode-enforce");
     expect(pill.classList.contains("mode-enforce")).toBe(true);
     expect(pill.textContent).toContain("ENFORCE");
     expect(pill.textContent).toContain("acting");
@@ -136,12 +137,42 @@ describe("StatusStrip mode pill", () => {
 
   it("shadow → SHADOW with the ⚠ warning glyph", () => {
     const container = mount({ armed: false });
-    const pill = container.querySelector(".pill");
+    // Target the mode pill specifically — the strip now carries a sibling auth-mode `.pill` too.
+    const pill = container.querySelector(".mode-shadow");
     expect(pill.classList.contains("mode-shadow")).toBe(true);
     expect(pill.classList.contains("warn")).toBe(true);
     expect(pill.textContent).toContain("SHADOW");
     expect(pill.textContent).toContain("proposes, never acts");
     expect(pill.querySelector(".pill-glyph").textContent).toBe("⚠");
+  });
+});
+
+describe("StatusStrip auth-mode pill (JEF-489)", () => {
+  it("oidc → a calm OIDC pill (word, no warn glyph)", () => {
+    const container = mount({ "auth-mode": "oidc" });
+    const pill = container.querySelector(".auth-oidc");
+    expect(pill).toBeTruthy();
+    expect(pill.classList.contains("warn")).toBe(false);
+    expect(pill.textContent).toContain("OIDC");
+    expect(pill.querySelector(".pill-glyph")).toBeNull(); // calm — no warning glyph
+  });
+
+  it("edge-only → the loud EDGE-ONLY ⚠ warn pill (word + glyph, never colour alone)", () => {
+    const container = mount({ "auth-mode": "edge-only" });
+    const pill = container.querySelector(".auth-edge");
+    expect(pill).toBeTruthy();
+    expect(pill.classList.contains("warn")).toBe(true); // same warn register as the SHADOW pill
+    expect(pill.textContent).toContain("EDGE-ONLY");
+    expect(pill.querySelector(".pill-glyph").textContent).toBe("⚠");
+  });
+
+  it("a missing auth-mode falls to the conservative EDGE-ONLY warn (never silently 'oidc')", () => {
+    const container = mount({ "auth-mode": undefined });
+    const pill = container.querySelector(".auth-edge");
+    expect(pill).toBeTruthy();
+    expect(pill.classList.contains("warn")).toBe(true);
+    expect(pill.textContent).toContain("EDGE-ONLY");
+    expect(container.querySelector(".auth-oidc")).toBeNull();
   });
 });
 

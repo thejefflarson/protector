@@ -11,8 +11,15 @@
 // The connection banner is the only `aria-live="polite"` region (the STRIP HEADLINE — not the
 // table): first-load says "connecting to the engine…", stale says the load-bearing two-sentence
 // "Not updating … This is a connection problem, not an all-clear." Live says nothing (no chrome).
+//
+// Auth states (JEF-489): once OIDC is configured (JEF-487), `/api/*.json` can answer 401/403. The
+// poll's `onAuthError` flips the status machine to `unauthenticated | forbidden` UNCONDITIONALLY
+// (even during first-load — a 401 on the very first tick must not hang on "connecting…"), and the
+// <AuthGate> interstitial REPLACES the privileged view. The auth interstitial is mutually exclusive
+// with the polite connection banner: an operator who has been signed out must never also see a calm
+// "connecting…"/"stale" line that could read as a live-but-slow all-clear.
 
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { startPolling } from "./poll.js";
 import { StatusStrip } from "./strip.jsx";
 import { FindingsView } from "./findings/table.jsx";
@@ -63,6 +70,14 @@ export function App({ initialTab = "findings", liveRegion }) {
     setStatus((s) => (s === "first-load" ? s : "stale"));
   }, []);
 
+  // An auth failure on the snapshot route (JEF-489): flip to the interstitial state UNCONDITIONALLY —
+  // unlike `markStale`, there is NO first-load guard, because a 401 on the very first tick must
+  // surface (a signed-out operator hanging forever on "connecting…" is the silent-hang bug this
+  // fixes). 403 (signed in, not allowed) is a distinct state from 401 (signed out / expired).
+  const markAuthError = useCallback((httpStatus) => {
+    setStatus(httpStatus === 403 ? "forbidden" : "unauthenticated");
+  }, []);
+
   // Poll the ACTIVE tab; a client tab-swap RESTARTS the poll (keyed on [activeTab]) so the new tab
   // refetches IMMEDIATELY (fixing the up-to-5s blank after a swap — JEF-408) rather than waiting for
   // the next interval. `() => activeTab` is correct: the effect restarts per swap, re-closing over
@@ -73,9 +88,10 @@ export function App({ initialTab = "findings", liveRegion }) {
         tab: () => activeTab,
         onSnapshot: applySnapshot,
         onStale: markStale,
+        onAuthError: markAuthError,
         liveRegion: liveRegion || (() => document.getElementById("dash-app")),
       }),
-    [activeTab, applySnapshot, markStale, liveRegion],
+    [activeTab, applySnapshot, markStale, markAuthError, liveRegion],
   );
 
   // Swap the active tab (client-side view swap). Drop the previous tab's snapshot — each tab has its
@@ -86,12 +102,21 @@ export function App({ initialTab = "findings", liveRegion }) {
     setData(null);
   }, []);
 
+  // In an auth state the privileged view is REPLACED by the interstitial, and the polite connection
+  // banner is suppressed — the two are mutually exclusive (JEF-489). The persistent strip stays: the
+  // interstitial copy explicitly covers that the last-seen posture may be out of date, so a held
+  // strip never reads as a live all-clear.
+  const authState = status === "unauthenticated" || status === "forbidden";
   return (
     <div id="dash-app" class="dash-app" data-tab={activeTab}>
       <StatusStrip strip={strip} />
-      <ConnectionBanner status={status} lastGoodAt={lastGoodAt} />
+      {authState ? null : <ConnectionBanner status={status} lastGoodAt={lastGoodAt} />}
       <TabNav activeTab={activeTab} onSwap={swapTab} />
-      <ActiveView activeTab={activeTab} data={data} />
+      {authState ? (
+        <AuthGate status={status} />
+      ) : (
+        <ActiveView activeTab={activeTab} data={data} />
+      )}
     </div>
   );
 }
@@ -114,6 +139,65 @@ function ConnectionBanner({ status, lastGoodAt }) {
       ) : null}
     </div>
   );
+}
+
+/**
+ * The auth interstitial (JEF-489) — shown IN PLACE OF the privileged view when the snapshot route
+ * answered an auth failure, so the last-good view is REPLACED (never left on screen reading stale).
+ * Mutually exclusive with {@link ConnectionBanner} (the caller suppresses the polite banner in an
+ * auth state). Two registers, chosen by the server's HTTP status:
+ *
+ *  - `unauthenticated` (401): you were signed out / the session expired — offer a re-auth control.
+ *  - `forbidden` (403): you're signed in but not allowed here — NO re-auth control (re-auth won't
+ *    help; the operator must be granted access out of band).
+ *
+ * Re-auth is a FULL-PAGE `<a href>` navigation (it re-enters the document-level OIDC flow, which
+ * bounces to the IdP), NEVER a fetch: the CSP `connect-src 'self'` blocks an XHR to the IdP, and we
+ * relax no CSP. It reuses the honest `empty` empty-state classes. `role="alert"` announces it; on
+ * transition focus moves to the panel heading (tabindex=-1) so a keyboard/SR operator lands on it.
+ */
+function AuthGate({ status }) {
+  const headingRef = useRef(null);
+  // Fire once per transition into an auth state: move focus to the panel heading so a keyboard /
+  // screen-reader operator lands on the interstitial (role="alert" also announces it aloud).
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [status]);
+
+  const forbidden = status === "forbidden";
+  const head = forbidden ? "no access to this dashboard" : "your session expired";
+  const sub = forbidden
+    ? "you're signed in, but your account isn't allowed here. ask whoever runs this cluster to grant you access."
+    : "you were signed out — this can happen after a while. what's on screen may be out of date. sign in again to pick up where you left off.";
+  return (
+    <main class="view auth-gate" role="alert">
+      <div class="empty empty-auth">
+        <p class="empty-head" tabindex={-1} ref={headingRef}>
+          {head}
+        </p>
+        <p class="empty-sub muted">{sub}</p>
+        {forbidden ? null : (
+          <p class="auth-gate-action">
+            {/* Full-page navigation (re-enters the OIDC document flow) — NEVER a fetch. */}
+            <a class="auth-gate-signin" href={reauthHref()}>
+              Sign in again
+            </a>
+          </p>
+        )}
+      </div>
+    </main>
+  );
+}
+
+/**
+ * The re-auth target: the CURRENT document URL, so a full-page navigation re-requests exactly where
+ * the operator was — the server's OIDC layer bounces that request to the IdP and returns them to the
+ * same tab afterwards. Relative + same-origin by construction (never an external/IdP URL the client
+ * fabricates — the server owns the redirect). Falls back to "/" if `location` is unavailable.
+ */
+function reauthHref() {
+  if (typeof window === "undefined" || !window.location) return "/";
+  return window.location.pathname + window.location.search;
 }
 
 /** Whole seconds since `at` (ms epoch), floored at 0 — for the stale banner's "NNs ago". */
