@@ -36,6 +36,13 @@ const S_JUDGEMENT: &str = "[redacted — judgement prompt+reply; forensic tier r
 const S_NODE: &str = "[redacted — node name; forensic tier required]";
 /// The sentinel for withheld objective secret names (raw).
 const S_OBJECTIVES: &str = "[redacted — objective/secret names; raw tier required]";
+/// The sentinel for the withheld free-text verdict reason (forensic). The model's `why` prose is
+/// authored by the judge model and routinely echoes the entry/namespace/peer/path it reasoned over
+/// — topology the shared scrubbers CANNOT reliably strip (they only scrub the decision's SECRET
+/// names + CVE tokens, not arbitrary workload/node/path strings). So the free-text reason is
+/// withheld below `forensic` (where paths/topology are already disclosed), leaving only the static
+/// verdict LABEL at `redacted`.
+const S_REASON: &str = "[redacted — verdict reason; forensic tier required]";
 
 /// Reduce `text` to the tier's disclosure by composing the shared scrubbers: always [`sanitize`]
 /// (structure); below `raw` also [`scrub_decision_names`] (the decision's SECRET names); below
@@ -176,11 +183,8 @@ impl<'a> EntryData<'a> {
     /// Render this entry at `tier`, with every field present (real value or typed sentinel).
     pub fn render(&self, tier: EffectiveTier) -> Value {
         let names = self.secret_name_refs();
-        let reason = self
-            .verdict
-            .map(|v| scrub(&v.summary(), tier, &names))
-            .unwrap_or_else(|| "awaiting judgement".to_string());
         let label = self.verdict.map(|v| v.label()).unwrap_or("awaiting");
+        let reason = self.reason_field(tier, &names);
 
         json!({
             "ref": entry_ref(self.entry),
@@ -201,6 +205,19 @@ impl<'a> EntryData<'a> {
             "cve_ids": self.cves_field(tier),
             "judgement": self.judgement_field(tier, &names),
         })
+    }
+
+    /// The free-text verdict reason. `awaiting judgement` when no verdict yet (a static, safe
+    /// string). Otherwise the model's `why` prose — WITHHELD below `forensic` (it can echo
+    /// entry/namespace/peer/path topology the scrubbers can't reliably strip), and the scrubbed prose
+    /// at forensic+ (where that topology is already disclosed). The static verdict LABEL always rides
+    /// alongside, so `redacted` still carries the decision.
+    fn reason_field(&self, tier: EffectiveTier, names: &[&str]) -> Value {
+        match self.verdict {
+            None => json!("awaiting judgement"),
+            Some(_) if tier < EffectiveTier::Forensic => json!(S_REASON),
+            Some(v) => json!(scrub(&v.summary(), tier, names)),
+        }
     }
 
     /// The blind-node name — real at forensic+ (topology), sentinel below. `null` when not blind.
@@ -401,6 +418,11 @@ pub fn withheld_for(entries: &[EntryData<'_>], tier: EffectiveTier) -> Vec<Withh
         out.push(Withheld {
             kind: "judgement",
             count: entries.iter().filter(|e| e.judgement.is_some()).count(),
+            unlock: "forensic",
+        });
+        out.push(Withheld {
+            kind: "verdict_reason",
+            count: entries.iter().filter(|e| e.verdict.is_some()).count(),
             unlock: "forensic",
         });
     }

@@ -31,6 +31,8 @@ sigstore = { version = "0.14.0", default-features = false, features = ["cosign",
 subtle = "2.6.1"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "process"] }
+tower = { version = "0.5.3", features = ["limit"] }
+tower-http = { version = "0.7.0", features = ["limit", "timeout"] }
 tracing = "0.1.44"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std"] }

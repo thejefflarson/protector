@@ -52,10 +52,23 @@ fn non_empty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Build the MCP router: the rmcp streamable-HTTP service at [`MCP_PATH`] behind the [`mcp_auth`]
-/// verifier layer, plus the UNAUTHENTICATED protected-resource metadata at [`WELL_KNOWN_PATH`]. The
-/// well-known route is added AFTER the auth `.layer`, so discovery stays open while every MCP call
-/// is gated.
+/// Hard cap on a single MCP request body. A JSON-RPC tool call is tiny (a name + a couple of string
+/// args); 256 KiB is generous and stops any token-holder — including the lowest `redacted` tier —
+/// from OOM-ing the engine PROCESS with a multi-GB body. Enforced OUTSIDE the auth layer, so an
+/// oversized body is rejected before it is verified OR parsed.
+const MAX_BODY_BYTES: usize = 256 * 1024;
+/// Hard cap on concurrently in-flight MCP requests. Bounds total work (incl. any long-lived
+/// streamed response) so a token-holder cannot exhaust the engine by opening unbounded connections.
+const MAX_CONCURRENT: usize = 64;
+/// Per-request timeout. Safe because the server runs STATELESS (`json_response`, no long-lived SSE
+/// session) — every request is a bounded request→response, so a slow/abandoned call cannot pin a
+/// worker or accumulate a session + keep-alive task.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Build the MCP router: the rmcp streamable-HTTP service at [`MCP_PATH`] behind the resource
+/// governors + the [`mcp_auth`] verifier layer, plus the UNAUTHENTICATED protected-resource metadata
+/// at [`WELL_KNOWN_PATH`]. The well-known route is added AFTER the governor/auth `.layer`s, so
+/// discovery stays open while every MCP call is gated AND resource-bounded.
 pub fn router(state: McpState, verifier: Arc<Verifier>, audit: Arc<dyn AuditSink>) -> Router {
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = server_config();
@@ -66,7 +79,19 @@ pub fn router(state: McpState, verifier: Arc<Verifier>, audit: Arc<dyn AuditSink
 
     Router::new()
         .route_service(MCP_PATH, mcp_service)
+        // Layers are applied inner→outer, so a request flows through them OUTER→inner: the body
+        // limit runs FIRST (reject an oversized body before verify/parse — the OOM guard), then the
+        // timeout + concurrency bound, then auth, then rmcp. A token-holder cannot OOM or exhaust the
+        // engine process (DoS → cluster-wide runtime-blindness).
         .layer(axum::middleware::from_fn_with_state(verifier, mcp_auth))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(MAX_CONCURRENT))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            MAX_BODY_BYTES,
+        ))
         // Discovery is unauthenticated (it carries only the issuer, no cluster data), added after
         // the auth layer so it is NOT gated.
         .route(
@@ -102,16 +127,28 @@ pub async fn serve_mcp(
     }
 }
 
-/// The rmcp server config. Loopback-only `Host` acceptance by default (the DNS-rebinding guard); an
-/// operator behind an ingress adds their host via [`ENV_ALLOWED_HOSTS`].
+/// The rmcp server config. STATELESS + `json_response` (every request is a bounded request→response
+/// returning `application/json`), so there is NO per-session task or keep-alive SSE stream to
+/// accumulate — an attacker cannot pile up idle sessions, and the per-request timeout is safe
+/// (nothing is meant to stay open). Loopback-only `Host` acceptance by default (the DNS-rebinding
+/// guard); an operator behind an ingress adds their host via [`ENV_ALLOWED_HOSTS`].
 fn server_config() -> rmcp::transport::StreamableHttpServerConfig {
     let mut config = rmcp::transport::StreamableHttpServerConfig::default();
+    // STATELESS request→response mode (the config is `#[non_exhaustive]`, so set fields on default).
+    config.stateful_mode = false;
+    config.json_response = true;
     if let Some(hosts) = non_empty_env(ENV_ALLOWED_HOSTS) {
-        config.allowed_hosts = hosts
+        let hosts: Vec<String> = hosts
             .split(',')
             .map(|h| h.trim().to_string())
             .filter(|h| !h.is_empty())
             .collect();
+        // Only override the loopback default with a NON-empty list — a value like "," that parses to
+        // empty must not silently disable the DNS-rebinding guard (rmcp treats an empty list as
+        // allow-all). Auth still gates every request regardless, but the guard stays on.
+        if !hosts.is_empty() {
+            config.allowed_hosts = hosts;
+        }
     }
     config
 }

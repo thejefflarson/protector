@@ -177,6 +177,10 @@ fn redacted_tier_leaks_no_secret_name_cve_or_path() {
         !out.contains("shop"),
         "redacted must not leak topology/namespace: {out}"
     );
+    assert!(
+        !out.contains("storefront"),
+        "redacted must not leak the workload name the verdict prose echoes: {out}"
+    );
     // But it is NOT an empty shape: the verdict label, an objective COUNT, the technique ID, and the
     // sentinels are all present (withheld ≠ omitted).
     assert!(out.contains("exploitable"), "verdict label present: {out}");
@@ -191,6 +195,59 @@ fn redacted_tier_leaks_no_secret_name_cve_or_path() {
     assert!(
         out.contains("forensic tier required"),
         "sentinels present: {out}"
+    );
+}
+
+#[test]
+fn redacted_tier_withholds_the_free_text_verdict_reason_topology() {
+    // The judge model's free-text `why` routinely echoes the entry/namespace/peer/path it reasoned
+    // over — topology the shared scrubbers CANNOT strip (they only remove SECRET names + CVE
+    // tokens). So the reason is WITHHELD below forensic; only the static label survives at redacted.
+    let mut f = secret_finding();
+    f.objective = "secret/edge/vault-token".into();
+    f.verdict = Some(Verdict::Exploitable(
+        "the argocd-server pod in edge is internet-facing and reaches secret/edge/vault-token"
+            .into(),
+    ));
+    let group = [&f];
+    let redacted = EntryData::from_group(ENTRY, &group, None, false)
+        .render(EffectiveTier::Redacted)
+        .to_string();
+    // None of the model-echoed topology leaks at the default tier.
+    for topology in [
+        "argocd-server",
+        "vault-token",
+        "secret/edge",
+        "internet-facing",
+    ] {
+        assert!(
+            !redacted.contains(topology),
+            "redacted must not leak model-echoed topology `{topology}`: {redacted}"
+        );
+    }
+    // `edge` only appears inside the withheld path/entry sentinels here, never the reason — the
+    // reason itself is a sentinel, and the static label still rides along.
+    assert!(
+        redacted.contains("verdict reason; forensic tier required"),
+        "the reason is a typed sentinel: {redacted}"
+    );
+    assert!(
+        redacted.contains("exploitable"),
+        "the static label survives: {redacted}"
+    );
+
+    // At forensic (where paths/topology are already disclosed) the reason text IS present — only the
+    // secret NAME within it is scrubbed.
+    let forensic = EntryData::from_group(ENTRY, &group, None, false)
+        .render(EffectiveTier::Forensic)
+        .to_string();
+    assert!(
+        forensic.contains("argocd-server pod in edge is internet-facing"),
+        "forensic reveals the reason prose: {forensic}"
+    );
+    assert!(
+        !forensic.contains("vault-token"),
+        "forensic still scrubs the secret name inside the reason: {forensic}"
     );
 }
 
@@ -539,6 +596,53 @@ mod transport {
             response.headers().contains_key(header::WWW_AUTHENTICATE),
             "the 401 carries the ID-JAG challenge"
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversize_request_body_is_rejected_before_auth_or_parse() {
+        // The DoS/OOM guard: the body-limit layer is OUTERMOST, so a multi-GB body is rejected with
+        // 413 before it is ever verified or parsed — a token-holder (even redacted tier) cannot OOM
+        // the engine process. (Timeout + concurrency bounds are wired alongside; see `router`.)
+        let (verifier, _fetcher) = verifier_with_key_a();
+        let router = crate::engine::mcp::transport::router(
+            super::state_with_secret(),
+            Arc::new(verifier),
+            Arc::new(TracingAuditSink),
+        );
+        let oversize = vec![b'x'; 512 * 1024]; // > the 256 KiB cap
+        let request = Request::builder()
+            .method("POST")
+            .uri(MCP_PATH)
+            .header(header::AUTHORIZATION, format!("Bearer {}", valid_token()))
+            .header(header::CONTENT_TYPE, "application/json")
+            // A real large POST advertises its length; the limit layer rejects it up front (413).
+            .header(header::CONTENT_LENGTH, oversize.len())
+            .body(Body::from(oversize))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // A normal small body still passes the limit (and reaches rmcp — not a 413).
+        let ok = crate::engine::mcp::transport::router(
+            super::state_with_secret(),
+            Arc::new(verifier_with_key_a().0),
+            Arc::new(TracingAuditSink),
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(MCP_PATH)
+                .header(header::AUTHORIZATION, format!("Bearer {}", valid_token()))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(ok.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
