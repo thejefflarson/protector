@@ -207,15 +207,11 @@ pub(crate) fn fence(value: &str) -> String {
     format!("<<<{}>>>", sanitize(value).trim())
 }
 
-/// Strip the characters an attacker could use to close a fence or inject prompt
-/// structure (`<>{}`, backtick, CR/LF). Used to neutralize cluster-controlled
-/// names before they enter the adjudication prompt.
-pub(crate) fn sanitize(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if "<>{}`\n\r".contains(c) { ' ' } else { c })
-        .collect()
-}
+// `sanitize` now lives in the shared `engine::redact` module (ADR-0031), so the
+// adjudication prompt and the sanctioned egress paths share ONE implementation. Re-exported
+// here so `guards::sanitize` — and every `super::guards::sanitize` importer plus `fence`
+// below — resolves unchanged.
+pub(crate) use crate::engine::redact::sanitize;
 
 pub(crate) fn fence_list(values: &[String]) -> String {
     if values.is_empty() {
