@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime};
 use k8s_openapi::api::core::v1::Pod;
 
 use crate::engine::graph::SecurityGraph;
+use crate::engine::graph::attack::AttackRef;
 use crate::engine::observe::Snapshot;
 use crate::engine::reason::adjudicate::Verdict;
 use crate::engine::reason::proof::ProvenChain;
@@ -57,6 +58,11 @@ pub enum CoverageEdge {
 pub struct Finding {
     pub entry: String,
     pub objective: String,
+    /// The ATT&CK technique this entry→objective chain realizes (the same `AttackRef` the
+    /// proven chain carried, JEF-488). Published so a downstream egress surface — the read-only
+    /// MCP server (ADR-0031) — can surface the low-cardinality technique ID at the redacted tier
+    /// without re-walking the graph. Copied from `ProvenChain::attack` at construction.
+    pub attack: AttackRef,
     /// Whether the entry is an internet-facing FRONT DOOR — drives the breach-relevance
     /// discriminator.
     pub foothold: bool,
@@ -148,6 +154,7 @@ impl Finding {
             evidence: EntryEvidence::for_entry(graph, &chain.entry),
             entry: chain.entry.0.clone(),
             objective: chain.objective.0.clone(),
+            attack: chain.attack,
             foothold: chain.foothold.is_some(),
             corroborated: chain.corroborated,
             disposition: classify(chain, action),

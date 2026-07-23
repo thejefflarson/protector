@@ -22,6 +22,7 @@ petgraph = "0.8.3"
 protector-behavior = { path = "../behavior" }
 regex = "1.12.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server", "tower", "server-side-http"] }
 rustls = { version = "0.23.40", features = ["aws_lc_rs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

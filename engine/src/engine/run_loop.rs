@@ -86,6 +86,38 @@ fn build_dashboard_auth() -> Option<(
     }
 }
 
+/// Build the read-only MCP server's OIDC verifier from the environment (ADR-0031 / JEF-488). The
+/// MCP surface REQUIRES app-level auth — its tier ceiling + audit line bind to a verified human
+/// subject, so there is NO edge-only bypass here (unlike the dashboard, ADR-0030 §6). Returns the
+/// verifier ONLY when an issuer is configured and the config is valid; otherwise the MCP server is
+/// NOT served (fail-closed — a read surface for tiered cluster data never runs unauthenticated).
+fn build_mcp_verifier() -> Option<std::sync::Arc<dashboard::auth::Verifier>> {
+    match dashboard::auth::OidcConfig::from_env() {
+        Ok(Some(config)) => {
+            let issuer = config.issuer.clone();
+            tracing::info!(%issuer, "mcp OIDC verification ENABLED (fail-closed, ADR-0031)");
+            Some(std::sync::Arc::new(dashboard::auth::Verifier::from_config(
+                config,
+            )))
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "PROTECTOR_MCP_ADDR is set but no OIDC issuer is configured — the MCP server is \
+                 NOT served (it requires a verified token for its tier ceiling + audit; set \
+                 PROTECTOR_DASHBOARD_OIDC_ISSUER to enable it, ADR-0031)"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "mcp OIDC is MISCONFIGURED — the MCP server is NOT served (fail-closed)"
+            );
+            None
+        }
+    }
+}
+
 /// Choose the actuator. Dry-run when nothing is enabled (the engine can never touch
 /// the cluster). Otherwise `PROTECTOR_ENGINE_ACTUATOR` selects the mechanism:
 /// `networkpolicy` isolates the compromised workload with a default-deny
@@ -431,6 +463,36 @@ pub async fn run_watch(
             Err(error) => tracing::error!(
                 %error, addr = %addr_str,
                 "PROTECTOR_DASHBOARD_ADDR is not a host:port socket address; dashboard disabled"
+            ),
+        }
+    }
+
+    // The read-only, tiered-redaction MCP server (ADR-0031 / JEF-488), served behind
+    // `PROTECTOR_MCP_ADDR` (a SEPARATE bind from the dashboard). Off when unset — opt-in,
+    // zero-egress, in-cluster only. It reads the SAME `state::` handles the dashboard serves
+    // (findings, the judgement ring, the admission-decision log) and mounts rmcp BEHIND the same
+    // OIDC verifier — so an unauthenticated call is a 401 on the same path as `/api`. It requires a
+    // verified token (no edge-only bypass); a missing/broken issuer means it is simply not served.
+    if let Ok(addr_str) = std::env::var("PROTECTOR_MCP_ADDR") {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                if let Some(verifier) = build_mcp_verifier() {
+                    let state = crate::engine::mcp::McpState {
+                        findings: engine.findings(),
+                        judgements: journal.clone(),
+                        policy_log: policy_log.clone(),
+                        cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
+                            .unwrap_or_else(|_| "cluster".to_string()),
+                    };
+                    // The audit seam (ADR-0031 §4): a structured tracing event for now; JEF-490
+                    // wires the durable sink + the "Access" dashboard tab into this same trait.
+                    let audit = std::sync::Arc::new(crate::engine::mcp::audit::TracingAuditSink);
+                    tokio::spawn(crate::engine::mcp::serve_mcp(addr, state, verifier, audit));
+                }
+            }
+            Err(error) => tracing::error!(
+                %error, addr = %addr_str,
+                "PROTECTOR_MCP_ADDR is not a host:port socket address; MCP server disabled"
             ),
         }
     }
