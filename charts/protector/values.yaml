@@ -303,6 +303,30 @@ engine:
     port: 8080
     # The cluster label shown in the dashboard's status strip.
     clusterLabel: cluster
+    # App-level OIDC verification (ADR-0030 / JEF-487) — closes the port-forward hole. Protector
+    # is a RESOURCE SERVER: it verifies the JWT the edge (or any conformant OIDC IdP) already
+    # issues; it runs no login flow of its own. This is DISTINCT from `signature.oidcIssuer` (the
+    # cosign keyless CERT-IDENTITY issuer) — a different concern, its own env namespace
+    # (PROTECTOR_DASHBOARD_OIDC_*) so the two never collide.
+    #
+    # FAIL-CLOSED when `issuer` is set: every request is verified and every failure DENIES (401 for
+    # /api, 302→login for a document, 503 if the JWKS is unreachable). Leave `issuer` EMPTY to run
+    # edge-trust-only (as today) — the engine then logs a LOUD startup warning that app-level auth
+    # is disabled (§6). The cluster-side IdP app + the engine→IdP NetworkPolicy live in the separate
+    # cluster repo, not here.
+    oidc:
+      # The expected token issuer (`iss`) and OIDC discovery base. EMPTY = unconfigured (edge-trust
+      # only, loud warning). Set to your IdP, e.g. the Cloudflare Access team issuer
+      # `https://<team>.cloudflareaccess.com` (the reference §7) or Okta/Keycloak/Auth0/Dex.
+      issuer: ""
+      # The expected audience (`aud`). REQUIRED once `issuer` is set (a misconfiguration otherwise —
+      # the dashboard is then NOT served rather than served unauthenticated). e.g. `protector` or the
+      # Cloudflare Access application AUD tag.
+      audience: ""
+      # The claim path the operator's authorization tier is read from (governs how much of the
+      # already-read-only view an identity sees; JEF-489). Default `tier`; supports a flat namespaced
+      # key or a dotted path (e.g. `authz.tier`).
+      tierClaim: "tier"
   # Two exploitation-intel feeds drive the engine's exploit intel + model reasoning
   # (ADR-0015): the CISA KEV catalogue (actively-exploited CVEs, known NOW) and the FIRST.org
   # EPSS scores (the PREDICTIVE per-CVE exploitation probability — JEF-243). The engine NEVER

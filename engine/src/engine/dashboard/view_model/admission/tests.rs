@@ -24,6 +24,7 @@ fn strip() -> StatusStripProps {
         escalated_count: 0,
         signing_regression_breach: 0,
         signing_regression_uncertain: 0,
+        auth_mode: crate::engine::dashboard::view_model::props::AuthMode::EdgeOnly,
     }
 }
 

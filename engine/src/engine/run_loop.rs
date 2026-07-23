@@ -28,6 +28,46 @@ fn restore_admission_log(
     restored
 }
 
+/// Build the dashboard's app-level OIDC gate from the environment (ADR-0030 / JEF-487): the
+/// fail-closed access control that closes the port-forward hole. Returns the `(enforcer, auth-mode)`
+/// to thread into the dashboard:
+/// - issuer CONFIGURED → `Some((Some(enforcer), Oidc))` — verify every request, fail-closed;
+/// - issuer ABSENT → `Some((None, EdgeOnly))` — serve edge-trust-only, but announce the single, loud
+///   bypass (§6) so an operator upgrading isn't silently unauthenticated;
+/// - MISconfigured (issuer set, audience/alg wrong) → `None` — logged and fail-closed: the dashboard
+///   is NOT served (never served unauthenticated on a broken config).
+#[allow(clippy::type_complexity)]
+fn build_dashboard_auth() -> Option<(
+    Option<std::sync::Arc<dashboard::auth::enforce::Enforcer>>,
+    dashboard::AuthMode,
+)> {
+    match dashboard::auth::OidcConfig::from_env() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                issuer = %config.issuer,
+                "dashboard OIDC enforcement ENABLED (fail-closed, ADR-0030)"
+            );
+            let enforcer = std::sync::Arc::new(dashboard::auth::enforce::Enforcer::new(config));
+            Some((Some(enforcer), dashboard::AuthMode::Oidc))
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "dashboard AUTH DISABLED — no OIDC issuer configured; relying on edge trust only \
+                 (set PROTECTOR_DASHBOARD_OIDC_ISSUER to enforce app-level auth, ADR-0030 §6)"
+            );
+            Some((None, dashboard::AuthMode::EdgeOnly))
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "dashboard OIDC is MISCONFIGURED — dashboard NOT served (fail-closed; fix the \
+                 config or unset PROTECTOR_DASHBOARD_OIDC_ISSUER to run edge-trust-only)"
+            );
+            None
+        }
+    }
+}
+
 /// Choose the actuator. Dry-run when nothing is enabled (the engine can never touch
 /// the cluster). Otherwise `PROTECTOR_ENGINE_ACTUATOR` selects the mechanism:
 /// `networkpolicy` isolates the compromised workload with a default-deny
@@ -346,24 +386,29 @@ pub async fn run_watch(
     if let Ok(addr_str) = std::env::var("PROTECTOR_DASHBOARD_ADDR") {
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
-                let state = dashboard::DashboardState {
-                    findings: engine.findings(),
-                    judgements: journal.clone(),
-                    reversions: engine.reversions(),
-                    // The durable decision journal backs the Trust would-have-acted report
-                    // (replayed read-only). Distinct handle from `journal` (the JudgementLog).
-                    decision_journal: engine.journal(),
-                    // The webhook's admission-decision ring backs the Admission tab (the webhook
-                    // floor). The SAME Arc the webhook engine writes — read-only here.
-                    policy_log: policy_log.clone(),
-                    cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
-                        .unwrap_or_else(|_| "cluster".to_string()),
-                    // The dashboard is Preact-only after the v4 cutover (ADR-0025 / JEF-398): every
-                    // tab renders the Preact client mount unconditionally — there is no per-tab flag.
-                    // The `PROTECTOR_DASHBOARD_PREACT_TABS` env var is no longer read (the cluster
-                    // chart still sets it harmlessly until the main loop removes it post-deploy).
-                };
-                tokio::spawn(dashboard::serve_dashboard(addr, state));
+                // App-level OIDC enforcement (ADR-0030 / JEF-487): the fail-closed gate that closes
+                // the port-forward hole. `None` is the MISconfigured case — already logged, and the
+                // dashboard is deliberately NOT served (never served unauthenticated on a bad config).
+                if let Some((auth, auth_mode)) = build_dashboard_auth() {
+                    let state = dashboard::DashboardState {
+                        findings: engine.findings(),
+                        judgements: journal.clone(),
+                        reversions: engine.reversions(),
+                        // The durable decision journal backs the Trust would-have-acted report
+                        // (replayed read-only). Distinct handle from `journal` (the JudgementLog).
+                        decision_journal: engine.journal(),
+                        // The webhook's admission-decision ring backs the Admission tab (the
+                        // webhook floor). The SAME Arc the webhook engine writes — read-only here.
+                        policy_log: policy_log.clone(),
+                        cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
+                            .unwrap_or_else(|_| "cluster".to_string()),
+                        // Server-derived (ADR-0030 / JEF-487): mirrors exactly the enforcement
+                        // decision from `build_dashboard_auth`, so the strip's auth pill can never
+                        // claim more than is actually enforced.
+                        auth_mode,
+                    };
+                    tokio::spawn(dashboard::serve_dashboard(addr, state, auth));
+                }
             }
             Err(error) => tracing::error!(
                 %error, addr = %addr_str,

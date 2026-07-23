@@ -27,12 +27,13 @@ fn empty_state() -> DashboardState {
         decision_journal: Arc::new(DecisionJournal::disabled()),
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-test".into(),
+        auth_mode: super::AuthMode::EdgeOnly,
     }
 }
 
 /// GET a route and return `(status, no_store, body_bytes)`.
 async fn get(path: &str) -> (StatusCode, bool, Vec<u8>) {
-    let router = super::router(empty_state());
+    let router = super::router(empty_state(), None);
     let response = router
         .oneshot(
             Request::builder()
@@ -89,7 +90,7 @@ async fn every_endpoint_is_get_only_json_and_no_store() {
 #[tokio::test]
 async fn a_write_verb_is_rejected_the_view_is_never_a_gate() {
     // POST to a JSON endpoint must not be routed (405) — there is no write route (ADR-0016).
-    let router = super::router(empty_state());
+    let router = super::router(empty_state(), None);
     let response = router
         .oneshot(
             Request::builder()
@@ -170,7 +171,7 @@ async fn an_empty_engine_never_serves_a_false_green() {
 /// and forbid `'unsafe-inline'` / `'unsafe-eval'` (Finding 1, JEF-395 / JEF-396).
 #[tokio::test]
 async fn the_json_api_carries_the_strict_csp() {
-    let router = super::router(empty_state());
+    let router = super::router(empty_state(), None);
     let response = router
         .oneshot(
             Request::builder()

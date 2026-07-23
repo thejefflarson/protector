@@ -36,6 +36,7 @@ fn all_clear_strip() -> StatusStripProps {
         escalated_count: 0,
         signing_regression_breach: 0,
         signing_regression_uncertain: 0,
+        auth_mode: AuthMode::EdgeOnly,
     }
 }
 
@@ -143,6 +144,24 @@ fn all_clear_strip_serializes_the_green_honesty_token() {
         "an honest all-clear ships green"
     );
     assert_eq!(v["watching"], json!(false));
+}
+
+#[test]
+fn auth_mode_serializes_as_a_stable_server_derived_token() {
+    // The client renders the pill (JEF-489) verbatim from this SERVER-derived token — it derives
+    // nothing. The wire vocabulary is `edge-only` (unconfigured, the conservative default) / `oidc`.
+    let v = serde_json::to_value(all_clear_strip()).unwrap();
+    assert_eq!(
+        v["auth-mode"],
+        json!("edge-only"),
+        "the default/unconfigured strip honestly reports edge-only"
+    );
+    let v = serde_json::to_value(all_clear_strip().with_auth_mode(AuthMode::Oidc)).unwrap();
+    assert_eq!(
+        v["auth-mode"],
+        json!("oidc"),
+        "a configured/enforcing dashboard reports oidc"
+    );
 }
 
 #[test]

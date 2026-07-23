@@ -41,10 +41,13 @@ use super::state::{
     Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
     default_window_report, derive_readiness,
 };
+use auth::enforce::Enforcer;
 use view_model::props::{
     ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps, ReadinessViewProps,
     StatusStripProps, Tab,
 };
+
+pub use view_model::props::AuthMode;
 
 /// The light-theme stylesheet, generated from the `docs/STYLEGUIDE.md` tokens. Served
 /// same-origin via `include_str!` — no third-party CSS (the zero-egress / no-CDN rule).
@@ -78,6 +81,12 @@ pub struct DashboardState {
     pub policy_log: Arc<PolicyDecisionLog>,
     /// The cluster label shown in the strip.
     pub cluster: String,
+    /// The SERVER-derived app-level auth mode (ADR-0030 / JEF-487): `Oidc` when the dashboard mounts
+    /// the enforcing verifier (an issuer is configured), `EdgeOnly` when unconfigured (the loud
+    /// bypass, §6). Folded into the persistent strip so the client renders the honest pill (JEF-489)
+    /// and derives nothing. Set by the caller (`run_loop`) from the same config it uses to build the
+    /// [`auth::enforce::Enforcer`], so the pill can never disagree with what is actually enforced.
+    pub auth_mode: AuthMode,
 }
 
 impl DashboardState {
@@ -121,6 +130,7 @@ impl DashboardState {
         strip
             .with_signing_regressions(breach, uncertain)
             .with_coverage_stall(alert)
+            .with_auth_mode(self.auth_mode)
     }
 
     /// The standing signing-regression counts `(established, cold)` from the admission-decision log
@@ -150,7 +160,8 @@ impl DashboardState {
         view.strip = view
             .strip
             .with_signing_regressions(breach, uncertain)
-            .with_coverage_stall(alert);
+            .with_coverage_stall(alert)
+            .with_auth_mode(self.auth_mode);
         view
     }
 
@@ -299,18 +310,22 @@ async fn dashboard_js() -> Response {
         .into_response()
 }
 
-/// Build the dashboard router with the read-only state.
+/// Build the dashboard router with the read-only state and, when configured, the app-level OIDC
+/// enforcement gate (ADR-0030 / JEF-487).
 ///
 /// Every response carries the strict same-origin CSP (ADR-0025) via a single
 /// [`security_headers::set_csp`] layer — the layer covers all routes, so a route added
 /// later (e.g. a `/api/*.json` snapshot) inherits it without a per-route edit.
 ///
-/// The OIDC verifier + its mountable [`auth::require_oidc`] layer (ADR-0030) are available as a
-/// sibling of the CSP layer, but are deliberately NOT mounted here yet: this ticket (JEF-485)
-/// ships the verifier primitive + layer only. Enforcement wiring + content negotiation (the loud
-/// unconfigured-mode passthrough vs a `401`/`503` deny) is JEF-487, which will `.layer(...)` it on.
-pub fn router(state: DashboardState) -> Router {
-    Router::new()
+/// When `auth` is `Some`, the content-negotiating [`auth::enforce::enforce`] gate is mounted
+/// UNDER the CSP layer: it verifies every request fail-closed and shapes each denial by route class
+/// (302→login for a document, 401 JSON for `/api`, 403 below-tier, 503 JWKS-down). Mounting it
+/// *before* the CSP `.layer(...)` makes CSP the OUTER layer, so the strict CSP + `no-store` ride
+/// every rejection too (the honesty guards compose WITH auth, they are not replaced by it). When
+/// `auth` is `None` the dashboard serves unauthenticated (edge-trust only) — the single loud bypass
+/// (§6), which `run_loop` announces at startup; the router simply omits the layer.
+pub fn router(state: DashboardState, auth: Option<Arc<Enforcer>>) -> Router {
+    let mut router = Router::new()
         .route("/", get(index))
         // The read-only per-view JSON snapshots the Preact client reconciles from (ADR-0025).
         // GET-only, same router state/authz as the page routes, `no-store`; each returns the
@@ -321,7 +336,15 @@ pub fn router(state: DashboardState) -> Router {
         .route("/api/readiness.json", get(readiness_json))
         .route("/api/admission.json", get(admission_json))
         .route("/assets/dashboard.css", get(dashboard_css))
-        .route("/assets/dashboard.js", get(dashboard_js))
+        .route("/assets/dashboard.js", get(dashboard_js));
+    // Mount the enforcement gate FIRST (so CSP, added next, is the outer layer wrapping its denials).
+    if let Some(enforcer) = auth {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            enforcer,
+            auth::enforce::enforce,
+        ));
+    }
+    router
         .layer(axum::middleware::from_fn(security_headers::set_csp))
         .with_state(state)
 }
@@ -331,7 +354,7 @@ pub fn router(state: DashboardState) -> Router {
 /// sit behind the cluster's own ingress/mesh, not face the internet directly, so it terminates
 /// no TLS of its own. A bind failure is logged and the task exits — the engine loop is
 /// unaffected (the dashboard is strictly observational).
-pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
+pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState, auth: Option<Arc<Enforcer>>) {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(error) => {
@@ -340,7 +363,7 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState) {
         }
     };
     tracing::info!(%addr, "dashboard listening (read-only, zero-egress)");
-    if let Err(error) = axum::serve(listener, router(state).into_make_service()).await {
+    if let Err(error) = axum::serve(listener, router(state, auth).into_make_service()).await {
         tracing::error!(%error, "dashboard server stopped");
     }
 }
