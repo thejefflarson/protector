@@ -578,6 +578,7 @@ fn build_clear() -> DashboardState {
         // The webhook floor: a populated admission log (admits + an audited + an enforced deny).
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
+        auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
     }
 }
 
@@ -654,6 +655,7 @@ fn build_watching() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
+        auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
     }
 }
 
@@ -813,6 +815,7 @@ fn build_breach() -> DashboardState {
         decision_journal: sample_journal(),
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
+        auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
     }
 }
 
@@ -867,6 +870,7 @@ fn build_blind() -> DashboardState {
         // "no admission decisions recorded yet" empty state (the empty case the brief asks for).
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
+        auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
     }
 }
 

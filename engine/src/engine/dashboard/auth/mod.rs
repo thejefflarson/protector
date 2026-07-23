@@ -11,15 +11,26 @@
 //! sees a JWT, not how it arrived (ADR-0030 §3/§6/§7).
 //!
 //! **Scope (JEF-485):** this module is the verifier primitive + a mountable middleware layer. The
-//! layer is the sibling shape to [`super::security_headers::set_csp`] and CAN be mounted, but it
-//! is deliberately **NOT** wired into [`super::router`] here — enforcement wiring and content
-//! negotiation (login redirect vs JSON `401`, the loud unconfigured-mode passthrough) are a later
-//! ticket (JEF-487). [`OidcConfig::from_env`] merely models the UNCONFIGURED state (issuer absent)
-//! so that later ticket can decide the passthrough behavior.
+//! content-negotiating enforcement wiring that mounts it on the live [`super::router`] (login
+//! redirect vs JSON `401`, the loud unconfigured-mode passthrough) lives in [`enforce`] (JEF-487).
+//! [`OidcConfig::from_env`] models the UNCONFIGURED state (issuer absent) so that wiring can choose
+//! the passthrough behavior.
+//!
+//! **Env namespace (JEF-487).** The dashboard-auth env vars are `PROTECTOR_DASHBOARD_OIDC_*` — a
+//! namespace DISTINCT from the sigstore/cosign signature-verification `PROTECTOR_OIDC_ISSUER`
+//! (the Fulcio keyless *cert-identity* issuer, unrelated to who may VIEW the dashboard). The two
+//! would otherwise collide: the chart sets the signature issuer unconditionally, which — under a
+//! shared name — would silently flip every existing deploy into fail-closed dashboard auth against
+//! the wrong issuer and lock operators out on upgrade (the exact regression ADR-0030 §6 forbids).
 
 pub mod claims;
+pub mod enforce;
 pub mod jwks;
 
+#[cfg(test)]
+mod enforce_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -35,17 +46,19 @@ use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 use claims::{Claims, Tier};
 use jwks::{HttpJwksFetcher, JwksFetcher, JwksStore};
 
-/// `PROTECTOR_OIDC_ISSUER` — the configured issuer. Its ABSENCE is what makes the verifier
-/// UNCONFIGURED (edge-trust only), the single, loud bypass ADR-0030 §6 names.
-const ENV_ISSUER: &str = "PROTECTOR_OIDC_ISSUER";
-/// `PROTECTOR_OIDC_AUDIENCE` — required once an issuer is configured.
-const ENV_AUDIENCE: &str = "PROTECTOR_OIDC_AUDIENCE";
-/// `PROTECTOR_OIDC_TIER_CLAIM` — the configurable claim path the tier is read from.
-const ENV_TIER_CLAIM: &str = "PROTECTOR_OIDC_TIER_CLAIM";
-/// `PROTECTOR_OIDC_ALGORITHM` — the pinned asymmetric algorithm (`RS256` | `ES256`).
-const ENV_ALGORITHM: &str = "PROTECTOR_OIDC_ALGORITHM";
+/// `PROTECTOR_DASHBOARD_OIDC_ISSUER` — the configured issuer. Its ABSENCE is what makes the
+/// verifier UNCONFIGURED (edge-trust only), the single, loud bypass ADR-0030 §6 names. Namespaced
+/// under `PROTECTOR_DASHBOARD_OIDC_*` so it never collides with the sigstore signature-verification
+/// `PROTECTOR_OIDC_ISSUER` (the cosign cert-identity issuer — a different concern, see the mod doc).
+const ENV_ISSUER: &str = "PROTECTOR_DASHBOARD_OIDC_ISSUER";
+/// `PROTECTOR_DASHBOARD_OIDC_AUDIENCE` — required once an issuer is configured.
+const ENV_AUDIENCE: &str = "PROTECTOR_DASHBOARD_OIDC_AUDIENCE";
+/// `PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM` — the configurable claim path the tier is read from.
+const ENV_TIER_CLAIM: &str = "PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM";
+/// `PROTECTOR_DASHBOARD_OIDC_ALGORITHM` — the pinned asymmetric algorithm (`RS256` | `ES256`).
+const ENV_ALGORITHM: &str = "PROTECTOR_DASHBOARD_OIDC_ALGORITHM";
 
-/// The default tier claim path when `PROTECTOR_OIDC_TIER_CLAIM` is unset.
+/// The default tier claim path when `PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM` is unset.
 const DEFAULT_TIER_CLAIM: &str = "tier";
 
 /// The Cloudflare Access assertion header — the browser lane (ADR-0030 §7).
@@ -104,16 +117,22 @@ pub struct OidcConfig {
 /// is a MISconfiguration (fail loud), distinct from the UNCONFIGURED case (issuer absent → `None`).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
-    /// An issuer is set but `PROTECTOR_OIDC_AUDIENCE` is missing — verification needs an audience.
+    /// An issuer is set but `PROTECTOR_DASHBOARD_OIDC_AUDIENCE` is missing — verification needs one.
     #[error("{ENV_AUDIENCE} must be set when {ENV_ISSUER} is configured")]
     MissingAudience,
-    /// `PROTECTOR_OIDC_ALGORITHM` is set to something other than a supported asymmetric algorithm.
+    /// `PROTECTOR_DASHBOARD_OIDC_ALGORITHM` is something other than a supported asymmetric algorithm.
     #[error("{ENV_ALGORITHM} `{0}` is not a supported asymmetric algorithm (RS256, ES256)")]
     UnsupportedAlgorithm(String),
+    /// `PROTECTOR_DASHBOARD_OIDC_MIN_TIER` is a non-empty value that is not one of the recognized
+    /// tiers — a loud misconfiguration (never silently degraded to the least-restrictive allow-all).
+    #[error(
+        "PROTECTOR_DASHBOARD_OIDC_MIN_TIER `{0}` is not a recognized tier (redacted, forensic, raw)"
+    )]
+    UnsupportedTier(String),
 }
 
 impl OidcConfig {
-    /// Build from the environment (ADR-0030). `PROTECTOR_OIDC_ISSUER` **absent/empty** ⇒ `Ok(None)`
+    /// Build from the environment (ADR-0030). `PROTECTOR_DASHBOARD_OIDC_ISSUER` **absent/empty** ⇒ `Ok(None)`
     /// (UNCONFIGURED — representable so the enforcement ticket can decide loud-log-and-passthrough).
     /// An issuer WITHOUT an audience, or an unsupported algorithm, ⇒ `Err(ConfigError)` (a loud
     /// misconfiguration). Otherwise ⇒ `Ok(Some(config))`.
@@ -139,7 +158,7 @@ impl OidcConfig {
 }
 
 /// A trimmed, non-empty environment value, or `None` if unset/blank.
-fn non_empty_env(key: &str) -> Option<String> {
+pub(super) fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
         .map(|value| value.trim().to_string())
@@ -331,19 +350,17 @@ fn build_validation(config: &OidcConfig) -> Validation {
 /// failure it DENIES (fail closed, ADR-0030 §6): a JWKS-unreachable condition is a `503`, every
 /// other failure a `401`.
 ///
-/// This is the sibling shape to [`super::security_headers::set_csp`] — a mountable layer. It is
-/// deliberately **NOT** wired into [`super::router`] in this ticket (JEF-485); enforcement wiring
-/// and content negotiation are JEF-487. Mount it with
-/// `axum::middleware::from_fn_with_state(Arc<Verifier>, require_oidc)`.
+/// This is the sibling shape to [`super::security_headers::set_csp`] — a mountable layer that emits
+/// a BARE status on failure (no content negotiation). The live [`super::router`] mounts the
+/// content-negotiating [`enforce`] layer instead (JEF-487, ADR-0030 §6), which reuses the shared
+/// [`authenticate`] seam this layer also uses — so the verification logic lives in exactly one
+/// place. Mount this bare form with `axum::middleware::from_fn_with_state(Arc<Verifier>, require_oidc)`.
 pub async fn require_oidc(
     State(verifier): State<Arc<Verifier>>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(token) = extract_token(request.headers()) else {
-        return AuthError::MissingToken.into_response();
-    };
-    match verifier.verify(&token).await {
+    match authenticate(&verifier, request.headers()).await {
         Ok(identity) => {
             request.extensions_mut().insert(identity);
             next.run(request).await
@@ -353,6 +370,15 @@ pub async fn require_oidc(
             error.into_response()
         }
     }
+}
+
+/// Authenticate a request: extract the JWT from ANY arrival lane and verify it, yielding the
+/// normalized [`Identity`] or the distinct [`AuthError`]. This is the ONE shared seam both the bare
+/// [`require_oidc`] layer and the content-negotiating [`enforce`] layer route through — the
+/// verification logic (extract → verify → fail-closed on every error) lives here, never duplicated.
+pub async fn authenticate(verifier: &Verifier, headers: &HeaderMap) -> Result<Identity, AuthError> {
+    let token = extract_token(headers).ok_or(AuthError::MissingToken)?;
+    verifier.verify(&token).await
 }
 
 /// Extract the JWT from a request from EITHER lane, so one verification path serves both machine

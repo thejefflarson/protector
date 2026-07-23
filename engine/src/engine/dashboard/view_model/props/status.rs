@@ -9,6 +9,20 @@
 //! performs ZERO honesty derivation. Every string is UNTRUSTED and ships raw (the render layer
 //! escapes; double-escaping is a bug).
 
+/// Whether the dashboard enforces app-level OIDC auth (ADR-0030 / JEF-487). SERVER-derived from
+/// whether an issuer is configured — the client renders the honest pill (JEF-489) and derives
+/// nothing. Serializes as the stable wire token `oidc` / `edge-only` under `auth-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    /// An OIDC issuer is configured: protector verifies every request itself (fail-closed).
+    Oidc,
+    /// No issuer configured: app-level auth is OFF, relying on edge trust only (the loud bypass,
+    /// ADR-0030 §6). The most-conservative default so an unset auth-mode never claims `oidc`.
+    #[default]
+    EdgeOnly,
+}
+
 /// The three honesty axes the status strip carries (brief §3): decided/judging/covered. Never
 /// collapse into one signal.
 ///
@@ -59,6 +73,9 @@ pub struct StatusStripProps {
     /// lead (the baseline itself is weak evidence). Maps to UNCERTAIN: blocks the green all-clear
     /// but reads as the calmer "watching" register, not a breach.
     pub signing_regression_uncertain: usize,
+    /// Whether the dashboard enforces app-level OIDC auth (ADR-0030 / JEF-487). SERVER-derived from
+    /// the presence of a configured issuer; the client renders the pill (JEF-489) verbatim.
+    pub auth_mode: AuthMode,
 }
 
 impl serde::Serialize for StatusStripProps {
@@ -69,7 +86,7 @@ impl serde::Serialize for StatusStripProps {
     /// drift from the derivation the (now-client) strip render uses.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        // 15 raw fields + 3 derived honesty tokens (all-clear / watching / judging-state).
+        // 16 raw fields (incl. auth-mode) + 3 derived honesty tokens (all-clear/watching/judging-state).
         let mut s = serializer.serialize_struct("StatusStripProps", 19)?;
         s.serialize_field("cluster", &self.cluster)?;
         s.serialize_field("armed", &self.armed)?;
@@ -91,6 +108,9 @@ impl serde::Serialize for StatusStripProps {
             "signing-regression-uncertain",
             &self.signing_regression_uncertain,
         )?;
+        // The server-derived app-level auth mode (ADR-0030 / JEF-487) — `oidc` when the verifier is
+        // configured/enforcing, `edge-only` when unconfigured. The client renders the pill verbatim.
+        s.serialize_field("auth-mode", &self.auth_mode)?;
         // The server-derived honesty tokens — the cardinal ADR-0025 contract.
         s.serialize_field("all-clear", &self.all_clear())?;
         s.serialize_field("watching", &self.watching())?;
@@ -137,6 +157,15 @@ impl StatusStripProps {
             }
             self.coverage_alert = Some(alert);
         }
+        self
+    }
+
+    /// Stamp the SERVER-derived app-level auth mode (ADR-0030 / JEF-487). Builder-style so the pure
+    /// strip builders keep their minimal signatures and the caller (`DashboardState`) — which alone
+    /// knows whether an OIDC issuer was configured — folds it in. Honest by construction: the
+    /// caller sets `Oidc` only when the enforcing verifier is actually mounted.
+    pub fn with_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.auth_mode = auth_mode;
         self
     }
 

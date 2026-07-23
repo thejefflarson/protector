@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use crate::engine::state::Readiness;
 
 use super::posture::human_age;
-use super::props::{CoverageChip, StatusStripProps};
+use super::props::{AuthMode, CoverageChip, StatusStripProps};
 
 /// The enrichment feeds shown as coverage chips in the strip, in a stable order. Arm-state and
 /// journal are reported elsewhere (the mode pill / Readiness tab), not as coverage chips.
@@ -89,6 +89,10 @@ pub(super) fn status_strip(
         // strip carries none of its own.
         signing_regression_breach: 0,
         signing_regression_uncertain: 0,
+        // The app-level auth mode (ADR-0030 / JEF-487) is wired in by the caller that knows whether
+        // an OIDC issuer was configured (`DashboardState::with_auth_mode`); the pure findings-derived
+        // strip defaults to the most-conservative `EdgeOnly` (never falsely claims `oidc`).
+        auth_mode: AuthMode::EdgeOnly,
     }
 }
 
