@@ -47,6 +47,11 @@ pub mod reason;
 // breach notifier (`notify`, ADR-0018) so the notifier and the read-only MCP server share
 // ONE implementation of "what is safe to emit off-cluster."
 pub mod redact;
+// The read-only, token-claim-bound tiered-redaction MCP server (ADR-0031 / JEF-488): a second
+// sanctioned egress carve-out, served on its own bind (`PROTECTOR_MCP_ADDR`) behind the SAME
+// OIDC verifier as the dashboard, exposing exactly four READ-ONLY tools. No actuation tool
+// exists by construction.
+pub mod mcp;
 pub mod respond;
 // The engine's output-state domain layer: the proven-chain findings, the per-entry
 // verdict store, the judgement/reversion logs, the behavioral-bake snapshot, and the

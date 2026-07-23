@@ -20,6 +20,7 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
     Finding {
         entry: entry.to_string(),
         objective: objective.to_string(),
+        attack: crate::engine::graph::attack::CREDENTIAL_ACCESS,
         foothold: true,
         corroborated: false,
         disposition: "auto-eligible".into(),

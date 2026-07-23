@@ -95,6 +95,7 @@ fn breach_finding() -> Finding {
     Finding {
         entry: "deployment/edge/api-gateway".into(),
         objective: "secret/payments/stripe-live-key".into(),
+        attack: protector::engine::graph::attack::CREDENTIAL_ACCESS,
         foothold: true,
         corroborated: true,
         disposition: "auto-eligible".into(),
@@ -131,6 +132,7 @@ fn simple_finding(entry: &str, objective: &str) -> Finding {
     Finding {
         entry: entry.into(),
         objective: objective.into(),
+        attack: protector::engine::graph::attack::CREDENTIAL_ACCESS,
         foothold: entry.contains("edge") || entry.contains("ingress"),
         corroborated: false,
         disposition: "structural — propose".into(),
@@ -163,6 +165,7 @@ fn redundant_finding() -> Finding {
     Finding {
         entry: entry.into(),
         objective: objective.into(),
+        attack: protector::engine::graph::attack::DATA_FROM_REPOSITORY,
         foothold: true,
         corroborated: false,
         disposition: "no-cut".into(),
