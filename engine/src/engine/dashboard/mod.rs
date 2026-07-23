@@ -18,6 +18,7 @@
 //!   ([`serve_dashboard`]) behind `PROTECTOR_DASHBOARD_ADDR`, reading the same `state::` handles
 //!   the engine holds.
 
+pub mod auth;
 pub mod page;
 mod security_headers;
 pub mod view_model;
@@ -303,6 +304,11 @@ async fn dashboard_js() -> Response {
 /// Every response carries the strict same-origin CSP (ADR-0025) via a single
 /// [`security_headers::set_csp`] layer — the layer covers all routes, so a route added
 /// later (e.g. a `/api/*.json` snapshot) inherits it without a per-route edit.
+///
+/// The OIDC verifier + its mountable [`auth::require_oidc`] layer (ADR-0030) are available as a
+/// sibling of the CSP layer, but are deliberately NOT mounted here yet: this ticket (JEF-485)
+/// ships the verifier primitive + layer only. Enforcement wiring + content negotiation (the loud
+/// unconfigured-mode passthrough vs a `401`/`503` deny) is JEF-487, which will `.layer(...)` it on.
 pub fn router(state: DashboardState) -> Router {
     Router::new()
         .route("/", get(index))
