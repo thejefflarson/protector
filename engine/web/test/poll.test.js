@@ -66,6 +66,74 @@ describe("startPolling", () => {
     await vi.waitFor(() => expect(onStale).toHaveBeenCalledTimes(1));
   });
 
+  // JEF-489: once OIDC is configured, /api/*.json answers 401/403 — a distinct signal from a stale
+  // connection. The auth statuses route to onAuthError (with the code), NEVER onStale/onSnapshot.
+  it("routes a 401 to onAuthError(401) — not onStale, not onSnapshot", async () => {
+    const onStale = vi.fn();
+    const onSnapshot = vi.fn();
+    const onAuthError = vi.fn();
+    startOnce({
+      tab: () => "findings",
+      onSnapshot,
+      onStale,
+      onAuthError,
+      liveRegion: () => null,
+      fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 401 }),
+    });
+    await vi.waitFor(() => expect(onAuthError).toHaveBeenCalledWith(401));
+    expect(onStale).not.toHaveBeenCalled();
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("routes a 403 to onAuthError(403) — not onStale, not onSnapshot", async () => {
+    const onStale = vi.fn();
+    const onAuthError = vi.fn();
+    startOnce({
+      tab: () => "findings",
+      onSnapshot: vi.fn(),
+      onStale,
+      onAuthError,
+      liveRegion: () => null,
+      fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 403 }),
+    });
+    await vi.waitFor(() => expect(onAuthError).toHaveBeenCalledWith(403));
+    expect(onStale).not.toHaveBeenCalled();
+  });
+
+  it("treats an opaque redirect (stray server 302 under redirect:manual) as a 401", async () => {
+    const onStale = vi.fn();
+    const onAuthError = vi.fn();
+    const fetchImpl = vi.fn().mockResolvedValue({ type: "opaqueredirect", status: 0, ok: false });
+    startOnce({
+      tab: () => "findings",
+      onSnapshot: vi.fn(),
+      onStale,
+      onAuthError,
+      liveRegion: () => null,
+      fetchImpl,
+    });
+    await vi.waitFor(() => expect(onAuthError).toHaveBeenCalledWith(401));
+    expect(onStale).not.toHaveBeenCalled();
+    // The fetch is made with redirect:"manual" so a 302 surfaces as an opaque redirect (not followed
+    // — the CSP would block the IdP hop anyway) rather than a silent stale.
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("still routes a non-auth non-ok (503) to onStale — auth handling is 401/403 only", async () => {
+    const onStale = vi.fn();
+    const onAuthError = vi.fn();
+    startOnce({
+      tab: () => "findings",
+      onSnapshot: vi.fn(),
+      onStale,
+      onAuthError,
+      liveRegion: () => null,
+      fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 503 }),
+    });
+    await vi.waitFor(() => expect(onStale).toHaveBeenCalledTimes(1));
+    expect(onAuthError).not.toHaveBeenCalled();
+  });
+
   it("DEFERS applying a snapshot while a selection is anchored in the live region", async () => {
     const onSnapshot = vi.fn();
     const onStale = vi.fn();
