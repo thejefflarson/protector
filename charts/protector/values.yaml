@@ -366,6 +366,11 @@ engine:
     # File the engine appends to; it rotates to <path>.1 in the same dir (~2 MiB total).
     # The dir is the PVC mount; must be writable (fsGroup 65532 owns it).
     path: /var/lib/protector/journal/decisions.jsonl
+    # Durable forensic/raw MCP disclosure audit (JEF-490, ADR-0031 §4): a DISTINCT append-only
+    # file on the SAME journal PVC/mount (never overloaded onto the decision journal above). It
+    # backs the dashboard's "Access" tab; durable-on-PVC so an empty log honestly reads "nobody
+    # pulled" rather than "resets on restart". Rotates to <path>.1 like the decision journal.
+    accessAuditPath: /var/lib/protector/journal/mcp-access-audit.jsonl
     # Persistent claim so the journal survives pod restart/reschedule. RWO (replicaCount 1).
     size: 256Mi
     # "" = the cluster's default StorageClass.

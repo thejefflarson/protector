@@ -312,6 +312,10 @@ pub enum Tab {
     Action,
     Readiness,
     Admission,
+    /// The forensic/raw MCP disclosure audit (JEF-490) — WHO pulled WHAT cluster fact at which tier,
+    /// itself redacted to the viewer's own tier. The sixth tab, placed last (a distinct audit
+    /// surface, not part of the live-posture story the first five tell).
+    Access,
 }
 
 impl Tab {
@@ -323,6 +327,7 @@ impl Tab {
             Tab::Action => "/?tab=action",
             Tab::Readiness => "/?tab=readiness",
             Tab::Admission => "/?tab=admission",
+            Tab::Access => "/?tab=access",
         }
     }
 
@@ -334,6 +339,7 @@ impl Tab {
             Tab::Action => "Action",
             Tab::Readiness => "Readiness",
             Tab::Admission => "Admission",
+            Tab::Access => "Access",
         }
     }
 
@@ -347,6 +353,7 @@ impl Tab {
             Tab::Action => "action",
             Tab::Readiness => "readiness",
             Tab::Admission => "admission",
+            Tab::Access => "access",
         }
     }
 }

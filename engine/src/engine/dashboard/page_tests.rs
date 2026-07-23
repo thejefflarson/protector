@@ -19,12 +19,13 @@
 use super::page;
 use super::view_model::props::Tab;
 
-const TABS: [Tab; 5] = [
+const TABS: [Tab; 6] = [
     Tab::Findings,
     Tab::Alerts,
     Tab::Action,
     Tab::Readiness,
     Tab::Admission,
+    Tab::Access,
 ];
 
 #[test]

@@ -582,6 +582,7 @@ fn build_clear() -> DashboardState {
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
+        mcp_audit: std::sync::Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -659,6 +660,7 @@ fn build_watching() -> DashboardState {
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — watching)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
+        mcp_audit: std::sync::Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -819,6 +821,7 @@ fn build_breach() -> DashboardState {
         policy_log: sample_policy_log(),
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
+        mcp_audit: std::sync::Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -874,6 +877,7 @@ fn build_blind() -> DashboardState {
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-us-east-1 (PREVIEW — blind)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
+        mcp_audit: std::sync::Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -925,6 +929,7 @@ fn resolve_tab(tab: Option<&str>) -> Tab {
         Some("action") | Some("trust") | Some("activity") => Tab::Action,
         Some("readiness") => Tab::Readiness,
         Some("admission") => Tab::Admission,
+        Some("access") => Tab::Access,
         _ => Tab::Findings,
     }
 }
@@ -984,6 +989,18 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
     view_model::build_admission_view(preview_strip(state), &state.policy_log.snapshot())
 }
 
+/// Build the "Access" view props (JEF-490) through the public render path — a raw-tier preview
+/// caller over the scenario's (empty) audit sink, so the preview exercises the same builder
+/// production serves.
+fn preview_access(state: &DashboardState) -> view_model::props::AccessViewProps {
+    view_model::build_access_view(
+        preview_strip(state),
+        protector::engine::dashboard::auth::claims::Tier::Raw,
+        &state.mcp_audit.records(),
+        state.mcp_audit.is_durable(),
+    )
+}
+
 /// Render the ROOT-ONLY document shell for a tab through the dashboard's PUBLIC render path (JEF-408,
 /// superseding ADR-0025's server-rendered strip/nav): the `<head>` + the Preact `#dash-root` mount.
 /// ALL body HTML — the status strip, the tab nav, and the view body — is client-rendered from the
@@ -1001,6 +1018,7 @@ fn render_json(state: &DashboardState, tab: Tab) -> String {
         Tab::Action => serde_json::to_string(&preview_action(state)),
         Tab::Readiness => serde_json::to_string(&preview_readiness(state)),
         Tab::Admission => serde_json::to_string(&preview_admission(state)),
+        Tab::Access => serde_json::to_string(&preview_access(state)),
     }
     .unwrap_or_else(|e| format!("{{\"error\":\"preview serialize failed: {e}\"}}"))
 }

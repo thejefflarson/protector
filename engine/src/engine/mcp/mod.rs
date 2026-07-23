@@ -22,6 +22,7 @@
 //! rmcp ([`server`] adapter + [`transport`] mount) is transport BELOW the boundary; it frames
 //! JSON-RPC and speaks the discovery/challenge handshake, and makes no trust decision.
 
+pub mod access_audit;
 pub mod audit;
 mod dispatch;
 mod render;
@@ -31,8 +32,16 @@ mod tiering;
 mod tools;
 mod transport;
 
+pub use access_audit::{AccessAuditSink, AccessRecord};
 pub use state::McpState;
+pub use tiering::EffectiveTier;
+pub use tools::BULK_SCOPE;
 pub use transport::{MCP_PATH, WELL_KNOWN_PATH, serve_mcp};
+
+/// The sentinel a `redacted`-tier viewer sees in place of a withheld workload identity — the SAME
+/// string the tool emits (`render::S_ENTRY`, JEF-488), re-exported so the "Access" screen (JEF-490)
+/// redacts a pull's target-class with ONE shared vocabulary across tool + screen.
+pub use render::S_ENTRY as WORKLOAD_IDENTITY_WITHHELD;
 
 #[cfg(test)]
 mod tests;

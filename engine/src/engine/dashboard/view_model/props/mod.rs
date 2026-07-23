@@ -27,6 +27,7 @@
 //! pre-existing [`signing`] inventory. Everything is re-exported FLAT here so every consumer's
 //! `props::TypeName` path resolves unchanged.
 
+mod access;
 mod action;
 mod admission;
 mod alerts;
@@ -35,6 +36,7 @@ mod readiness;
 mod signing;
 mod status;
 
+pub use access::{AccessPullRow, AccessTier, AccessViewProps, TierRevealRow};
 pub use action::{
     ActionViewProps, JudgementEntryProps, LeftAloneProps, ReversionProps, WouldActProps,
 };

@@ -6,11 +6,18 @@
 //! is the already-clamped result, so a tool cannot accidentally render at the raw ceiling by reading
 //! the claim directly. The only way to obtain one is [`EffectiveTier::clamp`].
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::dashboard::auth::claims::Tier;
 
 /// The tier a response is actually rendered at — the CLAMPED result of `min(requested, ceiling)`.
 /// Ordered `Redacted < Forensic < Raw`, mirroring [`Tier`], so a per-tool cap can further lower it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Serializes to the SAME low-cardinality label [`as_str`](Self::as_str) returns (`"redacted"` /
+/// `"forensic"` / `"raw"`), so the durable access-audit line (JEF-490) persists a stable, legible
+/// tier tag that round-trips on replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EffectiveTier {
     /// Safe-by-construction: verdicts, counts, technique IDs, coverage/freshness — nothing
     /// cluster-specific. The default and the floor.
