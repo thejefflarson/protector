@@ -54,6 +54,12 @@ export function hasLiveSelection(container) {
  *   caller applies it — goes live). Not called on a deferred (mid-selection) or failed tick.
  * @param {() => void} opts.onStale called when a tick fails (non-ok response or transport error) so
  *   the caller can mark the connection stale (never a false green).
+ * @param {(status: 401 | 403) => void} [opts.onAuthError] called when the snapshot route answers an
+ *   AUTH failure (JEF-489, enforced once OIDC is configured): `401` (signed out / session expired) or
+ *   `403` (signed in, not allowed here). Distinct from {@link opts.onStale}: an auth failure is not a
+ *   transient connection blip, so the caller shows the auth interstitial rather than the polite
+ *   "stale" banner. Optional (defaults to a no-op) so a caller that predates OIDC still gets the old
+ *   stale-on-non-ok behaviour for every other status.
  * @param {() => (Node | null)} opts.liveRegion reads the DOM node the selection guard checks.
  * @param {typeof fetch} [opts.fetchImpl] injectable fetch (tests pass a stub; default is global).
  * @param {(ms: number, fn: () => void) => number} [opts.setIntervalImpl] injectable interval, called
@@ -71,6 +77,7 @@ export function startPolling(opts) {
     tab,
     onSnapshot,
     onStale,
+    onAuthError = () => {},
     liveRegion,
     fetchImpl = typeof fetch !== "undefined" ? fetch : undefined,
     setIntervalImpl = (ms, fn) => setInterval(fn, ms),
@@ -82,8 +89,28 @@ export function startPolling(opts) {
     try {
       const res = await fetchImpl(snapshotUrl(tab()), {
         headers: { accept: "application/json" },
+        // Belt-and-suspenders (JEF-489): if the server ever answers an /api route with a bare 302 to
+        // the IdP (instead of a clean 401), `redirect: "manual"` surfaces it as an OPAQUE redirect
+        // (`type === "opaqueredirect"`, `status === 0`, not-ok) rather than transparently following
+        // it — the follow would be blocked by the CSP `connect-src 'self'` anyway. We read that as a
+        // 401 so the operator gets the "session expired" interstitial, never a silent stale.
+        redirect: "manual",
       });
       if (!live) return;
+      // Auth failures FIRST — distinct from a transient stale (checked before the generic !res.ok so
+      // an opaque redirect / 401 / 403 never falls through to the polite stale banner).
+      if (res.type === "opaqueredirect") {
+        onAuthError(401);
+        return;
+      }
+      if (res.status === 401) {
+        onAuthError(401);
+        return;
+      }
+      if (res.status === 403) {
+        onAuthError(403);
+        return;
+      }
       if (!res.ok) {
         onStale();
         return;

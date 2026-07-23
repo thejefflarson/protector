@@ -29,7 +29,10 @@ export function StatusStrip({ strip }) {
           <span class="sep">{"▸"}</span>
           <span class="cluster">{strip.cluster}</span>
         </div>
-        <ModePill armed={strip.armed} />
+        <div class="strip-pills">
+          <AuthModePill mode={strip["auth-mode"]} />
+          <ModePill armed={strip.armed} />
+        </div>
       </div>
       <div class="strip-axes">
         <JudgingAxis state={strip["judging-state"]} />
@@ -82,6 +85,34 @@ function ModePill({ armed }) {
   const { cls, word, sub, glyph } = armed
     ? { cls: "pill mode-enforce", word: "ENFORCE", sub: "acting", glyph: "" }
     : { cls: "pill mode-shadow warn", word: "SHADOW", sub: "proposes, never acts", glyph: "⚠" };
+  return (
+    <span class={cls}>
+      {glyph ? (
+        <span class="pill-glyph" aria-hidden="true">
+          {glyph}
+        </span>
+      ) : null}
+      <span class="pill-text">
+        <span class="pill-word">{word}</span>
+        <span class="pill-sub">{sub}</span>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The app-level auth-mode pill (JEF-489 / ADR-0030), driven by the SERVER-derived `auth-mode` prop
+ * (JEF-487 emits `oidc` / `edge-only`; the client derives nothing). `oidc` is the calm intended state
+ * (protector verifies every request itself). `edge-only` is a WARNING posture — app-level auth is OFF,
+ * relying on edge trust only — so it rides the SAME warn register as the SHADOW pill (`pill … warn`
+ * + ⚠). Meaning never by colour alone: word + glyph. A missing/unknown mode falls to the loud
+ * edge-only warn (the server's most-conservative default — never silently claims `oidc`).
+ */
+function AuthModePill({ mode }) {
+  const { cls, word, sub, glyph } =
+    mode === "oidc"
+      ? { cls: "pill auth-oidc", word: "OIDC", sub: "app auth on", glyph: "" }
+      : { cls: "pill auth-edge warn", word: "EDGE-ONLY", sub: "no app auth", glyph: "⚠" };
   return (
     <span class={cls}>
       {glyph ? (

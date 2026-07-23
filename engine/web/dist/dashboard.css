@@ -205,6 +205,23 @@ summary:focus-visible,
 .mode-shadow.warn .pill-glyph { color: var(--mode-shadow); }
 .mode-shadow.warn .pill-sub { color: var(--mode-shadow); }
 
+/* the auth-mode + mode pills sit together on the strip's right (JEF-489). */
+.strip-pills { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+/* OIDC (app auth on): the calm, intended state — the same calm blue the ENFORCE pill uses. */
+.auth-oidc .pill-word { color: var(--mode-enforce); }
+
+/* EDGE-ONLY (no app-level auth): a WARNING chip — the SAME warn register as the SHADOW pill (amber
+   ink + ⚠ + soft amber tint + amber border), so "app auth is off" reads as a posture to fix, never
+   colour alone (it carries the word EDGE-ONLY + the ⚠ glyph too). */
+.auth-edge.warn {
+  background: var(--posture-awaiting-tint);
+  border-color: var(--mode-shadow);
+}
+.auth-edge.warn .pill-word { color: var(--mode-shadow); }
+.auth-edge.warn .pill-glyph { color: var(--mode-shadow); }
+.auth-edge.warn .pill-sub { color: var(--mode-shadow); }
+
 .strip-axes {
   display: flex;
   flex-wrap: wrap;
@@ -770,6 +787,23 @@ summary:focus-visible,
 .empty-alerts-calm .empty-head { color: var(--ink-1); }
 /* quiet-but-blind (JEF-308): a quiet Alerts view while a node is blind is elevated, never green. */
 .empty-alerts-blind .empty-head { color: var(--posture-uncertain); }
+/* auth interstitial (JEF-489): session-expired / no-access. Elevated attention (amber, ≥4.5:1 as
+   body text — the same ink the warming/blind heads use), never green and never the loud breach red —
+   being signed out is an attention state, not a breach. */
+.empty-auth .empty-head { color: var(--posture-uncertain); }
+.auth-gate-action { margin: var(--space-4) 0 0; }
+/* the re-auth control: a plain full-page link styled as the primary action (never a fetch button).
+   The calm ENFORCE blue reads as "the safe way back in". Focus ring comes from the global a:focus. */
+.auth-gate-signin {
+  display: inline-block;
+  padding: var(--space-2) var(--space-4);
+  border: var(--hairline) solid var(--mode-enforce);
+  border-radius: var(--radius-chip);
+  color: var(--mode-enforce);
+  font-weight: var(--fw-bold);
+  text-decoration: none;
+}
+.auth-gate-signin:hover { background: var(--surface-hover); }
 
 /* ============================ Alerts view (JEF-323) ============================ */
 /* The live "alarming-now" activity list. An alarming signal is EVIDENCE, never a verdict — the

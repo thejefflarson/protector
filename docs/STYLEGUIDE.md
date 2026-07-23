@@ -111,13 +111,16 @@ Two weights only (400/600). Emphasis via weight + ink value, not a third weight.
 | Reversion log | `--posture-cleared` toned (a self-revert is the system working) |
 | Signing inventory | `--sign-*` chip (glyph + word); `invalid` → `--posture-breach` keyline (loud), `not signed` calm; ref/signer single-line ellipsis (never `break-all`), full value in the `<details>` panel + `title=`; "if enforced" → `--cov-present` would-admit / `--posture-breach` would-block |
 | Empty states | `--ink-2`; posture-coloured only when honestly earned (model judging) |
+| Auth-mode pill (JEF-489) | server-derived `auth-mode`: `OIDC` calm (`--mode-enforce` word, no glyph) vs `EDGE-ONLY` ⚠ warn (`--mode-shadow` ink + `--posture-awaiting-tint`, same warn register as the SHADOW pill) — word **+** glyph, never colour alone; a missing mode falls to the loud `EDGE-ONLY` |
+| Auth interstitial `AuthGate` (JEF-489) | reuses `empty` / `empty-head` / `empty-sub muted`; `--posture-uncertain` head (attention, never breach-red, never green); `role="alert"`, focus to the heading (`tabindex=-1`) on transition; **401** → "your session expired" + a full-page `<a>` re-auth link (never a fetch — CSP `connect-src 'self'`); **403** → "no access to this dashboard", NO re-auth control; mutually exclusive with the connection banner |
 
 ## Accessibility gate (test-enforced)
 1. **Contrast:** body/status text ≥ **4.5:1** on its surface; chips/rails/glyphs ≥ **3:1**.
-2. **Meaning not by colour alone:** every posture / severity / Δ / coverage / **signing posture**
-   state renders a non-empty **glyph + text label** in addition to colour. (Assert each
+2. **Meaning not by colour alone:** every posture / severity / Δ / coverage / **signing posture** /
+   **auth mode** state renders a non-empty **glyph + text label** in addition to colour. (Assert each
    enum→(glyph,label).) The signing posture is always one of signed / invalid signature / not
    signed / checking — **never n/a** — and its "if enforced" cell is always would-admit / would-block.
+   The auth-mode pill is always `OIDC` (calm) or `EDGE-ONLY ⚠` (warn) — word **+** glyph.
 3. **Honest-calm invariant:** the overall green/all-clear resolves to `--posture-cleared`/green
    ONLY when the model has affirmatively cleared everything — `model_judging == true` AND not
    `warming_up` AND **covered** AND **zero breaches AND zero awaiting AND zero uncertain**. If
