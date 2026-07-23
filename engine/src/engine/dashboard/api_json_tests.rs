@@ -28,6 +28,7 @@ fn empty_state() -> DashboardState {
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-test".into(),
         auth_mode: super::AuthMode::EdgeOnly,
+        mcp_audit: Arc::new(crate::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -73,6 +74,7 @@ async fn every_endpoint_is_get_only_json_and_no_store() {
         "/api/action.json",
         "/api/readiness.json",
         "/api/admission.json",
+        "/api/access.json",
     ] {
         let (status, no_store, body) = get(path).await;
         assert_eq!(status, StatusCode::OK, "{path} should 200");
@@ -115,7 +117,7 @@ async fn each_endpoint_returns_the_same_view_model_its_tab_renders() {
     // `Serialize` (the wire is one-directional server→client), so compare on the JSON `Value`.
     let state = empty_state();
 
-    let cases: [(&str, serde_json::Value); 5] = [
+    let cases: [(&str, serde_json::Value); 6] = [
         (
             "/api/findings.json",
             serde_json::to_value(state.findings_view()).unwrap(),
@@ -135,6 +137,14 @@ async fn each_endpoint_returns_the_same_view_model_its_tab_renders() {
         (
             "/api/admission.json",
             serde_json::to_value(state.admission_view()).unwrap(),
+        ),
+        (
+            // Unauthenticated (no enforcer) → the handler defaults to the most-restricted tier.
+            "/api/access.json",
+            serde_json::to_value(
+                state.access_view(crate::engine::dashboard::auth::claims::Tier::Redacted),
+            )
+            .unwrap(),
         ),
     ];
 

@@ -207,6 +207,37 @@ export function signingRepo(repo, images, overrides = {}) {
   };
 }
 
+// ----- JEF-490: fixtures for the "Access" view (forensic/raw MCP disclosure audit).
+
+/** One tier-reveal row (Section 1: what a tier reveals/withholds + whether the caller holds it). */
+export function accessReveal(tier, overrides = {}) {
+  return {
+    tier,
+    reveals: `what ${tier} reveals`,
+    withholds: `what ${tier} withholds`,
+    held: false,
+    ...overrides,
+  };
+}
+
+/** One forensic/raw pull row (Section 2), already redacted to the caller's tier by the server. */
+export function accessPull(overrides = {}) {
+  return {
+    when: "30s ago",
+    who: "alice@corp.example",
+    tool: "explain_verdict",
+    tier: "raw",
+    target: "workload/app/Pod/web",
+    raw: true,
+    ...overrides,
+  };
+}
+
+/** A whole Access view. `tier` is the caller's own tier; `durable` selects the empty-state caveat. */
+export function accessView({ tier = "redacted", reveals = [], pulls = [], durable = true } = {}) {
+  return { strip: strip(), tier, reveals, pulls, durable };
+}
+
 /** A whole Admission view. */
 export function admissionView(overrides = {}) {
   return {

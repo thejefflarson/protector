@@ -41,10 +41,13 @@ use super::state::{
     Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
     default_window_report, derive_readiness,
 };
+use crate::engine::mcp::AccessAuditSink;
+use auth::Identity;
+use auth::claims::Tier;
 use auth::enforce::Enforcer;
 use view_model::props::{
-    ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps, ReadinessViewProps,
-    StatusStripProps, Tab,
+    AccessViewProps, ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps,
+    ReadinessViewProps, StatusStripProps, Tab,
 };
 
 pub use view_model::props::AuthMode;
@@ -87,6 +90,11 @@ pub struct DashboardState {
     /// and derives nothing. Set by the caller (`run_loop`) from the same config it uses to build the
     /// [`auth::enforce::Enforcer`], so the pill can never disagree with what is actually enforced.
     pub auth_mode: AuthMode,
+    /// The durable forensic/raw MCP disclosure audit sink (ADR-0031 §4, JEF-490) — the SAME `Arc`
+    /// the MCP server appends to. The "Access" tab reads its records (redacted to the caller's own
+    /// tier); read-only here, like every other handle. Present even when the MCP server isn't served
+    /// (then it simply holds no records — an honest empty log, not a hidden tab).
+    pub mcp_audit: Arc<AccessAuditSink>,
 }
 
 impl DashboardState {
@@ -205,6 +213,17 @@ impl DashboardState {
         let rows = self.policy_log.snapshot();
         view_model::build_admission_view(self.status_strip(), &rows)
     }
+
+    /// Build the "Access" view props (JEF-490): the persistent strip + the CALLER's own tier chip +
+    /// the newest-first forensic/raw MCP disclosure pulls, each redacted to the caller's own tier.
+    /// `caller_tier` comes from the verified [`Identity`] the OIDC layer inserted (or the
+    /// most-restricted [`Tier::Redacted`] default when unauthenticated/edge-only), so a lower-tier
+    /// viewer can never learn a higher-tier pull's target. Pure read of the shared audit sink.
+    fn access_view(&self, caller_tier: Tier) -> AccessViewProps {
+        let records = self.mcp_audit.records();
+        let durable = self.mcp_audit.is_durable();
+        view_model::build_access_view(self.status_strip(), caller_tier, &records, durable)
+    }
 }
 
 /// The tab query parameter (`?tab=action`). Defaults to Findings. The legacy `trust`/`activity`
@@ -223,6 +242,7 @@ impl TabQuery {
             Some("action") | Some("trust") | Some("activity") => Tab::Action,
             Some("readiness") => Tab::Readiness,
             Some("admission") => Tab::Admission,
+            Some("access") => Tab::Access,
             _ => Tab::Findings,
         }
     }
@@ -277,6 +297,22 @@ async fn readiness_json(State(state): State<DashboardState>) -> Response {
 /// `GET /api/admission.json` — the read-only Admission view-model snapshot (ADR-0025).
 async fn admission_json(State(state): State<DashboardState>) -> Response {
     view_json(state.admission_view())
+}
+
+/// `GET /api/access.json` — the read-only "Access" view-model snapshot (JEF-490): the forensic/raw
+/// MCP disclosure audit, redacted to the CALLER's own tier. GET-only, `no-store`, inherits the OIDC
+/// gate from the router-wide enforce layer (a 401 fires there before this handler runs — no second
+/// gate). The caller's tier is read from the verified [`Identity`] the enforce layer inserted; when
+/// absent (edge-only / unauthenticated passthrough) it defaults to the most-restricted
+/// [`Tier::Redacted`], so a viewer without a verified tier claim can never see forensic/raw targets.
+async fn access_json(
+    State(state): State<DashboardState>,
+    identity: Option<axum::Extension<Identity>>,
+) -> Response {
+    let caller_tier = identity
+        .map(|axum::Extension(id)| id.tier)
+        .unwrap_or_default();
+    view_json(state.access_view(caller_tier))
 }
 
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
@@ -335,6 +371,7 @@ pub fn router(state: DashboardState, auth: Option<Arc<Enforcer>>) -> Router {
         .route("/api/action.json", get(action_json))
         .route("/api/readiness.json", get(readiness_json))
         .route("/api/admission.json", get(admission_json))
+        .route("/api/access.json", get(access_json))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js));
     // Mount the enforcement gate FIRST (so CSP, added next, is the outer layer wrapping its denials).

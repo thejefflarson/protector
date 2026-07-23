@@ -27,6 +27,7 @@ import { AlertsView } from "./alerts/view.jsx";
 import { ActionView } from "./action/view.jsx";
 import { ReadinessView } from "./readiness/view.jsx";
 import { AdmissionView } from "./admission/view.jsx";
+import { AccessView } from "./access/view.jsx";
 
 const TABS = [
   { id: "findings", label: "Findings", href: "/" },
@@ -34,6 +35,7 @@ const TABS = [
   { id: "action", label: "Action", href: "/?tab=action" },
   { id: "readiness", label: "Readiness", href: "/?tab=readiness" },
   { id: "admission", label: "Admission", href: "/?tab=admission" },
+  { id: "access", label: "Access", href: "/?tab=access" },
 ];
 
 /**
@@ -251,7 +253,14 @@ function TabNav({ activeTab, onSwap }) {
 /** Read the active tab from `?tab=` (the same vocabulary the server's `TabQuery` resolves). */
 export function tabFromLocation() {
   const t = new URLSearchParams(window.location.search).get("tab");
-  if (t === "alerts" || t === "action" || t === "readiness" || t === "admission") return t;
+  if (
+    t === "alerts" ||
+    t === "action" ||
+    t === "readiness" ||
+    t === "admission" ||
+    t === "access"
+  )
+    return t;
   return "findings";
 }
 
@@ -276,6 +285,8 @@ function ActiveView({ activeTab, data }) {
       return <ReadinessView view={data} />;
     case "admission":
       return <AdmissionView view={data} />;
+    case "access":
+      return <AccessView view={data} />;
     default:
       return <FindingsView view={data} />;
   }

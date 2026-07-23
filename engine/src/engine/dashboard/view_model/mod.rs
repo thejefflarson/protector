@@ -9,6 +9,7 @@
 
 pub mod props;
 
+mod access;
 mod action;
 mod admission;
 mod alerts;
@@ -20,12 +21,14 @@ mod strip;
 
 use std::time::SystemTime;
 
+use crate::engine::dashboard::auth::claims::Tier;
+use crate::engine::mcp::AccessRecord;
 use crate::engine::policy_log::PolicyDecisionRecord;
 use crate::engine::state::{CoverageState, Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
-    ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingProps, FindingsViewProps, Posture,
-    ReadinessViewProps, StatusStripProps, StripCoverageAlert,
+    AccessViewProps, ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingProps,
+    FindingsViewProps, Posture, ReadinessViewProps, StatusStripProps, StripCoverageAlert,
 };
 
 /// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
@@ -141,6 +144,19 @@ pub fn build_admission_view(
     rows: &[PolicyDecisionRecord],
 ) -> AdmissionViewProps {
     admission::build(strip, rows)
+}
+
+/// Build the whole "Access" view's props (JEF-490): the persistent strip + the caller's OWN tier
+/// chip + the per-tier reveal list + the newest-first forensic/raw disclosure pulls, each redacted
+/// to the CALLER's own tier (a lower-tier viewer never sees a higher-tier pull's target). `records`
+/// are newest-first; `durable` selects the honest empty-state caveat. Pure given its inputs.
+pub fn build_access_view(
+    strip: StatusStripProps,
+    caller_tier: Tier,
+    records: &[AccessRecord],
+    durable: bool,
+) -> AccessViewProps {
+    access::build(strip, caller_tier, records, durable)
 }
 
 /// The standing signing-regression counts `(established, cold)` derived from the admission-decision

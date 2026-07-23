@@ -34,6 +34,7 @@ fn empty_state(auth_mode: AuthMode) -> DashboardState {
         policy_log: Arc::new(PolicyDecisionLog::new()),
         cluster: "prod-test".into(),
         auth_mode,
+        mcp_audit: Arc::new(crate::engine::mcp::AccessAuditSink::in_memory()),
     }
 }
 
@@ -61,6 +62,30 @@ async fn send(auth: Option<Arc<Enforcer>>, request: Request<Body>) -> axum::resp
         .oneshot(request)
         .await
         .unwrap()
+}
+
+/// A dashboard state whose MCP access-audit sink already holds ONE raw pull of a specific
+/// crown-jewel entry — the row whose target-class must be redacted to the caller's own tier.
+fn state_with_raw_pull() -> DashboardState {
+    use crate::engine::mcp::EffectiveTier;
+    use crate::engine::mcp::audit::{AuditRecord, AuditSink};
+
+    let state = empty_state(AuthMode::Oidc);
+    state.mcp_audit.emit(AuditRecord::now(
+        "alice@corp.example",
+        "workload/app/Pod/web",
+        "explain_verdict",
+        EffectiveTier::Raw,
+    ));
+    state
+}
+
+/// A signed token whose `tier` claim is `tier` (else the base `forensic`). Same key/issuer as
+/// [`valid_token`], so it verifies — only the authorization tier differs.
+fn token_with_tier(tier: &str) -> String {
+    let mut claims = base_claims();
+    claims["tier"] = serde_json::json!(tier);
+    sign(KEY_A_PEM, KID_A, &claims)
 }
 
 /// A `GET` request with an optional bearer token and Accept header.
@@ -189,6 +214,85 @@ async fn api_findings_with_valid_token_is_200_with_the_view_model_and_oidc_auth_
 // -------------------------------------------------------------------------------------------------
 // Document GET / — 302 to login, never for /api.
 // -------------------------------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------------------------------
+// /api/access.json (JEF-490) — inherits the OIDC gate (401 unauthenticated), and the audit rows are
+// redacted to the CALLER's own tier: a redacted-tier caller never learns a raw pull's target; a
+// forensic/raw-tier caller does.
+// -------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn api_access_with_no_token_is_401_inheriting_the_oidc_gate() {
+    // The "Access" endpoint mounts under the SAME router-wide enforce layer — no second gate. An
+    // unauthenticated call is a 401 on the same path as every other /api route (never a 302).
+    let response = send(
+        Some(enforcer(Tier::Redacted)),
+        get("/api/access.json", None, Some("application/json")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response.headers().get(header::LOCATION).is_none(),
+        "an /api route is NEVER 302'd"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store",
+        "the access snapshot is a per-session-gated, zero-egress read — never edge-cached"
+    );
+}
+
+#[tokio::test]
+async fn api_access_redacts_a_raw_pulls_target_to_a_redacted_tier_caller() {
+    // A redacted-tier caller sees THAT a raw pull happened (who/tool/tier) but NOT its target — the
+    // withheld-workload sentinel, never the crown-jewel workload identity.
+    let response = router(state_with_raw_pull(), Some(enforcer(Tier::Redacted)))
+        .oneshot(get(
+            "/api/access.json",
+            Some(&token_with_tier("redacted")),
+            Some("application/json"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let row = &v["pulls"][0];
+    assert_eq!(row["who"], serde_json::json!("alice@corp.example"));
+    assert_eq!(row["tier"], serde_json::json!("raw"));
+    assert_eq!(
+        row["target"],
+        serde_json::json!(crate::engine::mcp::WORKLOAD_IDENTITY_WITHHELD),
+        "a redacted-tier viewer sees the withheld sentinel, never the workload identity"
+    );
+    assert_ne!(row["target"], serde_json::json!("workload/app/Pod/web"));
+    assert_eq!(
+        v["tier"],
+        serde_json::json!("redacted"),
+        "the caller's own chip"
+    );
+}
+
+#[tokio::test]
+async fn api_access_reveals_a_raw_pulls_target_to_a_raw_tier_caller() {
+    // A raw-tier caller (verified token) DOES see the workload-identity target of the same pull.
+    let response = router(state_with_raw_pull(), Some(enforcer(Tier::Redacted)))
+        .oneshot(get(
+            "/api/access.json",
+            Some(&token_with_tier("raw")),
+            Some("application/json"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let row = &v["pulls"][0];
+    assert_eq!(
+        row["target"],
+        serde_json::json!("workload/app/Pod/web"),
+        "a raw-tier viewer's own tier unlocks the target"
+    );
+    assert_eq!(v["tier"], serde_json::json!("raw"));
+}
 
 #[tokio::test]
 async fn document_root_with_no_token_is_302_to_login() {

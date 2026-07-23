@@ -1200,3 +1200,54 @@ summary:focus-visible,
 .prov-absent { color: var(--ink-3); }
 .prov-checking { color: var(--posture-awaiting); }
 .provenance-by { color: var(--ink-3); }
+
+/* ============================ Access view (JEF-490, ADR-0031 §4) ============================
+   The forensic/raw MCP disclosure audit. "your access" (the caller's tier + the per-tier reveal
+   list) sits above "forensic & raw pulls" (the audit table). Honesty over colour: every tier is
+   carried by glyph + WORD, never colour alone; raw is the loud/scarce breach palette (a crown-jewel
+   read); redacted is the calm floor. The audit table reuses the `.decisions` table shell so the
+   machine columns align (keyboard/semantics gate). */
+.view > .access-your { margin-bottom: var(--section-gap); }
+
+/* the tier chip: colour + glyph + WORD. `raw` reads in the loud breach palette (the scarce, most-
+   disclosing read); forensic is the caution amber (partial cluster detail); redacted is the calm
+   floor. The WORD is always present — meaning is never carried by colour alone. */
+.access-tier {
+  display: inline-flex; align-items: baseline; gap: var(--space-1);
+  font-size: var(--fs-micro); line-height: var(--lh-micro); font-weight: var(--fw-bold);
+  letter-spacing: var(--track-micro); text-transform: uppercase;
+  white-space: nowrap;
+}
+.access-tier-glyph { font-weight: var(--fw-bold); }
+.access-tier-redacted { color: var(--ink-3); }
+.access-tier-forensic { color: var(--posture-uncertain); }
+.access-tier-raw { color: var(--posture-breach); }
+
+/* the per-tier reveal rows reuse `.cov-row`; the tier the caller HOLDS gets a soft cleared keyline +
+   a "your tier" badge (never colour alone — the badge word carries it). */
+.access-reveal-held { border-left: var(--rail-soft) solid var(--cov-present); }
+.access-reveal-badge {
+  color: var(--cov-present); font-weight: var(--fw-bold);
+  letter-spacing: var(--track-micro); text-transform: uppercase;
+  border: var(--hairline) solid currentColor; border-radius: var(--radius-chip);
+  padding: 0 var(--space-1);
+}
+.access-reveal-label {
+  color: var(--ink-3); letter-spacing: var(--track-micro); text-transform: uppercase;
+  margin-right: var(--space-1);
+}
+
+/* the audit table: reuse the `.decisions` shell (aligned columns, `<th scope>`). A raw pull carries
+   the loud keyline on its leading cell — the crown-jewel read draws the eye. */
+.access-pulls .access-pull-row:hover { background: var(--surface-hover); }
+.access-pull-raw td.access-when {
+  border-left: var(--rail-strong) solid var(--posture-breach);
+}
+.access-when { white-space: nowrap; }
+.access-who { color: var(--ink-1); word-break: break-all; }
+.access-target { color: var(--ink-2); word-break: break-all; font-family: var(--font-data); }
+
+/* the honest empty state — calm (least-privilege working), never a false "nobody ever pulled". The
+   in-memory reset note is muted but present so an empty log is never over-read. */
+.empty-access-calm .empty-head { color: var(--ink-1); }
+.access-reset-note { color: var(--ink-3); }

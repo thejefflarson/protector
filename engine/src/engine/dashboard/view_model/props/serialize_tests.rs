@@ -83,6 +83,46 @@ fn live_tag_and_tab_serialize_to_stable_string_tags() {
         serde_json::to_value(Tab::Admission).unwrap(),
         json!("admission")
     );
+    assert_eq!(serde_json::to_value(Tab::Access).unwrap(), json!("access"));
+}
+
+#[test]
+fn access_tier_serializes_to_stable_lowercase_tags() {
+    // The "Access" chip switches on this token (colour + glyph + WORD); a rename breaks a test,
+    // not the client silently.
+    assert_eq!(
+        serde_json::to_value(AccessTier::Redacted).unwrap(),
+        json!("redacted")
+    );
+    assert_eq!(
+        serde_json::to_value(AccessTier::Forensic).unwrap(),
+        json!("forensic")
+    );
+    assert_eq!(serde_json::to_value(AccessTier::Raw).unwrap(), json!("raw"));
+}
+
+#[test]
+fn an_access_pull_row_ships_the_target_raw_with_the_raw_keyline_flag() {
+    // The tier-aware REDACTION is decided server-side: the `target` is already the real value or
+    // the sentinel by the time it serializes. Whatever it holds ships RAW (the client escapes), and
+    // the `raw` keyline flag is a decided boolean.
+    let row = AccessPullRow {
+        when: "30s ago".into(),
+        who: "<b>alice</b>@corp".into(),
+        tool: "explain_verdict".into(),
+        tier: AccessTier::Raw,
+        target: "workload/app/Pod/web".into(),
+        raw: true,
+    };
+    let v = serde_json::to_value(row).unwrap();
+    assert_eq!(v["tier"], json!("raw"));
+    assert_eq!(v["raw"], json!(true), "a raw pull carries the loud keyline");
+    assert_eq!(
+        v["who"],
+        json!("<b>alice</b>@corp"),
+        "the untrusted subject ships raw (the client escapes)"
+    );
+    assert_eq!(v["target"], json!("workload/app/Pod/web"));
 }
 
 #[test]

@@ -24,8 +24,10 @@ use super::tiering::EffectiveTier;
 /// two egress paths agree on how much "outcome" a summary discloses.
 const ATTACK_CAP: usize = 8;
 
-/// The sentinel for a withheld entry/workload identity (a path/topology fact — forensic).
-const S_ENTRY: &str = "[redacted — workload identity; forensic tier required]";
+/// The sentinel for a withheld entry/workload identity (a path/topology fact — forensic). `pub` so
+/// the "Access" audit screen (JEF-490) redacts a pull's target-class with the SAME vocabulary the
+/// tool uses — one sentinel string across tool + screen, never a second wording that could diverge.
+pub const S_ENTRY: &str = "[redacted — workload identity; forensic tier required]";
 /// The sentinel for withheld proven paths (topology — forensic).
 const S_PATHS: &str = "[redacted — proven path/topology; forensic tier required]";
 /// The sentinel for a withheld CVE inventory (forensic).

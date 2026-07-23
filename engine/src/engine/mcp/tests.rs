@@ -439,6 +439,53 @@ fn explain_verdict_clamps_a_redacted_token_that_asks_for_raw() {
 }
 
 #[test]
+fn the_durable_access_sink_records_exactly_one_line_for_a_raw_pull_and_none_for_redacted() {
+    // JEF-490: the same subject·entry·tool·tier·time contract, proven through the DURABLE sink the
+    // "Access" tab reads (not just the test RecordingAuditSink) — a raw pull appends one line, a
+    // redacted pull appends none.
+    use crate::engine::mcp::access_audit::AccessAuditSink;
+
+    let state = state_with_secret();
+
+    // A redacted pull discloses nothing cluster-specific → NO audit line.
+    let redacted_sink = AccessAuditSink::in_memory();
+    dispatch(
+        &state,
+        &redacted_sink,
+        "eve@corp.example",
+        tools::LIST_FINDINGS,
+        None,
+        Tier::Redacted,
+    )
+    .expect("list_findings");
+    assert!(
+        redacted_sink.records().is_empty(),
+        "a redacted pull is NOT audited by the durable sink"
+    );
+
+    // A raw explain_verdict IS audited — exactly one line, carrying the verified subject + entry.
+    let raw_sink = AccessAuditSink::in_memory();
+    let mut args = Map::new();
+    args.insert("entry".into(), Value::String(ENTRY.into()));
+    args.insert("tier".into(), Value::String("raw".into()));
+    dispatch(
+        &state,
+        &raw_sink,
+        "alice@corp.example",
+        tools::EXPLAIN_VERDICT,
+        Some(&args),
+        Tier::Raw,
+    )
+    .expect("explain_verdict");
+    let records = raw_sink.records();
+    assert_eq!(records.len(), 1, "a raw pull appends exactly one line");
+    assert_eq!(records[0].subject, "alice@corp.example");
+    assert_eq!(records[0].entry, ENTRY);
+    assert_eq!(records[0].tool, tools::EXPLAIN_VERDICT);
+    assert_eq!(records[0].tier, EffectiveTier::Raw);
+}
+
+#[test]
 fn explain_verdict_accepts_the_opaque_ref_and_rejects_an_unknown_entry() {
     let state = state_with_secret();
     let sink = RecordingAuditSink::default();
