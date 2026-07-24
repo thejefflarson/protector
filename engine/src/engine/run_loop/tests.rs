@@ -34,6 +34,7 @@ fn dashboard_oidc_min_tier_config_fails_loud_but_serves_on_valid_or_absent() {
             "PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM",
             "PROTECTOR_DASHBOARD_OIDC_ALGORITHM",
             "PROTECTOR_DASHBOARD_OIDC_LOGIN_URL",
+            "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS",
         ] {
             std::env::remove_var(key);
         }
@@ -64,6 +65,55 @@ fn dashboard_oidc_min_tier_config_fails_loud_but_serves_on_valid_or_absent() {
         super::build_dashboard_auth().expect("an absent min-tier defaults and serves");
     assert!(auth.is_some());
     assert_eq!(mode, crate::engine::dashboard::AuthMode::Oidc);
+
+    clear();
+}
+
+/// JEF-501: a malformed/unrecognized `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` must fail LOUD —
+/// neither `build_dashboard_auth` nor `build_mcp_verifier` serve on a misconfigured grant table —
+/// exactly like a mistyped `MIN_TIER`; a valid grant table serves normally.
+#[test]
+fn tier_grants_config_fails_loud_but_serves_on_valid_or_absent() {
+    let _env = crate::engine::dashboard::auth::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    const ISSUER: &str = "PROTECTOR_DASHBOARD_OIDC_ISSUER";
+    const AUDIENCE: &str = "PROTECTOR_DASHBOARD_OIDC_AUDIENCE";
+    const TIER_GRANTS: &str = "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS";
+    let clear = || unsafe {
+        for key in [ISSUER, AUDIENCE, TIER_GRANTS] {
+            std::env::remove_var(key);
+        }
+    };
+    clear();
+    unsafe {
+        std::env::set_var(ISSUER, "https://issuer.example");
+        std::env::set_var(AUDIENCE, "protector");
+    }
+
+    // An unrecognized tier name in the grants table → neither builder serves.
+    unsafe { std::env::set_var(TIER_GRANTS, "admin=alice@x.com") };
+    assert!(
+        super::build_dashboard_auth().is_none(),
+        "an unrecognized TIER_GRANTS tier must fail loud (dashboard not served)"
+    );
+    assert!(
+        super::build_mcp_verifier().is_none(),
+        "an unrecognized TIER_GRANTS tier must fail loud (mcp not served)"
+    );
+
+    // Malformed syntax → neither builder serves.
+    unsafe { std::env::set_var(TIER_GRANTS, "not-a-valid-entry") };
+    assert!(super::build_dashboard_auth().is_none());
+    assert!(super::build_mcp_verifier().is_none());
+
+    // A VALID grant table serves normally on both surfaces.
+    unsafe { std::env::set_var(TIER_GRANTS, "raw=alice@x.com;forensic=bob@x.com") };
+    let (auth, mode) = super::build_dashboard_auth().expect("a valid grant table serves");
+    assert!(auth.is_some());
+    assert_eq!(mode, crate::engine::dashboard::AuthMode::Oidc);
+    assert!(super::build_mcp_verifier().is_some());
 
     clear();
 }

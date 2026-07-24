@@ -10,7 +10,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
-use super::claims::{Claims, Tier};
+use super::claims::{Claims, Tier, TierGrants};
 use super::jwks::{HttpJwksFetcher, JwksFetcher, JwksStore};
 use super::test_support::{
     AUDIENCE, E, ISSUER, KEY_A_N, KEY_A_PEM, KEY_B_N, KEY_B_PEM, KID_A, KID_B, TestFetcher,
@@ -512,6 +512,7 @@ fn from_env_models_unconfigured_configured_and_errors() {
         super::ENV_AUDIENCE,
         super::ENV_TIER_CLAIM,
         super::ENV_ALGORITHM,
+        super::ENV_TIER_GRANTS,
     ];
     let clear = || unsafe {
         for key in keys {
@@ -534,6 +535,11 @@ fn from_env_models_unconfigured_configured_and_errors() {
     assert_eq!(config.audience, AUDIENCE);
     assert_eq!(config.tier_claim, "tier");
     assert_eq!(config.algorithm, SigningAlgorithm::Rs256);
+    assert_eq!(
+        config.tier_grants,
+        TierGrants::default(),
+        "TIER_GRANTS unset ⇒ no grants (unchanged behavior)"
+    );
 
     // Configurable tier claim + ES256.
     unsafe {
