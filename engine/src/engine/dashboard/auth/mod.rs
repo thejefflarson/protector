@@ -33,6 +33,8 @@ mod enforce_tests;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tier_grants_tests;
 
 use std::sync::Arc;
 
