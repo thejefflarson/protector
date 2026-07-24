@@ -313,6 +313,13 @@ spec:
               value: {{ .audience | quote }}
             - name: PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM
               value: {{ .tierClaim | quote }}
+            {{- if .tierGrants }}
+            # Identity→tier grants (JEF-501): resolves the forensic/raw ceiling from the VERIFIED
+            # sub/email when the IdP mints no `tier` claim (e.g. Cloudflare Access over GitHub).
+            # An explicit `tier` claim, when present, still takes precedence over a grant.
+            - name: PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS
+              value: {{ .tierGrants | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- end }}

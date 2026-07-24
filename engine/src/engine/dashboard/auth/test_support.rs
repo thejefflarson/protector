@@ -130,6 +130,7 @@ pub(crate) fn test_config() -> OidcConfig {
         audience: AUDIENCE.into(),
         tier_claim: "tier".into(),
         algorithm: SigningAlgorithm::Rs256,
+        tier_grants: super::claims::TierGrants::default(),
     }
 }
 

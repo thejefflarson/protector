@@ -327,6 +327,16 @@ engine:
       # already-read-only view an identity sees; JEF-489). Default `tier`; supports a flat namespaced
       # key or a dotted path (e.g. `authz.tier`).
       tierClaim: "tier"
+      # Operator identity→tier grants (JEF-501): resolves the forensic/raw ceiling from the
+      # VERIFIED token identity (`sub`/`email`) when the IdP mints no `tier` claim at all — e.g.
+      # Cloudflare Access relaying GitHub, which emits neither. Format `tier=id1,id2;tier=id3`,
+      # e.g. `raw=alice@example.com;forensic=bob@example.com`. An explicit `tier` claim (when the
+      # IdP does mint one) always takes precedence over a grant. EMPTY = no grants (every identity
+      # floors to `redacted`, today's behavior) — the actual grant for this cluster is wired in the
+      # separate cluster repo, not here. A malformed value or an unrecognized tier name is a loud
+      # misconfiguration: the dashboard/MCP server is NOT served rather than silently dropping the
+      # grant.
+      tierGrants: ""
   # Two exploitation-intel feeds drive the engine's exploit intel + model reasoning
   # (ADR-0015): the CISA KEV catalogue (actively-exploited CVEs, known NOW) and the FIRST.org
   # EPSS scores (the PREDICTIVE per-CVE exploitation probability — JEF-243). The engine NEVER

@@ -43,7 +43,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
 
-use claims::{Claims, Tier};
+use claims::{Claims, Tier, TierGrants};
 use jwks::{HttpJwksFetcher, JwksFetcher, JwksStore};
 
 /// `PROTECTOR_DASHBOARD_OIDC_ISSUER` — the configured issuer. Its ABSENCE is what makes the
@@ -57,6 +57,11 @@ const ENV_AUDIENCE: &str = "PROTECTOR_DASHBOARD_OIDC_AUDIENCE";
 const ENV_TIER_CLAIM: &str = "PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM";
 /// `PROTECTOR_DASHBOARD_OIDC_ALGORITHM` — the pinned asymmetric algorithm (`RS256` | `ES256`).
 const ENV_ALGORITHM: &str = "PROTECTOR_DASHBOARD_OIDC_ALGORITHM";
+/// `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` — operator identity→tier grants (JEF-501): resolves the
+/// ceiling from the VERIFIED `sub`/`email` when the IdP mints no `tier` claim at all (e.g.
+/// Cloudflare Access relaying GitHub). Format `tier=id1,id2;tier=id3`, e.g.
+/// `raw=alice@example.com;forensic=bob@example.com`. Unset/empty = no grants (unchanged behavior).
+const ENV_TIER_GRANTS: &str = "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS";
 
 /// The default tier claim path when `PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM` is unset.
 const DEFAULT_TIER_CLAIM: &str = "tier";
@@ -111,6 +116,9 @@ pub struct OidcConfig {
     pub tier_claim: String,
     /// The pinned asymmetric algorithm.
     pub algorithm: SigningAlgorithm,
+    /// Operator identity→tier grants (JEF-501): resolves the ceiling from the verified `sub`/
+    /// `email` when no `tier` claim is present. Empty (default) = no grants — current behavior.
+    pub tier_grants: TierGrants,
 }
 
 /// Why [`OidcConfig::from_env`] could not build a config even though an issuer was present. This
@@ -129,6 +137,19 @@ pub enum ConfigError {
         "PROTECTOR_DASHBOARD_OIDC_MIN_TIER `{0}` is not a recognized tier (redacted, forensic, raw)"
     )]
     UnsupportedTier(String),
+    /// A `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` entry names a tier that is not one of the
+    /// recognized tiers — a loud misconfiguration (JEF-501), never a silently-dropped grant.
+    #[error(
+        "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS names an unrecognized tier `{0}` \
+         (redacted, forensic, raw)"
+    )]
+    UnsupportedTierGrant(String),
+    /// `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` is not well-formed: every `;`-separated entry must be
+    /// `tier=id1,id2,...` with at least one non-empty identifier.
+    #[error(
+        "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS entry `{0}` is malformed (expected `tier=id1,id2`)"
+    )]
+    MalformedTierGrants(String),
 }
 
 impl OidcConfig {
@@ -148,13 +169,51 @@ impl OidcConfig {
             }
             None => SigningAlgorithm::Rs256,
         };
+        let tier_grants = match non_empty_env(ENV_TIER_GRANTS) {
+            Some(value) => parse_tier_grants(&value)?,
+            None => TierGrants::default(),
+        };
         Ok(Some(OidcConfig {
             issuer,
             audience,
             tier_claim,
             algorithm,
+            tier_grants,
         }))
     }
+}
+
+/// Strictly parse `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS`: `;`-separated entries of
+/// `tier=id1,id2,...`. Every entry must name a RECOGNIZED tier ([`Tier::parse_config`] — the same
+/// strict parser `PROTECTOR_DASHBOARD_OIDC_MIN_TIER` uses, see [`enforce`]) and carry at least one
+/// non-empty identifier, or this fails loud with a [`ConfigError`] — a typo here must never
+/// silently drop a grant or, worse, silently admit an unintended identifier (fail loud, exactly
+/// like a mistyped `MIN_TIER`).
+fn parse_tier_grants(value: &str) -> Result<TierGrants, ConfigError> {
+    let mut grants = TierGrants::default();
+    for entry in value.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(ConfigError::MalformedTierGrants(value.to_string()));
+        }
+        let (tier_name, ids) = entry
+            .split_once('=')
+            .ok_or_else(|| ConfigError::MalformedTierGrants(entry.to_string()))?;
+        let tier_name = tier_name.trim();
+        let tier = Tier::parse_config(tier_name)
+            .ok_or_else(|| ConfigError::UnsupportedTierGrant(tier_name.to_string()))?;
+        let ids: Vec<String> = ids
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        if ids.is_empty() {
+            return Err(ConfigError::MalformedTierGrants(entry.to_string()));
+        }
+        grants.grant(tier, ids);
+    }
+    Ok(grants)
 }
 
 /// A trimmed, non-empty environment value, or `None` if unset/blank.
@@ -172,8 +231,13 @@ pub(super) fn non_empty_env(key: &str) -> Option<String> {
 pub struct Identity {
     /// The token subject (`sub`) — the principal (a human for a browser/ID-JAG token).
     pub subject: String,
-    /// The resolved authorization tier (most-restricted when the claim is absent/empty/unknown).
+    /// The resolved authorization tier — see [`Tier::from_claims_with_grants`] for the precedence
+    /// (an explicit recognized `tier` claim, else an identity→tier grant, else the floor).
     pub tier: Tier,
+    /// The verified token's `email` claim, if present (JEF-501). Not an identity in its own
+    /// right — `subject` remains the principal — but threaded through so callers/logs that want it
+    /// (and the tier-grant resolution above) can read it without re-decoding the token.
+    pub email: Option<String>,
 }
 
 /// Every distinct way verification can fail. Each acceptance-critical failure — tampered
@@ -323,10 +387,15 @@ impl Verifier {
         let key = self.jwks.decoding_key(header.kid.as_deref()).await?;
         let data =
             decode::<Claims>(token, &key, &self.validation).map_err(|e| AuthError::from_jwt(&e))?;
-        let tier = Tier::from_claims(&data.claims, &self.config.tier_claim);
+        let tier = Tier::from_claims_with_grants(
+            &data.claims,
+            &self.config.tier_claim,
+            &self.config.tier_grants,
+        );
         Ok(Identity {
             subject: data.claims.sub,
             tier,
+            email: data.claims.email,
         })
     }
 }
