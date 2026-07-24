@@ -71,6 +71,12 @@ jobs:
       run: |
         npm --prefix engine/web ci --ignore-scripts
         npm --prefix engine/web run build
+    - name: Lint dashboard client (eslint + jsx-a11y)
+      # JEF-499: the accessibility gate. eslint-plugin-jsx-a11y (recommended, mapped onto Preact
+      # JSX) fails the build on an a11y authoring regression in engine/web/src; the axe route-smoke
+      # (the runtime half) runs in the `test` job's `npm run test`. Deps were installed by the
+      # `npm ci --ignore-scripts` above.
+      run: npm --prefix engine/web run lint
     - name: Format
       run: cargo fmt --check
     - name: Clippy
@@ -119,7 +125,9 @@ jobs:
     - name: Dashboard client tests
       # The v4 Preact client's offline unit + interaction tests (vitest + jsdom, ADR-0025 /
       # JEF-397): the keyed reconcile, the state-preservation (JEF-351) acceptance test, client
-      # escaping, and the honesty empty-states. `npm ci` above installed the dev toolchain.
+      # escaping, the honesty empty-states, and the JEF-499 vitest-axe route-smoke (every top-level
+      # view + AuthGate + status strip asserted free of serious/critical axe violations — an a11y
+      # regression goes red here). `npm ci` above installed the dev toolchain.
       run: npm --prefix engine/web run test
     - name: Audit dependencies
       run: |

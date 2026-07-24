@@ -112,7 +112,7 @@ function ProvenanceDetail({ r }) {
 
 /** A before→after identity/builder detail block: the "before" list (honest when empty) shared by the
  *  regression / exception / provenance-change panels. */
-function BeforeList({ heading, singular, items }) {
+function BeforeList({ singular, items }) {
   const list = Array.isArray(items) ? items : [];
   if (list.length === 0) {
     return (
