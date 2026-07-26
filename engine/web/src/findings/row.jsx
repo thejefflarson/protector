@@ -35,7 +35,7 @@ export function FindingRow({ f }) {
           <button
             class="expander"
             type="button"
-            aria-expanded={String(expanded)}
+            aria-expanded={expanded}
             aria-controls={detailId}
             aria-label="expand finding detail"
           >
@@ -64,7 +64,7 @@ export function FindingRow({ f }) {
         </td>
       </tr>
       <tr class="row-detail" id={detailId} data-detail-for={f.id}>
-        <td class="detail-host" colspan="7">
+        <td class="detail-host" colspan={7}>
           {expanded ? <DetailPanel f={f} /> : null}
         </td>
       </tr>

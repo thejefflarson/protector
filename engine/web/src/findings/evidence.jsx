@@ -82,7 +82,7 @@ function CveRow({ c }) {
       </tr>
       {c.title ? (
         <tr class="ev-subrow">
-          <td colspan="7">
+          <td colspan={7}>
             <span class="muted">{c.title}</span>
           </td>
         </tr>
