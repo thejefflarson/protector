@@ -38,6 +38,10 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: {{ .Values.agent.maxSurge }}
+      # A DaemonSet rollingUpdate may not have both maxSurge and maxUnavailable
+      # non-zero (Kubernetes rejects it). Surging ⇒ maxUnavailable:0; no surge ⇒
+      # fall back to the default terminate-then-replace (maxUnavailable:1).
+      maxUnavailable: {{ if gt (int .Values.agent.maxSurge) 0 }}0{{ else }}1{{ end }}
   selector:
     matchLabels:
       {{- include "protector.agentSelectorLabels" . | nindent 6 }}
