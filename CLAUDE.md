@@ -26,6 +26,11 @@ that grows unbounded becomes unreadable and unreviewable; that must not recur an
 ## Workflow
 
 - Branch + PR; never commit directly to `main`. Merge on green CI.
+- **Releases follow strict semver**, computed from the conventional-commit subjects since
+  the last tag: `feat` → **minor**; `fix`/`perf`/`refactor`/`chore`/`docs`/`ci`/`build` →
+  **patch**; `!` or `BREAKING CHANGE` → **major** (pre-1.0: breaking → minor). Do not
+  default to a rolling patch bump — this retires the old 0.3.x patch-per-release cadence
+  (e.g. the next release carrying any `feat` after v0.3.112 is **v0.4.0**, not v0.3.113).
 - Rust edition 2024: use `cargo add` for dependencies (don't hand-edit `Cargo.toml`);
   run `cargo fmt`; treat `clippy` warnings as errors; run the full test suite before
   declaring work complete.
