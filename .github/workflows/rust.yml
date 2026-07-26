@@ -77,6 +77,12 @@ jobs:
       # (the runtime half) runs in the `test` job's `npm run test`. Deps were installed by the
       # `npm ci --ignore-scripts` above.
       run: npm --prefix engine/web run lint
+    - name: Typecheck dashboard client (tsc --noEmit)
+      # JEF-399: eslint's no-unused-vars (JEF-499) catches unused imports; it does not type-check.
+      # `tsc --noEmit` over engine/web/src (tsconfig.json: checkJs, jsx: react-jsx / preact, offline —
+      # no `.d.ts` fetch) fails the build on a real type error (e.g. a JSX prop of the wrong type)
+      # slipping into the bundle. Deps were installed by the `npm ci --ignore-scripts` above.
+      run: npm --prefix engine/web run typecheck
     - name: Format
       run: cargo fmt --check
     - name: Clippy
