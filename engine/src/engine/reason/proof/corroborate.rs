@@ -11,21 +11,23 @@ use petgraph::stable_graph::NodeIndex;
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, Node, RuntimeSignal, SecurityGraph};
 
-/// The context the entry workload provides to the corroboration predicate (JEF-319). The
-/// flat per-behavior [`corroborates`] relation is context-free on purpose (regression-safe);
-/// the entry-scoped cross-tenant-lateral shape below needs MORE than `behavior + attack`,
-/// so it reads the entry's own namespace and foothold status from here.
+/// The context the entry workload provides to the corroboration predicate (JEF-319, JEF-314).
+/// The flat per-behavior [`corroborates`] relation is context-free on purpose
+/// (regression-safe); the entry-scoped shapes below (cross-tenant lateral, privilege
+/// escalation) need MORE than `behavior + attack`, so they read the entry's own namespace
+/// and foothold status from here.
 ///
-/// The shape is scoped to a real internet-facing entry so an ordinary cross-namespace service
-/// call from a non-entry pod never corroborates (ADR-0011 / ADR-0014 conservatism).
-/// `source_ns` is the entry workload's namespace; `is_foothold` is true only when the entry
-/// is a proven internet-facing foothold (a critical/KEV front door).
+/// Both shapes are scoped to a real internet-facing entry so an ordinary cross-namespace
+/// service call — or an ordinary setuid — from a non-entry pod never corroborates
+/// (ADR-0011 / ADR-0014 conservatism). `source_ns` is the entry workload's namespace;
+/// `is_foothold` is true only when the entry is a proven internet-facing foothold (a
+/// critical/KEV front door).
 #[derive(Clone, Copy)]
 pub(super) struct EntryContext<'a> {
     /// The entry workload's own namespace — the SOURCE side of the cross-tenant comparison.
     pub source_ns: &'a str,
     /// Whether the entry is a proven internet-facing foothold (ADR-0009): the gate that
-    /// scopes both new shapes to a real front door, not any workload.
+    /// scopes every entry-scoped shape to a real front door, not any workload.
     pub is_foothold: bool,
 }
 
@@ -102,7 +104,11 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         }
         // PrivilegeChange is NON-corroborating here: model evidence, not a per-objective
         // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
-        // Wiring it into a specific attack chain would be a JEF-49-style follow-up.
+        // Context-free root escalation stays this way for ANY pod on purpose: a root
+        // escalation on the proven internet-facing foothold DOES corroborate a
+        // PrivilegeEscalation objective, but that needs the entry's foothold status, which
+        // this flat relation doesn't have — so that shape lives at the entry-scoped seam
+        // ([`privilege_escalation_on_foothold`]), not here (JEF-314).
         Behavior::PrivilegeChange { .. } => false,
         // An *alarming* FileWrite — a sensitive-path / drop-and-execute / config-tamper drift
         // write (JEF-309) — corroborates ANY objective like an Alert / notable exec does: a
@@ -140,14 +146,18 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// chain is unaffected.
 ///
 /// A chain is corroborated if EITHER the context-free per-behavior relation holds for any
-/// signal (the objective's tactic OR the foothold's tactic, JEF-77) OR one of the entry-scoped
-/// shapes fires: a connection from the entry to a peer in a DIFFERENT namespace
-/// ([`cross_tenant_lateral`], JEF-319), or a `ProcessExec` of a path a RECENT `FileWrite`
-/// dropped ([`drop_then_execute`], JEF-321) — both scoped to a proven foothold entry.
+/// signal (the objective's tactic OR the foothold's tactic, JEF-77) OR one of the
+/// entry-scoped shapes fires: **cross-tenant lateral** (JEF-319) — a connection from the
+/// entry to a peer in a DIFFERENT namespace ([`cross_tenant_lateral`]) — **privilege
+/// escalation on the foothold** (JEF-314) — a root escalation on the entry itself
+/// ([`privilege_escalation_on_foothold`]) — or **drop-then-execute** (JEF-321) — a
+/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]). All three
+/// are scoped to a proven foothold entry.
 ///
-/// Those shapes stay OFF the flat per-behavior predicates: ordinary internet egress, ordinary
-/// in-cluster traffic, and an ordinary write-then-run of a benign path still corroborate
-/// nothing (ADR-0011). Like every arm here this only sets `corroborated`; it never actuates
+/// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
+/// ordinary in-cluster traffic, an ordinary setuid, and an ordinary write-then-run of a
+/// benign path all still corroborate nothing (ADR-0011). Like every arm here this only sets
+/// `corroborated`; it never actuates
 /// (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
     runtime: &[RuntimeSignal],
@@ -158,6 +168,7 @@ pub(super) fn corroborated_for(
     runtime.iter().any(|s| {
         corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
     }) || cross_tenant_lateral(runtime, entry)
+        || privilege_escalation_on_foothold(runtime, attack, entry)
         || drop_then_execute(runtime, entry)
 }
 
@@ -232,6 +243,35 @@ pub(super) fn drop_then_execute(runtime: &[RuntimeSignal], entry: EntryContext<'
                     .duration_since(write.provenance.observed_at)
                     .is_ok_and(|elapsed| elapsed <= DROP_EXEC_WINDOW)
         })
+    })
+}
+
+/// The privilege-escalation-on-foothold shape (JEF-314): a `PrivilegeChange` non-root→root
+/// on the entry itself corroborates a PrivilegeEscalation-tactic objective (T1611 Escape to
+/// Host / T1098.006 RBAC self-escalation, and any future T1548-tactic technique) — the setuid
+/// Falco fires critical on, here scoped to close the parity gap without the false positive
+/// Falco doesn't guard against.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`cross_tenant_lateral`]:
+/// corroborates ONLY when the entry is a proven internet-facing foothold (`entry.is_foothold`)
+/// AND `attack.tactic` is `PrivilegeEscalation`. The flat [`corroborates`] relation
+/// deliberately leaves `PrivilegeChange` non-corroborating everywhere (legit entrypoints and
+/// init processes escalate to root on ordinary pods constantly — the ADR-0011 false
+/// positive); gating on the proven foothold is what makes a root escalation there mean
+/// something a routine setuid on an unrelated pod does not: the attacker who owns the
+/// internet-facing front door escalating on that SAME workload.
+pub(super) fn privilege_escalation_on_foothold(
+    runtime: &[RuntimeSignal],
+    attack: &AttackRef,
+    entry: EntryContext<'_>,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    if !entry.is_foothold || attack.tactic != Tactic::PrivilegeEscalation {
+        return false;
+    }
+    runtime.iter().any(|s| match &s.behavior {
+        Behavior::PrivilegeChange { from_uid, to_uid } => *from_uid != 0 && *to_uid == 0,
+        _ => false,
     })
 }
 

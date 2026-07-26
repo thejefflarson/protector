@@ -289,9 +289,10 @@ pub fn prove_with(
         // once here rather than re-looking-up the node inside `corroborated_for` per
         // objective.
         let runtime = entry_runtime(graph, entry);
-        // The entry-scoped context for the two JEF-319 corroboration shapes (cross-tenant
-        // lateral, reverse-shell): the entry's own namespace and whether it's a proven
-        // internet-facing foothold. Constant across objectives, so build it once.
+        // The entry-scoped context for the entry-scoped corroboration shapes (JEF-319
+        // cross-tenant lateral, JEF-314 privilege escalation on the foothold): the entry's
+        // own namespace and whether it's a proven internet-facing foothold. Constant across
+        // objectives, so build it once.
         let entry_ctx = EntryContext {
             source_ns: entry_namespace(graph, entry),
             is_foothold: foothold.is_some(),
@@ -355,6 +356,8 @@ mod corroborate_context_tests;
 mod corroborate_drop_exec_tests;
 #[cfg(test)]
 mod corroborate_objective_tests;
+#[cfg(test)]
+mod corroborate_privesc_tests;
 #[cfg(test)]
 mod corroborate_tests;
 #[cfg(test)]

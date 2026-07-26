@@ -115,7 +115,7 @@ function useRowDisclosure(domId, label) {
     <button
       class="expander"
       type="button"
-      aria-expanded={String(open)}
+      aria-expanded={open}
       aria-controls={detailId}
       aria-label={label}
       onClick={() => setOpen((v) => !v)}
@@ -271,13 +271,13 @@ function baselineWord(established) {
  * @param {string} props.headClass  the CSS prefix (`signing-regression` | `signing-exception`).
  * @param {string} props.rowClass  the summary `<tr>` class (loud attention vs calm).
  * @param {Record<string,string>} props.dataAttr  the single `data-*` attribute (fixed token).
- * @param {string} [props.role]  `"alert"` for the loud banners, omitted for the calm exception.
+ * @param {"alert"} [props.role]  `"alert"` for the loud banners, omitted for the calm exception.
  * @param {string} props.glyph  the leading glyph.
  * @param {any} props.head  the headline word content (inside `{headClass}-word`).
  * @param {boolean} props.established  drives the sibling baseline-strength phrase.
  * @param {string} props.image  the untrusted image ref (rendered as JSX text).
  * @param {string} props.label  the expander's aria-label.
- * @param {(open: boolean) => any} props.detail  renders the detail body when open.
+ * @param {() => any} props.detail  renders the detail body when open.
  */
 function BannerRow({
   domId,
@@ -304,7 +304,7 @@ function BannerRow({
         {...dataAttr}
       >
         <td class="cell cell-expand">{expander}</td>
-        <td class="cell cell-regression" colspan="6">
+        <td class="cell cell-regression" colspan={6}>
           <span class={`${headClass}-head`}>
             <span class="glyph" aria-hidden="true">
               {glyph}
@@ -319,7 +319,7 @@ function BannerRow({
         </td>
       </tr>
       <tr class="row-detail" id={detailId} data-detail-for={domId}>
-        <td class="detail-host" colspan="7">
+        <td class="detail-host" colspan={7}>
           {open ? detail() : null}
         </td>
       </tr>
