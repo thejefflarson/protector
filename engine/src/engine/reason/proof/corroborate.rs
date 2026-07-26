@@ -4,6 +4,8 @@
 //! `corroborated`; they never actuate. `corroborates` is the per-objective seam the ADR
 //! is stated in terms of; `corroborated_for` resolves it for an entry's signals.
 
+use std::time::Duration;
+
 use petgraph::stable_graph::NodeIndex;
 
 use crate::engine::graph::attack::AttackRef;
@@ -146,13 +148,16 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// A chain is corroborated if EITHER the context-free per-behavior relation holds for any
 /// signal (the objective's tactic OR the foothold's tactic, JEF-77) OR one of the
 /// entry-scoped shapes fires: **cross-tenant lateral** (JEF-319) — a connection from the
-/// entry to a peer in a DIFFERENT namespace ([`cross_tenant_lateral`]) — or **privilege
+/// entry to a peer in a DIFFERENT namespace ([`cross_tenant_lateral`]) — **privilege
 /// escalation on the foothold** (JEF-314) — a root escalation on the entry itself
-/// ([`privilege_escalation_on_foothold`]). Both are scoped to a proven foothold entry.
+/// ([`privilege_escalation_on_foothold`]) — or **drop-then-execute** (JEF-321) — a
+/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]). All three
+/// are scoped to a proven foothold entry.
 ///
-/// Neither shape widens the flat predicates it sits beside: ordinary internet egress,
-/// ordinary in-cluster traffic, and an ordinary setuid all still corroborate nothing
-/// (ADR-0011). Like every arm here this only sets `corroborated`; it never actuates
+/// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
+/// ordinary in-cluster traffic, an ordinary setuid, and an ordinary write-then-run of a
+/// benign path all still corroborate nothing (ADR-0011). Like every arm here this only sets
+/// `corroborated`; it never actuates
 /// (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
     runtime: &[RuntimeSignal],
@@ -164,6 +169,7 @@ pub(super) fn corroborated_for(
         corroborates(&s.behavior, attack) || foothold.is_some_and(|f| corroborates(&s.behavior, f))
     }) || cross_tenant_lateral(runtime, entry)
         || privilege_escalation_on_foothold(runtime, attack, entry)
+        || drop_then_execute(runtime, entry)
 }
 
 /// The cross-tenant lateral-movement shape (JEF-319): a `NetworkConnection` from the entry to
@@ -184,6 +190,59 @@ pub(super) fn cross_tenant_lateral(runtime: &[RuntimeSignal], entry: EntryContex
             crate::engine::observe::peer_class::is_cross_tenant(entry.source_ns, peer)
         }
         _ => false,
+    })
+}
+
+/// The narrowest gap a `FileWrite` and the `ProcessExec` of the SAME path can sit apart and
+/// still read as one drop-then-execute act rather than coincidental path reuse (JEF-321): a
+/// script dropped and immediately run is seconds to low minutes apart; the same path written
+/// and re-run much later (a build cache, a rotated log re-opened for append) is unrelated.
+pub(super) const DROP_EXEC_WINDOW: Duration = Duration::from_secs(300);
+
+/// The drop-then-execute shape (JEF-321): a `ProcessExec` of a path RECENTLY `FileWrite`n by
+/// the SAME workload — the classic "drop a payload under a benign-looking path (e.g. `/tmp`),
+/// then run it" pattern. Neither behavior alone is `corroborates`-blanket here: an ordinary
+/// `ProcessExec` is not a [`notable_exec`](crate::engine::observe::exec_class::notable_exec) and
+/// an ordinary `/tmp` `FileWrite` is not an
+/// [`alarming_write`](crate::engine::observe::alarm_class::alarming_write) — apps legitimately
+/// write and run their own scripts. It's the CORRELATION of the two on the same path that is
+/// the tell — and that needs cross-signal state the flat per-behavior [`corroborates`] relation
+/// can't carry (it only ever sees one behavior at a time).
+///
+/// **Where the cross-signal state lives:** the entry's own `runtime` slice — already a bounded,
+/// time-windowed per-workload record of recent signals ([`RuntimeEvents`](crate::engine::observe::runtime::RuntimeEvents),
+/// TTL'd + capped at `MAX_EVENTS`, resolved once per entry by [`entry_runtime`]) — IS the
+/// "recent writes to match the exec against" this needs. No new store is introduced; this
+/// function only correlates two entries already in that slice. [`DROP_EXEC_WINDOW`] narrows
+/// "recent" further than the general runtime TTL (default 30 minutes) to the few minutes that
+/// actually reads as one drop-and-run act, and requires the write to have happened AT OR BEFORE
+/// the exec (an exec that merely precedes an unrelated later write of the same path is not
+/// drop-then-execute).
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`cross_tenant_lateral`]: corroborates
+/// ONLY when the entry is a proven internet-facing foothold. Apps legitimately write-then-run
+/// scripts under `/tmp` constantly — scoping to the proven entry/foothold is what keeps that the
+/// ADR-0011 on-call-engineer false positive, rather than turning every ordinary pod into a
+/// corroboration source.
+pub(super) fn drop_then_execute(runtime: &[RuntimeSignal], entry: EntryContext<'_>) -> bool {
+    if !entry.is_foothold {
+        return false;
+    }
+    runtime.iter().any(|exec| {
+        let Behavior::ProcessExec { path: exec_path } = &exec.behavior else {
+            return false;
+        };
+        runtime.iter().any(|write| {
+            let Behavior::FileWrite { path: write_path } = &write.behavior else {
+                return false;
+            };
+            write_path == exec_path
+                && exec
+                    .provenance
+                    .observed_at
+                    .duration_since(write.provenance.observed_at)
+                    .is_ok_and(|elapsed| elapsed <= DROP_EXEC_WINDOW)
+        })
     })
 }
 

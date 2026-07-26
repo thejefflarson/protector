@@ -353,6 +353,8 @@ pub fn prove_with(
 #[cfg(test)]
 mod corroborate_context_tests;
 #[cfg(test)]
+mod corroborate_drop_exec_tests;
+#[cfg(test)]
 mod corroborate_objective_tests;
 #[cfg(test)]
 mod corroborate_privesc_tests;
