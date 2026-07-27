@@ -366,19 +366,50 @@ pub(super) fn host_credential_read_on_foothold(
 /// until measured on a live node. If it attributes to the workload, this shape will need an
 /// additional discriminator (e.g. pairing with another signal) before it can be trusted at
 /// face value — do not widen this scoping further without that on-node measurement.
+///
+/// **Gated OFF by default pending that on-node measurement (security review follow-up,
+/// JEF-317):** until runc-attribution is measured on a live node, shipping this LIVE would
+/// make it a standing false corroboration on every foothold pod (re)start if the runc
+/// memfd re-exec attributes to the workload cgroup. `PROTECTOR_ANON_EXEC_CORROBORATION`
+/// (unset/false by default) is the deliberate gate — mirrors the Rekor lane's opt-in-off
+/// posture (`PROTECTOR_REKOR_ENABLE`, [`crate::policies::signature::rekor`]): an operator
+/// sets it during the measurement window to turn this shape on; until then it never
+/// corroborates. Do NOT flip the default without the on-node measurement landing.
 pub(super) fn anon_inode_exec_on_foothold(
     runtime: &[RuntimeSignal],
     attack: &AttackRef,
     entry: EntryContext<'_>,
 ) -> bool {
     use crate::engine::graph::attack::Tactic;
-    if !entry.is_foothold || attack.tactic != Tactic::Execution {
+    if !anon_exec_corroboration_enabled()
+        || !entry.is_foothold
+        || attack.tactic != Tactic::Execution
+    {
         return false;
     }
     runtime.iter().any(|s| match &s.behavior {
         Behavior::ProcessExec { exe_anon_inode, .. } => *exe_anon_inode,
         _ => false,
     })
+}
+
+/// Whether the operator has deliberately turned on [`anon_inode_exec_on_foothold`]
+/// (`PROTECTOR_ANON_EXEC_CORROBORATION`; unset/anything else is OFF) — see that function's
+/// doc-comment for why it defaults off. Read once per predicate call, ahead of the
+/// per-signal `runtime.iter()` loop — never re-parsed per `RuntimeSignal` — mirroring
+/// `RegistryAuth::from_env`'s uncached-but-called-once-per-resolution env reads
+/// (`policies::signature::auth`) rather than a process-lifetime cache: this crate's test
+/// suite already hit process-global env-var caching races once (JEF-412), so config reads
+/// stay uncached and are exercised under the same `EnvGuard`-style serialization used there.
+fn anon_exec_corroboration_enabled() -> bool {
+    std::env::var("PROTECTOR_ANON_EXEC_CORROBORATION")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
