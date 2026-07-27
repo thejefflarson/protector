@@ -40,6 +40,32 @@ Each of these is a fact. The platform's job is to turn facts into *chains*:
 the graph says is reachable, and its identity can read that secret.* That is a
 killchain, stated in things we can check.
 
+## North star — the model is the incident responder
+
+The load-bearing idea, stated as sharply as it goes: **the model acts as an incident
+responder.** Along internet-facing attack paths it decides — *what is an attack and what
+isn't*, and *what to cut and what to leave*, at the **minimum** scope that contains it.
+Determinism proves and enriches and *feeds* the model; it does **not** decide the cut. If
+a deterministic rule set could separate a real attack from benign reachable topology, this
+problem would already be solved — it isn't, because that separation is a judgement, which
+is exactly what a responder does and rules can't.
+
+This holds for the **whole path**, not just the front door: the model must see and judge
+downstream evidence — a downstream pod's own CVEs and on-box behavior — not only the
+internet-facing entry's. The two things it adjudicates:
+
+1. **Provable internet exploitation via CVE** — an internet-facing path where the evidence
+   shows a CVE being exploited.
+2. **On-box behavior suggesting compromise** of the critical path — on an internet-facing
+   pod *or* a downstream pod.
+
+**Honest current state (JEF-547 fact-check, `origin/main`):** the code does not yet meet
+this. The model governs only the *entry*; every downstream/pivot decision is made
+deterministically (reachability + CVE presence, or a live on-box signal) with the model out
+of the loop, the model is never shown downstream evidence, and it chooses no containment
+scope (all quarantine is pod-level; no node-level option). Closing that gap is a deliberate
+refactor tracked from JEF-547 — this section is the target it refactors toward.
+
 ## The superpower, and the discipline that earns it
 
 Because this runs **asynchronously and with privilege — outside the admission
