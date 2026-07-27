@@ -1,6 +1,7 @@
 //! Unit tests for the behavioral wire contract. Moved out of `lib.rs`'s
 //! `#[cfg(test)] mod tests` block into its own file (JEF-320) per the repo's 1,000-line
-//! file cap — `lib.rs` was approaching it. No test content changed by the move.
+//! file cap — `lib.rs` was approaching it. `use super::*` resolves to `lib.rs`, exactly
+//! as the inline `mod tests` block did. No test content changed by the move.
 
 use super::*;
 
@@ -153,9 +154,11 @@ fn process_exec_fingerprint_coarsens_to_basename() {
     // exec churn doesn't bust the verdict cache (mirrors LibraryLoaded's basename key).
     let a = Behavior::ProcessExec {
         path: "/usr/bin/bash".into(),
+        exe_anon_inode: false,
     };
     let b = Behavior::ProcessExec {
         path: "/bin/bash".into(),
+        exe_anon_inode: false,
     };
     assert_eq!(a.fingerprint_key(), "exec:bash");
     assert_eq!(a.fingerprint_key(), b.fingerprint_key());
@@ -171,15 +174,82 @@ fn process_exec_summary_is_the_bare_path() {
     // (a shell / package manager) and annotates the prompt/output line (JEF-113).
     let shell = Behavior::ProcessExec {
         path: "/bin/bash".into(),
+        exe_anon_inode: false,
     };
     let normal = Behavior::ProcessExec {
         path: "/app/server".into(),
+        exe_anon_inode: false,
     };
     assert_eq!(shell.summary(), "executed /bin/bash");
     assert_eq!(normal.summary(), "executed /app/server");
     // Classification is engine evidence, NOT action-bar corroboration — only Alerts
     // corroborate from the wire type's perspective.
     assert!(!shell.is_alert());
+}
+
+#[test]
+fn exe_anon_inode_is_a_raw_fact_distinct_from_path_shape_classification() {
+    // JEF-317 (Route A): `exe_anon_inode` is a kernel-observed inode fact, independent
+    // of the path — a `/bin/bash`-looking exec can still be anon-inode-backed (the
+    // path is whatever `bprm->filename` resolved to; the flag is a separate read).
+    let anon = Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+        exe_anon_inode: true,
+    };
+    let normal = Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+        exe_anon_inode: false,
+    };
+    // The bare summary carries the raw fact (a kernel-computed bool, not a curated
+    // classification — unlike shell/package-manager it is NOT engine-annotated).
+    assert_eq!(
+        anon.summary(),
+        "executed /bin/bash (anonymous-inode: memfd/unlinked backing, no on-disk file)"
+    );
+    assert_eq!(normal.summary(), "executed /bin/bash");
+    // The verdict-cache fingerprint distinguishes the two — a genuinely different fact
+    // about the same-named binary must not collapse into one cache entry.
+    assert_ne!(anon.fingerprint_key(), normal.fingerprint_key());
+    assert_eq!(anon.fingerprint_key(), "exec:bash:anon-inode");
+    assert_eq!(normal.fingerprint_key(), "exec:bash");
+    // Neither is an Alert-style blanket corroboration source from the wire type's own
+    // view — only Alerts corroborate here; scoped corroboration is engine policy.
+    assert!(!anon.is_alert());
+}
+
+#[test]
+fn exe_anon_inode_serializes_only_when_true() {
+    // JEF-317: the common (non-anonymous) exec omits the field entirely, keeping the
+    // JSON byte-identical to before this field existed (mirrors SecretReadSource's
+    // `Mounted`-is-omitted convention). A `true` flag serializes explicitly and both
+    // round-trip; an older sensor's JSON with the field absent defaults to `false`.
+    let normal = Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+        exe_anon_inode: false,
+    };
+    let v = serde_json::to_value(&normal).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"kind": "process_exec", "path": "/bin/bash"})
+    );
+    assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), normal);
+
+    let anon = Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+        exe_anon_inode: true,
+    };
+    let v = serde_json::to_value(&anon).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"kind": "process_exec", "path": "/bin/bash", "exe_anon_inode": true})
+    );
+    assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), anon);
+
+    // A legacy `process_exec` with no `exe_anon_inode` key deserializes to `false`.
+    let legacy: Behavior =
+        serde_json::from_value(serde_json::json!({"kind": "process_exec", "path": "/bin/bash"}))
+            .unwrap();
+    assert_eq!(legacy, normal);
 }
 
 #[test]
@@ -214,6 +284,7 @@ fn variant_label_is_a_stable_low_cardinality_token() {
         (
             Behavior::ProcessExec {
                 path: "/bin/bash".into(),
+                exe_anon_inode: false,
             },
             "exec",
         ),
@@ -302,6 +373,7 @@ fn observation_carries_the_node_and_omits_it_when_absent() {
         node: Some("node-a".into()),
         behavior: Behavior::ProcessExec {
             path: "/bin/sh".into(),
+            exe_anon_inode: false,
         },
     };
     let v = serde_json::to_value(&with_node).unwrap();

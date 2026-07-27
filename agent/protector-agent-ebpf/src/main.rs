@@ -35,9 +35,9 @@ use aya_ebpf::{
 // dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
 // tests share one definition and can't drift.
 use protector_agent_common::{
-    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, ReadKey, WriteKey,
-    DEDUP_MAP_CAP, DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_FILE_WRITE,
-    KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
+    should_coalesce, ConnEvent, ConnKey, EventHeader, ExecEvent, FileEvent, PrivEvent, ReadKey,
+    WriteKey, DEDUP_MAP_CAP, DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
+    KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -519,21 +519,27 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
 
 /// fentry on `security_bprm_check(struct linux_binprm *bprm)` — the process-exec probe
 /// (ADR-0014, JEF-53). This LSM hook fires on every `execve` once the new binary is
-/// resolved, so `bprm->filename` is the path the kernel is about to exec. Emits a
-/// [`FileEvent`] (kind [`KIND_EXEC`]) carrying that path; userspace turns it into a
-/// `ProcessExec`. Observe-only. NOTE: the attach point is `security_bprm_check` (the
-/// exported LSM call, in BTF — like the other `security_*` probes); the un-prefixed
-/// `bprm_check_security` is NOT a BTF function on 6.8 (verified on-node: JEF-53 deploy).
+/// resolved, so `bprm->filename` is the path the kernel is about to exec. Emits an
+/// [`ExecEvent`] (kind [`KIND_EXEC`]) carrying that path plus the anon-inode fact
+/// (JEF-317, below); userspace turns it into a `ProcessExec`. Observe-only. NOTE: the
+/// attach point is `security_bprm_check` (the exported LSM call, in BTF — like the other
+/// `security_*` probes); the un-prefixed `bprm_check_security` is NOT a BTF function on
+/// 6.8 (verified on-node: JEF-53 deploy). Attached via **fentry, not `lsm/*`**: the fleet
+/// does not carry `bpf` in its active LSM list (`CONFIG_LSM` omits it, no `lsm=` on the
+/// kernel cmdline — confirmed on-node over SSH on both arches), so an `lsm/` program would
+/// never attach here; fentry on the `security_*` function works regardless of the active
+/// LSM list, which is why every probe in this file uses it.
 ///
-/// JEF-317 (fileless exec / memfd_create parity with Falco): for an fd-only exec —
-/// `fexecve()`/`execveat(fd, "", AT_EMPTY_PATH)`, the shape every memfd-backed "fileless"
-/// payload execs through — the kernel's OWN `bprm->filename` synthesis (not this probe)
-/// already resolves to an fd-only string (`/dev/fd/<n>`, `/proc/<pid>/fd/<n>`) with no
-/// on-disk path. This probe therefore needs NO change to surface that fact: the same
-/// `filename` read below already carries it, byte for byte. `engine::observe::exec_class`
-/// classifies that shape as a fileless exec and blanket-corroborates it, purely from this
-/// already-emitted path — see that module for the detection and why no new probe, offset,
-/// or wire field was needed (JEF-113: the agent stays pure data, the engine classifies).
+/// JEF-317 (fileless exec / memfd_create parity with Falco), Route A: an EARLIER version
+/// of this signal classified the exec *path's shape* (`/dev/fd/<n>` etc.) — withdrawn by
+/// security review, because the kernel synthesizes that identical string for a benign
+/// `fexecve()` of an on-disk file too, and runc copies itself into a memfd and re-execs on
+/// ~every container start (the CVE-2019-5736 mitigation), so path shape alone forged
+/// corroboration on routine behavior. The real signal is the *inode*, not the path: a
+/// memfd/anonymous-fd exec's backing file lives on a shmem/tmpfs superblock and/or is
+/// unlinked (`i_nlink == 0`), which a normal on-disk, directory-linked executable is not.
+/// [`exe_is_anon_inode`] reads `bprm->file->f_inode` to determine that, straight from the
+/// kernel's own resolution — no path parsing at all.
 #[fentry(function = "security_bprm_check")]
 pub fn bprm_check(ctx: FEntryContext) -> u32 {
     let _ = try_bprm_check(&ctx);
@@ -546,19 +552,21 @@ fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
     if bprm.is_null() {
         return Ok(());
     }
-    emit_exec_path(bprm);
+    emit_exec_path(bprm, exe_is_anon_inode(bprm));
     Ok(())
 }
 
-/// Emit the exec'd binary's path as a [`KIND_EXEC`] event. `bprm->filename` is a kernel
-/// `char *` (the resolved exec path), so — like the library-load probe — read the string
-/// directly with `bpf_probe_read_kernel_str`. NOT `bpf_d_path`: `security_bprm_check`
-/// isn't on the kernel's d_path allowlist, so the verifier would reject it (JEF-68).
-fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
-    let mut ev = FileEvent {
+/// Emit the exec'd binary's path (plus the anon-inode fact, JEF-317) as a [`KIND_EXEC`]
+/// [`ExecEvent`]. `bprm->filename` is a kernel `char *` (the resolved exec path), so —
+/// like the library-load probe — read the string directly with `bpf_probe_read_kernel_str`.
+/// NOT `bpf_d_path`: `security_bprm_check` isn't on the kernel's d_path allowlist, so the
+/// verifier would reject it (JEF-68).
+fn emit_exec_path(bprm: *const vmlinux::linux_binprm, exe_anon_inode: bool) {
+    let mut ev = ExecEvent {
         header: make_header(KIND_EXEC),
         len: 0,
         path: [0u8; PATH_CAP],
+        exe_anon_inode: exe_anon_inode as u8,
     };
     // Read the `char *filename` pointer out of the binprm, then the string it points to.
     let mut name_ptr: *const u8 = core::ptr::null();
@@ -584,11 +592,43 @@ fn emit_exec_path(bprm: *const vmlinux::linux_binprm) {
     } else {
         PATH_CAP as u32
     };
-    if let Some(mut slot) = EVENTS.reserve::<FileEvent>(0) {
+    if let Some(mut slot) = EVENTS.reserve::<ExecEvent>(0) {
         slot.write(ev);
         slot.submit(0);
     } else {
         record_drop(); // ring full — count the loss instead of silently skipping
+    }
+}
+
+/// Whether the exec'd binary's backing inode is anonymous (JEF-317, Route A): a
+/// memfd/shmem-backed file (`inode->i_sb->s_magic` is the tmpfs magic — `memfd_create` is
+/// shmem-backed under the hood) OR an unlinked file (`inode->i_nlink == 0` — covers a
+/// memfd, which is never linked into any directory, AND the separate "delete the binary
+/// while it's still executing" technique on a normal filesystem). Reads
+/// `bprm->file->f_inode`: `bprm->file` is the ALREADY-OPENED executable (opened before
+/// this hook fires — see the doc on [`bprm_check`]), so this is the SAME file the kernel
+/// is about to run, not a TOCTOU-able separate lookup. A failed read = "not anonymous"
+/// (fail closed on the flag, matching [`is_tmpfs`]/[`inode_ino`]'s existing convention).
+///
+/// PURE DATA (JEF-113): this reports a kernel fact only. Whether an anon-inode exec is
+/// alarming — and the runc-memfd-reexec false-positive risk that makes this conservative
+/// — is engine policy, not decided here.
+fn exe_is_anon_inode(bprm: *const vmlinux::linux_binprm) -> bool {
+    unsafe {
+        let mut file: *mut vmlinux::file = core::ptr::null_mut();
+        if read_kernel(&mut file, core::ptr::addr_of!((*bprm).file)) != 0 || file.is_null() {
+            return false;
+        }
+        let Some(inode) = inode_of(file as *const vmlinux::file) else {
+            return false;
+        };
+        let mut nlink: u32 = 1; // fail closed: a failed read must not read as "unlinked"
+        if read_kernel(&mut nlink, core::ptr::addr_of!((*inode).i_nlink)) == 0 && nlink == 0 {
+            return true;
+        }
+        // Reuse the SAME `inode` already fetched above (not `is_tmpfs(file)`, which would
+        // re-walk `file->f_inode` a second time for the same fact).
+        superblock_magic(inode) == Some(TMPFS_MAGIC)
     }
 }
 
@@ -724,24 +764,45 @@ fn is_sensitive_credential_basename(file: *const vmlinux::file) -> bool {
         .any(|&want| want == &buf[..len])
 }
 
+/// Read `file->f_inode` — the pointer chase every inode-fact reader below starts from
+/// ([`is_tmpfs`], [`inode_ino`], [`exe_is_anon_inode`]). `None` on a failed read or a null
+/// inode; every caller treats that as "the fact I wanted isn't available" (fail closed for
+/// an alarm-shaped bool, fail open for the dedup key — each caller's own choice).
+unsafe fn inode_of(file: *const vmlinux::file) -> Option<*mut vmlinux::inode> {
+    unsafe {
+        let mut inode: *mut vmlinux::inode = core::ptr::null_mut();
+        if read_kernel(&mut inode, core::ptr::addr_of!((*file).f_inode)) != 0 || inode.is_null() {
+            return None;
+        }
+        Some(inode)
+    }
+}
+
+/// Read `inode->i_sb->s_magic` — the superblock magic every magic-comparing reader below
+/// starts from ([`is_tmpfs`], [`exe_is_anon_inode`]). `None` on any failed read.
+unsafe fn superblock_magic(inode: *mut vmlinux::inode) -> Option<u64> {
+    unsafe {
+        let mut sb: *mut vmlinux::super_block = core::ptr::null_mut();
+        if read_kernel(&mut sb, core::ptr::addr_of!((*inode).i_sb)) != 0 || sb.is_null() {
+            return None;
+        }
+        let mut magic: u64 = 0;
+        if read_kernel(&mut magic, core::ptr::addr_of!((*sb).s_magic).cast()) != 0 {
+            return None;
+        }
+        Some(magic)
+    }
+}
+
 /// Whether `file` lives on a tmpfs — `file->f_inode->i_sb->s_magic == TMPFS_MAGIC`. The
 /// pointer chase uses bpf_probe_read_kernel (fixed offsets from the node-BTF vmlinux),
 /// the same safe pattern as the connect probe. A failed read = "not tmpfs" (drop).
 fn is_tmpfs(file: *const vmlinux::file) -> bool {
     unsafe {
-        let mut inode: *mut vmlinux::inode = core::ptr::null_mut();
-        if read_kernel(&mut inode, core::ptr::addr_of!((*file).f_inode)) != 0 || inode.is_null() {
+        let Some(inode) = inode_of(file) else {
             return false;
-        }
-        let mut sb: *mut vmlinux::super_block = core::ptr::null_mut();
-        if read_kernel(&mut sb, core::ptr::addr_of!((*inode).i_sb)) != 0 || sb.is_null() {
-            return false;
-        }
-        let mut magic: u64 = 0;
-        if read_kernel(&mut magic, core::ptr::addr_of!((*sb).s_magic).cast()) != 0 {
-            return false;
-        }
-        magic == TMPFS_MAGIC
+        };
+        superblock_magic(inode) == Some(TMPFS_MAGIC)
     }
 }
 
@@ -751,10 +812,7 @@ fn is_tmpfs(file: *const vmlinux::file) -> bool {
 /// then emits without deduping (fail open), never dropping a real write for a bookkeeping miss.
 fn inode_ino(file: *const vmlinux::file) -> Option<u64> {
     unsafe {
-        let mut inode: *mut vmlinux::inode = core::ptr::null_mut();
-        if read_kernel(&mut inode, core::ptr::addr_of!((*file).f_inode)) != 0 || inode.is_null() {
-            return None;
-        }
+        let inode = inode_of(file)?;
         let mut ino: u64 = 0;
         if read_kernel(&mut ino, core::ptr::addr_of!((*inode).i_ino).cast()) != 0 {
             return None;

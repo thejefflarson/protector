@@ -75,6 +75,7 @@ fn distinct_behaviors_all_survive() {
         "p1",
         Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         },
         3,
     )); // exec:bash
@@ -82,6 +83,7 @@ fn distinct_behaviors_all_survive() {
         "p1",
         Behavior::ProcessExec {
             path: "/usr/bin/python".into(),
+            exe_anon_inode: false,
         },
         4,
     )); // exec:python
@@ -132,6 +134,7 @@ fn exec_churn_collapses_by_basename() {
         "p1",
         Behavior::ProcessExec {
             path: "/usr/bin/bash".into(),
+            exe_anon_inode: false,
         },
         1,
     ));
@@ -139,6 +142,7 @@ fn exec_churn_collapses_by_basename() {
         "p1",
         Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         },
         2,
     ));
@@ -215,7 +219,8 @@ fn max_size_forces_a_flush() {
         c.offer(obs(
             "p1",
             Behavior::ProcessExec {
-                path: "/bin/sh".into()
+                path: "/bin/sh".into(),
+                exe_anon_inode: false,
             },
             3
         ))

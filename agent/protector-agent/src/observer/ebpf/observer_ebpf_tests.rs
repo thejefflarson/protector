@@ -137,47 +137,91 @@ fn decode_priv_change_parses_uids() {
     );
 }
 
-#[test]
-fn decode_exec_parses_path_and_maps_to_process_exec() {
-    // A KIND_EXEC FileEvent carrying a NUL-terminated exec path must decode to a
-    // RawEvent::Exec, and into_behavior must map it to Behavior::ProcessExec whose
-    // fingerprint coarsens to the basename (JEF-53).
+/// Build an [`ExecEvent`] with a NUL-terminated `path` and the given `exe_anon_inode` byte
+/// (JEF-317, Route A).
+fn exec_event(kind_pid_cgroup: (u32, u32, u64), bin: &[u8], exe_anon_inode: u8) -> ExecEvent {
+    let (kind, pid, cgroup_id) = kind_pid_cgroup;
     let mut path = [0u8; PATH_CAP];
-    let bin = b"/usr/bin/bash\0";
     path[..bin.len()].copy_from_slice(bin);
-    let ev = FileEvent {
+    ExecEvent {
         header: EventHeader {
-            kind: KIND_EXEC,
-            pid: 4321,
-            cgroup_id: 999,
+            kind,
+            pid,
+            cgroup_id,
         },
         len: bin.len() as u32,
         path,
-    };
+        exe_anon_inode,
+    }
+}
+
+#[test]
+fn decode_exec_parses_path_and_maps_to_process_exec() {
+    // A KIND_EXEC ExecEvent carrying a NUL-terminated exec path must decode to a
+    // RawEvent::Exec, and into_behavior must map it to Behavior::ProcessExec whose
+    // fingerprint coarsens to the basename (JEF-53). exe_anon_inode == 0 here — the
+    // ordinary, non-anonymous case.
+    let ev = exec_event((KIND_EXEC, 4321, 999), b"/usr/bin/bash\0", 0);
     let bytes = unsafe {
         std::slice::from_raw_parts(
-            (&ev as *const FileEvent).cast::<u8>(),
-            std::mem::size_of::<FileEvent>(),
+            (&ev as *const ExecEvent).cast::<u8>(),
+            std::mem::size_of::<ExecEvent>(),
         )
     };
     let raw = EbpfObserver::decode(bytes).expect("KIND_EXEC should decode");
     match &raw {
-        RawEvent::Exec { attr, path } => {
+        RawEvent::Exec {
+            attr,
+            path,
+            exe_anon_inode,
+        } => {
             assert_eq!(attr.pid, 4321);
             assert_eq!(attr.cgroup_id, 999);
             assert_eq!(path, "/usr/bin/bash");
+            assert!(!exe_anon_inode);
         }
         _ => panic!("expected RawEvent::Exec"),
     }
     assert_eq!(raw.attr().pid, 4321);
     match raw.into_behavior() {
-        Behavior::ProcessExec { path } => {
+        Behavior::ProcessExec {
+            path,
+            exe_anon_inode,
+        } => {
             assert_eq!(path, "/usr/bin/bash");
+            assert!(!exe_anon_inode);
             assert_eq!(
-                Behavior::ProcessExec { path }.fingerprint_key(),
+                Behavior::ProcessExec {
+                    path,
+                    exe_anon_inode
+                }
+                .fingerprint_key(),
                 "exec:bash"
             );
         }
+        other => panic!("expected ProcessExec, got {other:?}"),
+    }
+}
+
+#[test]
+fn decode_exec_carries_the_anon_inode_flag_through() {
+    // A KIND_EXEC ExecEvent with exe_anon_inode == 1 (JEF-317, Route A: the kernel's own
+    // f_inode read, not a path-shape guess) must decode and map the flag through verbatim
+    // — never inferred from the path, which here looks like an ordinary on-disk binary.
+    let ev = exec_event((KIND_EXEC, 1, 2), b"/bin/bash\0", 1);
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&ev as *const ExecEvent).cast::<u8>(),
+            std::mem::size_of::<ExecEvent>(),
+        )
+    };
+    let raw = EbpfObserver::decode(bytes).expect("KIND_EXEC should decode");
+    match &raw {
+        RawEvent::Exec { exe_anon_inode, .. } => assert!(exe_anon_inode),
+        _ => panic!("expected RawEvent::Exec"),
+    }
+    match raw.into_behavior() {
+        Behavior::ProcessExec { exe_anon_inode, .. } => assert!(exe_anon_inode),
         other => panic!("expected ProcessExec, got {other:?}"),
     }
 }

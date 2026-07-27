@@ -47,7 +47,7 @@ fn alarming_now_label(behavior: &Behavior) -> Option<(&'static str, String)> {
     // the fixed phrasing; the exec path is the untrusted payload.
     if let Some(label) = exec_class::notable_exec(behavior) {
         let path = match behavior {
-            Behavior::ProcessExec { path } => path.as_str(),
+            Behavior::ProcessExec { path, .. } => path.as_str(),
             _ => "",
         };
         return Some(("exec", format!("notable exec: {label} ({path})")));

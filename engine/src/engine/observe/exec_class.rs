@@ -1,79 +1,31 @@
 //! Exec-classification policy (JEF-55 / JEF-113): is a process-exec a *notable* runtime
-//! signal — an interactive shell, a package manager, or a **fileless exec** (JEF-317) run
-//! inside a container?
+//! signal — an interactive shell, or a package manager, run inside a container?
 //!
 //! This is **engine policy**, not part of the wire type. The shared [`Behavior`] crate is
 //! pure data (agent + engine both depend on it), so the lists of "what counts as a shell /
-//! package manager / fileless exec" live here — alongside the other engine classification
-//! thresholds (CVE severity, corroboration) — rather than on the wire type. Keeping it here
-//! means a list change rebuilds only the engine, never the agent. These are free functions
-//! that classify a [`Behavior`] from the OUTSIDE, mirroring how the rest of the engine
-//! treats `Behavior` as inert evidence.
+//! package manager" live here — alongside the other engine classification thresholds
+//! (CVE severity, corroboration) — rather than on the wire type. Keeping it here means a
+//! list change rebuilds only the engine, never the agent. These are free functions that
+//! classify a [`Behavior`] from the OUTSIDE, mirroring how the rest of the engine treats
+//! `Behavior` as inert evidence.
 //!
 //! An interactive-shell exec is a "terminal shell in container"; a package-manager exec is
 //! "package management launched" — both classic container-tamper signals, classified
-//! ENGINE-SIDE from the path the agent already emits (no wire change). A fileless exec
-//! ([`is_fileless_exec`], below) is the same shape: classified from the SAME path field the
-//! agent already emits for every exec — no new probe or wire field needed.
+//! ENGINE-SIDE from the path the agent already emits (no wire change).
+//!
+//! **JEF-317 (fileless / anon-inode exec) deliberately does NOT live here.** An earlier
+//! version classified the exec *path's shape* (`/dev/fd/<n>` etc.) as fileless and fed it
+//! into this module's blanket "notable exec" gate — withdrawn by security review, because
+//! the kernel synthesizes that identical path for a benign `fexecve()` of an on-disk file
+//! too, and runc's own memfd re-exec on ~every container start (CVE-2019-5736's
+//! mitigation) would forge corroboration on routine behavior at a high base rate. The real
+//! signal — the exec'd binary's backing *inode* (`Behavior::ProcessExec::exe_anon_inode`,
+//! a kernel-observed fact set by the agent, not derived from `path` here) — is
+//! deliberately scoped MORE narrowly than this module's blanket gate: see
+//! `reason::proof::corroborate::anon_inode_exec_on_foothold`, which requires a proven
+//! foothold entry AND an Execution-tactic objective, not "any objective like an alert".
 
 use crate::engine::graph::Behavior;
-
-/// The Falco-parity gap this closes (JEF-317, ADR-0014's "Retire Falco" epic): Falco fires
-/// **critical** on `memfd_create` + `execve` of the resulting anonymous fd — malware that
-/// never writes an executable to disk, so neither the exec probe's path artifact nor F2's
-/// `FileWrite` (JEF-306) has anything to corroborate against (an fd built purely with
-/// `memfd_create` never touches `security_file_open` at all).
-///
-/// **Where the signal already lives (no agent/wire change — JEF-113):** the exec probe
-/// (`security_bprm_check`, ADR-0014) already emits the kernel's own `bprm->filename` as
-/// [`Behavior::ProcessExec::path`] verbatim. The kernel's `do_execveat_common()` /
-/// `alloc_bprm()` synthesize that string from the SYSCALL shape, not from anything the
-/// exec'd program controls: an `execveat(fd, "", AT_EMPTY_PATH)` — what `fexecve()` and every
-/// memfd-backed "fileless" loader use, since a memfd has no path to pass — resolves to
-/// `"/dev/fd/<fd>"` (a `struct file`, not a directory entry). A caller that instead execs the
-/// literal `/proc/<pid-or-self>/fd/<fd>` symlink (`fexecve()`'s pre-execveat fallback, and a
-/// pattern droppers use directly) carries the identical "resolved only through an open fd,
-/// never a pathname" tell. Both forms are therefore already PURE DATA on the wire; this module
-/// only classifies a string the agent was already sending — no eBPF probe, offset, or wire
-/// schema change (the whole reason this ships with no additional on-node validation risk).
-///
-/// [`is_anon_fd_path`] recognizes exactly the two shapes the kernel produces: `/dev/fd/<n>`
-/// (`execveat(fd, "", AT_EMPTY_PATH)`'s own synthesis) and `/proc/<pid|self>/fd/<n>` (the
-/// literal-path form `fexecve()` falls back to, and a pattern droppers use directly).
-fn is_anon_fd_path(path: &str) -> bool {
-    // Segment-match against '/'-separated components, not a string-prefix test, so a
-    // directory that merely happens to be NAMED "fd" (`/dev/fdisk`) or a longer path past
-    // the fd number (`/proc/self/fd/3/extra`) can't false-positive.
-    let mut segs = path.strip_prefix('/').unwrap_or(path).split('/');
-    match (
-        segs.next(),
-        segs.next(),
-        segs.next(),
-        segs.next(),
-        segs.next(),
-    ) {
-        (Some("dev"), Some("fd"), Some(n), None, None) => is_ascii_digits(n),
-        (Some("proc"), Some(pid), Some("fd"), Some(n), None) => {
-            (pid == "self" || is_ascii_digits(pid)) && is_ascii_digits(n)
-        }
-        _ => false,
-    }
-}
-
-/// Whether every byte of `s` is an ASCII digit, and `s` is non-empty (the fd number, or a
-/// numeric pid, in a fileless-exec path — [`is_anon_fd_path`]).
-fn is_ascii_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// Whether `behavior` is a [`Behavior::ProcessExec`] of an fd-only "fileless" target — no
-/// on-disk path was ever given to `execve` (JEF-317). Always `false` for any other behavior.
-pub fn is_fileless_exec(behavior: &Behavior) -> bool {
-    match behavior {
-        Behavior::ProcessExec { path } => is_anon_fd_path(path),
-        _ => false,
-    }
-}
 
 /// Interactive shells a process-exec might be (matched on the binary's basename).
 /// An exec of one of these inside a container is the classic "terminal shell in
@@ -118,7 +70,7 @@ fn basename(path: &str) -> &str {
 /// `false` for any other behavior.
 pub fn is_interactive_shell(behavior: &Behavior) -> bool {
     match behavior {
-        Behavior::ProcessExec { path } => INTERACTIVE_SHELLS.contains(&basename(path)),
+        Behavior::ProcessExec { path, .. } => INTERACTIVE_SHELLS.contains(&basename(path)),
         _ => false,
     }
 }
@@ -129,26 +81,27 @@ pub fn is_interactive_shell(behavior: &Behavior) -> bool {
 /// on the binary's basename. Always `false` for any other behavior.
 pub fn is_package_manager(behavior: &Behavior) -> bool {
     match behavior {
-        Behavior::ProcessExec { path } => PACKAGE_MANAGERS.contains(&basename(path)),
+        Behavior::ProcessExec { path, .. } => PACKAGE_MANAGERS.contains(&basename(path)),
         _ => false,
     }
 }
 
-/// A short, human label for a *notable* runtime exec — a shell, a package manager, or a
-/// fileless (fd-only) exec run inside the container (JEF-55, JEF-317) — or `None` for an
-/// unremarkable behavior. Used to annotate the adjudication prompt ("executed /bin/bash
-/// (interactive shell in container)") and as the corroboration predicate (a notable exec
-/// corroborates like an alert, JEF-117). This is a classification, NOT an `is_alert`: it
-/// does not by itself corroborate the action bar from the wire type's view — the engine
-/// decides what it means. The label is a fixed internal string (never untrusted input),
-/// safe to embed in the prompt.
+/// A short, human label for a *notable* runtime exec — a shell, or a package manager, run
+/// inside the container (JEF-55) — or `None` for an unremarkable behavior. Used to
+/// annotate the adjudication prompt ("executed /bin/bash (interactive shell in
+/// container)") and as the corroboration predicate (a notable exec corroborates like an
+/// alert, JEF-117). This is a classification, NOT an `is_alert`: it does not by itself
+/// corroborate the action bar from the wire type's view — the engine decides what it
+/// means. The label is a fixed internal string (never untrusted input), safe to embed in
+/// the prompt.
+///
+/// Deliberately does NOT include the JEF-317 anon-inode-exec fact — see the module doc for
+/// why: that signal is scoped MORE narrowly than this blanket gate, not folded into it.
 pub fn notable_exec(behavior: &Behavior) -> Option<&'static str> {
     if is_interactive_shell(behavior) {
         Some("interactive shell in container")
     } else if is_package_manager(behavior) {
         Some("package manager in container")
-    } else if is_fileless_exec(behavior) {
-        Some("fileless exec via anonymous fd — no on-disk path (memfd_create/execveat)")
     } else {
         None
     }
@@ -179,7 +132,10 @@ mod tests {
     fn classifies_shells_and_package_managers_from_the_exec_path() {
         // (exec path, is_shell, is_pkg_mgr) — positives across both lists, with absolute
         // and bare paths to exercise basename extraction.
-        let exec = |p: &str| Behavior::ProcessExec { path: p.into() };
+        let exec = |p: &str| Behavior::ProcessExec {
+            path: p.into(),
+            exe_anon_inode: false,
+        };
         let cases = [
             // Interactive shells — "terminal shell in container".
             ("/bin/sh", true, false),
@@ -258,12 +214,15 @@ mod tests {
         // the evidence blocks saw before the classifier moved out of the wire type (JEF-113).
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         };
         let pkg = Behavior::ProcessExec {
             path: "/usr/bin/apt".into(),
+            exe_anon_inode: false,
         };
         let normal = Behavior::ProcessExec {
             path: "/app/server".into(),
+            exe_anon_inode: false,
         };
         let secret = Behavior::SecretRead {
             secret: "app/session-key".into(),
@@ -286,12 +245,15 @@ mod tests {
     fn notable_exec_labels_shells_and_package_managers() {
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         };
         let pkg = Behavior::ProcessExec {
             path: "/usr/bin/apt".into(),
+            exe_anon_inode: false,
         };
         let normal = Behavior::ProcessExec {
             path: "/app/server".into(),
+            exe_anon_inode: false,
         };
         // The notable label is a fixed internal token, safe to embed in the prompt.
         assert_eq!(notable_exec(&shell), Some("interactive shell in container"));
@@ -300,66 +262,20 @@ mod tests {
         assert_eq!(notable_exec(&normal), None);
     }
 
+    /// JEF-317 regression guard: `exe_anon_inode` — the real (inode) fileless-exec fact —
+    /// must NOT feed this module's blanket "notable exec" gate on its own. The withdrawn
+    /// v1 approach classified path *shape* into this same gate; Route A deliberately keeps
+    /// the two separate (see the module doc and
+    /// `reason::proof::corroborate::anon_inode_exec_on_foothold`, which scopes it far more
+    /// narrowly than "notable = corroborates any objective").
     #[test]
-    fn fileless_exec_flags_fd_only_paths() {
-        // (exec path, is fileless) — both forms the kernel/`fexecve()` produce for an
-        // fd-only exec (JEF-317), plus look-alikes that must NOT match.
-        let exec = |p: &str| Behavior::ProcessExec { path: p.into() };
-        let cases = [
-            // /dev/fd/<n> — execveat(fd, "", AT_EMPTY_PATH)'s bprm->filename synthesis.
-            ("/dev/fd/3", true),
-            ("/dev/fd/0", true),
-            ("/dev/fd/12345", true),
-            // /proc/<pid|self>/fd/<n> — the literal-path form (fexecve()'s fallback, and a
-            // pattern droppers use directly).
-            ("/proc/self/fd/3", true),
-            ("/proc/1/fd/9", true),
-            ("/proc/48213/fd/17", true),
-            // Negatives: a normal app binary, and look-alikes that must NOT match.
-            ("/app/server", false),
-            ("/dev/fdisk", false),            // no `/` boundary after "fd"
-            ("/dev/fd/", false),              // no fd number
-            ("/dev/fd/abc", false),           // non-numeric "fd number"
-            ("/proc/self/fdinfo/3", false),   // "fdinfo", not "fd"
-            ("/proc/self/fd/3/extra", false), // trailing segment after the fd number
-            ("/proc/abc/fd/3", false),        // non-numeric, non-"self" pid segment
-            ("/etc/proc/self/fd/3", false),   // not rooted at /proc
-        ];
-        for (path, want) in cases {
-            let b = exec(path);
-            assert_eq!(is_fileless_exec(&b), want, "is_fileless_exec({path:?})");
-        }
-    }
-
-    #[test]
-    fn fileless_exec_is_notable_and_scoped_to_process_exec() {
+    fn anon_inode_exec_alone_is_not_notable_here() {
         let anon = Behavior::ProcessExec {
-            path: "/dev/fd/7".into(),
+            path: "/app/server".into(),
+            exe_anon_inode: true,
         };
-        assert_eq!(
-            notable_exec(&anon),
-            Some("fileless exec via anonymous fd — no on-disk path (memfd_create/execveat)")
-        );
-        assert_eq!(
-            annotated_summary(&anon),
-            "executed /dev/fd/7 (fileless exec via anonymous fd — no on-disk path (memfd_create/execveat))"
-        );
-
-        // A path that merely CONTAINS "/dev/fd/" further in must not match — only the exec
-        // path forms the kernel actually produces count, not a substring anywhere.
-        let others = [
-            Behavior::Alert {
-                rule: "/dev/fd/3".into(),
-            },
-            Behavior::FileWrite {
-                path: "/dev/fd/3".into(),
-            },
-            Behavior::LibraryLoaded {
-                name: "/dev/fd/3".into(),
-            },
-        ];
-        for b in others {
-            assert!(!is_fileless_exec(&b), "{b:?} is_fileless_exec");
-        }
+        assert!(!is_interactive_shell(&anon));
+        assert!(!is_package_manager(&anon));
+        assert_eq!(notable_exec(&anon), None);
     }
 }

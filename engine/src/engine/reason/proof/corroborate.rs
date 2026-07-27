@@ -37,16 +37,24 @@ pub(super) struct EntryContext<'a> {
 ///
 /// An *alerting* signal corroborates **any** objective: an alert means "an attack is
 /// happening now" regardless of which chain. An alert arrives via the tool-agnostic
-/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell,
-/// package-manager, or fileless (fd-only, JEF-317) exec (JEF-55) corroborates the same
-/// broad way (JEF-117): a hands-on-keyboard / tamper-now signal that, like the alert,
-/// evidences active intrusion irrespective of which chain it lands on. An *alarming* file
-/// write (JEF-309) — a write to a sensitive path (drop-and-execute / config tamper) — is a
-/// further such blanket source (`observe::alarm_class::alarming_write`). The agent's own
-/// mundane behaviors (connection / secret-read / library-load) corroborate per objective —
-/// each only for the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they
-/// are never the "everything corroborates everything" blanket the alert gate intentionally
-/// is.
+/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell or
+/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): a
+/// hands-on-keyboard / tamper-now signal that, like the alert, evidences active intrusion
+/// irrespective of which chain it lands on. An *alarming* file write (JEF-309) — a write to
+/// a sensitive path (drop-and-execute / config tamper) — is a further such blanket source
+/// (`observe::alarm_class::alarming_write`). The agent's own mundane behaviors
+/// (connection / secret-read / library-load) corroborate per objective — each only for
+/// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
+/// "everything corroborates everything" blanket the alert gate intentionally is.
+///
+/// **JEF-317 (anon-inode exec) is deliberately NOT one of these blanket sources.** An
+/// earlier version routed a "fileless exec" classification (matched on exec *path shape*)
+/// into this same blanket gate — withdrawn by security review: the kernel synthesizes the
+/// identical path shape for a benign `fexecve()` of an on-disk file, and runc copies
+/// itself into a memfd and re-execs via that shape on ~every container start, so it forged
+/// corroboration on routine behavior at a high base rate. The real (inode-based) signal —
+/// `Behavior::ProcessExec::exe_anon_inode` — is scoped MUCH more narrowly, at the
+/// entry-scoped seam: see [`anon_inode_exec_on_foothold`].
 ///
 /// Matching on `attack.tactic` (not the precise technique) is the stable key: the
 /// recognizers tag a Secret-read chain CREDENTIAL_ACCESS (T1552), an internet-egress
@@ -103,19 +111,15 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
-        // A *notable* exec — an interactive shell, a package manager, or a **fileless**
-        // exec (JEF-317: execve of an fd-only target — memfd_create/execveat, no on-disk
-        // path — the one shipped-critical Falco class the F2 FileWrite corroboration can't
-        // reach, since such an fd never touches `security_file_open`) in the container
+        // A *notable* exec — an interactive shell or a package manager run in the container
         // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): a tamper-now
         // signal that evidences active intrusion regardless of chain. Conservative on
-        // purpose: a *bare* ProcessExec
-        // (anything else) stays NON-corroborating — legit entrypoints exec constantly
-        // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
-        // only. `notable_exec` is `Some` exactly for shell/pkg-mgr/fileless execs (JEF-113:
-        // the classifier is engine policy in `observe::exec_class`, not on the wire type —
-        // the fileless-exec case classifies the SAME `path` field the agent already emits,
-        // no wire change).
+        // purpose: a *bare* ProcessExec (anything else, including one with
+        // `exe_anon_inode: true` — see [`anon_inode_exec_on_foothold`] for that shape's
+        // own, much narrower gate) stays NON-corroborating here — legit entrypoints exec
+        // constantly (the ADR-0011 on-call-engineer false positive), so it remains model
+        // evidence only. `notable_exec` is `Some` exactly for shell/pkg-mgr execs (JEF-113:
+        // the classifier is engine policy in `observe::exec_class`, not on the wire type).
         Behavior::ProcessExec { .. } => {
             crate::engine::observe::exec_class::notable_exec(behavior).is_some()
         }
@@ -168,10 +172,12 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// entry to a peer in a DIFFERENT namespace ([`cross_tenant_lateral`]) — **privilege
 /// escalation on the foothold** (JEF-314) — a root escalation on the entry itself
 /// ([`privilege_escalation_on_foothold`]) — **drop-then-execute** (JEF-321) — a
-/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]) — or **an
+/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]) — **an
 /// on-host credential read on the foothold** (JEF-320 security rework) — a `SecretRead` with
 /// [`SecretReadSource::HostPath`] on the entry itself
-/// ([`host_credential_read_on_foothold`]). All four are scoped to a proven foothold entry.
+/// ([`host_credential_read_on_foothold`]) — or **anon-inode exec on the foothold** (JEF-317,
+/// Route A) — an Execution-tactic objective with an `exe_anon_inode` exec on the entry
+/// ([`anon_inode_exec_on_foothold`]). All five are scoped to a proven foothold entry.
 ///
 /// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
 /// ordinary in-cluster traffic, an ordinary setuid, an ordinary write-then-run of a benign
@@ -191,6 +197,7 @@ pub(super) fn corroborated_for(
         || privilege_escalation_on_foothold(runtime, attack, entry)
         || drop_then_execute(runtime, entry)
         || host_credential_read_on_foothold(runtime, attack, entry)
+        || anon_inode_exec_on_foothold(runtime, attack, entry)
 }
 
 /// The cross-tenant lateral-movement shape (JEF-319): a `NetworkConnection` from the entry to
@@ -250,7 +257,10 @@ pub(super) fn drop_then_execute(runtime: &[RuntimeSignal], entry: EntryContext<'
         return false;
     }
     runtime.iter().any(|exec| {
-        let Behavior::ProcessExec { path: exec_path } = &exec.behavior else {
+        let Behavior::ProcessExec {
+            path: exec_path, ..
+        } = &exec.behavior
+        else {
             return false;
         };
         runtime.iter().any(|write| {
@@ -327,6 +337,47 @@ pub(super) fn host_credential_read_on_foothold(
             &s.behavior,
             Behavior::SecretRead { source, .. } if *source == SecretReadSource::HostPath
         )
+    })
+}
+
+/// The anon-inode-exec-on-foothold shape (JEF-317, Route A): a `ProcessExec` with
+/// `exe_anon_inode: true` on the entry corroborates an Execution-tactic objective (T1610
+/// Deploy Container, T1609 Container Administration Command, and any future T1059-family
+/// technique) — the memfd_create/anonymous-fd `execve` Falco fires critical on, here
+/// scoped to close the parity gap without forging corroboration on routine behavior.
+///
+/// **Why this is conservative in TWO ways, mirroring [`privilege_escalation_on_foothold`]:**
+/// scoped to a proven internet-facing foothold entry (`entry.is_foothold`) AND to an
+/// Execution-tactic objective — a bare `exe_anon_inode` exec is NEVER routed into the flat
+/// [`corroborates`] blanket gate (unlike a shell/package-manager exec), so it can only ever
+/// corroborate this one specific tactic on this one specific entry, never "any objective"
+/// the way an Alert does.
+///
+/// This predicate runs unconditionally once the foothold/tactic gate above is met — it is
+/// NOT behind any operator-facing flag; like every arm in this module it is shadow-gated
+/// (ADR-0014): it only ever sets `corroborated`, never actuates.
+///
+/// **CAVEAT this scoping does NOT fully close (flagged, not silently assumed away):** the
+/// real inode signal is genuinely more specific than the withdrawn path-shape one, but it
+/// is not proven false-positive-free. runc copies itself into a memfd and re-execs via that
+/// memfd on ~every container start (the CVE-2019-5736 mitigation) — whether that re-exec
+/// attributes to the WORKLOAD's cgroup (this entry) or to the host container runtime
+/// depends on `setns` timing relative to `security_bprm_check` firing, which is UNKNOWN
+/// until measured on a live node. If it attributes to the workload, this shape will need an
+/// additional discriminator (e.g. pairing with another signal) before it can be trusted at
+/// face value — do not widen this scoping further without that on-node measurement.
+pub(super) fn anon_inode_exec_on_foothold(
+    runtime: &[RuntimeSignal],
+    attack: &AttackRef,
+    entry: EntryContext<'_>,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    if !entry.is_foothold || attack.tactic != Tactic::Execution {
+        return false;
+    }
+    runtime.iter().any(|s| match &s.behavior {
+        Behavior::ProcessExec { exe_anon_inode, .. } => *exe_anon_inode,
+        _ => false,
     })
 }
 

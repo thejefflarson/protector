@@ -58,15 +58,29 @@ pub enum Behavior {
     PrivilegeChange { from_uid: u32, to_uid: u32 },
     /// A process was exec'd in the workload — the runtime signal for "unexpected process
     /// spawned" (ADR-0014). `path` is the exec'd binary's path as the kernel saw it
-    /// (`linux_binprm->filename`) — for an exec of an open file descriptor rather than a
-    /// directory-entry path (`fexecve`/`execveat(fd, "", AT_EMPTY_PATH)`, the shape a
-    /// `memfd_create`-backed "fileless" payload execs through), the kernel itself resolves
-    /// this to an fd-only form (`/dev/fd/<n>`, `/proc/<pid>/fd/<n>`) with no on-disk path at
-    /// all — engine policy classifies that shape as a fileless exec (JEF-317) purely from
-    /// this same field, no wire change. PURE DATA: whether a `path` is a shell / package
-    /// manager / fileless exec is engine classification (`observe::exec_class`, JEF-113),
-    /// not a property of this shared wire type.
-    ProcessExec { path: String },
+    /// (`linux_binprm->filename`). PURE DATA: whether a `path` is a shell / package manager
+    /// is engine classification (`observe::exec_class`, JEF-113), not a property of this
+    /// shared wire type.
+    ///
+    /// `exe_anon_inode` (JEF-317, Route A) is a SEPARATE kernel-observed fact, not derived
+    /// from `path`: whether the exec'd binary's backing inode is anonymous — memfd/shmem-
+    /// backed, or unlinked (`i_nlink == 0`) — rather than a normal, linked, on-disk file.
+    /// This is the Falco-parity signal ("memfd_create + execve of an anonymous fd") a path
+    /// string alone cannot carry: the kernel synthesizes the SAME `/dev/fd/<n>`-shaped
+    /// `bprm->filename` for a benign `fexecve()` of an on-disk file as it does for a real
+    /// memfd payload, so an earlier version of this signal that classified the *path shape*
+    /// was withdrawn (a security review caught it forging corroboration on routine
+    /// behavior — see JEF-317). The exec probe now reads `bprm->file->f_inode` directly
+    /// instead. Defaulted `false` (an older sensor, or a sensor without inode access, omits
+    /// it) — never inferred, so an unset flag reads as "not anonymous", never guessed
+    /// `true`. A raw kernel fact, not a verdict: whether it's alarming is engine policy
+    /// (`observe::exec_class`, `reason::proof::corroborate`), scoped conservatively — see
+    /// those modules for why (the runc-memfd-reexec false-positive risk).
+    ProcessExec {
+        path: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        exe_anon_inode: bool,
+    },
     /// A **write** to a file — the runtime signal for container drift: drop-and-execute
     /// (a new file created then run) and config tampering (an existing file overwritten).
     /// The eBPF agent's file-write probe (fentry on `security_file_open` filtered to
@@ -123,6 +137,14 @@ impl SecretReadSource {
     fn is_mounted(&self) -> bool {
         matches!(self, SecretReadSource::Mounted)
     }
+}
+
+/// Whether `b` is `false` — a named predicate for `#[serde(skip_serializing_if)]` (no
+/// built-in one exists for `bool`). Used to omit a `false` anon-inode-exec flag from the
+/// wire (JEF-317), keeping the common (non-anonymous) exec's JSON byte-identical to before
+/// this field existed.
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// The basename of a binary path as the kernel saw it (`/usr/bin/apt` -> `apt`) — the
@@ -205,11 +227,23 @@ impl Behavior {
             Behavior::PrivilegeChange { from_uid, to_uid } => {
                 format!("privilege change uid {from_uid} -> {to_uid}")
             }
-            // Just the exec'd path. Whether it's a *notable* exec (a shell or package
-            // manager run in the container — JEF-55) is engine classification policy
-            // (`engine::observe::exec_class`), applied by the engine when it builds the
-            // prompt/output line — this shared wire type stays pure data (JEF-113).
-            Behavior::ProcessExec { path } => format!("executed {path}"),
+            // The exec'd path, plus the raw `exe_anon_inode` kernel fact when set (JEF-317)
+            // — unlike the shell/package-manager CLASSIFICATION (a curated list, engine
+            // policy in `engine::observe::exec_class`), this is a single kernel-computed
+            // boolean the agent already resolved, so it rides the bare summary like
+            // `PrivilegeChange`'s uids do, not as an engine annotation.
+            Behavior::ProcessExec {
+                path,
+                exe_anon_inode,
+            } => {
+                if *exe_anon_inode {
+                    format!(
+                        "executed {path} (anonymous-inode: memfd/unlinked backing, no on-disk file)"
+                    )
+                } else {
+                    format!("executed {path}")
+                }
+            }
             // Just the written path. Whether the write is *sensitive* (container drift /
             // config tampering) is engine corroboration policy (JEF-306 F3), not a property
             // of this shared wire type — the agent emits the path, the engine classifies.
@@ -262,7 +296,18 @@ impl Behavior {
             // Coarsen to the basename so repeated execs of the same binary from different
             // absolute paths collapse to one stable key (mirrors how LibraryLoaded keys on
             // the lib name, not the full path) — keeps exec churn from busting the cache.
-            Behavior::ProcessExec { path } => format!("exec:{}", basename(path)),
+            // `exe_anon_inode` is kept in the key (JEF-317): it is a genuinely different
+            // security-relevant fact about the SAME binary name (an on-disk `bash` vs. an
+            // anonymous-inode exec that happens to report itself as "bash"), so folding it
+            // in must not silently collapse the two into one cache entry.
+            Behavior::ProcessExec {
+                path,
+                exe_anon_inode,
+            } => format!(
+                "exec:{}{}",
+                basename(path),
+                if *exe_anon_inode { ":anon-inode" } else { "" }
+            ),
             // Coarsen to the DIRNAME so per-file write churn within a directory
             // (drop-and-execute writing many files, a config dir rewritten file-by-file)
             // collapses to one stable key — writes are high-frequency, so keying on the
