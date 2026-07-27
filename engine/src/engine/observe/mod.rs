@@ -19,6 +19,7 @@ pub mod exec_class;
 pub mod exploit_intel;
 pub mod feed_reload;
 pub mod health;
+pub mod host_credential_class;
 pub mod ingest_guard;
 pub mod ip_index;
 pub mod linkerd;

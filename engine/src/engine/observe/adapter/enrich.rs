@@ -3,6 +3,7 @@ use petgraph::visit::EdgeRef;
 use super::*;
 use crate::engine::graph::{Behavior, Reachability};
 use crate::engine::observe::Attribution;
+use crate::engine::observe::host_credential_class::host_credential_path;
 use crate::engine::observe::ip_index::{IpIndex, PeerResolutionMemo};
 
 /// Annotates Image nodes with vulnerability findings (Vulnerability port). Like
@@ -150,28 +151,44 @@ impl Adapter for RuntimeAdapter {
                     .or_insert(*static_linkage);
                 continue;
             }
-            // Refine a raw FileRead (a tmpfs open the credential-free agent couldn't
-            // classify) into a SecretRead using the pod's secret volumeMounts — or drop
-            // it if the path isn't under a Secret mount (most tmpfs reads aren't). Other
-            // behaviors pass through unchanged.
+            // Refine a raw FileRead (a file open the wire-pure agent couldn't classify
+            // itself) into a SecretRead — either a k8s-mounted Secret (the pod's
+            // volumeMounts) or a well-known ON-HOST credential path (JEF-320, e.g. the host
+            // shadow file, an SSH private-key dir, a cloud-credential file — see
+            // `host_credential_class`) — or drop it if neither classifier claims it (most
+            // reads are neither). Other behaviors pass through unchanged.
             let behavior = match &event.behavior {
                 Behavior::FileRead { path } => match pod.and_then(|p| secret_for_path(p, path)) {
                     Some(secret) => {
                         // Real secret reads are sparse — log each at info (operability +
                         // confirms the secret-read probe end-to-end on the nodes).
                         tracing::info!(%secret, namespace = %ns, pod = %name, "secret read");
-                        // A refined FileRead is always a mounted-file read — the only kind
-                        // eBPF observes. The API secret-read path is the audit adapter's
-                        // (JEF-269), never this one.
                         Behavior::SecretRead {
                             secret,
                             source: crate::engine::graph::SecretReadSource::Mounted,
                         }
                     }
-                    None => {
-                        filtered += 1;
-                        continue;
-                    }
+                    None => match host_credential_path(path) {
+                        Some(secret) => {
+                            // Same operability signal as a mounted secret read, distinct
+                            // log message so an operator can tell a k8s-mount read from an
+                            // on-host credential-path read at a glance.
+                            tracing::info!(
+                                %secret,
+                                namespace = %ns,
+                                pod = %name,
+                                "on-host credential read"
+                            );
+                            Behavior::SecretRead {
+                                secret,
+                                source: crate::engine::graph::SecretReadSource::HostPath,
+                            }
+                        }
+                        None => {
+                            filtered += 1;
+                            continue;
+                        }
+                    },
                 },
                 // Resolve a connection peer's cluster IP to the workload/service it
                 // belongs to (JEF: resolve-connection-peers), stably across a transient
@@ -575,3 +592,7 @@ fn under<'a>(path: &'a str, mount_path: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests;
+// JEF-320's on-host credential-path tests live in their own file rather than growing
+// `tests.rs` (already large) further, per the repo's file-size convention.
+#[cfg(test)]
+mod host_credential_tests;

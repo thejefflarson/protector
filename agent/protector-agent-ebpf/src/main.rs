@@ -248,6 +248,41 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
 /// no universal secret marker (see docs/ebpf-testing-on-nodes.md).
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 
+/// A small, fixed allowlist of on-host credential-file BASENAMES (JEF-320, Retire-Falco
+/// G3) — the cheap in-kernel volume gate that lets `try_file_open` widen past `is_tmpfs`
+/// for a read that might be the host password/shadow file, an SSH private key, or a
+/// cloud-provider credential file. These live on the container's ordinary rootfs
+/// (overlayfs), not tmpfs, so `is_tmpfs` alone never sees them — but letting EVERY
+/// non-tmpfs read through would reopen the full file-open firehose `is_tmpfs` exists to
+/// avoid. This basename check is deliberately short and distinctive (unlike `is_tmpfs`,
+/// which is broad by design) so it stays nowhere near that volume.
+///
+/// This is NOT the security classification — same division of labor as the existing
+/// tmpfs-scoped probe: the agent stays pure data (JEF-113), and the engine
+/// (`engine::observe::host_credential_class`) makes the real "is this path a known
+/// on-host credential path" call from the FULL path `bpf_d_path` returns below.
+const SENSITIVE_CREDENTIAL_BASENAMES: &[&[u8]] = &[
+    b"shadow",
+    b"passwd",
+    b"sudoers",
+    b"authorized_keys",
+    b"known_hosts",
+    b"id_rsa",
+    b"id_dsa",
+    b"id_ecdsa",
+    b"id_ed25519",
+    b"credentials",
+    b"application_default_credentials.json",
+    b"azureProfile.json",
+    b"accessTokens.json",
+    b"msal_token_cache.json",
+];
+
+/// Read buffer for [`is_sensitive_credential_basename`] — sized to the longest entry in
+/// [`SENSITIVE_CREDENTIAL_BASENAMES`] (`application_default_credentials.json`, 38 bytes)
+/// plus room for the NUL terminator.
+const CREDENTIAL_BASENAME_CAP: usize = 48;
+
 /// `PROT_EXEC` — an executable memory mapping. The dynamic linker mmaps shared objects
 /// (and the main binary) executable, so this distinguishes a code load from a data mmap.
 const PROT_EXEC: u64 = 0x4;
@@ -273,7 +308,11 @@ fn is_write_open(flags: u64) -> bool {
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
 /// For a tmpfs read, emits a [`FileEvent`] with the container-relative path via
 /// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
-/// in-kernel keeps the (very high) file-open volume off the ring buffer. Observe-only.
+/// in-kernel keeps the (very high) file-open volume off the ring buffer. JEF-320 widens
+/// this past tmpfs for a small, fixed allowlist of on-host credential-file basenames (see
+/// [`SENSITIVE_CREDENTIAL_BASENAMES`]) — ON-NODE LOAD VALIDATION PENDING for that widening
+/// (docs/ebpf-testing-on-nodes.md: this crate can't be compiled or verifier-tested off the
+/// fleet). Observe-only.
 #[fentry(function = "security_file_open")]
 pub fn file_open(ctx: FEntryContext) -> u32 {
     let _ = try_file_open(&ctx);
@@ -283,10 +322,12 @@ pub fn file_open(ctx: FEntryContext) -> u32 {
 fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     // security_file_open's first argument is `struct file *file`.
     let file: *const vmlinux::file = unsafe { ctx.arg(0) };
-    if file.is_null() || !is_tmpfs(file) {
+    if file.is_null() {
         return Ok(());
     }
-    emit_file_path(file, KIND_FILE_OPEN);
+    if is_tmpfs(file) || is_sensitive_credential_basename(file) {
+        emit_file_path(file, KIND_FILE_OPEN);
+    }
     Ok(())
 }
 
@@ -565,6 +606,48 @@ fn emit_lib_name(file: *const vmlinux::file) {
     } else {
         record_drop();
     }
+}
+
+/// Whether `file`'s leaf dentry name is one of [`SENSITIVE_CREDENTIAL_BASENAMES`]
+/// (JEF-320) — the cheap volume gate for `try_file_open`'s past-tmpfs widening. Reads the
+/// dentry's `d_name` directly rather than `bpf_d_path`ing every non-tmpfs open, the same
+/// allowed-anywhere pattern as [`emit_lib_name`]. A failed read = "not sensitive" (drop,
+/// never a false allow).
+fn is_sensitive_credential_basename(file: *const vmlinux::file) -> bool {
+    let mut dentry: *mut vmlinux::dentry = core::ptr::null_mut();
+    let mut name_ptr: *const u8 = core::ptr::null();
+    unsafe {
+        if read_kernel(&mut dentry, core::ptr::addr_of!((*file).f_path.dentry)) != 0
+            || dentry.is_null()
+        {
+            return false;
+        }
+        if read_kernel(
+            &mut name_ptr,
+            core::ptr::addr_of!((*dentry).d_name.name).cast(),
+        ) != 0
+            || name_ptr.is_null()
+        {
+            return false;
+        }
+    }
+    let mut buf = [0u8; CREDENTIAL_BASENAME_CAP];
+    let n = unsafe {
+        bpf_probe_read_kernel_str(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            CREDENTIAL_BASENAME_CAP as u32,
+            name_ptr as *const core::ffi::c_void,
+        )
+    };
+    if n <= 0 {
+        return false;
+    }
+    // `n` counts the trailing NUL (see emit_lib_name); clamp defensively before slicing so
+    // a bigger-than-expected return can never index out of `buf`.
+    let len = (n as usize).min(CREDENTIAL_BASENAME_CAP).saturating_sub(1);
+    SENSITIVE_CREDENTIAL_BASENAMES
+        .iter()
+        .any(|&want| want == &buf[..len])
 }
 
 /// Whether `file` lives on a tmpfs — `file->f_inode->i_sb->s_magic == TMPFS_MAGIC`. The
