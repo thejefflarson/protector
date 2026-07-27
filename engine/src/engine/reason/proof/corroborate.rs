@@ -9,7 +9,7 @@ use std::time::Duration;
 use petgraph::stable_graph::NodeIndex;
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{Behavior, Node, RuntimeSignal, SecurityGraph};
+use crate::engine::graph::{Behavior, Node, RuntimeSignal, SecretReadSource, SecurityGraph};
 
 /// The context the entry workload provides to the corroboration predicate (JEF-319, JEF-314).
 /// The flat per-behavior [`corroborates`] relation is context-free on purpose
@@ -80,9 +80,20 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
                 || (attack.tactic == Tactic::InitialAccess
                     && crate::engine::observe::peer_class::foothold_peer(behavior).is_some())
         }
-        // A read of a mounted secret corroborates a CREDENTIAL_ACCESS objective (T1552):
-        // the workload is actually touching the credential the chain reaches.
-        Behavior::SecretRead { .. } => attack.tactic == Tactic::CredentialAccess,
+        // A read of a k8s-mounted or API-fetched secret corroborates a CREDENTIAL_ACCESS
+        // objective (T1552) context-free: the workload is actually touching a credential
+        // the chain reaches, unambiguous regardless of foothold status.
+        //
+        // `SecretReadSource::HostPath` (JEF-320) is DELIBERATELY EXCLUDED here (security
+        // rework): an on-host credential path can be read by an ordinary, legitimate
+        // in-container process unrelated to the chain (a bastion pod's own `sshd` reading
+        // its own `/etc/shadow` for PAM), so it needs the proven-foothold gate the flat,
+        // context-free relation can't apply — that shape lives at the entry-scoped seam
+        // ([`host_credential_read_on_foothold`]), mirroring how `PrivilegeChange` defers to
+        // [`privilege_escalation_on_foothold`].
+        Behavior::SecretRead { source, .. } => {
+            attack.tactic == Tactic::CredentialAccess && *source != SecretReadSource::HostPath
+        }
         // A library load corroborates a FOOTHOLD (Initial Access / Exploit Public-Facing,
         // T1190): after JEF-75 a LibraryLoaded surviving on a workload is already pruned
         // to a *vulnerable* library, so its presence is the runtime foothold signal.
@@ -150,14 +161,17 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// entry-scoped shapes fires: **cross-tenant lateral** (JEF-319) — a connection from the
 /// entry to a peer in a DIFFERENT namespace ([`cross_tenant_lateral`]) — **privilege
 /// escalation on the foothold** (JEF-314) — a root escalation on the entry itself
-/// ([`privilege_escalation_on_foothold`]) — or **drop-then-execute** (JEF-321) — a
-/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]). All three
-/// are scoped to a proven foothold entry.
+/// ([`privilege_escalation_on_foothold`]) — **drop-then-execute** (JEF-321) — a
+/// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]) — or **an
+/// on-host credential read on the foothold** (JEF-320 security rework) — a `SecretRead` with
+/// [`SecretReadSource::HostPath`] on the entry itself
+/// ([`host_credential_read_on_foothold`]). All four are scoped to a proven foothold entry.
 ///
 /// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
-/// ordinary in-cluster traffic, an ordinary setuid, and an ordinary write-then-run of a
-/// benign path all still corroborate nothing (ADR-0011). Like every arm here this only sets
-/// `corroborated`; it never actuates
+/// ordinary in-cluster traffic, an ordinary setuid, an ordinary write-then-run of a benign
+/// path, and an ordinary in-container process reading a host credential path off a
+/// non-foothold pod all still corroborate nothing (ADR-0011). Like every arm here this only
+/// sets `corroborated`; it never actuates
 /// (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
     runtime: &[RuntimeSignal],
@@ -170,6 +184,7 @@ pub(super) fn corroborated_for(
     }) || cross_tenant_lateral(runtime, entry)
         || privilege_escalation_on_foothold(runtime, attack, entry)
         || drop_then_execute(runtime, entry)
+        || host_credential_read_on_foothold(runtime, attack, entry)
 }
 
 /// The cross-tenant lateral-movement shape (JEF-319): a `NetworkConnection` from the entry to
@@ -272,6 +287,40 @@ pub(super) fn privilege_escalation_on_foothold(
     runtime.iter().any(|s| match &s.behavior {
         Behavior::PrivilegeChange { from_uid, to_uid } => *from_uid != 0 && *to_uid == 0,
         _ => false,
+    })
+}
+
+/// The on-host-credential-path-read-on-foothold shape (JEF-320 security rework, HIGH/MEDIUM
+/// findings from a HELD security review): a `SecretRead` with [`SecretReadSource::HostPath`]
+/// — a read of a well-known on-host credential path
+/// (`crate::engine::observe::host_credential_class`) OUTSIDE any k8s Secret mount — on the
+/// entry itself corroborates a CredentialAccess-tactic objective.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`cross_tenant_lateral`] /
+/// [`privilege_escalation_on_foothold`] / [`drop_then_execute`]: corroborates ONLY when the
+/// entry is a proven internet-facing foothold (`entry.is_foothold`) AND `attack.tactic` is
+/// `CredentialAccess`. This is deliberately NOT in the flat, context-free [`corroborates`]
+/// relation the way a `Mounted`/`Api` `SecretRead` is: reading the pod's OWN declared k8s
+/// Secret is unambiguous credential access, but an on-host credential path can be read by an
+/// ordinary, legitimate in-container process that has nothing to do with any chain (a
+/// bastion pod's own `sshd` reading its own `/etc/shadow` for PAM, an init process reading
+/// `/etc/sudoers`) — gating on the proven foothold is what keeps that the same ADR-0011
+/// on-call-engineer false positive the sibling shapes guard against, rather than turning
+/// every ordinary pod's mundane host-file access into a standing corroboration source.
+pub(super) fn host_credential_read_on_foothold(
+    runtime: &[RuntimeSignal],
+    attack: &AttackRef,
+    entry: EntryContext<'_>,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    if !entry.is_foothold || attack.tactic != Tactic::CredentialAccess {
+        return false;
+    }
+    runtime.iter().any(|s| {
+        matches!(
+            &s.behavior,
+            Behavior::SecretRead { source, .. } if *source == SecretReadSource::HostPath
+        )
     })
 }
 
