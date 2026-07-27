@@ -72,10 +72,29 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+// axe-core keeps a single global "a run is in progress" flag and throws "Axe is already running" if a
+// second `run()` starts before the first has finished (JEF-530). None of the `it`s below are
+// `.concurrent`, so vitest itself never overlaps them — but vitest-axe's Promise wrapper has no reject
+// path for an errored run (its callback does `if (err) throw err`, which fires *outside* the Promise
+// executor's synchronous frame and so never settles the promise). If axe-core's async rule evaluation
+// ever hiccups on the CI runner, that leaves a call hanging past its test's timeout; vitest then moves
+// on to the next `it` while axe-core's `_running` flag is still true, and the *next* view's fresh axe
+// call trips the guard — cascading into unrelated tests. Routing every call through one queue makes
+// axe-core's single-flight requirement true by construction: this file will never issue a second axe
+// run before the previous one has settled, no matter what triggers the overlap.
+let axeQueue = Promise.resolve();
+function runAxe(container) {
+  const run = axeQueue.then(() => axe(container, AXE_OPTS));
+  // Chain the next call onto this one's settlement (success or failure) so a rejected run never wedges
+  // the queue for every test that follows it.
+  axeQueue = run.catch(() => undefined);
+  return run;
+}
+
 /** Run axe on a rendered container and assert zero serious/critical violations, naming any that fire
  *  (rule id + impact + node count) so a regression points straight at the offending rule. */
 async function expectAccessible(container) {
-  const results = await axe(container, AXE_OPTS);
+  const results = await runAxe(container);
   const blocking = results.violations.filter((v) => BLOCKING.has(v.impact));
   const summary = blocking
     .map((v) => `${v.id} (${v.impact}, ${v.nodes.length} node(s)): ${v.help}`)
