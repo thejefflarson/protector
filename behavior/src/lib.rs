@@ -57,9 +57,15 @@ pub enum Behavior {
     /// corroborate a specific attack is JEF-49's job.
     PrivilegeChange { from_uid: u32, to_uid: u32 },
     /// A process was exec'd in the workload — the runtime signal for "unexpected process
-    /// spawned" (ADR-0014). `path` is the exec'd binary's path as the
-    /// kernel saw it (`linux_binprm->filename`). Evidence for the model only today;
-    /// wiring exec → corroboration is JEF-49.
+    /// spawned" (ADR-0014). `path` is the exec'd binary's path as the kernel saw it
+    /// (`linux_binprm->filename`) — for an exec of an open file descriptor rather than a
+    /// directory-entry path (`fexecve`/`execveat(fd, "", AT_EMPTY_PATH)`, the shape a
+    /// `memfd_create`-backed "fileless" payload execs through), the kernel itself resolves
+    /// this to an fd-only form (`/dev/fd/<n>`, `/proc/<pid>/fd/<n>`) with no on-disk path at
+    /// all — engine policy classifies that shape as a fileless exec (JEF-317) purely from
+    /// this same field, no wire change. PURE DATA: whether a `path` is a shell / package
+    /// manager / fileless exec is engine classification (`observe::exec_class`, JEF-113),
+    /// not a property of this shared wire type.
     ProcessExec { path: String },
     /// A **write** to a file — the runtime signal for container drift: drop-and-execute
     /// (a new file created then run) and config tampering (an existing file overwritten).

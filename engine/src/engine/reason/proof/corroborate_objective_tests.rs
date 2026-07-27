@@ -204,9 +204,30 @@ fn package_manager_exec_corroborates_any_objective() {
     assert!(corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating —
-/// legit entrypoints exec constantly (the ADR-0011 false positive). It is model
-/// evidence only, never the broad tamper-now gate (JEF-117).
+/// A fileless exec — execve of an fd-only target (`/dev/fd/<n>` / `/proc/<pid>/fd/<n>`, no
+/// on-disk path — JEF-317, the Falco-parity "memfd_create / anonymous-fd execve" critical)
+/// corroborates ANY objective like an alert (JEF-117): the same blanket tamper-now gate a
+/// shell or package-manager exec triggers, closing the gap where F2's `FileWrite`
+/// (JEF-306) has no path artifact to correlate against (a memfd-backed exec never touches
+/// `security_file_open`).
+#[test]
+fn fileless_exec_corroborates_any_objective() {
+    for path in ["/dev/fd/7", "/proc/self/fd/3", "/proc/1234/fd/9"] {
+        let anon = Behavior::ProcessExec { path: path.into() };
+        assert!(
+            crate::engine::observe::exec_class::is_fileless_exec(&anon),
+            "{path:?}"
+        );
+        assert!(corroborates(&anon, &CREDENTIAL_ACCESS), "{path:?}");
+        assert!(corroborates(&anon, &EXFILTRATION), "{path:?}");
+        assert!(corroborates(&anon, &ESCAPE_TO_HOST), "{path:?}");
+        assert!(corroborates(&anon, &EXPLOIT_PUBLIC_FACING), "{path:?}");
+    }
+}
+
+/// NEGATIVE: a *bare* (non-shell, non-pkg-mgr, non-fileless) ProcessExec stays
+/// non-corroborating — legit entrypoints exec constantly (the ADR-0011 false positive).
+/// It is model evidence only, never the broad tamper-now gate (JEF-117).
 #[test]
 fn bare_exec_does_not_corroborate() {
     let bare = Behavior::ProcessExec {

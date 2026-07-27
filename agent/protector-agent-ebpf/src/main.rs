@@ -524,6 +524,16 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
 /// `ProcessExec`. Observe-only. NOTE: the attach point is `security_bprm_check` (the
 /// exported LSM call, in BTF — like the other `security_*` probes); the un-prefixed
 /// `bprm_check_security` is NOT a BTF function on 6.8 (verified on-node: JEF-53 deploy).
+///
+/// JEF-317 (fileless exec / memfd_create parity with Falco): for an fd-only exec —
+/// `fexecve()`/`execveat(fd, "", AT_EMPTY_PATH)`, the shape every memfd-backed "fileless"
+/// payload execs through — the kernel's OWN `bprm->filename` synthesis (not this probe)
+/// already resolves to an fd-only string (`/dev/fd/<n>`, `/proc/<pid>/fd/<n>`) with no
+/// on-disk path. This probe therefore needs NO change to surface that fact: the same
+/// `filename` read below already carries it, byte for byte. `engine::observe::exec_class`
+/// classifies that shape as a fileless exec and blanket-corroborates it, purely from this
+/// already-emitted path — see that module for the detection and why no new probe, offset,
+/// or wire field was needed (JEF-113: the agent stays pure data, the engine classifies).
 #[fentry(function = "security_bprm_check")]
 pub fn bprm_check(ctx: FEntryContext) -> u32 {
     let _ = try_bprm_check(&ctx);

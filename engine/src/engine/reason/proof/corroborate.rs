@@ -37,15 +37,16 @@ pub(super) struct EntryContext<'a> {
 ///
 /// An *alerting* signal corroborates **any** objective: an alert means "an attack is
 /// happening now" regardless of which chain. An alert arrives via the tool-agnostic
-/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell or
-/// package-manager exec (JEF-55) corroborates the same broad way (JEF-117): a
-/// hands-on-keyboard / tamper-now signal that, like the alert, evidences active intrusion
-/// irrespective of which chain it lands on. An *alarming* file write (JEF-309) — a write to
-/// a sensitive path (drop-and-execute / config tamper) — is the third such blanket source
-/// (`observe::alarm_class::alarming_write`). The agent's own mundane behaviors
-/// (connection / secret-read / library-load) corroborate per objective — each only for
-/// the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they are never the
-/// "everything corroborates everything" blanket the alert gate intentionally is.
+/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell,
+/// package-manager, or fileless (fd-only, JEF-317) exec (JEF-55) corroborates the same
+/// broad way (JEF-117): a hands-on-keyboard / tamper-now signal that, like the alert,
+/// evidences active intrusion irrespective of which chain it lands on. An *alarming* file
+/// write (JEF-309) — a write to a sensitive path (drop-and-execute / config tamper) — is a
+/// further such blanket source (`observe::alarm_class::alarming_write`). The agent's own
+/// mundane behaviors (connection / secret-read / library-load) corroborate per objective —
+/// each only for the objective class whose ATT&CK *tactic* it evidences (JEF-49), so they
+/// are never the "everything corroborates everything" blanket the alert gate intentionally
+/// is.
 ///
 /// Matching on `attack.tactic` (not the precise technique) is the stable key: the
 /// recognizers tag a Secret-read chain CREDENTIAL_ACCESS (T1552), an internet-egress
@@ -102,14 +103,19 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
-        // A *notable* exec — an interactive shell or package manager in the container
+        // A *notable* exec — an interactive shell, a package manager, or a **fileless**
+        // exec (JEF-317: execve of an fd-only target — memfd_create/execveat, no on-disk
+        // path — the one shipped-critical Falco class the F2 FileWrite corroboration can't
+        // reach, since such an fd never touches `security_file_open`) in the container
         // (JEF-55) — corroborates ANY objective like an Alert does (JEF-117): a tamper-now
         // signal that evidences active intrusion regardless of chain. Conservative on
         // purpose: a *bare* ProcessExec
         // (anything else) stays NON-corroborating — legit entrypoints exec constantly
         // (the ADR-0011 on-call-engineer false positive), so it remains model evidence
-        // only. `notable_exec` is `Some` exactly for shell/pkg-mgr execs (JEF-113: the
-        // classifier is engine policy in `observe::exec_class`, not on the wire type).
+        // only. `notable_exec` is `Some` exactly for shell/pkg-mgr/fileless execs (JEF-113:
+        // the classifier is engine policy in `observe::exec_class`, not on the wire type —
+        // the fileless-exec case classifies the SAME `path` field the agent already emits,
+        // no wire change).
         Behavior::ProcessExec { .. } => {
             crate::engine::observe::exec_class::notable_exec(behavior).is_some()
         }
