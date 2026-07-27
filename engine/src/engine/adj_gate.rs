@@ -53,11 +53,16 @@ impl Engine {
     /// (re-judge) vs subtractive (the prior verdict holds), and the baseline itself (the gate
     /// serves its verdict on a subtractive hold). Built before the cache lookup so the cached-on
     /// and sent prompt bytes can never drift.
+    // 8 args (JEF-565 added `downstream`): each is a distinct, already-computed piece of this
+    // pass's per-entry state (no natural sub-grouping that wouldn't just be a wrapper struct for
+    // its own sake — see the same call already made in `run_loop.rs`/`supply_chain/mod.rs`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_pending(
         &self,
         entry_key: &str,
         entry: graph::NodeKey,
         objectives: Vec<(graph::NodeKey, graph::attack::AttackRef)>,
+        downstream: Vec<graph::NodeKey>,
         idxs: &[usize],
         graph: &graph::SecurityGraph,
         asn: &crate::engine::observe::asn::AsnDb,
@@ -69,6 +74,7 @@ impl Engine {
             graph,
             asn,
             baseline.as_ref().map(|b| &b.surface),
+            &downstream,
         );
         // The verdict-cache key is the FULL-STATE hash (excludes the "Changes since…" section) so
         // an identical full state always keys identically regardless of the delta — see
@@ -79,6 +85,7 @@ impl Engine {
             entry_key: entry_key.to_string(),
             entry,
             objectives,
+            downstream,
             prompt: delta.prompt,
             fingerprint,
             sections: delta.sections,
