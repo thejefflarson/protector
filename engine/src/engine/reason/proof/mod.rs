@@ -351,6 +351,8 @@ pub fn prove_with(
 }
 
 #[cfg(test)]
+mod corroborate_anon_inode_exec_tests;
+#[cfg(test)]
 mod corroborate_context_tests;
 #[cfg(test)]
 mod corroborate_drop_exec_tests;

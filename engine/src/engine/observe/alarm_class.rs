@@ -225,6 +225,7 @@ mod tests {
             },
             Behavior::ProcessExec {
                 path: "/usr/bin/dropper".into(),
+                exe_anon_inode: false,
             },
             Behavior::SecretRead {
                 secret: "/var/run/secrets/kubernetes.io/serviceaccount/token".into(),
@@ -247,6 +248,7 @@ mod tests {
         }));
         assert!(is_alarming_now(&Behavior::ProcessExec {
             path: "/bin/bash".into(), // notable exec (interactive shell)
+            exe_anon_inode: false,
         }));
         assert!(is_alarming_now(&write("/etc/cron.d/dropper"))); // alarming write
 
@@ -254,6 +256,7 @@ mod tests {
         assert!(!is_alarming_now(&write("/data/app.log")));
         assert!(!is_alarming_now(&Behavior::ProcessExec {
             path: "/app/server".into(), // bare exec, not a shell/pkg-mgr
+            exe_anon_inode: false,
         }));
         assert!(!is_alarming_now(&Behavior::NetworkConnection {
             peer: "10.42.0.1:8086".into(),

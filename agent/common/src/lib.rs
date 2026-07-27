@@ -20,8 +20,9 @@ pub const KIND_FILE_OPEN: u32 = 2;
 /// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
 pub const KIND_LIBRARY_LOAD: u32 = 3;
 /// A process was exec'd (fentry on `security_bprm_check`). Carries the exec'd binary's
-/// path, read from `linux_binprm->filename`; userspace emits a ProcessExec. Reuses
-/// [`FileEvent`] (kind discriminates) — the runtime signal for "unexpected process
+/// path, read from `linux_binprm->filename`, PLUS the anon-inode kernel fact (JEF-317,
+/// Route A) read from `bprm->file->f_inode`; userspace emits a `ProcessExec`. Its own
+/// [`ExecEvent`] body (not [`FileEvent`]) — the runtime signal for "unexpected process
 /// spawned" (ADR-0014).
 pub const KIND_EXEC: u32 = 4;
 /// A process gained root (fentry on `security_task_fix_setuid`). The eBPF side filters to
@@ -51,6 +52,31 @@ pub struct FileEvent {
     pub len: u32,
     /// The opened file's absolute path (from `bpf_d_path`), not NUL-terminated.
     pub path: [u8; PATH_CAP],
+}
+
+/// One observed process exec (kind [`KIND_EXEC`]) — the same `header`/`len`/`path` shape
+/// as [`FileEvent`], plus the pure-data anon-inode fact (JEF-317, Route A):
+/// [`Self::exe_anon_inode`]. A dedicated struct rather than a [`FileEvent`] field, since
+/// this fact is exec-specific — the file-open/library-load/file-write probes have no
+/// `bprm` to read it from, so folding it into the shared `FileEvent` would mean carrying a
+/// meaningless byte on every OTHER kind's wire event.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ExecEvent {
+    pub header: EventHeader,
+    /// Valid bytes in `path` (≤ [`PATH_CAP`]).
+    pub len: u32,
+    /// The exec'd binary's path (`linux_binprm->filename`), not NUL-terminated past `len`.
+    pub path: [u8; PATH_CAP],
+    /// `1` if the exec'd binary's backing inode is anonymous — memfd/shmem-backed
+    /// (`inode->i_sb->s_magic` is the tmpfs/shmem magic) or unlinked (`i_nlink == 0`) —
+    /// rather than a normal, linked, on-disk file; `0` otherwise. A `u8`, not `bool`: a
+    /// kernel-written byte is not guaranteed a valid Rust `bool` bit pattern, and `no_std`
+    /// eBPF code writing this field directly must not rely on that guarantee. A KERNEL-
+    /// OBSERVABLE FACT (JEF-113), not a verdict — whether an anon-inode exec is alarming
+    /// is engine policy, conservatively scoped (see `engine::observe::exec_class` /
+    /// `engine::reason::proof::corroborate`), NOT decided here.
+    pub exe_anon_inode: u8,
 }
 
 /// The fixed prefix of every event in the ring buffer. `repr(C)`, at offset 0 of each

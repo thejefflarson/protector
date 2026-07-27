@@ -180,6 +180,7 @@ fn alert_still_corroborates_any_objective() {
 fn shell_exec_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
         path: "/bin/bash".into(),
+        exe_anon_inode: false,
     };
     assert!(crate::engine::observe::exec_class::is_interactive_shell(
         &shell
@@ -196,6 +197,7 @@ fn shell_exec_corroborates_any_objective() {
 fn package_manager_exec_corroborates_any_objective() {
     let pkg = Behavior::ProcessExec {
         path: "/usr/bin/apt".into(),
+        exe_anon_inode: false,
     };
     assert!(crate::engine::observe::exec_class::is_package_manager(&pkg));
     assert!(corroborates(&pkg, &CREDENTIAL_ACCESS));
@@ -204,13 +206,36 @@ fn package_manager_exec_corroborates_any_objective() {
     assert!(corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating —
-/// legit entrypoints exec constantly (the ADR-0011 false positive). It is model
-/// evidence only, never the broad tamper-now gate (JEF-117).
+/// NEGATIVE / REGRESSION GUARD (JEF-317): an anon-inode exec (`exe_anon_inode: true`) must
+/// NOT blanket-corroborate via the flat [`corroborates`] relation, even though it is a real
+/// Falco-parity signal — this is the exact shape a security review flagged in an earlier,
+/// withdrawn version (which routed a path-shape classification into this same blanket
+/// gate, forging corroboration on routine `fexecve()`/runc-memfd-reexec behavior). The real
+/// signal has its own, far narrower, entry-scoped gate — see
+/// `corroborate_anon_inode_exec_tests.rs`.
+#[test]
+fn anon_inode_exec_does_not_blanket_corroborate() {
+    let anon = Behavior::ProcessExec {
+        // NOT a shell/package-manager path — isolates exe_anon_inode as the only thing
+        // under test (a shell path would ALSO blanket-corroborate via notable_exec, for
+        // an unrelated reason).
+        path: "/tmp/payload".into(),
+        exe_anon_inode: true,
+    };
+    assert!(!corroborates(&anon, &CREDENTIAL_ACCESS));
+    assert!(!corroborates(&anon, &EXFILTRATION));
+    assert!(!corroborates(&anon, &ESCAPE_TO_HOST));
+    assert!(!corroborates(&anon, &EXPLOIT_PUBLIC_FACING));
+}
+
+/// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating — legit
+/// entrypoints exec constantly (the ADR-0011 false positive). It is model evidence only,
+/// never the broad tamper-now gate (JEF-117).
 #[test]
 fn bare_exec_does_not_corroborate() {
     let bare = Behavior::ProcessExec {
         path: "/app/server".into(),
+        exe_anon_inode: false,
     };
     assert!(crate::engine::observe::exec_class::notable_exec(&bare).is_none());
     assert!(!corroborates(&bare, &CREDENTIAL_ACCESS));
