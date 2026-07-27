@@ -85,6 +85,35 @@ fn graph_with_evidence_bearing_downstream() -> (SecurityGraph, NodeKey, NodeKey)
     (g, entry_key, dn_key)
 }
 
+/// A downstream workload carrying ONLY a critical loaded-at-runtime CVE — no exposed secret, no
+/// behavior of any kind. The JEF-588 fixture: this is the case that must NOT read as a breach
+/// driver — a downstream CVE with no on-box behavior corroborating it is severity/context only.
+fn graph_with_downstream_cve_only() -> (SecurityGraph, NodeKey, NodeKey) {
+    let mut g = SecurityGraph::new();
+    let entry = workload("entry-web");
+    let entry_key = entry.key();
+    g.upsert_node(entry);
+
+    let dn = workload("downstream-pod");
+    let dn_key = dn.key();
+    let d = g.upsert_node(dn);
+    let img = g.upsert_node(Node::Image(Image {
+        digest: "sha256:dn-cve-only".into(),
+        reference: Some("downstream:1".into()),
+        trust: Trust::Unknown,
+        vulnerabilities: vec![Vulnerability {
+            id: "CVE-2024-9999".into(),
+            severity: Severity::Critical,
+            reachability: Reachability::LoadedAtRuntime,
+            ..Default::default()
+        }],
+        exposed_secrets: vec![],
+        static_binary: None,
+    }));
+    g.add_edge(d, img, proof());
+    (g, entry_key, dn_key)
+}
+
 /// A downstream workload with NO evidence of any kind — the clean-marker case.
 fn graph_with_clean_downstream() -> (SecurityGraph, NodeKey, NodeKey) {
     let mut g = SecurityGraph::new();
@@ -324,4 +353,75 @@ fn non_workload_nodes_are_never_rendered_as_downstream() {
     );
     assert!(build.prompt.contains(&secret.0));
     assert!(build.prompt.contains("no evidence observed."));
+}
+
+/// JEF-588 AC: "for an incident with a downstream-only loaded-at-runtime CVE and NO downstream
+/// behavior, the rendered prompt does NOT present that CVE as a breach/exploitation driver (it's
+/// context) — i.e. the framing a model would read as 'promote'." The CVE must still be GROUNDED
+/// (present, verbatim, so a citation of it passes anti-fabrication) — this is a framing test, not
+/// an evidence-hiding test (ADR-0029 forbids the latter).
+#[test]
+fn downstream_only_cve_with_no_behavior_is_framed_as_context_not_a_breach_driver() {
+    let (g, entry, dn) = graph_with_downstream_cve_only();
+    let build = build_delta_prompt_asn(
+        &entry,
+        &[],
+        &g,
+        &AsnDb::empty(),
+        None,
+        std::slice::from_ref(&dn),
+    );
+
+    // Grounding stays: the CVE is still visible, verbatim, in the downstream block — a model
+    // that cites it for CONTEXT (or even mistakenly for "exploitable") is not fabricating.
+    assert!(
+        build.prompt.contains("CVE-2024-9999"),
+        "the downstream CVE stays in the prompt as grounded evidence, just reframed"
+    );
+    assert!(
+        build
+            .prompt
+            .contains("Downstream evidence on this entry's proven paths"),
+        "the downstream section header is present"
+    );
+
+    // The entry itself carries NO evidence of its own — the ONLY exploitation-shaped fact in
+    // this whole prompt is the downstream CVE, so a promoting verdict can only come from the
+    // model over-reading that CVE. The framing must forbid exactly that reading.
+    assert!(
+        build.prompt.contains(
+            "Critical CVEs observed loading at runtime on this workload's reachable path \
+             (exploitation evidence — vulnerable code proven to run; CVEs merely present in the \
+             image are omitted as context): <<<(none)>>>"
+        ),
+        "the entry's own CVE field is empty — the downstream CVE is the only CVE anywhere"
+    );
+
+    // The instructions must explicitly say a downstream node's own loaded-at-runtime CVE is NOT
+    // exploitation evidence by itself — the reframing this ticket makes.
+    assert!(
+        build
+            .prompt
+            .contains("A downstream node's OWN loaded-at-runtime CVE is DIFFERENT and is NOT exploitation evidence on its own"),
+        "the prompt must explicitly demote a downstream-only CVE off the breach-evidence list"
+    );
+    assert!(
+        build.prompt.contains("CONTEXT/SEVERITY ONLY"),
+        "a downstream CVE must be framed as context/severity, not exploitation evidence"
+    );
+    assert!(
+        build
+            .prompt
+            .contains("A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence"),
+        "the Decide: \"exploitable\" line must explicitly exclude a lone downstream CVE as a promotion driver"
+    );
+
+    // The fenced downstream block itself carries structured CVE evidence only — no behavior, no
+    // secret — so nothing IN THAT BLOCK reads as live/on-box evidence for this fixture.
+    assert!(
+        build.prompt.contains(
+            "Exposed secrets baked into this image: <<<(none)>>> | Observed runtime behavior: <<<(none)>>>"
+        ),
+        "the downstream block itself carries no secret/behavior evidence — only the CVE, which is context"
+    );
 }

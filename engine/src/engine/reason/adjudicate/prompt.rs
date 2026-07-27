@@ -345,20 +345,33 @@ fn assemble(
     // not breach drivers. Evidence is fenced as untrusted data so a malicious CVE id / node key
     // can't inject. The anti-fabrication backstop (guard_fabricated_cve) still catches a cited
     // CVE absent from the evidence.
+    //
+    // JEF-588: a DOWNSTREAM node's loaded-at-runtime CVE was previously framed as promoting
+    // "exactly as if it were on the entry" — that over-promotes. Network/RBAC/mount reachability
+    // proves a PATH to a downstream node exists; it says nothing about whether attacker input
+    // actually flows through that path to TRIGGER that node's vulnerable code (an application-
+    // dataflow question the reach tags can't answer). So only the ENTRY's own loaded-at-runtime
+    // CVE — the workload directly hit by the attacker, no intermediate hop's dataflow to prove —
+    // is CVE exploitation evidence. A downstream CVE stays in the prompt, but strictly as
+    // CONTEXT/SEVERITY: this node's vulnerability surface / blast radius IF it were ever popped,
+    // the same calibrated footing as reach breadth (ADR-0029's severity-vs-breach line). A
+    // downstream node's own BEHAVIOR (a live alert / hands-on-keyboard signal — on-box evidence
+    // it actually WAS popped) and a downstream exposed secret are unaffected: both still promote
+    // exactly as if on the entry, same as before.
     let prompt = format!(
         r#"You are a senior security analyst making one call: is this internet-facing workload a real BREACH risk?
 
 A deterministic analysis already PROVED this workload can reach every objective listed below — that reachability is a GIVEN, not the question. Reaching things — however broadly, however many tenants, however high-impact, whether granted by RBAC, mounted, or over the network (same-namespace OR cross-namespace) — is NEVER a breach by itself. Breadth, tenancy, and the severity of what is reached are how BAD it would be if exploited; they are not whether it IS being exploited.
 
 A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one of these three IS exploitation evidence — if ANY one is present, the reached objective is exploitable:
-  - a CVE in the "Critical CVEs observed loading at runtime" list below — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
+  - a CVE in the "Critical CVEs observed loading at runtime" list below (the ENTRY's own field — the workload the attacker directly hits, not a downstream hop) — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
   - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now), OR
   - a credential listed in the "Exposed secrets baked into this image" field below (a usable API key, token, or private key committed into the image — an immediately-usable breach primitive).
 If NONE of the three is present, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
-The same three evidence types apply to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A CVE observed loading at runtime, a live alert/hands-on-keyboard signal, or an exposed secret found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: a popped pod partway down a proven path completes the chain. A downstream workload marked "no evidence observed" carries none of its own.
+Two of these three extend to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A live alert/hands-on-keyboard signal, or an exposed secret, found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: on-box evidence that node actually WAS popped completes the chain. A downstream node's OWN loaded-at-runtime CVE is DIFFERENT and is NOT exploitation evidence on its own: reachability (network/RBAC/mount) proves a PATH to that node exists, it does not prove attacker input flows THROUGH that path to trigger that node's specific vulnerable code — an application-dataflow question this analysis cannot answer from reach tags alone. Treat a downstream CVE as CONTEXT/SEVERITY ONLY: that node's vulnerability surface — how bad it would be IF that node were ever popped — never a breach driver by itself, on the same calibrated footing as reach breadth below. A downstream workload marked "no evidence observed" carries none of any of this.
 
-Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)".
+Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)". The same filter applies to every downstream node's CVE block.
 
 Traps that are NOT evidence, no matter how they are labeled:
   - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
@@ -379,11 +392,11 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
-Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence (a "no evidence observed" workload carries none; this is the SAME exploitation-evidence bar as the entry's own fields above):
+Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
 {downstream}
 
 Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal, a credential listed in the (non-empty) "Exposed secrets baked into this image" field, OR the same evidence on a downstream workload on the proven path.
+  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the ENTRY's "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal (entry OR downstream), a credential listed in the (non-empty) "Exposed secrets baked into this image" field (entry OR downstream). A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only.
   "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
   "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
   "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
