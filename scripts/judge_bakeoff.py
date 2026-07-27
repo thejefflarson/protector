@@ -341,19 +341,39 @@ CASES = [
      "workload/protector/Pod/protector-7f5577cf4b-9wkwl",
      "<<<(none)>>>", "(none)", "(none)",
      _PROTECTOR_OBJS, "(none)", _PROTECTOR_DELTA),
-    # JEF-565 — the entry itself is CLEAN (no CVE, no live signal, no exposed secret) but a
-    # workload TWO HOPS downstream on the proven path is running a KEV CVE. Before this ticket the
-    # downstream pod was invisible to the judge (only a one-line reachable-objective entry); now it
-    # gets its own fenced evidence block. MUST be exploitable — the same bar as an entry-level CVE,
-    # applied to a proven downstream hop. 10-tuple: trailing posture="(none)" + changes="" +
-    # the downstream block.
-    ("downstream_only_cve", "exploitable",
+    # JEF-567 EDGE-VS-DOWNSTREAM CORRECTION (ground-truth fix; was wrongly "exploitable"):
+    # the entry itself is CLEAN (no CVE, no live signal, no exposed secret) and a workload TWO
+    # HOPS downstream on the proven path has a CVE loaded at runtime but NO behavioral evidence
+    # of its own (no alert, no hands-on-keyboard). Proving a NON-edge CVE exploitable needs
+    # attacker input to actually REACH the vulnerable code path THROUGH the edge — reachability +
+    # "loaded-at-runtime" cannot show that (network reachability is not application dataflow, and
+    # "loaded" is not "the vulnerable function ran with attacker-controlled data"). Only an
+    # internet-facing (edge) CVE is directly hittable that way; a downstream hop needs its OWN
+    # on-box behavioral signal, never a reachability+CVE inference. This is now a keep-honest
+    # REFUTE trap: the model must NOT over-promote on downstream reachability + a loaded CVE
+    # alone (the reachable-downstream-CVE-behind-a-clean-edge case is the deferred JEF-587
+    # proxy/exposure problem, out of scope here). 10-tuple: trailing posture="(none)" +
+    # changes="" + the downstream block.
+    ("downstream_only_cve", "refuted",
      "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
      "<<<connects to 10.42.3.5:8080 (cluster)>>>",
      f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
      "  - workload/public/Pod/web-cache-0 [NETWORK] [same-ns] (Collection: Data from Information Repositories)",
      "(none)", "",
      "  - <<<workload/public/Pod/web-cache-0>>>: CVEs observed loading at runtime: <<<CVE-2024-31337 [severity: critical] [reachability: loaded-at-runtime] [no fix available]>>> | Exposed secrets baked into this image: <<<(none)>>> | Observed runtime behavior: <<<(none)>>> | Static posture findings: <<<(none)>>>"),
+    # The path-2 case the model SHOULD promote on (VISION.md #2, "on-box behavior suggesting
+    # compromise ... on an internet-facing pod OR a downstream pod"): the entry is CLEAN, but the
+    # SAME downstream hop now carries an ALARMING-NOW on-box behavior (hands-on-keyboard exec /
+    # a live alert) and no CVE of its own. Downstream evidence is BEHAVIORAL-only — this is the
+    # one signal type that stands on its own two hops in, exactly as it would on the entry.
+    # MUST be exploitable.
+    ("downstream_behavioral_compromise", "exploitable",
+     "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
+     "<<<connects to 10.42.3.5:8080 (cluster)>>>",
+     f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
+     "  - workload/public/Pod/web-cache-0 [NETWORK] [same-ns] (Collection: Data from Information Repositories)",
+     "(none)", "",
+     "  - <<<workload/public/Pod/web-cache-0>>>: CVEs observed loading at runtime: <<<(none)>>> | Exposed secrets baked into this image: <<<(none)>>> | Observed runtime behavior: <<<ALERT (Falco): a terminal shell was spawned in the container>>> <<<reverse-shell connect to 203.0.113.7:4444 (INTERNET egress)>>> | Static posture findings: <<<(none)>>>"),
     # The clean-downstream-marker sibling of the above: the SAME shape, but the downstream hop
     # carries NO evidence of its own — checked, nothing found. MUST refute (a clean downstream
     # marker must never itself read as evidence).
