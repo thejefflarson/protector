@@ -2,8 +2,8 @@
 //!
 //! The agent's `SecretRead` (via `security_file_open`) started out scoped to the tmpfs
 //! superblock — the k8s Secret/ConfigMap/projected-volume mount point — so a read of a
-//! **host-filesystem** credential file (the host password/shadow file, a user's SSH
-//! private-key directory, a cloud-provider credential file) produced no CredentialAccess
+//! **host-filesystem** credential file (the host shadow file, a user's SSH private-key
+//! directory, a cloud-provider credential file) produced no CredentialAccess
 //! corroboration, even though it lives on the container's ordinary rootfs and Falco's
 //! "Read sensitive file untrusted" / "Read ssh information" rules fire on exactly this.
 //! This module is the engine-side classifier that closes that gap.
@@ -23,6 +23,30 @@
 //! the actual "is this path a known on-host credential path" call, from the full path
 //! alone, exactly like `adapter::enrich::secret_for_path` does for k8s Secret mounts.
 //!
+//! **Security rework (JEF-320 follow-up, four fixes from a HELD security review):**
+//! 1. `/etc/passwd` and `~/.ssh/known_hosts` are dropped from the allowlist — both are
+//!    world-readable / hold no secret material (`passwd` has no password hashes since
+//!    shadow passwords; `known_hosts` holds OTHER hosts' PUBLIC keys), and both are read
+//!    constantly by benign processes (`id`, `ls -l`, NSS, PAM, any SSH client). Matching
+//!    them produced a standing false CredentialAccess corroboration on ~every workload.
+//!    Falco itself fires on `shadow`, never `passwd`, for exactly this reason. `gshadow`
+//!    (the group-password shadow file) and `sudoers` (root-equivalent grant list) are
+//!    added — both hold or gate genuine credential material.
+//! 2. The `.ssh` match is now ANCHORED: a matched path must be a non-empty file directly
+//!    under a REAL home root (`/root/.ssh/<file>` or `/home/<user>/.ssh/<file>`), not a
+//!    `.ssh` segment at any depth (which let a world-writable `/tmp/.../.ssh/…` or
+//!    `/dev/shm/.../.ssh/…` path forge an SSH-key corroboration) and not the bare `.ssh`
+//!    directory itself (a directory open, not a key read).
+//! 3. The untrusted path is lexically NORMALIZED first (`.`/`..`/`//` collapsed via
+//!    [`std::path::Path::components`], never `std::fs::canonicalize` — that would touch
+//!    the ENGINE HOST's disk, violating zero-egress) before every check, closing a
+//!    path-traversal gap that could both forge a match (an unrelated basename reached via
+//!    a `..` that walks back out of a matched segment) and evade one (a dot/double-slash
+//!    variant of an exact path like `/etc/./shadow` or `/etc//shadow`).
+//!
+//! (The fourth fix — foothold-gating the resulting `SecretReadSource::HostPath`
+//! corroboration — lives in `engine::reason::proof::corroborate`, not here.)
+//!
 //! **FP-scoping (container/entry context only):** every `RuntimeSignal` that reaches a
 //! Workload node in `RuntimeAdapter::contribute` is already attributed to a *Pod* — a
 //! genuine host-system daemon (e.g. the node's real `sshd`, running outside any container
@@ -34,26 +58,42 @@
 //! its own `authorized_keys`) still matches. That residual false-positive is accepted
 //! deliberately: this signal is CORROBORATION ONLY (`corroborates()` only ever sets
 //! `corroborated`, never actuates — shadow-only, ADR-0014), it is combined with the model's
-//! own reasoning and every other piece of evidence on the chain, and it targets an
-//! explicitly off-critical-path residual gap (F0 §7) rather than a live corroboration path.
+//! own reasoning and every other piece of evidence on the chain, and (post security-rework)
+//! it is additionally gated to a proven internet-facing foothold entry
+//! (`engine::reason::proof::corroborate::host_credential_read_on_foothold`) rather than
+//! corroborating context-free on any workload.
 
-/// Absolute on-host paths matched **exactly** — the host password/shadow/sudoers files
-/// (F0 §3 Class E1, "Read sensitive file untrusted": `/etc/shadow` et al.). Deliberately a
-/// short, exact list (not a directory-prefix match on all of `/etc`) so an unrelated
-/// `/etc/*` config read never false-positives.
-const EXACT_HOST_PATHS: &[&str] = &["/etc/shadow", "/etc/passwd", "/etc/sudoers"];
+/// Absolute on-host paths matched **exactly** (against the NORMALIZED form of the observed
+/// path — see [`host_credential_path`]) — the host shadow/gshadow/sudoers files (F0 §3
+/// Class E1, "Read sensitive file untrusted": `/etc/shadow` et al.). Deliberately a short,
+/// exact list (not a directory-prefix match on all of `/etc`) so an unrelated `/etc/*`
+/// config read never false-positives.
+///
+/// `/etc/passwd` is deliberately NOT here: it is world-readable and holds no secret
+/// material (password hashes live in `/etc/shadow`), and is read constantly by benign
+/// processes (`id`, `ls -l`, NSS, PAM) — including it produced a standing false
+/// CredentialAccess corroboration on ~every workload (HIGH finding, security rework).
+/// Falco's own rule set matches `shadow`, never `passwd`, for the same reason.
+const EXACT_HOST_PATHS: &[&str] = &["/etc/shadow", "/etc/gshadow", "/etc/sudoers"];
 
-/// The path SEGMENT (not substring) that marks a per-user SSH private-key directory (F0
-/// §3 Class E1, "Read ssh information": any read under `~/.ssh`, regardless of whose home
-/// directory it is). Any file read one level under a `.ssh` segment counts — private keys,
-/// `authorized_keys`, `known_hosts` are all credential-adjacent, matching the breadth of
-/// Falco's own rule.
+/// The path SEGMENT (not substring) that marks a per-user SSH directory (F0 §3 Class E1,
+/// "Read ssh information"). See [`ssh_key_material_path`] for the ANCHORED match this
+/// segment feeds — a bare segment-anywhere match was a security finding (security rework):
+/// it let a `.ssh` directory under an attacker-writable temp/shm path forge a match.
 const SSH_DIR_SEGMENT: &str = ".ssh";
+
+/// The one basename under a `.ssh` directory that is deliberately EXCLUDED from a match:
+/// `known_hosts` holds the PUBLIC keys of remote hosts the user has connected to — no
+/// secret material — and is rewritten by an ordinary SSH client on every new connection.
+/// Matching it (security rework finding 1) produced routine false CredentialAccess
+/// corroborations indistinguishable from an actual private-key read.
+const SSH_NON_CREDENTIAL_BASENAME: &str = "known_hosts";
 
 /// Cloud-provider credential files for the major providers (AWS/GCP/Azure), each paired
 /// with the provider's conventional config-directory SEGMENT so a same-named file in an
 /// unrelated directory (e.g. some app's own `credentials` file) does not match. `file`
-/// must be the exact basename; `dir_segment` must appear as a whole path segment.
+/// must be the exact basename; `dir_segment` must appear as a whole path segment (of the
+/// NORMALIZED path — see [`host_credential_path`]).
 const CLOUD_CREDENTIAL_FILES: &[(&str, &str)] = &[
     // AWS CLI / SDKs: ~/.aws/credentials.
     (".aws", "credentials"),
@@ -66,41 +106,85 @@ const CLOUD_CREDENTIAL_FILES: &[(&str, &str)] = &[
     (".azure", "msal_token_cache.json"),
 ];
 
-/// The last `/`-separated, non-empty segment of `path` — its basename. Bare (no `/`)
-/// paths return themselves, mirroring [`crate::engine::graph::Behavior`]'s own
-/// `basename` helper.
-fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+/// Lexically normalize `path` into its `/`-separated NON-EMPTY components, collapsing
+/// `.`/`..`/duplicate-`/` forms via [`std::path::Path::components`] — WITHOUT touching disk
+/// (deliberately NOT `std::fs::canonicalize`, which would read the **engine host's** own
+/// filesystem and resolve symlinks there, violating zero-egress: the path under
+/// classification describes a file on a remote workload's rootfs, not anything that exists
+/// on this host).
+///
+/// This closes a path-traversal finding (security rework): matching the raw, unnormalized
+/// path let a crafted path both FORGE a match (e.g. `/tmp/.aws/../credentials` textually
+/// contains the `.aws` segment and the `credentials` basename, but lexically resolves to
+/// `/tmp/credentials` — nowhere near `.aws`) and EVADE one (e.g. `/etc/./shadow` or
+/// `/etc//shadow` resolve to the real `/etc/shadow` but never matched the exact-string
+/// list). Every check below runs against this normalized form.
+fn normalized_components(path: &str) -> Vec<&str> {
+    use std::path::{Component, Path};
+    let mut out: Vec<&str> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(segment) => {
+                out.push(segment.to_str().expect("path is valid UTF-8 str"));
+            }
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    out
 }
 
-/// Whether `path` contains `segment` as a whole `/`-delimited component (never a
-/// substring match — `.ssh` must not match `.sshrc` or `.ssh-backup`).
-fn has_segment(path: &str, segment: &str) -> bool {
-    path.split('/').any(|s| s == segment)
+/// Whether the normalized path `components` is a non-empty FILE directly under a real
+/// home directory's `.ssh` — `/root/.ssh/<file>` or `/home/<user>/.ssh/<file>` — the
+/// ANCHORED form of F0's "Read ssh information" rule (security rework finding 2).
+///
+/// Anchoring to a real home root (rather than a `.ssh` segment at any depth) means a
+/// `.ssh` directory nested under an attacker-writable path — a world-writable temp or
+/// `/dev/shm` directory, or any other non-home location — does NOT match: such a path can
+/// be planted by an unprivileged attacker precisely to forge this corroboration, so it
+/// carries none of the "this is really a user's SSH key material" signal a home-rooted
+/// `.ssh` does. Requiring a non-empty component AFTER `.ssh` means a read/open of the
+/// `.ssh` directory itself — not a file inside it — does not match either. `known_hosts`
+/// directly under `.ssh` is excluded (finding 1: no secret material).
+fn ssh_key_material_path(components: &[&str]) -> bool {
+    let rest = match components {
+        [root, seg, rest @ ..] if *root == "root" && *seg == SSH_DIR_SEGMENT => rest,
+        [home, _user, seg, rest @ ..] if *home == "home" && *seg == SSH_DIR_SEGMENT => rest,
+        _ => return false,
+    };
+    !rest.is_empty() && rest != [SSH_NON_CREDENTIAL_BASENAME]
+}
+
+/// Whether the normalized path `components` end in a known cloud-provider credential
+/// basename AND contain that provider's config-directory segment somewhere earlier in the
+/// (normalized) path — see [`CLOUD_CREDENTIAL_FILES`].
+fn cloud_credential_path(components: &[&str]) -> bool {
+    let Some(&name) = components.last() else {
+        return false;
+    };
+    CLOUD_CREDENTIAL_FILES
+        .iter()
+        .any(|&(dir, file)| file == name && components.contains(&dir))
 }
 
 /// Classify `path` (a container-relative path the agent observed, from a `FileRead`) as a
-/// well-known **on-host** sensitive credential path (JEF-320). Returns the path itself —
-/// used verbatim as the [`crate::engine::graph::Behavior::SecretRead`] `secret` identifier
-/// (mirrors how a k8s-mounted secret is named by `adapter::enrich::secret_for_path`) — or
-/// `None` for anything else, including deliberate near-misses: a look-alike basename
-/// outside its expected directory, a backup/rotated file (`shadow.bak`), or a directory
-/// read of `.ssh` itself rather than a file inside it.
+/// well-known **on-host** sensitive credential path (JEF-320). Returns the NORMALIZED path
+/// (see [`normalized_components`]) — used as the [`crate::engine::graph::Behavior::SecretRead`]
+/// `secret` identifier (mirrors how a k8s-mounted secret is named by
+/// `adapter::enrich::secret_for_path`) — or `None` for anything else, including deliberate
+/// near-misses: a look-alike basename outside its expected directory, a backup/rotated file
+/// (`shadow.bak`), a directory read of `.ssh` itself rather than a file inside it, or a
+/// `.ssh` outside a real home root.
 pub fn host_credential_path(path: &str) -> Option<String> {
-    if EXACT_HOST_PATHS.contains(&path) {
-        return Some(path.to_string());
-    }
-    if has_segment(path, SSH_DIR_SEGMENT) {
-        return Some(path.to_string());
-    }
-    let name = basename(path);
-    if CLOUD_CREDENTIAL_FILES
-        .iter()
-        .any(|&(dir, file)| file == name && has_segment(path, dir))
-    {
-        return Some(path.to_string());
-    }
-    None
+    let components = normalized_components(path);
+    let normalized = format!("/{}", components.join("/"));
+
+    let is_credential = EXACT_HOST_PATHS.contains(&normalized.as_str())
+        || ssh_key_material_path(&components)
+        || cloud_credential_path(&components);
+    is_credential.then_some(normalized)
 }
 
 #[cfg(test)]
@@ -108,7 +192,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_shadow_passwd_sudoers_match_exactly() {
+    fn host_shadow_gshadow_sudoers_match_exactly() {
         for path in EXACT_HOST_PATHS {
             assert_eq!(
                 host_credential_path(path),
@@ -136,20 +220,54 @@ mod tests {
     }
 
     #[test]
-    fn ssh_key_material_matches_any_file_under_a_dot_ssh_segment() {
-        // Any home directory, any filename directly under `.ssh` — private keys,
-        // authorized_keys, known_hosts — matches Falco's "read ssh information" breadth.
+    fn passwd_no_longer_matches() {
+        // HIGH finding (security rework): world-readable, no secret material, read
+        // constantly by benign processes (id / ls -l / NSS / PAM) — must NOT corroborate.
+        assert_eq!(host_credential_path("/etc/passwd"), None);
+    }
+
+    #[test]
+    fn known_hosts_no_longer_matches() {
+        // Finding 1 (security rework): other hosts' PUBLIC keys, no secret material, and
+        // rewritten by any ordinary SSH client — must NOT corroborate, unlike a real key.
+        assert_eq!(host_credential_path("/root/.ssh/known_hosts"), None);
+        assert_eq!(host_credential_path("/home/app/.ssh/known_hosts"), None);
+    }
+
+    #[test]
+    fn ssh_key_material_matches_a_file_under_a_real_home_dot_ssh() {
         let matches = [
             "/root/.ssh/id_rsa",
             "/root/.ssh/id_ed25519",
             "/home/app/.ssh/authorized_keys",
-            "/home/app/.ssh/known_hosts",
-            "/var/lib/jenkins/.ssh/id_rsa.pub",
-            "/.ssh/id_rsa", // no home dir prefix at all
         ];
         for path in matches {
             assert_eq!(host_credential_path(path), Some(path.to_string()), "{path}");
         }
+    }
+
+    #[test]
+    fn ssh_anchored_match_rejects_a_temp_or_shm_dot_ssh_path() {
+        // MEDIUM finding (security rework): an attacker-writable temp/shm `.ssh` directory
+        // must NOT forge an SSH-key corroboration — only a REAL home root anchors a match.
+        let near_misses = [
+            "/tmp/.ssh/id_rsa",
+            "/dev/shm/.ssh/id_rsa",
+            "/tmp/fake/.ssh/id_rsa",
+            "/var/lib/jenkins/.ssh/id_rsa.pub", // not /root or /home/<user>
+        ];
+        for path in near_misses {
+            assert_eq!(host_credential_path(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn ssh_anchored_match_rejects_the_bare_dot_ssh_directory() {
+        // MEDIUM finding (security rework): the `.ssh` directory ITSELF (no file
+        // component beneath it) must NOT match — only a file inside it does.
+        assert_eq!(host_credential_path("/root/.ssh"), None);
+        assert_eq!(host_credential_path("/home/app/.ssh"), None);
+        assert_eq!(host_credential_path("/root/.ssh/"), None);
     }
 
     #[test]
@@ -215,5 +333,44 @@ mod tests {
         for path in benign {
             assert_eq!(host_credential_path(path), None, "{path}");
         }
+    }
+
+    #[test]
+    fn dot_and_double_slash_variants_of_shadow_still_match_normalized() {
+        // MEDIUM finding (security rework), the EVADE case: `.`/`..`/`//` noise in the
+        // observed path must not let a real `/etc/shadow` read slip past an exact-string
+        // check — normalization must resolve it to the canonical form first.
+        assert_eq!(
+            host_credential_path("/etc/./shadow"),
+            Some("/etc/shadow".to_string())
+        );
+        assert_eq!(
+            host_credential_path("/etc//shadow"),
+            Some("/etc/shadow".to_string())
+        );
+        assert_eq!(
+            host_credential_path("/etc/foo/../shadow"),
+            Some("/etc/shadow".to_string())
+        );
+    }
+
+    #[test]
+    fn traversal_past_a_matched_segment_does_not_forge_a_cloud_credential_match() {
+        // MEDIUM finding (security rework), the FORGE case: a path that textually
+        // contains a matched dir segment (`.aws`) and a matched basename
+        // (`credentials`), but whose `..` walks back OUT of that directory before
+        // reaching the file, must NOT match — it never actually reads through `.aws`.
+        assert_eq!(host_credential_path("/tmp/.aws/../credentials"), None);
+        assert_eq!(
+            host_credential_path("/root/.aws/subdir/../../credentials"),
+            None
+        );
+    }
+
+    #[test]
+    fn traversal_past_a_matched_ssh_segment_does_not_forge_a_match() {
+        // The same FORGE shape against the anchored `.ssh` rule: `..` walks back out of
+        // `/root/.ssh` before reaching a sibling file, so it must not match either.
+        assert_eq!(host_credential_path("/root/.ssh/../id_rsa"), None);
     }
 }
