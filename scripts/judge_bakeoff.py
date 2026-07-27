@@ -72,6 +72,8 @@ A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one 
   - a credential listed in the "Exposed secrets baked into this image" field below (a usable API key, token, or private key committed into the image — an immediately-usable breach primitive).
 If NONE of the three is present, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
+The same three evidence types apply to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A CVE observed loading at runtime, a live alert/hands-on-keyboard signal, or an exposed secret found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: a popped pod partway down a proven path completes the chain. A downstream workload marked "no evidence observed" carries none of its own.
+
 Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)".
 
 Traps that are NOT evidence, no matter how they are labeled:
@@ -93,19 +95,22 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
+Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence (a "no evidence observed" workload carries none; this is the SAME exploitation-evidence bar as the entry's own fields above):
+{downstream}
 
 Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal, OR a credential listed in the (non-empty) "Exposed secrets baked into this image" field.
+  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal, a credential listed in the (non-empty) "Exposed secrets baked into this image" field, OR the same evidence on a downstream workload on the proven path.
   "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
   "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
   "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
 
-Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above — never invent, recall, or copy a CVE id from anywhere else; if the CVE list is "(none)", do not name any CVE."""
+Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above or in a downstream workload's block below — never invent, recall, or copy a CVE id from anywhere else; if both are "(none)", do not name any CVE."""
 
-# (name, expected_verdict, entry, cves, secrets, runtime, objectives[, posture, changes]) — one
-# case per branch. `posture` (static misconfig/RBAC findings) and `changes` (the ADR-0023 "Changes
-# since the last decisive verdict" delta block) are OPTIONAL trailing fields; when omitted they
-# default to "(none)" and "" so the existing cases stay 7-tuples. Objective lines are EXACTLY the
+# (name, expected_verdict, entry, cves, secrets, runtime, objectives[, posture, changes,
+# downstream]) — one case per branch. `posture` (static misconfig/RBAC findings), `changes` (the
+# ADR-0023 "Changes since the last decisive verdict" delta block), and `downstream` (JEF-565's
+# per-node downstream-evidence block) are OPTIONAL trailing fields; when omitted they default to
+# "(none)", "", and "(none)" so the existing cases stay 7-tuples. Objective lines are EXACTLY the
 # engine format. A [MOUNTED]/[RBAC-GRANTED] Credential-Access objective renders as the JEF-402
 # OUTCOME phrasing ("could read a credential store if exploited (Credential Access, T1552)"), NOT
 # the bare "Unsecured Credentials" ATT&CK name — every line carries its tags, no prose hints, so
@@ -336,6 +341,29 @@ CASES = [
      "workload/protector/Pod/protector-7f5577cf4b-9wkwl",
      "<<<(none)>>>", "(none)", "(none)",
      _PROTECTOR_OBJS, "(none)", _PROTECTOR_DELTA),
+    # JEF-565 — the entry itself is CLEAN (no CVE, no live signal, no exposed secret) but a
+    # workload TWO HOPS downstream on the proven path is running a KEV CVE. Before this ticket the
+    # downstream pod was invisible to the judge (only a one-line reachable-objective entry); now it
+    # gets its own fenced evidence block. MUST be exploitable — the same bar as an entry-level CVE,
+    # applied to a proven downstream hop. 10-tuple: trailing posture="(none)" + changes="" +
+    # the downstream block.
+    ("downstream_only_cve", "exploitable",
+     "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
+     "<<<connects to 10.42.3.5:8080 (cluster)>>>",
+     f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
+     "  - workload/public/Pod/web-cache-0 [NETWORK] [same-ns] (Collection: Data from Information Repositories)",
+     "(none)", "",
+     "  - <<<workload/public/Pod/web-cache-0>>>: CVEs observed loading at runtime: <<<CVE-2024-31337 [severity: critical] [reachability: loaded-at-runtime] [no fix available]>>> | Exposed secrets baked into this image: <<<(none)>>> | Observed runtime behavior: <<<(none)>>> | Static posture findings: <<<(none)>>>"),
+    # The clean-downstream-marker sibling of the above: the SAME shape, but the downstream hop
+    # carries NO evidence of its own — checked, nothing found. MUST refute (a clean downstream
+    # marker must never itself read as evidence).
+    ("downstream_clean_marker", "refuted",
+     "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
+     "<<<connects to 10.42.3.5:8080 (cluster)>>>",
+     f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
+     "  - workload/public/Pod/web-cache-0 [NETWORK] [same-ns] (Collection: Data from Information Repositories)",
+     "(none)", "",
+     "  - <<<workload/public/Pod/web-cache-0>>>: no evidence observed."),
 ]
 
 # Fast-field candidates, ordered roughly small->large. Goal: the FASTEST model that scores
@@ -506,8 +534,10 @@ def bench(models):
             name, exp, entry, cves, secrets, runtime, objs = case[:7]
             posture = case[7] if len(case) > 7 else "(none)"  # optional trailing field
             changes = case[8] if len(case) > 8 else ""  # optional ADR-0023 delta block
+            downstream = case[9] if len(case) > 9 else "(none)"  # optional JEF-565 downstream block
             res = chat(m, SYS.format(entry=entry, cves=cves, secrets=secrets, runtime=runtime,
-                                     posture=posture, objectives=objs, changes=changes))
+                                     posture=posture, objectives=objs, changes=changes,
+                                     downstream=downstream))
             if size == "?":
                 size = resident_size(m)
             rows.append((name, exp, res))
@@ -568,8 +598,10 @@ def flip_run(model, case_name, n, temp=0.0):
     name, exp, entry, cves, secrets, runtime, objs = case[:7]
     posture = case[7] if len(case) > 7 else "(none)"
     changes = case[8] if len(case) > 8 else ""
+    downstream = case[9] if len(case) > 9 else "(none)"
     prompt = SYS.format(entry=entry, cves=cves, secrets=secrets, runtime=runtime,
-                        posture=posture, objectives=objs, changes=changes)
+                        posture=posture, objectives=objs, changes=changes,
+                        downstream=downstream)
     mode = f"boundary-mass temp={temp}" if temp > 0 else "temp=0"
     print(f"FLIP-RATE  model={model}  case={case_name}  expected={exp}  n={n}  {mode}  num_ctx={NUM_CTX}")
     print(f"prompt length: {len(prompt)} chars\n")

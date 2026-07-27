@@ -95,6 +95,11 @@ struct PendingEntry {
     entry_key: String,
     entry: graph::NodeKey,
     objectives: Vec<(graph::NodeKey, graph::attack::AttackRef)>,
+    /// The deduped, sorted workload [`graph::NodeKey`]s on this entry's PROVEN paths
+    /// (`ProvenChain::paths`), EXCLUDING the entry itself (JEF-565) — every workload the model's
+    /// prompt renders its own evidence block for, threaded through to `Adjudicator::judge` so an
+    /// implementation's own backstops can weigh downstream evidence exactly as the prompt does.
+    downstream: Vec<graph::NodeKey>,
     /// The model's complete, deterministic input (built by `build_judgment_prompt`).
     prompt: String,
     /// The verdict-cache key: `prompt_cache_key(&prompt)` — the freshness key persisted in
