@@ -6,14 +6,37 @@
 //! backstop (anti-fabrication) over the parsed verdict.
 
 use crate::engine::graph::attack::AttackRef;
-use crate::engine::graph::{NodeKey, SecurityGraph};
+use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 
-use super::evidence::{cve_ids_of, entry_evidence, entry_findings};
+use super::evidence::{cve_ids_of, entry_evidence, entry_findings, retain_reachable_cves};
 use super::guards::{
     guard_fabricated_cve, guard_fabricated_reachability_tag, guard_unsupported_exploitable,
 };
 use super::prompt::parse_verdict;
 use super::{Adjudicator, Verdict};
+
+/// The downstream counterpart of the entry's own evidence fetch below (JEF-565): every
+/// downstream node on the entry's proven paths is real, structural evidence — same standing as
+/// the entry's own — so the anti-fabrication and zero-anchor backstops must ground against it
+/// too, exactly as the prompt shows it (same per-node fetch + [`retain_reachable_cves`] filter
+/// the downstream prompt blocks use).
+fn downstream_backstop_evidence(
+    graph: &SecurityGraph,
+    downstream: &[NodeKey],
+) -> (Vec<String>, bool, Vec<Behavior>) {
+    let mut cves = Vec::new();
+    let mut has_secret = false;
+    let mut behaviors = Vec::new();
+    for node in downstream {
+        let (mut node_cves, node_behaviors) = entry_evidence(graph, node);
+        retain_reachable_cves(&mut node_cves);
+        cves.extend(node_cves);
+        behaviors.extend(node_behaviors);
+        let (secret_lines, _posture) = entry_findings(graph, node);
+        has_secret |= !secret_lines.is_empty();
+    }
+    (cves, has_secret, behaviors)
+}
 
 /// A model-backed adjudicator (OpenAI-compatible endpoint via [`crate::engine::model`]).
 pub struct ModelAdjudicator {
@@ -80,6 +103,7 @@ impl Adjudicator for ModelAdjudicator {
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
         prompt: &str,
+        downstream: &[NodeKey],
     ) -> Verdict {
         // Fetch the entry's evidence ONCE for the two anti-fabrication backstops. JEF-134:
         // the deterministic layer PROVES + ENRICHES only — there is no pre-call decision
@@ -88,13 +112,23 @@ impl Adjudicator for ModelAdjudicator {
         // Authorized access (RBAC/mounted), however broad or high-severity, is not a breach
         // without exploitation evidence; that call is the model's, not the engine's. The ONE
         // remaining backstop is anti-fabrication (guard_fabricated_cve), not a decision gate.
-        let (cves, behaviors) = entry_evidence(graph, entry);
+        let (mut cves, mut behaviors) = entry_evidence(graph, entry);
         // Exposed-secret presence for the zero-anchor backstop, read from the SAME source the
         // prompt uses (`entry_findings` → `(secret_lines, posture_lines)`): a non-empty
         // `secret_lines` means a usable credential is baked into the image. Posture (misconfig
         // / RBAC) is NOT an exploitation anchor, so it is ignored here.
         let (secret_lines, _posture_lines) = entry_findings(graph, entry);
-        let has_exposed_secret = !secret_lines.is_empty();
+        let mut has_exposed_secret = !secret_lines.is_empty();
+        // JEF-565: the prompt now shows a fenced evidence block for every DOWNSTREAM workload on
+        // the entry's proven paths too, not just the entry — so a genuine downstream CVE/secret/
+        // behavior citation is real, grounded evidence and must not trip the anti-fabrication or
+        // zero-anchor backstops below. Fold it into the SAME real-evidence sets those backstops
+        // already check, exactly as the downstream prompt blocks render it.
+        let (downstream_cves, downstream_has_secret, downstream_behaviors) =
+            downstream_backstop_evidence(graph, downstream);
+        cves.extend(downstream_cves);
+        has_exposed_secret |= downstream_has_secret;
+        behaviors.extend(downstream_behaviors);
 
         // JEF-350: the caller already built this exact prompt to derive the verdict-cache key
         // (its hash); reuse those bytes for the model call rather than rebuilding, so the input
