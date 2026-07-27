@@ -194,6 +194,12 @@ impl Mitigation {
         // pods too (condition 2 acts regardless of network position). The remaining safety
         // gates (blast-radius, enabled class, scope) still apply in [`decide`]; audit arms
         // nothing, so this stays PROPOSE-only until an operator enforces `network`.
+        //
+        // JEF-322 thesis-check note: for `RemotelyExploitable`, that "per-pod evidence" is
+        // CVE *presence* + reachability (`compromisable`), not a live signal — so this
+        // branch auto-actions without the model-affirmation ADR-0013 requires for the
+        // entry-foothold lane. Verified deliberate, not a bug; see
+        // `reason::proof::chain::quarantine_targets_on_path`'s JEF-322 note.
         if self.action == ProposedAction::QuarantineWorkload {
             return true;
         }
