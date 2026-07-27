@@ -19,8 +19,12 @@ The model must, on cluster-representative cases, get the call right:
 - **own-app** (its own namespace's `[MOUNTED]` secret / `[same-ns]` DB) → **refute**
 - **argo / broad RBAC** (reaches many tenants' secrets, all `[RBAC-GRANTED]`) → **refute**
 - **log4shell** (a critical, exploited-in-wild CVE loaded at runtime) → **exploitable**
-- **cross-tenant network** (`[NETWORK]` `[cross-ns]` into a different tenant) → **exploitable**
-- **escape-to-host** (a privilege-escalation / host-escape outcome) → **exploitable**
+- **cross-tenant network** (`[NETWORK]` `[cross-ns]` into a different tenant, no CVE/signal) →
+  **refute** — a reachable path is loose topology (no NetworkPolicy), a severity finding to
+  fix, not an attack in progress.
+- **escape-to-host** (a privilege-escalation / host-escape outcome reachable, no CVE/signal)
+  → **refute** — same principle: a scary OUTCOME being reachable is not the outcome being
+  exploited.
 
 The principle (JEF-134): the deterministic layer PROVES + ENRICHES — reachability, the
 `[RBAC-GRANTED]` / `[MOUNTED]` / `[same-ns]` / `[cross-ns]` reach tags, and the CVE /
@@ -33,6 +37,33 @@ longer pre-decides via deterministic "promotion grounds" (those mis-gated ArgoCD
 (`guard_fabricated_cve`), which stops the model citing a CVE absent from the evidence — it
 is not a decision gate. See the holistic prompt in `build_judgment_prompt`
 (`engine/src/engine/reason/adjudicate.rs`).
+
+### Edge vs. downstream — the exploitability path is not the same evidence bar (JEF-565/JEF-567)
+
+JEF-565 gave the model its own evidence block for every workload on an entry's *proven* path,
+not just the entry — but the two positions in the chain are not judged identically:
+
+- **Edge (the internet-facing entry) — the CVE-exploitability path.** A critical CVE observed
+  *loading at runtime* on the entry is directly hittable from the internet: reachability +
+  a loaded CVE on the front door **is** exploitation evidence on its own → `exploitable`
+  (`log4j_breach`).
+- **Downstream (anything past the edge) — BEHAVIORAL evidence only.** Proving a *non-edge* CVE
+  exploitable would require knowing that attacker input actually reaches the vulnerable code
+  path *through* the edge — and reachability + "loaded-at-runtime" cannot show that: network
+  reachability is not application dataflow, and "loaded" is not "the vulnerable function ran
+  with attacker-controlled data". So a downstream workload's CVE, on its own, is **not**
+  exploitation evidence — only an on-box **behavioral** signal on that downstream workload
+  (an alert / hands-on-keyboard action — something happening *now*) is:
+  - `downstream_only_cve` — a downstream hop with a loaded-at-runtime CVE and *no* behavioral
+    evidence, behind a clean edge → **refute**. This is a deliberate keep-honest trap: the
+    model must not over-promote on downstream reachability + a loaded CVE alone. (Whether a
+    downstream CVE like this is exploitable via some other proxy/exposure path is the JEF-587
+    problem — deferred, not judged here.)
+  - `downstream_behavioral_compromise` — a downstream hop with an alert / hands-on-keyboard
+    signal and no CVE of its own, behind a clean edge → **exploitable**, the same bar as a
+    live signal on the entry itself.
+  - `downstream_clean_marker` — a downstream hop explicitly checked with nothing found →
+    **refute**.
 
 > **Recalibration gate (follow-up — JEF-50 arming, not the engine change):** removing the
 > deterministic grounds makes "is argo a breach" the *model's* call, so whether the prod
@@ -56,9 +87,10 @@ python3 scripts/judge_bakeoff.py              # phase 1: bench the default short
 python3 scripts/judge_bakeoff.py qwen3:4b-instruct   # bench specific models
 ```
 
-A candidate must score the bake-off cases correctly — own-app / argo **refuted**;
-log4j / cross-tenant-net / escape-to-host **exploitable** — to pass. A model that misses
-any case does not advance.
+A candidate must score the bake-off cases correctly — own-app / argo / cross-tenant-net /
+escape-to-host / `downstream_only_cve` / `downstream_clean_marker` **refuted**; log4j /
+`downstream_behavioral_compromise` **exploitable** — to pass. A model that misses any case
+does not advance.
 
 ### 2. Gated competence probe (`real_model_judges_toxic_vs_unevidenced`)
 
@@ -83,8 +115,9 @@ pointed at the candidate.)
 ## Checklist before swapping the prod model
 
 1. `python3 scripts/judge_bakeoff.py` against the candidate — it scores every bake-off
-   case correctly (own-app/argo refute; log4j/cross-tenant-net/escape exploitable) and is
-   fast enough on the target hardware.
+   case correctly (own-app/argo/cross-tenant-net/escape/`downstream_only_cve` refute;
+   log4j/`downstream_behavioral_compromise` exploitable) and is fast enough on the target
+   hardware.
 2. `cargo nextest run real_model_judges -- --ignored` against the candidate endpoint —
    the gated probe **passes** (all anchor assertions hold: log4shell exploitable; own-app
    and argo broad-RBAC refuted).
@@ -96,3 +129,13 @@ pointed at the candidate.)
   degraded endpoint stops being retried every pass). Deferred from JEF-109 as a larger
   change; the bounded client timeout + the `protector.engine.model_client_fallback` and
   `model_calls{result=unavailable}` metrics are the current backstops.
+- **Prompt text for the edge/downstream split (JEF-567 follow-up):** `build_judgment_prompt`'s
+  "Downstream evidence" paragraph still tells the model a downstream CVE observed
+  loading-at-runtime is exploitation evidence "exactly as if it were on the entry" — the SAME
+  bar as an edge CVE. This doc's edge/downstream framing above (and the `downstream_only_cve`
+  ground-truth flip to `refute`) is intentionally AHEAD of that prompt text: the fixture
+  ground truth is corrected here (T2a, ASSESSMENT-only), but rewording the prompt itself to
+  make downstream evidence behavioral-only is a separate engine change, not yet done. Until
+  that lands, expect the bake-off/e2e gate to actually score `downstream_only_cve` as
+  `exploitable` against the CURRENT prompt — that is the known, tracked gap this fixture
+  exists to close, not a bug in the fixture.
