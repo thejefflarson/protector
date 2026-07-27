@@ -82,6 +82,7 @@ fn breach_finding() -> Finding {
             },
             Behavior::ProcessExec {
                 path: "/bin/sh".into(),
+                exe_anon_inode: false,
             },
             Behavior::NetworkConnection {
                 peer: "185.220.101.4:9001".into(),

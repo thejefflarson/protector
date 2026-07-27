@@ -4,6 +4,12 @@ These rules apply to all work in this repo. Architectural *decisions* live in
 `docs/adr/`; this file captures the engineering *conventions* contributors and agents
 must follow.
 
+**North star:** the product's reason for existing is that **the model acts as an incident
+responder** — along internet-facing attack paths it decides what is an attack and what to
+cut, at the minimum scope; determinism proves + enriches + *feeds* the model, it never
+decides the cut. See [`docs/VISION.md`](docs/VISION.md). Work should point toward it (the
+downstream/pivot lane is not there yet — tracked from JEF-547).
+
 ## File size — hard limit
 
 **No source file may exceed 1,000 lines.** This is a hard cap, not a guideline. A file

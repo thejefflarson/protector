@@ -288,12 +288,15 @@ fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
     let (g, e) = graph_with_behaviors(vec![
         Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         },
         Behavior::ProcessExec {
             path: "/usr/bin/apt".into(),
+            exe_anon_inode: false,
         },
         Behavior::ProcessExec {
             path: "/app/server".into(),
+            exe_anon_inode: false,
         },
     ]);
     let prompt = build_judgment_prompt(&e, &[], &g);

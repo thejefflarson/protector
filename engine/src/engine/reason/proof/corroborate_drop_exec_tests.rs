@@ -35,7 +35,13 @@ fn write(path: &str, secs: u64) -> RuntimeSignal {
 }
 
 fn exec(path: &str, secs: u64) -> RuntimeSignal {
-    sig(Behavior::ProcessExec { path: path.into() }, secs)
+    sig(
+        Behavior::ProcessExec {
+            path: path.into(),
+            exe_anon_inode: false,
+        },
+        secs,
+    )
 }
 
 /// The entry is a proven internet-facing foothold in namespace `ns`.
