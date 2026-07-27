@@ -29,6 +29,24 @@ that grows unbounded becomes unreadable and unreviewable; that must not recur an
 - Presentation is a **view, never a decision gate** (ADR-0016).
 - Untrusted text (CVE / verdict / prompt / advisory) is always escaped at render.
 
+## Configuration — detection on by default; two gates only
+
+Protector's job is detection, and **shadow already makes every detector inert of action**,
+so a per-detector on/off flag guards nothing. **Do not add `PROTECTOR_*_ENABLE`-style
+toggles** for detection / corroboration / enrichment features — wire them on. If a detector
+is noisy, fix its **scope** (add a discriminator), don't add a toggle.
+
+Only two boundaries justify a setting:
+
+- **Enforcement** — `PROTECTOR_MODE` (`audit` = shadow, the default; `enforce` +
+  `enforceScope` arms the reversible cuts, ADR-0021). The single shadow-vs-act gate.
+- **Egress** — the zero-egress invariant. A flag that guards an *outbound* call is
+  legitimate (e.g. `PROTECTOR_REKOR_ENABLE`, `PROTECTOR_ENGINE_NOTIFY_URL`,
+  `PROTECTOR_ALLOW_EXTERNAL_*`).
+
+Everything else is a deployment essential (binds, TLS, endpoints, feed mounts) or a tuning
+knob with a sane default — not an operator toggle. Prefer a good default over a new setting.
+
 ## Workflow
 
 - Branch + PR; never commit directly to `main`. Merge on green CI.
