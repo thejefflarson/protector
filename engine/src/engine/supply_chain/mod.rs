@@ -11,8 +11,10 @@
 //!      TOFU baseline, and surface signing-regression drift ([`signing_drift`]).
 //!   2. [`signing_rekor::reconcile`] — opt-in: corroborate baselines against the public
 //!      transparency log and surface registry↔log divergence (OFF ⇒ zero egress).
-//!   3. [`provenance_sweep::sweep`] — opt-in: observe each image's SLSA build provenance and fold
-//!      the verified provenance identity into the SAME baseline ([`provenance_drift`]).
+//!   3. [`provenance_sweep::sweep`] — default-on (JEF-410): observe each image's SLSA build
+//!      provenance and fold the verified provenance identity into the SAME baseline
+//!      ([`provenance_drift`]). No `PROTECTOR_*_ENABLE` gate — it adds zero egress beyond the
+//!      signing sweep, so it stays on by default like every other detector.
 //!
 //! After the sweeps, the freshly-updated baseline is published to the webhook (the engine is the
 //! SOLE writer; ADR-0020 Stage 3) and the LIVE signing-trust readiness signals are refreshed —
@@ -41,10 +43,11 @@ pub mod signing_sweep;
 // can surface an audit-only signing-regression finding on drift from the baseline.
 pub mod signing_drift;
 
-// The build-provenance drift classifier + sweep (ADR-0020 §5, JEF-275): the provenance twin of
-// signing_drift/signing_sweep — observes each image's SLSA provenance posture, learns the per-repo
-// provenance identity (TOFU), and surfaces an audit-only provenance-change finding when an
-// established repo is built by an unexpected builder/source. OFF by default — zero extra egress.
+// The build-provenance drift classifier + sweep (ADR-0020 §5, JEF-275; default-on since JEF-410):
+// the provenance twin of signing_drift/signing_sweep — observes each image's SLSA provenance
+// posture, learns the per-repo provenance identity (TOFU), and surfaces an audit-only
+// provenance-change finding when an established repo is built by an unexpected builder/source.
+// Adds zero extra egress: it reuses the signing sweep's registry/Rekor round trip.
 pub mod provenance_drift;
 pub mod provenance_sweep;
 
@@ -66,14 +69,17 @@ pub mod signing_rekor;
 
 /// The wired-in supply-chain observers for a `run_watch` loop, built ONCE at loop start so each
 /// one's TTL + image/query cache persists across passes (a steady cluster re-sweeps for free). Any
-/// field may be `None`: a missing signing observer (misconfigured TUF cache) degrades to a no-op
-/// sweep, and the Rekor lane / provenance scanner are opt-in and absent by default (zero egress).
+/// field may be `None`: a missing signing or provenance observer (misconfigured TUF cache)
+/// degrades to a no-op sweep, and the Rekor lane specifically is opt-in and absent by default
+/// (a genuine second egress destination — everything else here is default-on, JEF-410).
 pub struct SupplyChainSweeps<'a> {
     /// Signing-posture observer (ADR-0020 Stage 1). `None` ⇒ the signing sweep is a no-op.
     pub signing_observer: Option<&'a SigningObserver>,
     /// Opt-in Rekor transparency-log lane (ADR-0020 §4). `None` ⇒ reconcile is a no-op (zero egress).
     pub rekor_lane: Option<&'a RekorLane>,
-    /// Opt-in build-provenance scanner (ADR-0020 §5). `None` ⇒ the provenance sweep is a no-op.
+    /// Build-provenance scanner (ADR-0020 §5), default-on (JEF-410). `None` only if the shared
+    /// cosign observer itself failed to build (e.g. TUF cache dir); the provenance sweep is then a
+    /// no-op, same degrade path as a missing `signing_observer`.
     pub provenance_scanner: Option<&'a ProvenanceScanner>,
     /// The scoped "exception accepted" config, read by the signing sweep's render.
     pub exceptions: &'a SigningExceptions,
@@ -86,7 +92,7 @@ pub struct SupplyChainSweeps<'a> {
 /// call sequence behind one entry point.
 ///
 /// In order: observe signing posture ([`signing_sweep::sweep`]) → opt-in Rekor reconciliation
-/// ([`signing_rekor::reconcile`]) → opt-in provenance observation ([`provenance_sweep::sweep`]).
+/// ([`signing_rekor::reconcile`]) → default-on provenance observation ([`provenance_sweep::sweep`]).
 /// Then publishes the freshly-updated baseline to the webhook (the engine is the SOLE writer;
 /// JEF-265) — done after ALL baseline-mutating sweeps so the webhook always sees a consistent,
 /// whole-pass snapshot — and refreshes the LIVE signing-trust readiness signals ([`signing_trust`])

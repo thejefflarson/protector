@@ -283,10 +283,10 @@ new egress path.
    — exactly the baseline-relative semantics JEF-280 established. Absent / unverifiable /
    checking never fire a change.
 
-4. **Off by default; degrades cleanly.** The provenance sweep is opt-in
-   (`PROTECTOR_PROVENANCE_ENABLE`, mirroring the Rekor lane), so the default posture adds
-   **zero egress** beyond the signing sweep, and an image with no provenance (today's
-   norm) simply reads `Absent`. This is safe to ship before any CI attaches provenance.
+4. **Degrades cleanly.** An image with no provenance (today's norm) simply reads `Absent` —
+   calm, never an alarm. *(Superseded by the JEF-410 addendum below: the sweep is now
+   default-on, not opt-in — it was never a new egress destination, so gating it behind a
+   flag was detection proliferation, not an egress control.)*
 
 **Known limitation (DECISION NEEDED — recorded for the architect).** The pinned
 `sigstore` crate (0.14) verifies DSSE bundle referrers only for the cosign `sign/v1`
@@ -403,3 +403,32 @@ scope only; observation, learning, drift classification, and the render are unch
    the existing cache + `PROTECTOR_MAX_IMAGES`). A missing/unreadable exception file, an un-compilable
    pin regexp, an unavailable observer, or an empty/poisoned baseline snapshot all degrade in the safe
    direction: MORE enforced or NOT denying — never a silent widen of what is admitted.
+
+## Addenda (JEF-410 — build provenance is default-ON: retire `PROTECTOR_PROVENANCE_ENABLE`)
+
+The JEF-275 addendum shipped the provenance sweep opt-in behind `PROTECTOR_PROVENANCE_ENABLE`,
+"mirroring the Rekor lane." That mirroring was a mistake: the Rekor lane's flag
+(`PROTECTOR_REKOR_ENABLE`) is a genuine **egress** gate — Rekor is a separate outbound
+destination from the registry the cluster already pulls from, and ADR-0015's zero-egress default
+means a NEW destination must stay opt-in. The provenance sweep is not that. Per the operator's
+standing principle — detection features are on by default; the only gates are enforcement and
+egress, never a per-detector `PROTECTOR_*_ENABLE` flag — the provenance flag gated *detection*,
+not egress, and is retired.
+
+1. **Zero-egress re-confirmed before flipping the default.** [`ProvenanceObserver::observe_provenance`]
+   on `CosignChecker` calls the SAME `fetch_layers` (registry pull + Rekor inclusion check) that
+   [`SignatureObserver::observe`] already makes for that image's *signing* posture — one round trip,
+   two postures read off it. There is no second verifier, no second client, no additional host
+   contacted; the only change is that the SLSA in-toto/DSSE layer `trusted_signature_layers` already
+   fetched is now also classified. So flipping the default costs nothing egress-wise: any image the
+   signing sweep already observes is now also read for provenance off the identical bytes.
+2. **The provenance sweep is now built unconditionally** (`build_provenance_scanner`, mirroring
+   `build_signing_observer` exactly), bounded by the same `PROTECTOR_MAX_IMAGES` cap and TTL cache as
+   before. `PROTECTOR_PROVENANCE_ENABLE` is removed; there is no replacement flag and no migration
+   step — the sweep simply runs every pass now, same as signing observation always has.
+3. **Still observation-only.** This addendum changes construction only — no enforcement, no new
+   drift semantics, no render change. A verified provenance still only feeds the audit-only
+   provenance-change finding (Decision §5 point 3) and the per-repo baseline; it never gates
+   admission. The genuinely opt-in Rekor lane (`PROTECTOR_REKOR_ENABLE`) is UNCHANGED by this
+   addendum — it remains gated because it is a real second egress destination, the case this
+   principle's "egress" carve-out exists for.
