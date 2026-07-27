@@ -21,12 +21,15 @@
 //! `ProvenanceChange/<repo>`, decision `allow`. This is **audit-only — still admitted** (the shadow
 //! invariant, ADR-0016): the finding is surfaced, never acted on. NO enforcement here.
 //!
-//! ## Off by default (zero extra egress)
+//! ## Default-on, zero extra egress (JEF-410)
 //!
-//! The sweep is a no-op unless a [`ProvenanceScanner`] is wired (opt-in via the run-loop's
-//! `PROTECTOR_PROVENANCE_ENABLE`, mirroring the Rekor lane), so the default posture adds ZERO
-//! outbound calls beyond the existing signing sweep. When on, it reuses the SAME sanctioned
-//! registry/sigstore fetch path (ADR-0015), bounded by the scanner's TTL cache + `max_images` cap.
+//! Detection features are on by default — only enforcement and egress are gated, never a
+//! per-detector `PROTECTOR_*_ENABLE` flag — so the run-loop wires a [`ProvenanceScanner`]
+//! unconditionally (mirroring the always-on signing sweep). This adds ZERO new outbound calls: the
+//! scanner reuses the SAME sanctioned registry/sigstore fetch path signature verification already
+//! uses (ADR-0015) — no second verifier, no new egress destination — bounded by the scanner's TTL
+//! cache + `max_images` cap. The sweep is still a no-op (empty map, no rows recorded) if the shared
+//! cosign observer itself fails to build (e.g. an unwritable TUF cache dir).
 
 use std::sync::Arc;
 use std::time::SystemTime;

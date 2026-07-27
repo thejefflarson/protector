@@ -199,7 +199,6 @@ fn clear_observer_env() {
         std::env::remove_var("PROTECTOR_CACHE_TTL");
         std::env::remove_var("PROTECTOR_MAX_IMAGES");
         std::env::remove_var("PROTECTOR_OIDC_ISSUER");
-        std::env::remove_var("PROTECTOR_PROVENANCE_ENABLE");
     }
 }
 
@@ -235,9 +234,14 @@ fn cosign_observer_parts_honors_env_overrides() {
     assert_eq!(cache_ttl, Duration::from_secs(42));
 }
 
-/// Anti-drift: from ONE env, the signing observer builds AND (once opted in) the provenance
-/// scanner builds — both routed through the shared parts, both inheriting the same bounds. If
-/// either builder stopped going through `cosign_observer_parts`, this pins the equivalence.
+/// Anti-drift: from ONE env, BOTH the signing observer and the provenance scanner build — routed
+/// through the shared parts, both inheriting the same bounds. If either builder stopped going
+/// through `cosign_observer_parts`, this pins the equivalence.
+///
+/// JEF-410: provenance detection is default-ON (no `PROTECTOR_*_ENABLE` gate) — detection features
+/// are on by default, and only enforcement/egress are gated. This test previously asserted the
+/// scanner was off until an opt-in flag was set; it now asserts it builds unconditionally from a
+/// valid env, exactly like the signing observer.
 #[test]
 fn both_builders_build_from_the_same_env() {
     clear_observer_env();
@@ -251,16 +255,8 @@ fn both_builders_build_from_the_same_env() {
         super::build_signing_observer().is_some(),
         "signing observer must build from a valid env"
     );
-
-    // Provenance is opt-in: off by default, on only when explicitly enabled — the one bit
-    // that stays distinct from the signing sweep.
-    assert!(
-        super::build_provenance_scanner().is_none(),
-        "provenance scanner is off until PROTECTOR_PROVENANCE_ENABLE is set"
-    );
-    unsafe { std::env::set_var("PROTECTOR_PROVENANCE_ENABLE", "1") };
     assert!(
         super::build_provenance_scanner().is_some(),
-        "provenance scanner must build from the same env once opted in"
+        "provenance scanner must build from the same env, default-on, with no opt-in flag required"
     );
 }

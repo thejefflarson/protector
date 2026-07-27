@@ -226,20 +226,17 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     ))
 }
 
-/// Build the opt-in build-provenance scanner (ADR-0020 §5, JEF-275). Returns `None` — and so makes
-/// NO extra outbound call ever — unless `PROTECTOR_PROVENANCE_ENABLE` is explicitly set (the default
-/// posture adds zero egress beyond the signing sweep). When enabled it observes each running image's
-/// SLSA provenance on the SAME sanctioned cosign path as signature verification, reusing the shared
-/// [`cosign_observer_parts`] verifier — no second verifier.
+/// Build the build-provenance scanner (ADR-0020 §5, JEF-275). Default-ON (JEF-410): detection
+/// features are on by default — only enforcement and egress are gated, never a per-detector
+/// `PROTECTOR_*_ENABLE` flag — so this now mirrors [`build_signing_observer`] exactly, with no
+/// opt-in of its own. It adds NO new outbound call: it observes each running image's SLSA
+/// provenance on the SAME sanctioned cosign fetch path as signature verification, reusing the
+/// shared [`cosign_observer_parts`] verifier — no second verifier, no new egress destination (the
+/// identical registry/Rekor round trip the signing sweep already makes for that image). Returns
+/// `None` only if the shared cosign observer itself can't build (e.g. the TUF cache dir can't be
+/// created) — the same degrade path [`build_signing_observer`] takes.
 fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceScanner> {
-    // Opt-in gate: the one bit distinct from the signing sweep. Absent ⇒ zero extra egress.
-    if std::env::var("PROTECTOR_PROVENANCE_ENABLE").is_err() {
-        return None;
-    }
     let (checker, max_images, cache_ttl) = cosign_observer_parts("build-provenance")?;
-    tracing::info!(
-        "build-provenance scanner ENABLED (opt-in; reuses the sanctioned cosign fetch path, ADR-0020 §5)"
-    );
     Some(crate::policies::signature::ProvenanceScanner::new(
         checker, max_images, cache_ttl,
     ))
@@ -545,11 +542,12 @@ pub async fn run_watch(
     // divergence.
     let rekor_lane = build_rekor_lane();
 
-    // The opt-in build-provenance scanner (ADR-0020 §5, JEF-275): OFF unless
-    // `PROTECTOR_PROVENANCE_ENABLE` is set, so the default posture adds zero egress beyond the
-    // signing sweep. Built once so its TTL cache persists across passes. When enabled, each pass
-    // observes every running image's SLSA provenance posture (verified / unverifiable / no-provenance
-    // / checking) and folds the verified provenance identity into the SAME per-repo baseline.
+    // The build-provenance scanner (ADR-0020 §5, JEF-275): default-ON (JEF-410, detection-on-by-
+    // default), built once so its TTL cache persists across passes. It adds NO egress beyond the
+    // signing sweep — same round trip, same image. Each pass observes every running image's SLSA
+    // provenance posture (verified / unverifiable / no-provenance / checking) and folds the
+    // verified provenance identity into the SAME per-repo baseline. Observation-only: never
+    // actuates, just surfaces the dashboard's provenance posture column.
     let provenance_scanner = build_provenance_scanner();
 
     // Bundle the once-built supply-chain observers into the facade's handle (JEF-369). Built once,
@@ -766,7 +764,7 @@ pub async fn run_watch(
             linkerd_mtls_auths: linkerd_mtls_now,
         };
         // Run the supply-chain sweep pipeline over this snapshot (JEF-369): observe signing posture,
-        // opt-in Rekor reconciliation, opt-in provenance observation, publish the whole-pass
+        // opt-in Rekor reconciliation, default-on provenance observation, publish the whole-pass
         // baseline to the webhook, and refresh the LIVE signing-trust readiness signals — the same
         // sequence, in the same order, that ran inline here before the facade extraction. Run before
         // `process` so the inventory reflects the same snapshot the engine just reasoned over.
