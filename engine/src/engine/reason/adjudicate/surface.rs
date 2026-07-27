@@ -38,6 +38,12 @@ pub struct JudgedSurface {
     secrets: BTreeSet<String>,
     posture: BTreeSet<String>,
     behaviors: BTreeSet<String>,
+    /// The downstream-workload evidence lines (JEF-565) — projected from the SAME node-prefixed
+    /// lines the downstream prompt blocks render (`downstream::render_downstream`). This is the
+    /// category that closes the trap: without it, a downstream-only change (a new CVE two hops
+    /// in) is visible to the model in the PROMPT but invisible to the re-judge gate, so the
+    /// layer-2 subtractive-delta hold would silently keep serving the prior (stale) verdict.
+    downstream: BTreeSet<String>,
 }
 
 impl JudgedSurface {
@@ -51,6 +57,7 @@ impl JudgedSurface {
         secrets: &[String],
         posture: &[String],
         behaviors: &[String],
+        downstream: &[String],
     ) -> Self {
         let set = |v: &[String]| v.iter().cloned().collect::<BTreeSet<String>>();
         Self {
@@ -59,6 +66,7 @@ impl JudgedSurface {
             secrets: set(secrets),
             posture: set(posture),
             behaviors: set(behaviors),
+            downstream: set(downstream),
         }
     }
 
@@ -83,6 +91,7 @@ impl JudgedSurface {
             secrets: diff(&self.secrets, &base.secrets),
             posture: diff(&self.posture, &base.posture),
             behaviors: diff(&self.behaviors, &base.behaviors),
+            downstream: diff(&self.downstream, &base.downstream),
         }
     }
 }
@@ -98,6 +107,10 @@ pub struct ChangesSince {
     secrets: Vec<String>,
     posture: Vec<String>,
     behaviors: Vec<String>,
+    /// Downstream-workload evidence additions (JEF-565) — a newly-appeared CVE/secret/behavior
+    /// on a workload on the entry's proven paths, or a downstream node transitioning
+    /// clean→evidence-bearing.
+    downstream: Vec<String>,
 }
 
 impl ChangesSince {
@@ -110,6 +123,7 @@ impl ChangesSince {
             && self.secrets.is_empty()
             && self.posture.is_empty()
             && self.behaviors.is_empty()
+            && self.downstream.is_empty()
     }
 
     /// The additions as labeled prompt lines, in a fixed category order (each category's lines
@@ -129,6 +143,7 @@ impl ChangesSince {
         push("newly-exposed secret", &self.secrets);
         push("new static-posture finding", &self.posture);
         push("newly-observed runtime behavior", &self.behaviors);
+        push("new downstream-workload evidence", &self.downstream);
         out
     }
 }
