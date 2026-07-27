@@ -61,7 +61,10 @@ fn proposes_a_mitigation_for_a_cuttable_chain() {
 
 /// Auto-action requires an internet-facing entry: a corroborated, adjudicated
 /// chain whose entry is internal-only is NOT live-actionable — the engine acts
-/// on remote exploitation, not normal internal activity.
+/// on remote exploitation, not normal internal activity. JEF-566: this gate is now
+/// identical for every action, `QuarantineWorkload` included — no special case, so
+/// an internal-only actively-exploited pod (`breach_relevant == false`) is
+/// propose-only just like an internal-only edge-cut.
 #[test]
 fn auto_action_requires_a_breach_relevant_entry() {
     use crate::engine::graph::NodeKey;
@@ -77,7 +80,7 @@ fn auto_action_requires_a_breach_relevant_entry() {
         promoted: false,
         breach_relevant,
     };
-    let mitigation = |breach_relevant: bool| Mitigation {
+    let mitigation = |action: ProposedAction, breach_relevant: bool| Mitigation {
         cut: Link {
             from: NodeKey("workload/app/Pod/x".into()),
             to: NodeKey("workload/app/Pod/y".into()),
@@ -86,16 +89,28 @@ fn auto_action_requires_a_breach_relevant_entry() {
             from_labels: Default::default(),
             to_labels: Default::default(),
         },
-        action: ProposedAction::DenyNetworkPath,
+        action,
         justifications: vec![justify(breach_relevant)],
     };
     assert!(
-        mitigation(true).is_live_corroborated(),
+        mitigation(ProposedAction::DenyNetworkPath, true).is_live_corroborated(),
         "internet-facing + corroborated ⇒ auto-actionable"
     );
     assert!(
-        !mitigation(false).is_live_corroborated(),
+        !mitigation(ProposedAction::DenyNetworkPath, false).is_live_corroborated(),
         "internal-only corroborated ⇒ NOT auto-actionable (context, not a breach)"
+    );
+    // The JEF-566 gate: QuarantineWorkload clears/fails on the SAME breach_relevant
+    // condition — it no longer bypasses it via a special case.
+    assert!(
+        mitigation(ProposedAction::QuarantineWorkload, true).is_live_corroborated(),
+        "a breach-relevant, corroborated workload quarantine ⇒ auto-actionable, same as \
+         DenyNetworkPath"
+    );
+    assert!(
+        !mitigation(ProposedAction::QuarantineWorkload, false).is_live_corroborated(),
+        "JEF-566: an internal-only actively-exploited pod (breach_relevant == false) is \
+         propose-only, never auto-cut — no more QuarantineWorkload special case"
     );
 }
 
@@ -419,8 +434,19 @@ fn crit_vuln(id: &str, kev: bool) -> Vulnerability {
 /// A multi-hop breach: internet `web` -reaches-> `app1` (critical CVE) -reaches->
 /// `app2` (KEV) which mounts the secret. Both `app1` and `app2` are compromisable and
 /// network-reachable from the internet foothold — so both are *remotely exploitable*
-/// (JEF-284 condition 1), a popped app one and two hops in.
+/// (JEF-284 condition 1), a popped app one and two hops in. No runtime evidence, so the
+/// justifying chain is NOT live-corroborated (JEF-566: target *identification* here is
+/// unaffected — only auto-*action* now requires corroboration).
 fn multi_hop_breach_snapshot() -> Snapshot {
+    multi_hop_breach_snapshot_with_runtime(Vec::new())
+}
+
+/// [`multi_hop_breach_snapshot`] with caller-supplied runtime evidence, so a test can
+/// make the justifying chain live-corroborated (e.g. an alert on the `web` entry)
+/// while keeping the same topology/CVE shape.
+fn multi_hop_breach_snapshot_with_runtime(
+    runtime_events: Vec<crate::engine::observe::RuntimeObservation>,
+) -> Snapshot {
     use crate::engine::observe::ImageVulnerabilities;
     let pod = |name: &str, role: &str, image: &str, secret: Option<&str>| {
         let env = secret
@@ -469,6 +495,7 @@ fn multi_hop_breach_snapshot() -> Snapshot {
                 vulnerabilities: vec![crit_vuln("CVE-2026-1002", true)],
             },
         ],
+        runtime_events,
         ..Default::default()
     }
 }
@@ -567,6 +594,17 @@ fn internal_actively_exploited_pod_is_quarantined() {
         chains.iter().all(|c| !c.is_breach_relevant()),
         "the internal chain is deliberately not breach-relevant"
     );
+    // JEF-566: quarantining it as a PROPOSAL is fine (it still surfaces to a human), but
+    // it must never clear the auto-action gate — an internal-only pod is not a breach,
+    // live alert or not.
+    let mitigation = workload_quarantines(&delta)
+        .into_iter()
+        .find(|m| m.cut.from.0 == "workload/app/Pod/watcher")
+        .expect("watcher is quarantined");
+    assert!(
+        !mitigation.is_live_corroborated(),
+        "an internal-only actively-exploited pod is propose-only, never auto-cut"
+    );
 }
 
 /// The regression guard: a pod that is merely *reached* (network-reachable and clean —
@@ -651,8 +689,23 @@ fn reachable_but_clean_pod_is_not_quarantined() {
 
 #[test]
 fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
+    use crate::engine::observe::{Attribution, RuntimeObservation};
+    use protector_behavior::Behavior;
+
+    // This test isolates the enable/scope gate (not the JEF-566 corroboration gate), so
+    // give the entry a live alert — any "attack happening now" signal — corroborating the
+    // justifying chain, so `is_live_corroborated()` clears independently of what's asserted
+    // here.
     let chains = prove(&build_graph(
-        &multi_hop_breach_snapshot(),
+        &multi_hop_breach_snapshot_with_runtime(vec![RuntimeObservation {
+            attribution: Attribution::by_namespaced_name("app", "web"),
+            source: Some("alert".into()),
+            observed_at_ms: None,
+            node: None,
+            behavior: Behavior::Alert {
+                rule: "Terminal shell in container".into(),
+            },
+        }]),
         &default_adapters(),
     ));
     let mut ledger = MitigationLedger::new();
@@ -662,6 +715,10 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
         .find(|m| m.cut.from.0 == "workload/app/Pod/app2")
         .expect("app2 is quarantined")
         .clone();
+    assert!(
+        mitigation.is_live_corroborated(),
+        "the entry alert corroborates the justifying chain, clearing the JEF-566 gate"
+    );
 
     // No alive collateral in this snapshot's health view; keep the blast radius empty so
     // the test isolates the enable/scope gate.
