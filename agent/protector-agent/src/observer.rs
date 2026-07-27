@@ -80,7 +80,8 @@ mod ebpf {
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
         ConnEvent, EventHeader, ExecEvent, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
-        KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
+        KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_MODULE_LOAD, KIND_PRIV_CHANGE, KIND_PTRACE_ATTACH,
+        PATH_CAP, PrivEvent,
     };
     use protector_behavior::{Attribution, Behavior};
 
@@ -160,6 +161,18 @@ mod ebpf {
         /// eBPF side already filtered to write-intent opens and deduped repeats to the same
         /// `(pid, inode)`; this just carries the path through (JEF-306).
         FileWrite { attr: EventAttr, path: String },
+        /// Ptrace ATTACH access check (JEF-318): a process attempted to PTRACE_ATTACH (or
+        /// PTRACE_SEIZE / a cross-process memory access) another process — the
+        /// process-injection primitive Falco fires critical on. No payload beyond
+        /// attribution: the attacking pid/cgroup IS the fact (the target pid is deliberately
+        /// not read — see the eBPF probe's doc comment).
+        PtraceAttach { attr: EventAttr },
+        /// Kernel module load (JEF-318): `init_module`/`finit_module` reached
+        /// `load_module()`'s `security_kernel_load_data(LOADING_MODULE, …)` call — a
+        /// container loading arbitrary code into the HOST kernel, the module-load parity
+        /// signal Falco fires critical on. No payload beyond attribution — the occurrence is
+        /// the fact.
+        ModuleLoad { attr: EventAttr },
     }
 
     /// The pair of identities every event carries for attribution (JEF-158): the in-kernel
@@ -190,7 +203,9 @@ mod ebpf {
                 | RawEvent::LibraryLoad { attr, .. }
                 | RawEvent::PrivChange { attr, .. }
                 | RawEvent::Exec { attr, .. }
-                | RawEvent::FileWrite { attr, .. } => *attr,
+                | RawEvent::FileWrite { attr, .. }
+                | RawEvent::PtraceAttach { attr, .. }
+                | RawEvent::ModuleLoad { attr, .. } => *attr,
             }
         }
 
@@ -224,6 +239,8 @@ mod ebpf {
                     exe_anon_inode,
                 },
                 RawEvent::FileWrite { path, .. } => Behavior::FileWrite { path },
+                RawEvent::PtraceAttach { .. } => Behavior::PtraceAttach,
+                RawEvent::ModuleLoad { .. } => Behavior::ModuleLoad,
             }
         }
     }
@@ -592,6 +609,8 @@ mod ebpf {
                 ("mmap_file", "security_mmap_file"),
                 ("fix_setuid", "security_task_fix_setuid"),
                 ("bprm_check", "security_bprm_check"),
+                ("ptrace_access_check", "security_ptrace_access_check"),
+                ("kernel_load_data", "security_kernel_load_data"),
             ];
             let attempted = FENTRY_PROBES.len() as u32;
             let btf = match Btf::from_sys_fs() {
@@ -692,6 +711,14 @@ mod ebpf {
                     let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
                     Self::file_write(&ev)
                 }
+                // JEF-318: both bodies ARE the header — already parsed above, and its length
+                // already checked at the top of this function — so no further byte parse.
+                KIND_PTRACE_ATTACH => Some(RawEvent::PtraceAttach {
+                    attr: EventAttr::from_header(&header),
+                }),
+                KIND_MODULE_LOAD => Some(RawEvent::ModuleLoad {
+                    attr: EventAttr::from_header(&header),
+                }),
                 _ => None, // unknown kind (older/newer probe set) — skip
             }
         }

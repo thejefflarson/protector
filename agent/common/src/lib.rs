@@ -36,6 +36,20 @@ pub const KIND_PRIV_CHANGE: u32 = 5;
 /// config tampering (ADR-0014). Reuses [`FileEvent`]
 /// (the `kind` discriminates it from the read/exec/library file events).
 pub const KIND_FILE_WRITE: u32 = 6;
+/// A ptrace ATTACH access check (fentry on `security_ptrace_access_check`, filtered
+/// in-kernel to `mode & PTRACE_MODE_ATTACH` — JEF-318, Retire-Falco G2). The classic
+/// process-injection primitive Falco fires critical on. Carries NO body beyond the shared
+/// [`EventHeader`]: the occurrence, attributed by the header's pid/cgroup, IS the fact — the
+/// target `task_struct`'s pid is deliberately NOT read (see the eBPF probe's doc comment for
+/// why). Userspace emits a `Behavior::PtraceAttach`.
+pub const KIND_PTRACE_ATTACH: u32 = 7;
+/// A kernel module load (fentry on `security_kernel_load_data`, filtered in-kernel to
+/// `id == LOADING_MODULE` — JEF-318, Retire-Falco G2). Falco fires critical on
+/// `init_module`/`finit_module`; `load_module()` calls this hook on BOTH syscalls before any
+/// parsing, so one probe covers both. Carries NO body beyond [`EventHeader`], same shape as
+/// [`KIND_PTRACE_ATTACH`] — the occurrence is the fact. Userspace emits a
+/// `Behavior::ModuleLoad`.
+pub const KIND_MODULE_LOAD: u32 = 8;
 
 /// Max path bytes carried per [`FileEvent`]. Secret-mount paths are well under this; a
 /// longer path is truncated (the secret name still lands). Sized to keep the eBPF stack

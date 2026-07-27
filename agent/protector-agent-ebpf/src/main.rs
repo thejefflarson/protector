@@ -37,7 +37,8 @@ use aya_ebpf::{
 use protector_agent_common::{
     should_coalesce, ConnEvent, ConnKey, EventHeader, ExecEvent, FileEvent, PrivEvent, ReadKey,
     WriteKey, DEDUP_MAP_CAP, DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
-    KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
+    KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_MODULE_LOAD, KIND_PRIV_CHANGE, KIND_PTRACE_ATTACH,
+    PATH_CAP,
 };
 
 /// Ring buffer of behavioral events (all kinds) drained by userspace.
@@ -194,6 +195,40 @@ fn allow_credential_read(key: &ReadKey) -> bool {
     }
     // First time we've seen this key (or it was LRU-evicted): record and emit.
     let _ = CREDENTIAL_READ_SEEN.insert(key, &now, 0);
+    true
+}
+
+/// In-kernel dedup map for the ptrace-attach probe (JEF-318): `pid` → last-emit time (ns).
+/// `security_ptrace_access_check` fires on every PTRACE_MODE_ATTACH check — not just a
+/// `ptrace(PTRACE_ATTACH/PTRACE_SEIZE)` syscall, but also `process_vm_readv`/
+/// `process_vm_writev` (a debugger or monitoring tool reading another process's memory),
+/// which a legitimate chatty caller can invoke in a tight loop. The dedup key is JUST the
+/// attacking `pid` — no target (see [`try_ptrace_access_check`]'s doc for why the target
+/// `task_struct` is never read): a repeat attach check from the SAME attacker inside the
+/// window is the same "this pid is ptrace-attaching things" fact refreshed, not a new one.
+/// Mirrors [`CREDENTIAL_READ_SEEN`]'s JEF-320 ring-DoS lesson — an unbounded fentry on a hook
+/// with a legitimate high-frequency caller is exactly the shape that flooded the ring there.
+#[map]
+static PTRACE_SEEN: LruHashMap<u32, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
+
+/// The ptrace-attach dedup gate (JEF-318), mirroring [`allow_credential_read`]. Returns
+/// `true` if an attach check from `pid` should be emitted, `false` if it's a repeat inside
+/// [`DEDUP_WINDOW_NS`] and was coalesced (the shared [`COALESCED`] counter is bumped here).
+/// Fail open: an insert that never fails falls through to emit, so a bookkeeping error never
+/// silently loses a real signal. The first sighting of a pid (or one LRU-evicted) always emits.
+fn allow_ptrace(pid: u32) -> bool {
+    let now = unsafe { bpf_ktime_get_ns() };
+    if let Some(last) = PTRACE_SEEN.get_ptr_mut(&pid) {
+        // SAFETY: `last` points at this key's live slot; we read then overwrite it.
+        let last_ns = unsafe { *last };
+        if should_coalesce(last_ns, now, DEDUP_WINDOW_NS) {
+            record_coalesced();
+            return false;
+        }
+        unsafe { *last = now };
+        return true;
+    }
+    let _ = PTRACE_SEEN.insert(&pid, &now, 0);
     true
 }
 
@@ -629,6 +664,108 @@ fn exe_is_anon_inode(bprm: *const vmlinux::linux_binprm) -> bool {
         // Reuse the SAME `inode` already fetched above (not `is_tmpfs(file)`, which would
         // re-walk `file->f_inode` a second time for the same fact).
         superblock_magic(inode) == Some(TMPFS_MAGIC)
+    }
+}
+
+/// `PTRACE_MODE_ATTACH` (include/linux/ptrace.h) — set when the caller is asking to ATTACH
+/// (`PTRACE_ATTACH`/`PTRACE_SEIZE`, or a `process_vm_readv`/`process_vm_writev` cross-process
+/// memory access), as opposed to a `PTRACE_MODE_READ`-only check (e.g. every `/proc/<pid>/…`
+/// stat, which fires constantly and carries no injection signal). Filtering to this bit
+/// in-kernel is the FIRST volume cut on this hook — see [`try_ptrace_access_check`].
+const PTRACE_MODE_ATTACH: u32 = 0x02;
+
+/// fentry on `security_ptrace_access_check(struct task_struct *child, unsigned int mode)` —
+/// the ptrace-attach probe (JEF-318, Retire-Falco G2). Falco fires critical on a ptrace
+/// ATTACH: the classic process-injection primitive (debugger-attach, code injection via
+/// `PTRACE_POKETEXT`, credential/memory scraping via `process_vm_readv`). This hook fires on
+/// EVERY ptrace access check, including the read-only `PTRACE_MODE_READ` checks
+/// `/proc/<pid>/…` triggers constantly, so [`try_ptrace_access_check`] filters in-kernel to
+/// `mode & PTRACE_MODE_ATTACH` before touching anything else — an ATTACH request
+/// specifically, not a read-only check — then further dedups per attacking pid
+/// ([`allow_ptrace`]) so a legitimate chatty caller (a debugger single-stepping via repeated
+/// `process_vm_readv`) can't flood the ring (the JEF-320 ring-DoS lesson).
+///
+/// No vmlinux struct read at all: `mode` is passed BY VALUE (a plain `unsigned int`
+/// register), and the attacking workload is already fully identified by [`make_header`]'s
+/// pid/cgroup. **DECISION (JEF-318):** the target `task_struct`'s pid is deliberately NOT
+/// read — `struct task_struct` is enormous and its layout shifts heavily across kernel
+/// configs/versions (far more volatile than the already-ON-NODE-PENDING `linux_binprm`/
+/// `inode` offsets from JEF-317), so adding that offset here would be a materially bigger
+/// verifier-rejection risk for a field the corroboration predicate below doesn't need — the
+/// attacking pid alone is enough to scope the Falco-parity signal to the foothold entry.
+#[fentry(function = "security_ptrace_access_check")]
+pub fn ptrace_access_check(ctx: FEntryContext) -> u32 {
+    let _ = try_ptrace_access_check(&ctx);
+    0
+}
+
+fn try_ptrace_access_check(ctx: &FEntryContext) -> Result<(), i64> {
+    // security_ptrace_access_check's 2nd argument is `unsigned int mode`.
+    let mode: u32 = unsafe { ctx.arg(1) };
+    if mode & PTRACE_MODE_ATTACH == 0 {
+        return Ok(()); // a read-only access check — not the attach signal
+    }
+    let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+    if !allow_ptrace(pid) {
+        return Ok(());
+    }
+    emit_fact(KIND_PTRACE_ATTACH);
+    Ok(())
+}
+
+/// `enum kernel_load_data_id`'s `LOADING_MODULE` value (`include/linux/kernel_read_file.h`):
+/// the enum is a stable, list-ordered generator macro — `LOADING_UNKNOWN`(0),
+/// `LOADING_FIRMWARE`(1), `LOADING_MODULE`(2), `LOADING_KEXEC_IMAGE`(3),
+/// `LOADING_KEXEC_INITRAMFS`(4), `LOADING_POLICY`(5), `LOADING_X509_CERTIFICATE`(6),
+/// `LOADING_MAX_ID`(7). **ON-NODE BTF VERIFICATION PENDING (JEF-318):** confirm against
+/// `bpftool btf dump … format c | grep -A8 'enum kernel_load_data_id'` on BOTH fleet arches
+/// before this ships past a spike deploy (docs/ebpf-testing-on-nodes.md). Unlike a struct
+/// offset, a wrong value here is NOT verifier-checked — it's a plain integer compare, so a
+/// reorder (unlikely; this list has been stable since its 5.x introduction, but unconfirmed
+/// on THIS fleet kernel) would misclassify silently rather than fail loud.
+const LOADING_MODULE: u32 = 2;
+
+/// fentry on `security_kernel_load_data(enum kernel_load_data_id id, bool contents)` — the
+/// kernel-module-load probe (JEF-318, Retire-Falco G2). Falco fires critical on
+/// `init_module`/`finit_module`. `load_module()` (kernel/module/main.c) calls this hook
+/// EARLY — before any parsing — on BOTH syscalls: `init_module`'s in-memory buffer AND
+/// `finit_module`'s fd (which first reaches `security_kernel_read_file(id=READING_MODULE)`
+/// to read the fd into that same buffer, then falls through to the same `load_module()` call
+/// this probe hooks). One probe on `security_kernel_load_data` therefore covers both
+/// syscalls, with no `struct file`/path chase at all: `id` and `contents` are passed BY
+/// VALUE (plain scalars), so — like the ptrace probe above — this touches no vmlinux struct
+/// offset whatsoever. Filters in-kernel to `id == LOADING_MODULE`: the SAME hook also fires
+/// for firmware/kexec/policy/x509 loads, which are not the Falco-parity signal this closes.
+/// No dedup gate (unlike ptrace/credential-read above): a real module load is RARE in a
+/// normal container workload (no `modprobe`/`insmod` in the entrypoint) — high signal, low
+/// volume by construction.
+#[fentry(function = "security_kernel_load_data")]
+pub fn kernel_load_data(ctx: FEntryContext) -> u32 {
+    let _ = try_kernel_load_data(&ctx);
+    0
+}
+
+fn try_kernel_load_data(ctx: &FEntryContext) -> Result<(), i64> {
+    // security_kernel_load_data's 1st argument is `enum kernel_load_data_id id`.
+    let id: u32 = unsafe { ctx.arg(0) };
+    if id != LOADING_MODULE {
+        return Ok(());
+    }
+    emit_fact(KIND_MODULE_LOAD);
+    Ok(())
+}
+
+/// Emit a bare [`EventHeader`]-only fact of `kind` — shared by the ptrace-attach and
+/// module-load probes (JEF-318), whose entire signal IS the occurrence, attributed by
+/// [`make_header`]'s pid/cgroup, with no further payload. Unlike every other emitter in this
+/// file there is no body struct: the ring event for these two kinds IS the header, so
+/// userspace's `decode` needs no kind-specific byte parse beyond the header it already reads.
+fn emit_fact(kind: u32) {
+    if let Some(mut slot) = EVENTS.reserve::<EventHeader>(0) {
+        slot.write(make_header(kind));
+        slot.submit(0);
+    } else {
+        record_drop(); // ring full — count the loss instead of silently skipping
     }
 }
 

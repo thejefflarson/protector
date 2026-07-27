@@ -253,10 +253,62 @@ fn exe_anon_inode_serializes_only_when_true() {
 }
 
 #[test]
+fn ptrace_attach_and_module_load_are_fieldless_facts() {
+    // JEF-318: both new variants carry no fields at all — the occurrence, attributed by
+    // RuntimeObservation::attribution, IS the whole fact. Serde round-trips to a bare
+    // `{"kind": "..."}`, summary/fingerprint are fixed strings, and neither is a wire-type
+    // Alert (only Behavior::Alert corroborates from this crate's own view — the foothold
+    // scoping is engine policy, JEF-113).
+    let ptrace = Behavior::PtraceAttach;
+    let v = serde_json::to_value(&ptrace).unwrap();
+    assert_eq!(v, serde_json::json!({"kind": "ptrace_attach"}));
+    assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), ptrace);
+    assert_eq!(
+        ptrace.summary(),
+        "ptrace attach (process injection primitive)"
+    );
+    assert_eq!(ptrace.fingerprint_key(), "ptrace-attach");
+    assert_eq!(ptrace.variant_label(), "ptrace-attach");
+    assert!(!ptrace.is_alert());
+
+    let module_load = Behavior::ModuleLoad;
+    let v = serde_json::to_value(&module_load).unwrap();
+    assert_eq!(v, serde_json::json!({"kind": "module_load"}));
+    assert_eq!(serde_json::from_value::<Behavior>(v).unwrap(), module_load);
+    assert_eq!(module_load.summary(), "loaded a kernel module");
+    assert_eq!(module_load.fingerprint_key(), "module-load");
+    assert_eq!(module_load.variant_label(), "module-load");
+    assert!(!module_load.is_alert());
+
+    // Distinguishable from each other and from every existing variant.
+    assert_ne!(ptrace.fingerprint_key(), module_load.fingerprint_key());
+    assert_ne!(ptrace.variant_label(), module_load.variant_label());
+}
+
+#[test]
+fn ptrace_attach_observation_round_trips_over_the_wire() {
+    // The full RuntimeObservation the agent POSTs for a ptrace attach — attributed by pod
+    // UID (the eBPF agent's path), source + node stamped — round-trips (JEF-318).
+    let obs = RuntimeObservation {
+        attribution: Attribution::by_pod_uid("uid"),
+        source: Some("protector-agent".into()),
+        observed_at_ms: None,
+        node: Some("node-a".into()),
+        behavior: Behavior::PtraceAttach,
+    };
+    let v = serde_json::to_value(&obs).unwrap();
+    assert_eq!(v["behavior"], serde_json::json!({"kind": "ptrace_attach"}));
+    assert_eq!(
+        serde_json::from_value::<RuntimeObservation>(v).unwrap(),
+        obs
+    );
+}
+
+#[test]
 fn variant_label_is_a_stable_low_cardinality_token() {
     // Each variant maps to a fixed token carrying NO per-instance payload (no peer,
     // path, or secret name) — so it's safe as a metric label without cardinality blow-up.
-    let cases: [(Behavior, &str); 9] = [
+    let cases: [(Behavior, &str); 11] = [
         (Behavior::Alert { rule: "x".into() }, "alert"),
         (
             Behavior::NetworkConnection {
@@ -300,6 +352,8 @@ fn variant_label_is_a_stable_low_cardinality_token() {
             },
             "image-linkage",
         ),
+        (Behavior::PtraceAttach, "ptrace-attach"),
+        (Behavior::ModuleLoad, "module-load"),
     ];
     for (behavior, want) in cases {
         assert_eq!(behavior.variant_label(), want, "{behavior:?}");
