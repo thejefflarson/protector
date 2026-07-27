@@ -107,12 +107,16 @@ pub trait Adjudicator: Send + Sync {
     /// so the model call reuses the exact same bytes the cache keyed on rather than rebuilding
     /// it — the cached-on input and the sent input can never drift. `entry`/`objectives`/
     /// `graph` are still supplied for the deterministic backstops and the judgement record.
+    /// `downstream` is the same deduped, sorted set of workload [`NodeKey`]s on the entry's
+    /// proven paths that `prompt` renders a per-node evidence block for (JEF-565) — so an
+    /// implementation's own backstops can weigh downstream evidence exactly as the prompt does.
     async fn judge(
         &self,
         entry: &NodeKey,
         objectives: &[(NodeKey, AttackRef)],
         graph: &SecurityGraph,
         prompt: &str,
+        downstream: &[NodeKey],
     ) -> Verdict;
 }
 
@@ -128,6 +132,7 @@ impl Adjudicator for NullAdjudicator {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         Verdict::Confirmed
     }
@@ -137,6 +142,7 @@ impl Adjudicator for NullAdjudicator {
 // (repo CLAUDE.md). The public surface (the verdict types, the adjudicators, the
 // prompt builder, and the cache/journal helpers the engine + output state import) is
 // re-exported here so external paths (`reason::adjudicate::...`) resolve unchanged.
+mod downstream;
 mod evidence;
 mod guards;
 mod model_call;

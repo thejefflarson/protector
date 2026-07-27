@@ -8,6 +8,15 @@
 use super::guards::sanitize;
 use crate::engine::graph::attack::{AttackRef, Tactic};
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
+use crate::engine::observe::asn::AsnDb;
+// JEF-113: exec *classification* (shell / package-manager in container) moved out of the
+// shared `Behavior` wire type into engine policy; annotate here so the model still sees
+// "executed /bin/bash (interactive shell in container)" rather than the bare path
+// `Behavior::summary` now returns.
+use crate::engine::observe::exec_class::annotated_summary;
+// JEF-380: for INTERNET egress render the deduped, sorted PROVIDER set via the offline ASN
+// dataset — cluster peers are untouched.
+use crate::engine::observe::peer_class::internet_egress_line;
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
 /// prompt is the verdict-cache key (hashed, JEF-350), this cap must be DETERMINISTIC —
@@ -196,6 +205,21 @@ pub(crate) fn entry_evidence(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
 ) -> (Vec<String>, Vec<Behavior>) {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    entry_evidence_budgeted(graph, entry_key, &mut budget)
+}
+
+/// As [`entry_evidence`], but draws the CVE free-text budget from a shared external `budget`
+/// rather than a fresh [`ENTRY_FREETEXT_BUDGET`] (JEF-565): the entry's own call still passes a
+/// fresh budget (unchanged behavior), while each downstream workload on the entry's proven
+/// paths (`downstream::render_downstream`) threads ONE shared incident-wide budget across every
+/// node, so a wide entry (argo, ~110 objectives) cannot multiply the per-node budget into an
+/// unbounded prompt. Structural fields are never dropped — only prose beyond the budget.
+pub(crate) fn entry_evidence_budgeted(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+    budget: &mut usize,
+) -> (Vec<String>, Vec<Behavior>) {
     let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
     // Render in a STABLE order so the per-entry free-text budget (below) is deterministic:
     // the same evidence must always produce the same budgeted lines, both for the prompt
@@ -225,16 +249,78 @@ pub(crate) fn entry_evidence(
         }
         true
     });
-    // Apply the per-entry AGGREGATE untrusted-free-text budget (JEF-106): a shared budget
-    // is threaded across the lines so a CVE-heavy image can't aggregate an unbounded prompt
-    // even when every per-field cap holds. Early CVE lines keep their prose; once the budget
-    // is spent, later lines fall back to the structured fields only.
-    let mut budget = ENTRY_FREETEXT_BUDGET;
+    // Apply the AGGREGATE untrusted-free-text budget (JEF-106): a shared budget is threaded
+    // across the lines so a CVE-heavy image can't aggregate an unbounded prompt even when
+    // every per-field cap holds. Early CVE lines keep their prose; once the budget is spent,
+    // later lines fall back to the structured fields only.
     let cves = vulns
         .iter()
-        .map(|v| cve_evidence_budgeted(v, &mut budget))
+        .map(|v| cve_evidence_budgeted(v, budget))
         .collect();
     (cves, behaviors)
+}
+
+/// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
+/// the ONLY CVE category that is exploitation evidence is `[reachability: loaded-at-runtime]`
+/// (vulnerable code observed running on the reachable path). CVEs that are present-but-not-running
+/// (`not-observed`), static-binary-unknowable, or unknown-reachability are CONTEXT — "how bad IF
+/// exploited" — never a breach on their own, and they stay on the dashboard for operators. Sending
+/// them to the JUDGE only hands a small model a non-evidence CVE to fabricate a `loaded-at-runtime`
+/// tag onto (JEF-451, the recurring false `exploitable`). So the judge's CVE field carries only the
+/// reachable (running) CVEs; `(none)` otherwise. This is enrichment/filtering of NON-evidence, not
+/// the objective-breadth capping ADR-0029 forbids (a not-observed CVE can never change a correct
+/// verdict). Measured on the deployed qwen3:1.7b: it collapses the temp-0.8 flip mass 15%→0% with
+/// no false negatives. The anti-fabrication guards read the FULL list separately (`model_call`), so
+/// their behaviour is unchanged. NOTE: `objective_reach` is not this — this is the CVE image-reach.
+///
+/// Shared by the entry's own CVE field (`prompt::render_evidence`) and each downstream node's
+/// block (JEF-565, `downstream::render_downstream`) so both filter with the EXACT same rule —
+/// one source of truth for what counts as CVE exploitation evidence in the judge prompt.
+const LOADED_AT_RUNTIME: &str = "[reachability: loaded-at-runtime]";
+
+/// Retain only the CVE lines that are exploitation evidence (see [`LOADED_AT_RUNTIME`]).
+pub(crate) fn retain_reachable_cves(cves: &mut Vec<String>) {
+    cves.retain(|line| line.contains(LOADED_AT_RUNTIME));
+}
+
+/// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
+/// runtime behavior" field carries. Shared by the entry's own field and each downstream
+/// node's block (JEF-565) so both apply the SAME two engine policies:
+///
+/// - When the ASN dataset is EMPTY (no feed wired / unreadable file), every behavior —
+///   including each internet connection — renders one line via [`annotated_summary`], exactly
+///   as it did before the feed existed (the graceful-degrade contract).
+/// - When the dataset is present, INTERNET egress connections are pulled out and collapsed
+///   into ONE deduped, sorted provider line ([`internet_egress_line`]); every other behavior
+///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
+///   `annotated_summary` as before.
+///
+/// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
+/// changes the prompt or its verdict-cache hash.
+pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::with_capacity(behaviors.len());
+    if asn.is_empty() {
+        // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
+        lines.extend(behaviors.iter().map(annotated_summary));
+    } else {
+        // Collapse INTERNET egress to a provider set; everything else renders as before.
+        let mut internet_peers: Vec<&str> = Vec::new();
+        for behavior in behaviors {
+            match behavior {
+                Behavior::NetworkConnection {
+                    peer,
+                    internet: true,
+                } => internet_peers.push(peer),
+                other => lines.push(annotated_summary(other)),
+            }
+        }
+        if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
+            lines.push(line);
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    lines
 }
 
 /// Render one non-CVE scanner finding (JEF-244 — exposed secret / misconfig / RBAC) into a
@@ -266,21 +352,33 @@ pub(crate) fn entry_findings(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
 ) -> (Vec<String>, Vec<String>) {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    entry_findings_budgeted(graph, entry_key, &mut budget)
+}
+
+/// As [`entry_findings`], but draws the finding free-text budget from a shared external
+/// `budget` (JEF-565) — the downstream counterpart of [`entry_evidence_budgeted`]; see its
+/// doc for why (the per-incident aggregate budget across every downstream node on the entry's
+/// proven paths).
+pub(crate) fn entry_findings_budgeted(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+    budget: &mut usize,
+) -> (Vec<String>, Vec<String>) {
     let (mut secrets, mut misconfigs, mut rbac) = graph.entry_findings(entry_key);
     secrets.sort_by(|a, b| a.id.cmp(&b.id));
     misconfigs.sort_by(|a, b| a.id.cmp(&b.id));
     rbac.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut budget = ENTRY_FREETEXT_BUDGET;
     let secret_lines = secrets
         .iter()
-        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .map(|f| finding_evidence_budgeted(f, budget))
         .collect();
     // Misconfig + RBAC share one "static posture" list: same role in the prompt (severity
     // context), so the model sees one fenced block rather than two it might over-weight.
     let posture_lines = misconfigs
         .iter()
         .chain(rbac.iter())
-        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .map(|f| finding_evidence_budgeted(f, budget))
         .collect();
     (secret_lines, posture_lines)
 }

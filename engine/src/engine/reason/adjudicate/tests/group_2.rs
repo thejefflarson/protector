@@ -40,7 +40,7 @@ async fn null_adjudicator_confirms() {
     assert_eq!(
         NullAdjudicator
             // NullAdjudicator ignores the prompt (it confirms unconditionally).
-            .judge(&chain.entry, &objectives_of(&chain), &graph, "")
+            .judge(&chain.entry, &objectives_of(&chain), &graph, "", &[])
             .await,
         Verdict::Confirmed
     );
@@ -71,7 +71,7 @@ async fn every_breach_relevant_entry_is_handed_to_the_model() {
     // `Uncertain("model unavailable")` instead, proving the model IS consulted.
     let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none");
     let prompt = build_judgment_prompt(&entry, &objs, &g);
-    let verdict = adjudicator.judge(&entry, &objs, &g, &prompt).await;
+    let verdict = adjudicator.judge(&entry, &objs, &g, &prompt, &[]).await;
     assert_eq!(
         verdict,
         Verdict::Uncertain("model unavailable".to_string()),
@@ -95,13 +95,13 @@ async fn judgements_are_journaled_with_prompt_and_verdict() {
     // engine builds the prompt (JEF-350) and hands it to `judge`; mirror that here.
     let (g, entry, objs) = entry_reaching_db("app", "app", "postgres-0", DATA_FROM_REPOSITORY);
     let prompt = build_judgment_prompt(&entry, &objs, &g);
-    adjudicator.judge(&entry, &objs, &g, &prompt).await;
+    adjudicator.judge(&entry, &objs, &g, &prompt, &[]).await;
 
     // A cross-ns entry — also judged.
     let (g2, entry2, objs2) =
         entry_reaching_db("app", "billing", "ledger-db", DATA_FROM_REPOSITORY);
     let prompt2 = build_judgment_prompt(&entry2, &objs2, &g2);
-    adjudicator.judge(&entry2, &objs2, &g2, &prompt2).await;
+    adjudicator.judge(&entry2, &objs2, &g2, &prompt2, &[]).await;
 
     let recorded = journal.snapshot(); // newest-first
     assert_eq!(recorded.len(), 2, "both judgements captured");
@@ -196,7 +196,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     let toxic_objs = objectives_of(&toxic);
     let toxic_prompt = build_judgment_prompt(&toxic.entry, &toxic_objs, &g_toxic);
     let toxic_verdict = adjudicator
-        .judge(&toxic.entry, &toxic_objs, &g_toxic, &toxic_prompt)
+        .judge(&toxic.entry, &toxic_objs, &g_toxic, &toxic_prompt, &[])
         .await;
     eprintln!("[{model}] exposed + critical KEV CVE -> secret : {toxic_verdict:?}");
 
@@ -204,7 +204,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     let bare_objs = objectives_of(&bare);
     let bare_prompt = build_judgment_prompt(&bare.entry, &bare_objs, &g_bare);
     let bare_verdict = adjudicator
-        .judge(&bare.entry, &bare_objs, &g_bare, &bare_prompt)
+        .judge(&bare.entry, &bare_objs, &g_bare, &bare_prompt, &[])
         .await;
     eprintln!("[{model}] exposed, NO cve / NO runtime -> secret: {bare_verdict:?}");
 
@@ -324,7 +324,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
         }
         let prompt = build_judgment_prompt(&entry_key, &objectives, &g);
         adjudicator
-            .judge(&entry_key, &objectives, &g, &prompt)
+            .judge(&entry_key, &objectives, &g, &prompt, &[])
             .await
     };
     eprintln!("[{model}] argo: broad RBAC-granted secrets, NO cve/behavior: {argo_verdict:?}");
