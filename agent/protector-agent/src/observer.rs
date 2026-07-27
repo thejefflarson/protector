@@ -79,7 +79,7 @@ mod ebpf {
     // The repr(C) event layouts are shared with the eBPF crate via this one crate, so the
     // kernel↔userspace byte contract can't drift (ADR-0014).
     use protector_agent_common::{
-        ConnEvent, EventHeader, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
+        ConnEvent, EventHeader, ExecEvent, FileEvent, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN,
         KIND_FILE_WRITE, KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP, PrivEvent,
     };
     use protector_behavior::{Attribution, Behavior};
@@ -147,8 +147,15 @@ mod ebpf {
             old_uid: u32,
             new_uid: u32,
         },
-        /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed.
-        Exec { attr: EventAttr, path: String },
+        /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed, plus
+        /// the anon-inode kernel fact (JEF-317, Route A) the probe read from
+        /// `bprm->file->f_inode` — memfd/shmem-backed or unlinked, rather than a normal
+        /// on-disk file.
+        Exec {
+            attr: EventAttr,
+            path: String,
+            exe_anon_inode: bool,
+        },
         /// File write: the written file's path (e.g. `/etc/cron.d/x`), NUL-trimmed. The
         /// eBPF side already filtered to write-intent opens and deduped repeats to the same
         /// `(pid, inode)`; this just carries the path through (JEF-306).
@@ -208,7 +215,14 @@ mod ebpf {
                     from_uid: old_uid,
                     to_uid: new_uid,
                 },
-                RawEvent::Exec { path, .. } => Behavior::ProcessExec { path },
+                RawEvent::Exec {
+                    path,
+                    exe_anon_inode,
+                    ..
+                } => Behavior::ProcessExec {
+                    path,
+                    exe_anon_inode,
+                },
                 RawEvent::FileWrite { path, .. } => Behavior::FileWrite { path },
             }
         }
@@ -663,11 +677,11 @@ mod ebpf {
                     Self::priv_change(&ev)
                 }
                 KIND_EXEC => {
-                    if data.len() < std::mem::size_of::<FileEvent>() {
+                    if data.len() < std::mem::size_of::<ExecEvent>() {
                         return None;
                     }
-                    // SAFETY: kind says this is a FileEvent of exactly this layout.
-                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<FileEvent>()) };
+                    // SAFETY: kind says this is an ExecEvent of exactly this layout.
+                    let ev = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<ExecEvent>()) };
                     Self::exec(&ev)
                 }
                 KIND_FILE_WRITE => {
@@ -739,9 +753,11 @@ mod ebpf {
 
         /// Parse a process-exec event into a raw Exec. `path` is the exec'd binary path as
         /// the kernel saw it (`linux_binprm->filename`), NUL-trimmed; the behavior crate
-        /// coarsens it to the basename for the fingerprint. Drops empty paths. Pure (no
-        /// `/proc`).
-        fn exec(ev: &FileEvent) -> Option<RawEvent> {
+        /// coarsens it to the basename for the fingerprint. `exe_anon_inode` (JEF-317,
+        /// Route A) carries the probe's `bprm->file->f_inode` fact straight through — a
+        /// non-zero kernel byte is `true`, never inferred from `path`. Drops empty paths.
+        /// Pure (no `/proc`).
+        fn exec(ev: &ExecEvent) -> Option<RawEvent> {
             let len = (ev.len as usize).min(PATH_CAP);
             let path = String::from_utf8_lossy(&ev.path[..len])
                 .trim_end_matches('\0')
@@ -752,6 +768,7 @@ mod ebpf {
             Some(RawEvent::Exec {
                 attr: EventAttr::from_header(&ev.header),
                 path,
+                exe_anon_inode: ev.exe_anon_inode != 0,
             })
         }
 

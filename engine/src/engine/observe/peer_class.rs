@@ -396,6 +396,7 @@ mod tests {
             },
             Behavior::ProcessExec {
                 path: "169.254.169.254:80".into(),
+                exe_anon_inode: false,
             },
         ];
         for b in others {

@@ -1,5 +1,5 @@
 //! Exec-classification policy (JEF-55 / JEF-113): is a process-exec a *notable* runtime
-//! signal — an interactive shell or a package manager run inside a container?
+//! signal — an interactive shell, or a package manager, run inside a container?
 //!
 //! This is **engine policy**, not part of the wire type. The shared [`Behavior`] crate is
 //! pure data (agent + engine both depend on it), so the lists of "what counts as a shell /
@@ -12,6 +12,18 @@
 //! An interactive-shell exec is a "terminal shell in container"; a package-manager exec is
 //! "package management launched" — both classic container-tamper signals, classified
 //! ENGINE-SIDE from the path the agent already emits (no wire change).
+//!
+//! **JEF-317 (fileless / anon-inode exec) deliberately does NOT live here.** An earlier
+//! version classified the exec *path's shape* (`/dev/fd/<n>` etc.) as fileless and fed it
+//! into this module's blanket "notable exec" gate — withdrawn by security review, because
+//! the kernel synthesizes that identical path for a benign `fexecve()` of an on-disk file
+//! too, and runc's own memfd re-exec on ~every container start (CVE-2019-5736's
+//! mitigation) would forge corroboration on routine behavior at a high base rate. The real
+//! signal — the exec'd binary's backing *inode* (`Behavior::ProcessExec::exe_anon_inode`,
+//! a kernel-observed fact set by the agent, not derived from `path` here) — is
+//! deliberately scoped MORE narrowly than this module's blanket gate: see
+//! `reason::proof::corroborate::anon_inode_exec_on_foothold`, which requires a proven
+//! foothold entry AND an Execution-tactic objective, not "any objective like an alert".
 
 use crate::engine::graph::Behavior;
 
@@ -58,7 +70,7 @@ fn basename(path: &str) -> &str {
 /// `false` for any other behavior.
 pub fn is_interactive_shell(behavior: &Behavior) -> bool {
     match behavior {
-        Behavior::ProcessExec { path } => INTERACTIVE_SHELLS.contains(&basename(path)),
+        Behavior::ProcessExec { path, .. } => INTERACTIVE_SHELLS.contains(&basename(path)),
         _ => false,
     }
 }
@@ -69,12 +81,12 @@ pub fn is_interactive_shell(behavior: &Behavior) -> bool {
 /// on the binary's basename. Always `false` for any other behavior.
 pub fn is_package_manager(behavior: &Behavior) -> bool {
     match behavior {
-        Behavior::ProcessExec { path } => PACKAGE_MANAGERS.contains(&basename(path)),
+        Behavior::ProcessExec { path, .. } => PACKAGE_MANAGERS.contains(&basename(path)),
         _ => false,
     }
 }
 
-/// A short, human label for a *notable* runtime exec — a shell or package manager run
+/// A short, human label for a *notable* runtime exec — a shell, or a package manager, run
 /// inside the container (JEF-55) — or `None` for an unremarkable behavior. Used to
 /// annotate the adjudication prompt ("executed /bin/bash (interactive shell in
 /// container)") and as the corroboration predicate (a notable exec corroborates like an
@@ -82,6 +94,9 @@ pub fn is_package_manager(behavior: &Behavior) -> bool {
 /// corroborate the action bar from the wire type's view — the engine decides what it
 /// means. The label is a fixed internal string (never untrusted input), safe to embed in
 /// the prompt.
+///
+/// Deliberately does NOT include the JEF-317 anon-inode-exec fact — see the module doc for
+/// why: that signal is scoped MORE narrowly than this blanket gate, not folded into it.
 pub fn notable_exec(behavior: &Behavior) -> Option<&'static str> {
     if is_interactive_shell(behavior) {
         Some("interactive shell in container")
@@ -117,7 +132,10 @@ mod tests {
     fn classifies_shells_and_package_managers_from_the_exec_path() {
         // (exec path, is_shell, is_pkg_mgr) — positives across both lists, with absolute
         // and bare paths to exercise basename extraction.
-        let exec = |p: &str| Behavior::ProcessExec { path: p.into() };
+        let exec = |p: &str| Behavior::ProcessExec {
+            path: p.into(),
+            exe_anon_inode: false,
+        };
         let cases = [
             // Interactive shells — "terminal shell in container".
             ("/bin/sh", true, false),
@@ -196,12 +214,15 @@ mod tests {
         // the evidence blocks saw before the classifier moved out of the wire type (JEF-113).
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         };
         let pkg = Behavior::ProcessExec {
             path: "/usr/bin/apt".into(),
+            exe_anon_inode: false,
         };
         let normal = Behavior::ProcessExec {
             path: "/app/server".into(),
+            exe_anon_inode: false,
         };
         let secret = Behavior::SecretRead {
             secret: "app/session-key".into(),
@@ -224,17 +245,37 @@ mod tests {
     fn notable_exec_labels_shells_and_package_managers() {
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         };
         let pkg = Behavior::ProcessExec {
             path: "/usr/bin/apt".into(),
+            exe_anon_inode: false,
         };
         let normal = Behavior::ProcessExec {
             path: "/app/server".into(),
+            exe_anon_inode: false,
         };
         // The notable label is a fixed internal token, safe to embed in the prompt.
         assert_eq!(notable_exec(&shell), Some("interactive shell in container"));
         assert_eq!(notable_exec(&pkg), Some("package manager in container"));
         // An unremarkable exec is not notable.
         assert_eq!(notable_exec(&normal), None);
+    }
+
+    /// JEF-317 regression guard: `exe_anon_inode` — the real (inode) fileless-exec fact —
+    /// must NOT feed this module's blanket "notable exec" gate on its own. The withdrawn
+    /// v1 approach classified path *shape* into this same gate; Route A deliberately keeps
+    /// the two separate (see the module doc and
+    /// `reason::proof::corroborate::anon_inode_exec_on_foothold`, which scopes it far more
+    /// narrowly than "notable = corroborates any objective").
+    #[test]
+    fn anon_inode_exec_alone_is_not_notable_here() {
+        let anon = Behavior::ProcessExec {
+            path: "/app/server".into(),
+            exe_anon_inode: true,
+        };
+        assert!(!is_interactive_shell(&anon));
+        assert!(!is_package_manager(&anon));
+        assert_eq!(notable_exec(&anon), None);
     }
 }

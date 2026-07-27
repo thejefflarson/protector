@@ -17,6 +17,7 @@ use crate::engine::observe::asn::AsnDb;
 fn section_hashes_isolate_the_changed_section() {
     let (g_a, entry_a) = graph_with_behaviors(vec![Behavior::ProcessExec {
         path: "/bin/bash".into(),
+        exe_anon_inode: false,
     }]);
     let (g_b, entry_b) = graph_with_behaviors(vec![Behavior::FileRead {
         path: "/etc/passwd".into(),

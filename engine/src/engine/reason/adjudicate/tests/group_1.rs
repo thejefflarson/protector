@@ -240,6 +240,7 @@ fn prompt_hash_is_deterministic_and_order_independent() {
     let behaviors = vec![
         Behavior::ProcessExec {
             path: "/bin/bash".into(),
+            exe_anon_inode: false,
         },
         Behavior::NetworkConnection {
             peer: "10.0.0.2:5432".into(),
@@ -516,6 +517,7 @@ fn unsupported_exploitable_guard_preserves_each_anchored_case() {
     // Anchor 3b — a corroborating runtime behavior: a notable exec (notable_exec(), JEF-117).
     let notable = vec![Behavior::ProcessExec {
         path: "/bin/bash".into(),
+        exe_anon_inode: false,
     }];
     assert!(matches!(
         guard_unsupported_exploitable(
