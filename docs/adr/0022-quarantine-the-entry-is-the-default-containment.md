@@ -1,6 +1,6 @@
 # 0022. Quarantine the internet-facing entry is the default containment; the surgical edge-cut is the refinement
 
-- Status: Accepted
+- Status: Accepted; the **JEF-284 amendment's decision procedure is superseded in part by [ADR-0032](0032-model-is-incident-responder.md)** (the model now decides the cut). The containment vocabulary, additive/reversible shapes, and the precedence ladder survive as the menu ordering / proposal fallback.
 - Date: 2026-07-03
 
 ## Context
@@ -159,3 +159,24 @@ default posture is byte-identical; under `enforce` the `network` class arms it w
 dashboard disposition names the WHY — `quarantine — remotely exploitable` /
 `quarantine — actively exploited` — distinct from the entry-foothold
 `quarantine entry (default-deny)`; all are fixed internal strings (no untrusted text).
+
+## Amendment (JEF-547, 2026-07-27): the model decides the cut — the JEF-284 procedure is superseded by [ADR-0032](0032-model-is-incident-responder.md)
+
+The JEF-284 amendment above made the **per-pod deterministic bar the auto-action trigger**
+(remotely-exploitable on reachability + CVE presence, or actively-exploited on a live signal,
+*"regardless of network position, internal pods included"*), with the model never consulted.
+A clean fact-check (JEF-322) confirmed this contradicts the product thesis (ADR-0013/0029):
+the coarsest action had the weakest bar, and CVE *presence* auto-cut downstream pods.
+
+**ADR-0032 supersedes that decision procedure.** The model — as incident responder — decides
+which cut to apply over the whole internet-facing path, choosing from a menu that determinism
+*enumerates*; the `is_live_corroborated` unconditional-`true` for `QuarantineWorkload` is
+deleted, and an internal-only actively-exploited pod becomes **propose-only** (outside the
+north star's internet-facing lanes).
+
+**What survives from this ADR:** the containment action *vocabulary* (`QuarantineEntry` /
+`QuarantineWorkload` / `DenyNetworkPath`) and their additive / reversible / self-revert
+mechanics (ADR-0010/0017); the precedence ladder as the menu's **ordering/annotation** and as
+`containment_for`'s **human-proposal fallback** when the model is unavailable/uncertain; and
+the *"never quarantine a merely-reached objective"* rule (ADR-0032 keeps evidence required).
+Only the *"determinism auto-fires the per-pod cut without the model"* stance is retired.
