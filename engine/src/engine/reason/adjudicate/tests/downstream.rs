@@ -18,6 +18,17 @@ use crate::engine::observe::asn::AsnDb;
 use std::time::SystemTime;
 
 fn workload(name: &str) -> Node {
+    workload_with_behaviors(name, vec![])
+}
+
+fn workload_with_behaviors(name: &str, behaviors: Vec<Behavior>) -> Node {
+    let runtime = behaviors
+        .into_iter()
+        .map(|behavior| RuntimeSignal {
+            behavior,
+            provenance: Provenance::new("test", SystemTime::UNIX_EPOCH),
+        })
+        .collect();
     Node::Workload(Workload {
         namespace: "app".into(),
         name: name.into(),
@@ -25,7 +36,7 @@ fn workload(name: &str) -> Node {
         labels: Default::default(),
         meshed: false,
         exposure: Exposure::Internal,
-        runtime: Vec::new(),
+        runtime,
         persistent: false,
         misconfigs: vec![],
         rbac_findings: vec![],
@@ -197,6 +208,12 @@ fn identical_evidence_yields_byte_identical_prompt_regardless_of_input_order() {
 fn wide_entry_downstream_budget_bounds_prose_without_dropping_any_cve() {
     const N: usize = 120; // argo-shaped: comfortably over the ~110-objective case
     const LONG_TITLE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    // A long (but under the PER-LINE `TITLE_CAP`), attacker-influenced exec path — the
+    // security-review follow-up to JEF-565: `Behavior::summary` free-text (file/exec paths,
+    // peer strings) must be bounded by the AGGREGATE per-incident budget exactly like a
+    // CVE/finding title, not just capped per-line and fenced. Under 120 chars so it survives
+    // the per-line cap unaltered; it is the AGGREGATE budget across N=120 nodes this asserts.
+    const LONG_PATH: &str = "/usr/bin/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
     let mut g = SecurityGraph::new();
     let entry = workload("entry-web");
@@ -207,7 +224,13 @@ fn wide_entry_downstream_budget_bounds_prose_without_dropping_any_cve() {
     let mut expected_ids = Vec::with_capacity(N);
     for i in 0..N {
         let name = format!("downstream-{i:03}");
-        let node = workload(&name);
+        let node = workload_with_behaviors(
+            &name,
+            vec![Behavior::ProcessExec {
+                path: LONG_PATH.into(),
+                exe_anon_inode: false,
+            }],
+        );
         let key = node.key();
         let w = g.upsert_node(node);
         let cve_id = format!("CVE-2024-{i:04}");
@@ -256,6 +279,29 @@ fn wide_entry_downstream_budget_bounds_prose_without_dropping_any_cve() {
     assert!(
         titles_present < N,
         "the per-incident budget must cap SOME titles on a wide entry (got {titles_present}/{N})"
+    );
+
+    // Security-review follow-up: behavior-line free text (an attacker-influenced exec path) is
+    // bounded by the SAME structural-first discipline — every node still shows it observed an
+    // exec (the fallback names the KIND, "exec", never silently drops the behavior), but the
+    // full path does not survive on every one of the N nodes.
+    let paths_present = build.prompt.matches(LONG_PATH).count();
+    assert!(
+        paths_present < N,
+        "the per-incident budget must cap SOME exec paths on a wide entry (got {paths_present}/{N})"
+    );
+    assert!(
+        build.prompt.contains("exec (free-text budget exhausted)"),
+        "a budget-exhausted behavior line must fall back to its structured KIND, not vanish"
+    );
+    assert_eq!(
+        build.prompt.matches("executed ").count()
+            + build
+                .prompt
+                .matches("exec (free-text budget exhausted)")
+                .count(),
+        N,
+        "every one of the N nodes must show SOME exec evidence (full or truncated) — none dropped"
     );
 }
 

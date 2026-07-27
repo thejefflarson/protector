@@ -25,16 +25,20 @@ use crate::engine::observe::peer_class::internet_egress_line;
 /// the prompt (the NVD advisory feed is retired, JEF-242); this cap stays to keep it fenced.
 const TITLE_CAP: usize = 120;
 
-/// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across an
-/// entry's CVE lines (JEF-106). Per-field caps bound any ONE field, but a CVE-heavy image
-/// (hundreds of CVEs, each at its per-field cap) could still aggregate an unbounded prompt
-/// — the security review's "TOTAL untrusted-evidence budget per entry" gap. Once the
-/// running total of untrusted free-text (the trivy `title`s) crosses this budget, later
-/// CVE lines drop their free prose and fall back to the STRUCTURED, low-cardinality fields
-/// only (id/severity/score/reachability/fix) — the JEF-106 structural-first stance: the
-/// model never loses a CVE, only its unbounded prose. Deterministic (CVEs are sorted before
-/// rendering, see `build_judgment_prompt_with`), so the same evidence always renders the
-/// same budgeted prompt and the verdict fingerprint stays stable across passes.
+/// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across ONE
+/// category of an entry's evidence lines (JEF-106) — CVEs, findings (secrets+posture), and
+/// observed behavior each thread their OWN fresh instance of this budget (see
+/// [`entry_evidence_budgeted`], [`entry_findings_budgeted`], [`render_behavior_lines`]). Per-field
+/// caps bound any ONE field, but a CVE-heavy image (hundreds of CVEs, each at its per-field cap)
+/// — or, per the same reasoning, a workload with many observed behaviors — could still aggregate
+/// an unbounded prompt — the security review's "TOTAL untrusted-evidence budget per entry" gap.
+/// Once the running total of untrusted free-text in a category crosses this budget, later lines
+/// in that category drop their free prose and fall back to the STRUCTURED, low-cardinality
+/// fields only (id/severity/score/reachability/fix for a CVE; the behavior KIND alone for a
+/// behavior line) — the JEF-106 structural-first stance: the model never loses a CVE or a
+/// behavior, only its unbounded prose. Deterministic (each category is sorted before rendering),
+/// so the same evidence always renders the same budgeted prompt and the verdict fingerprint
+/// stays stable across passes.
 pub(crate) const ENTRY_FREETEXT_BUDGET: usize = 1200;
 
 /// Char-safe truncate-then-sanitize for one untrusted free-text field (JEF-106). The
@@ -298,10 +302,40 @@ pub(crate) fn retain_reachable_cves(cves: &mut Vec<String>) {
 /// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
 /// changes the prompt or its verdict-cache hash.
 pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::with_capacity(behaviors.len());
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    render_behavior_lines_budgeted(behaviors, asn, &mut budget)
+}
+
+/// As [`render_behavior_lines`], but draws the free-text budget from a shared external
+/// `budget` — the behavior-line counterpart of [`entry_evidence_budgeted`] (JEF-565's
+/// security-review follow-up): `Behavior::summary` embeds attacker-influenced free-text (an
+/// exec'd path, a file path, a raw peer string) that is fenced+sanitized but was previously
+/// neither length-capped nor charged to any budget — harmless for a single entry, but this
+/// ticket multiplies it across every downstream node on a proven path, exactly the "total
+/// untrusted prose on a wide entry" the per-incident budget exists to bound. Each line is
+/// capped to [`TITLE_CAP`] and charged to `budget`; once exhausted, later lines fall back to
+/// the STRUCTURED, low-cardinality behavior KIND alone ([`Behavior::variant_label`]) — the
+/// model never loses that a behavior was observed, only its free-text detail (the same
+/// JEF-106 structural-first stance as a CVE/finding title). The entry's own call
+/// ([`render_behavior_lines`]) threads a fresh [`ENTRY_FREETEXT_BUDGET`], unchanged from
+/// before this budget existed for any evidence short of it; the downstream path
+/// (`downstream::render_downstream`) threads ONE shared incident-wide pool across every node.
+pub(crate) fn render_behavior_lines_budgeted(
+    behaviors: &[Behavior],
+    asn: &AsnDb,
+    budget: &mut usize,
+) -> Vec<String> {
+    // Kept alongside each rendered line so a budget-exhausted line still falls back to its
+    // KIND rather than being dropped outright; the grouped INTERNET-egress line has no single
+    // behavior behind it, so it falls back to the generic "connection" kind.
+    let mut lines: Vec<(String, &str)> = Vec::with_capacity(behaviors.len());
     if asn.is_empty() {
         // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
-        lines.extend(behaviors.iter().map(annotated_summary));
+        lines.extend(
+            behaviors
+                .iter()
+                .map(|b| (annotated_summary(b), b.variant_label())),
+        );
     } else {
         // Collapse INTERNET egress to a provider set; everything else renders as before.
         let mut internet_peers: Vec<&str> = Vec::new();
@@ -311,16 +345,27 @@ pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<
                     peer,
                     internet: true,
                 } => internet_peers.push(peer),
-                other => lines.push(annotated_summary(other)),
+                other => lines.push((annotated_summary(other), other.variant_label())),
             }
         }
         if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
-            lines.push(line);
+            // No single `Behavior` behind the grouped provider line (it summarizes N internet
+            // connections) — `"connection"` matches `Behavior::NetworkConnection`'s own
+            // `variant_label()`, the kind every one of those N behaviors shares.
+            lines.push((line, "connection"));
         }
     }
-    lines.sort();
-    lines.dedup();
-    lines
+    let mut out: Vec<String> = lines
+        .into_iter()
+        .map(|(line, kind)| {
+            let capped = cap_untrusted(&line, TITLE_CAP);
+            take_from_budget(capped, budget)
+                .unwrap_or_else(|| format!("{kind} (free-text budget exhausted)"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Render one non-CVE scanner finding (JEF-244 — exposed secret / misconfig / RBAC) into a

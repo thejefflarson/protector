@@ -5,7 +5,8 @@
 //! PER WORKLOAD on the entry's proven paths (`ProvenChain::paths`), reusing the exact same
 //! evidence functions, JEF-453 reachable-CVE filter, fencing, and per-field caps the entry's own
 //! block uses (`evidence::{entry_evidence_budgeted, entry_findings_budgeted,
-//! retain_reachable_cves, render_behavior_lines}`) — no second rendering path to drift from.
+//! retain_reachable_cves, render_behavior_lines_budgeted}`) — no second rendering path to drift
+//! from.
 //!
 //! Split out of `prompt.rs` purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 //!
@@ -19,7 +20,8 @@ use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::observe::asn::AsnDb;
 
 use super::evidence::{
-    entry_evidence_budgeted, entry_findings_budgeted, render_behavior_lines, retain_reachable_cves,
+    entry_evidence_budgeted, entry_findings_budgeted, render_behavior_lines_budgeted,
+    retain_reachable_cves,
 };
 use super::guards::{fence, fence_list};
 
@@ -28,11 +30,14 @@ use super::guards::{fence, fence_list};
 /// [`super::evidence::ENTRY_FREETEXT_BUDGET`], which is per-node. Without an incident-wide cap a
 /// wide entry (argo, ~110 objectives, though typically far fewer distinct downstream WORKLOADS)
 /// could multiply the per-node budget into an unbounded prompt. Structural fields (CVE
-/// id/severity/reachability/fix, secret id/severity) are NEVER dropped — only the free-text
-/// title beyond the budget (JEF-106 structural-first stance), exactly like the entry's own
-/// budget. CVE prose and finding prose are charged to two independent pools of this size, one
-/// each — mirroring the entry's own two independent `ENTRY_FREETEXT_BUDGET` pools
-/// (`entry_evidence` vs `entry_findings`).
+/// id/severity/reachability/fix, secret id/severity, behavior KIND) are NEVER dropped — only
+/// the free-text beyond the budget (JEF-106 structural-first stance), exactly like the entry's
+/// own budget. CVE prose, finding prose, and behavior-line prose (a security-review follow-up:
+/// `Behavior::summary` embeds attacker-influenced free-text — an exec'd path, a file path, a raw
+/// peer string — fenced+sanitized but otherwise unbounded) are each charged to their OWN
+/// independent pool of this size — mirroring the entry's own independent `ENTRY_FREETEXT_BUDGET`
+/// pools (`entry_evidence` for CVEs, `entry_findings` for secrets+posture,
+/// `render_behavior_lines` for behaviors).
 pub(crate) const INCIDENT_DOWNSTREAM_FREETEXT_BUDGET: usize = 4000;
 
 /// The rendered downstream-evidence section: one block per node (spliced into the prompt) and
@@ -66,6 +71,11 @@ pub(crate) fn render_downstream(
 
     let mut cve_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;
     let mut finding_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;
+    // A THIRD independent incident-wide pool for behavior-line free text (security-review
+    // follow-up to JEF-565): `Behavior::summary` embeds attacker-influenced free-text (an
+    // exec'd path, a file path, a raw peer string) fenced+sanitized but previously uncapped and
+    // unbudgeted — harmless on one entry, but multiplied across every downstream node here.
+    let mut behavior_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;
     let mut blocks = Vec::with_capacity(sorted.len());
     let mut surface_lines = Vec::new();
 
@@ -74,7 +84,7 @@ pub(crate) fn render_downstream(
         retain_reachable_cves(&mut cves);
         cves.sort();
         cves.dedup();
-        let behavior_lines = render_behavior_lines(&behaviors, asn);
+        let behavior_lines = render_behavior_lines_budgeted(&behaviors, asn, &mut behavior_budget);
         let (mut secret_lines, mut posture_lines) =
             entry_findings_budgeted(graph, node, &mut finding_budget);
         secret_lines.sort();
