@@ -35,7 +35,7 @@ use aya_ebpf::{
 // dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
 // tests share one definition and can't drift.
 use protector_agent_common::{
-    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, WriteKey,
+    should_coalesce, ConnEvent, ConnKey, EventHeader, FileEvent, PrivEvent, ReadKey, WriteKey,
     DEDUP_MAP_CAP, DEDUP_WINDOW_NS, KIND_CONNECT, KIND_EXEC, KIND_FILE_OPEN, KIND_FILE_WRITE,
     KIND_LIBRARY_LOAD, KIND_PRIV_CHANGE, PATH_CAP,
 };
@@ -163,6 +163,40 @@ fn allow_write(key: &WriteKey) -> bool {
     true
 }
 
+/// In-kernel dedup map for the credential-basename read gate (JEF-320 security rework):
+/// `(pid, inode)` → last-emit time (ns). Bounds a HIGH finding from security review: the
+/// `try_file_open` widening past `is_tmpfs` to `SENSITIVE_CREDENTIAL_BASENAMES` had no
+/// dedup, so a chatty reader of a matched basename (e.g. repeatedly opening `/etc/shadow`
+/// or a `credentials` file) could flood the single shared ring and starve real exec/priv-
+/// change/connect signals via `record_drop()` — a sensor-blinding primitive. Same shape,
+/// sizing, and eviction style as [`WRITE_SEEN`].
+#[map]
+static CREDENTIAL_READ_SEEN: LruHashMap<ReadKey, u64> =
+    LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
+
+/// The credential-basename-read dedup gate (JEF-320 security rework), mirroring
+/// [`allow_write`]. Returns `true` if this read of `key` should be emitted, `false` if
+/// it's a repeat inside [`DEDUP_WINDOW_NS`] and was coalesced (the shared [`COALESCED`]
+/// counter is bumped here). On emit, stamps `now` so the next repeat is measured from it.
+/// Fail open: an insert that never fails falls through to emit, so a bookkeeping error
+/// never silently loses a real signal. The first sighting of a key (no entry) always emits.
+fn allow_credential_read(key: &ReadKey) -> bool {
+    let now = unsafe { bpf_ktime_get_ns() };
+    if let Some(last) = CREDENTIAL_READ_SEEN.get_ptr_mut(key) {
+        // SAFETY: `last` points at this key's live slot; we read then overwrite it.
+        let last_ns = unsafe { *last };
+        if should_coalesce(last_ns, now, DEDUP_WINDOW_NS) {
+            record_coalesced();
+            return false;
+        }
+        unsafe { *last = now };
+        return true;
+    }
+    // First time we've seen this key (or it was LRU-evicted): record and emit.
+    let _ = CREDENTIAL_READ_SEEN.insert(key, &now, 0);
+    true
+}
+
 // Minimal kernel sockaddr layout for the IPv4 case. We only touch the family and the
 // `sockaddr_in` address/port; reads are bounds-checked by `bpf_probe_read_kernel`.
 const AF_INET: u16 = 2;
@@ -250,23 +284,37 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 /// A small, fixed allowlist of on-host credential-file BASENAMES (JEF-320, Retire-Falco
 /// G3) — the cheap in-kernel volume gate that lets `try_file_open` widen past `is_tmpfs`
-/// for a read that might be the host password/shadow file, an SSH private key, or a
+/// for a read that might be the host shadow/gshadow/sudoers file, an SSH private key, or a
 /// cloud-provider credential file. These live on the container's ordinary rootfs
 /// (overlayfs), not tmpfs, so `is_tmpfs` alone never sees them — but letting EVERY
 /// non-tmpfs read through would reopen the full file-open firehose `is_tmpfs` exists to
 /// avoid. This basename check is deliberately short and distinctive (unlike `is_tmpfs`,
-/// which is broad by design) so it stays nowhere near that volume.
+/// which is broad by design) so it stays nowhere near that volume. The volume this list
+/// lets past `is_tmpfs` is additionally bounded in-kernel by [`allow_credential_read`] (a
+/// second HIGH finding: an unbounded matched-basename read let an attacker flood the
+/// shared ring — see its doc comment).
 ///
 /// This is NOT the security classification — same division of labor as the existing
 /// tmpfs-scoped probe: the agent stays pure data (JEF-113), and the engine
 /// (`engine::observe::host_credential_class`) makes the real "is this path a known
 /// on-host credential path" call from the FULL path `bpf_d_path` returns below.
+///
+/// **KEEP IN SYNC with `engine::observe::host_credential_class`** (security rework, HIGH
+/// finding): this list is the coarse in-kernel PRE-filter, that module makes the precise
+/// security decision — a basename here that the engine no longer classifies as a
+/// credential is pure ring pressure with zero detection value. `passwd` and `known_hosts`
+/// were REMOVED (world-readable / hold no secret material, matching
+/// `host_credential_class::EXACT_HOST_PATHS` dropping `passwd` and
+/// `SSH_NON_CREDENTIAL_BASENAME` excluding `known_hosts`); `gshadow` was ADDED (matches
+/// `EXACT_HOST_PATHS`). The coarse basename `credentials` deliberately stays even though
+/// it's shared by every cloud provider's config dir — the engine does the precise
+/// directory-paired path check (`CLOUD_CREDENTIAL_FILES`); the dedup gate above bounds how
+/// often a match on it can cost a ring slot.
 const SENSITIVE_CREDENTIAL_BASENAMES: &[&[u8]] = &[
     b"shadow",
-    b"passwd",
+    b"gshadow",
     b"sudoers",
     b"authorized_keys",
-    b"known_hosts",
     b"id_rsa",
     b"id_dsa",
     b"id_ecdsa",
@@ -310,9 +358,10 @@ fn is_write_open(flags: u64) -> bool {
 /// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
 /// in-kernel keeps the (very high) file-open volume off the ring buffer. JEF-320 widens
 /// this past tmpfs for a small, fixed allowlist of on-host credential-file basenames (see
-/// [`SENSITIVE_CREDENTIAL_BASENAMES`]) — ON-NODE LOAD VALIDATION PENDING for that widening
-/// (docs/ebpf-testing-on-nodes.md: this crate can't be compiled or verifier-tested off the
-/// fleet). Observe-only.
+/// [`SENSITIVE_CREDENTIAL_BASENAMES`]), bounded by the [`allow_credential_read`] dedup gate
+/// (security rework) so a chatty reader of a matched basename can't flood the ring — ON-NODE
+/// LOAD VALIDATION PENDING for that widening (docs/ebpf-testing-on-nodes.md: this crate
+/// can't be compiled or verifier-tested off the fleet). Observe-only.
 #[fentry(function = "security_file_open")]
 pub fn file_open(ctx: FEntryContext) -> u32 {
     let _ = try_file_open(&ctx);
@@ -325,7 +374,22 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     if file.is_null() {
         return Ok(());
     }
-    if is_tmpfs(file) || is_sensitive_credential_basename(file) {
+    if is_tmpfs(file) {
+        emit_file_path(file, KIND_FILE_OPEN);
+        return Ok(());
+    }
+    if is_sensitive_credential_basename(file) {
+        // JEF-320 security rework: dedup gate on (pid, inode) — a chatty reader of a
+        // matched basename (e.g. hammering `/etc/shadow` or a `credentials` file) must not
+        // be able to flood the single shared ring and starve real exec/priv-change/connect
+        // signals. A missing inode still emits (fail open, mirrors `try_file_write`): the
+        // dedup is a volume optimization, not a correctness gate.
+        let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
+        if let Some(ino) = inode_ino(file) {
+            if !allow_credential_read(&ReadKey::new(pid, ino)) {
+                return Ok(());
+            }
+        }
         emit_file_path(file, KIND_FILE_OPEN);
     }
     Ok(())

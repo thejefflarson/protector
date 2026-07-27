@@ -163,6 +163,30 @@ impl WriteKey {
     }
 }
 
+/// Dedup key for the credential-basename read gate (JEF-320 security rework): the
+/// `(pid, inode)` tuple, same shape as [`WriteKey`] but a distinct type (its own LRU map,
+/// its own gate) so the two dedup domains can't be mixed up at a call site. Bounds a HIGH
+/// finding from security review: `try_file_open`'s widening past `is_tmpfs` to a small
+/// basename allowlist (`SENSITIVE_CREDENTIAL_BASENAMES` in the eBPF crate) had no dedup, so
+/// an attacker with code-exec in any pod could spam reads of a matched basename (e.g.
+/// `/etc/shadow`, a `credentials` file) to exhaust the single shared ring buffer and force
+/// `record_drop()` to silently drop real exec/priv-change/connect signals node-wide — a
+/// sensor-blinding / detection-evasion primitive. Coalescing on `(pid, inode)` collapses
+/// exactly that chatty-reader case at the source, same as [`WriteKey`] does for writes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ReadKey {
+    pub pid: u32,
+    pub ino: u64,
+}
+
+impl ReadKey {
+    /// Build the dedup key for a read by `pid` of the file with inode `ino`.
+    pub fn new(pid: u32, ino: u64) -> Self {
+        Self { pid, ino }
+    }
+}
+
 /// Whether a repeat event keyed at `last_ns` should be coalesced (suppressed) at `now_ns`,
 /// given the dedup `window_ns` (JEF-65). The single source of truth for the dedup
 /// decision, shared verbatim by the kernel probe and the userspace tests so the two can't
@@ -234,5 +258,16 @@ mod tests {
         assert_eq!(base, WriteKey::new(1234, 42));
         assert_ne!(base, WriteKey::new(9999, 42));
         assert_ne!(base, WriteKey::new(1234, 43));
+    }
+
+    #[test]
+    fn read_key_distinguishes_pid_and_inode() {
+        // The credential-basename-read dedup key (JEF-320 security rework) mirrors
+        // WriteKey's equality shape: same (pid, inode) pair compares equal, either field
+        // differing does not.
+        let base = ReadKey::new(1234, 42);
+        assert_eq!(base, ReadKey::new(1234, 42));
+        assert_ne!(base, ReadKey::new(9999, 42));
+        assert_ne!(base, ReadKey::new(1234, 43));
     }
 }
