@@ -25,6 +25,7 @@ impl reason::adjudicate::Adjudicator for CountingAdjudicator {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         self.0.fetch_add(1, Ordering::SeqCst);
         Verdict::Refuted("counted".into())
@@ -214,6 +215,7 @@ impl reason::adjudicate::Adjudicator for FixedAdjudicator {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         self.0.clone()
     }
@@ -282,6 +284,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             _objectives: &[(NodeKey, AttackRef)],
             _graph: &SecurityGraph,
             _prompt: &str,
+            _downstream: &[NodeKey],
         ) -> Verdict {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Verdict::Exploitable("RCE reaches the secret".into())
@@ -483,6 +486,7 @@ impl reason::adjudicate::Adjudicator for ConcurrencyProbe {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(now, Ordering::SeqCst);
@@ -535,6 +539,7 @@ async fn one_entrys_model_failure_does_not_poison_the_others() {
             _objectives: &[(NodeKey, AttackRef)],
             _graph: &SecurityGraph,
             _prompt: &str,
+            _downstream: &[NodeKey],
         ) -> Verdict {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Verdict::Uncertain("model unavailable".into())

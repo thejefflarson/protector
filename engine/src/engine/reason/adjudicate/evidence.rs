@@ -8,6 +8,15 @@
 use super::guards::sanitize;
 use crate::engine::graph::attack::{AttackRef, Tactic};
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
+use crate::engine::observe::asn::AsnDb;
+// JEF-113: exec *classification* (shell / package-manager in container) moved out of the
+// shared `Behavior` wire type into engine policy; annotate here so the model still sees
+// "executed /bin/bash (interactive shell in container)" rather than the bare path
+// `Behavior::summary` now returns.
+use crate::engine::observe::exec_class::annotated_summary;
+// JEF-380: for INTERNET egress render the deduped, sorted PROVIDER set via the offline ASN
+// dataset — cluster peers are untouched.
+use crate::engine::observe::peer_class::internet_egress_line;
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
 /// prompt is the verdict-cache key (hashed, JEF-350), this cap must be DETERMINISTIC —
@@ -16,16 +25,20 @@ use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulner
 /// the prompt (the NVD advisory feed is retired, JEF-242); this cap stays to keep it fenced.
 const TITLE_CAP: usize = 120;
 
-/// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across an
-/// entry's CVE lines (JEF-106). Per-field caps bound any ONE field, but a CVE-heavy image
-/// (hundreds of CVEs, each at its per-field cap) could still aggregate an unbounded prompt
-/// — the security review's "TOTAL untrusted-evidence budget per entry" gap. Once the
-/// running total of untrusted free-text (the trivy `title`s) crosses this budget, later
-/// CVE lines drop their free prose and fall back to the STRUCTURED, low-cardinality fields
-/// only (id/severity/score/reachability/fix) — the JEF-106 structural-first stance: the
-/// model never loses a CVE, only its unbounded prose. Deterministic (CVEs are sorted before
-/// rendering, see `build_judgment_prompt_with`), so the same evidence always renders the
-/// same budgeted prompt and the verdict fingerprint stays stable across passes.
+/// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across ONE
+/// category of an entry's evidence lines (JEF-106) — CVEs, findings (secrets+posture), and
+/// observed behavior each thread their OWN fresh instance of this budget (see
+/// [`entry_evidence_budgeted`], [`entry_findings_budgeted`], [`render_behavior_lines`]). Per-field
+/// caps bound any ONE field, but a CVE-heavy image (hundreds of CVEs, each at its per-field cap)
+/// — or, per the same reasoning, a workload with many observed behaviors — could still aggregate
+/// an unbounded prompt — the security review's "TOTAL untrusted-evidence budget per entry" gap.
+/// Once the running total of untrusted free-text in a category crosses this budget, later lines
+/// in that category drop their free prose and fall back to the STRUCTURED, low-cardinality
+/// fields only (id/severity/score/reachability/fix for a CVE; the behavior KIND alone for a
+/// behavior line) — the JEF-106 structural-first stance: the model never loses a CVE or a
+/// behavior, only its unbounded prose. Deterministic (each category is sorted before rendering),
+/// so the same evidence always renders the same budgeted prompt and the verdict fingerprint
+/// stays stable across passes.
 pub(crate) const ENTRY_FREETEXT_BUDGET: usize = 1200;
 
 /// Char-safe truncate-then-sanitize for one untrusted free-text field (JEF-106). The
@@ -196,6 +209,21 @@ pub(crate) fn entry_evidence(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
 ) -> (Vec<String>, Vec<Behavior>) {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    entry_evidence_budgeted(graph, entry_key, &mut budget)
+}
+
+/// As [`entry_evidence`], but draws the CVE free-text budget from a shared external `budget`
+/// rather than a fresh [`ENTRY_FREETEXT_BUDGET`] (JEF-565): the entry's own call still passes a
+/// fresh budget (unchanged behavior), while each downstream workload on the entry's proven
+/// paths (`downstream::render_downstream`) threads ONE shared incident-wide budget across every
+/// node, so a wide entry (argo, ~110 objectives) cannot multiply the per-node budget into an
+/// unbounded prompt. Structural fields are never dropped — only prose beyond the budget.
+pub(crate) fn entry_evidence_budgeted(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+    budget: &mut usize,
+) -> (Vec<String>, Vec<Behavior>) {
     let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
     // Render in a STABLE order so the per-entry free-text budget (below) is deterministic:
     // the same evidence must always produce the same budgeted lines, both for the prompt
@@ -225,16 +253,119 @@ pub(crate) fn entry_evidence(
         }
         true
     });
-    // Apply the per-entry AGGREGATE untrusted-free-text budget (JEF-106): a shared budget
-    // is threaded across the lines so a CVE-heavy image can't aggregate an unbounded prompt
-    // even when every per-field cap holds. Early CVE lines keep their prose; once the budget
-    // is spent, later lines fall back to the structured fields only.
-    let mut budget = ENTRY_FREETEXT_BUDGET;
+    // Apply the AGGREGATE untrusted-free-text budget (JEF-106): a shared budget is threaded
+    // across the lines so a CVE-heavy image can't aggregate an unbounded prompt even when
+    // every per-field cap holds. Early CVE lines keep their prose; once the budget is spent,
+    // later lines fall back to the structured fields only.
     let cves = vulns
         .iter()
-        .map(|v| cve_evidence_budgeted(v, &mut budget))
+        .map(|v| cve_evidence_budgeted(v, budget))
         .collect();
     (cves, behaviors)
+}
+
+/// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
+/// the ONLY CVE category that is exploitation evidence is `[reachability: loaded-at-runtime]`
+/// (vulnerable code observed running on the reachable path). CVEs that are present-but-not-running
+/// (`not-observed`), static-binary-unknowable, or unknown-reachability are CONTEXT — "how bad IF
+/// exploited" — never a breach on their own, and they stay on the dashboard for operators. Sending
+/// them to the JUDGE only hands a small model a non-evidence CVE to fabricate a `loaded-at-runtime`
+/// tag onto (JEF-451, the recurring false `exploitable`). So the judge's CVE field carries only the
+/// reachable (running) CVEs; `(none)` otherwise. This is enrichment/filtering of NON-evidence, not
+/// the objective-breadth capping ADR-0029 forbids (a not-observed CVE can never change a correct
+/// verdict). Measured on the deployed qwen3:1.7b: it collapses the temp-0.8 flip mass 15%→0% with
+/// no false negatives. The anti-fabrication guards read the FULL list separately (`model_call`), so
+/// their behaviour is unchanged. NOTE: `objective_reach` is not this — this is the CVE image-reach.
+///
+/// Shared by the entry's own CVE field (`prompt::render_evidence`) and each downstream node's
+/// block (JEF-565, `downstream::render_downstream`) so both filter with the EXACT same rule —
+/// one source of truth for what counts as CVE exploitation evidence in the judge prompt.
+const LOADED_AT_RUNTIME: &str = "[reachability: loaded-at-runtime]";
+
+/// Retain only the CVE lines that are exploitation evidence (see [`LOADED_AT_RUNTIME`]).
+pub(crate) fn retain_reachable_cves(cves: &mut Vec<String>) {
+    cves.retain(|line| line.contains(LOADED_AT_RUNTIME));
+}
+
+/// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
+/// runtime behavior" field carries. Shared by the entry's own field and each downstream
+/// node's block (JEF-565) so both apply the SAME two engine policies:
+///
+/// - When the ASN dataset is EMPTY (no feed wired / unreadable file), every behavior —
+///   including each internet connection — renders one line via [`annotated_summary`], exactly
+///   as it did before the feed existed (the graceful-degrade contract).
+/// - When the dataset is present, INTERNET egress connections are pulled out and collapsed
+///   into ONE deduped, sorted provider line ([`internet_egress_line`]); every other behavior
+///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
+///   `annotated_summary` as before.
+///
+/// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
+/// changes the prompt or its verdict-cache hash.
+pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    render_behavior_lines_budgeted(behaviors, asn, &mut budget)
+}
+
+/// As [`render_behavior_lines`], but draws the free-text budget from a shared external
+/// `budget` — the behavior-line counterpart of [`entry_evidence_budgeted`] (JEF-565's
+/// security-review follow-up): `Behavior::summary` embeds attacker-influenced free-text (an
+/// exec'd path, a file path, a raw peer string) that is fenced+sanitized but was previously
+/// neither length-capped nor charged to any budget — harmless for a single entry, but this
+/// ticket multiplies it across every downstream node on a proven path, exactly the "total
+/// untrusted prose on a wide entry" the per-incident budget exists to bound. Each line is
+/// capped to [`TITLE_CAP`] and charged to `budget`; once exhausted, later lines fall back to
+/// the STRUCTURED, low-cardinality behavior KIND alone ([`Behavior::variant_label`]) — the
+/// model never loses that a behavior was observed, only its free-text detail (the same
+/// JEF-106 structural-first stance as a CVE/finding title). The entry's own call
+/// ([`render_behavior_lines`]) threads a fresh [`ENTRY_FREETEXT_BUDGET`], unchanged from
+/// before this budget existed for any evidence short of it; the downstream path
+/// (`downstream::render_downstream`) threads ONE shared incident-wide pool across every node.
+pub(crate) fn render_behavior_lines_budgeted(
+    behaviors: &[Behavior],
+    asn: &AsnDb,
+    budget: &mut usize,
+) -> Vec<String> {
+    // Kept alongside each rendered line so a budget-exhausted line still falls back to its
+    // KIND rather than being dropped outright; the grouped INTERNET-egress line has no single
+    // behavior behind it, so it falls back to the generic "connection" kind.
+    let mut lines: Vec<(String, &str)> = Vec::with_capacity(behaviors.len());
+    if asn.is_empty() {
+        // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
+        lines.extend(
+            behaviors
+                .iter()
+                .map(|b| (annotated_summary(b), b.variant_label())),
+        );
+    } else {
+        // Collapse INTERNET egress to a provider set; everything else renders as before.
+        let mut internet_peers: Vec<&str> = Vec::new();
+        for behavior in behaviors {
+            match behavior {
+                Behavior::NetworkConnection {
+                    peer,
+                    internet: true,
+                } => internet_peers.push(peer),
+                other => lines.push((annotated_summary(other), other.variant_label())),
+            }
+        }
+        if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
+            // No single `Behavior` behind the grouped provider line (it summarizes N internet
+            // connections) — `"connection"` matches `Behavior::NetworkConnection`'s own
+            // `variant_label()`, the kind every one of those N behaviors shares.
+            lines.push((line, "connection"));
+        }
+    }
+    let mut out: Vec<String> = lines
+        .into_iter()
+        .map(|(line, kind)| {
+            let capped = cap_untrusted(&line, TITLE_CAP);
+            take_from_budget(capped, budget)
+                .unwrap_or_else(|| format!("{kind} (free-text budget exhausted)"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Render one non-CVE scanner finding (JEF-244 — exposed secret / misconfig / RBAC) into a
@@ -266,21 +397,33 @@ pub(crate) fn entry_findings(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
 ) -> (Vec<String>, Vec<String>) {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    entry_findings_budgeted(graph, entry_key, &mut budget)
+}
+
+/// As [`entry_findings`], but draws the finding free-text budget from a shared external
+/// `budget` (JEF-565) — the downstream counterpart of [`entry_evidence_budgeted`]; see its
+/// doc for why (the per-incident aggregate budget across every downstream node on the entry's
+/// proven paths).
+pub(crate) fn entry_findings_budgeted(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+    budget: &mut usize,
+) -> (Vec<String>, Vec<String>) {
     let (mut secrets, mut misconfigs, mut rbac) = graph.entry_findings(entry_key);
     secrets.sort_by(|a, b| a.id.cmp(&b.id));
     misconfigs.sort_by(|a, b| a.id.cmp(&b.id));
     rbac.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut budget = ENTRY_FREETEXT_BUDGET;
     let secret_lines = secrets
         .iter()
-        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .map(|f| finding_evidence_budgeted(f, budget))
         .collect();
     // Misconfig + RBAC share one "static posture" list: same role in the prompt (severity
     // context), so the model sees one fenced block rather than two it might over-weight.
     let posture_lines = misconfigs
         .iter()
         .chain(rbac.iter())
-        .map(|f| finding_evidence_budgeted(f, &mut budget))
+        .map(|f| finding_evidence_budgeted(f, budget))
         .collect();
     (secret_lines, posture_lines)
 }

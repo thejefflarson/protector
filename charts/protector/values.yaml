@@ -118,25 +118,42 @@ service:
 
 # RAM-tight, arm64-friendly: a webhook that mostly idles with occasional signature
 # verification (network I/O to the registry + Rekor) plus the async engine loop.
+# The 250m limit (JEF-560) proved too tight: a per-pass signing/provenance sweep across a
+# fleet's worth of images does a burst of TLS handshakes + JSON/crypto work on the SAME cgroup
+# the probe HTTP server shares, and the CFS quota can throttle the whole container — including
+# the probe response — long enough to look dead. 500m gives that burst headroom without
+# meaningfully changing steady-state idle usage (still requests only 10m).
 resources:
   requests:
     cpu: 10m
     memory: 64Mi
   limits:
-    cpu: 250m
+    cpu: 500m
     memory: 256Mi
 
-# Probes hit the HTTPS server; kubelet doesn't verify the cert for probes.
+# Probes hit the HTTPS server; kubelet doesn't verify the cert for probes. `/healthz` and
+# `/readyz` are both served from process start (no engine-sweep dependency), so a probe
+# failure here means the process is either genuinely wedged or — the JEF-560 incident — was
+# merely CPU-throttled long enough to miss the default 1s timeout / 3-strike (30s) budget
+# during a legitimate sweep burst. Widened timeout + failure budget so a busy-but-alive engine
+# isn't mistaken for a dead one and SIGTERM'd into a restart loop; liveness (which restarts the
+# container) gets the most slack, readiness (which only pulls it from admission routing) less.
 livenessProbe:
   httpGet:
     path: /healthz
     port: https
     scheme: HTTPS
+  timeoutSeconds: 5
+  periodSeconds: 15
+  failureThreshold: 6
 readinessProbe:
   httpGet:
     path: /readyz
     port: https
     scheme: HTTPS
+  timeoutSeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
 
 nodeSelector: {}
 tolerations: []
