@@ -114,6 +114,22 @@ jobs:
           push: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # sccache's R2 backend for the in-image cargo build (JEF-584, ADR-0020).
+          # `secret-envs` (key=envname) reads these straight out of the RUNNER POD's env,
+          # where the `sccache-r2` Secret is injected via envFrom (cluster repo:
+          # charts/actions/runners/values-protector.yaml) — the repo has no Actions secret
+          # for R2, and this needs no lift step or on-disk secret file. Secrets, not
+          # build-args: a build-arg persists in `docker history` on every pushed image.
+          # Unset (e.g. the Secret is missing) -> the mounts are empty and
+          # scripts/start-sccache-docker.sh degrades to a local disk cache, not a failure.
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+            SCCACHE_BUCKET=SCCACHE_BUCKET
+            SCCACHE_ENDPOINT=SCCACHE_ENDPOINT
+            SCCACHE_REGION=SCCACHE_REGION
+            SCCACHE_S3_KEY_PREFIX=SCCACHE_S3_KEY_PREFIX
+            SCCACHE_S3_USE_SSL=SCCACHE_S3_USE_SSL
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
           # Exporting cache pushes to the cache repo, which needs the registry login that
           # is gated off for PRs — so only export on non-PR events (otherwise PR builds
