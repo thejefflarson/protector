@@ -83,3 +83,19 @@ Harder / accepted downsides:
 - **This revises ADR-0001's conjunction.** That bar was the right conservative
   starting point; this is the considered refinement once the signals' asymmetry
   and the adjudicator were both in place.
+
+## Amendment (JEF-547, 2026-07-27): the adjudicator becomes the cut *selector* ([ADR-0032](0032-model-is-incident-responder.md))
+
+The `corroborated ∧ adjudicated` auto-gate decided here is **unchanged and reaffirmed** — and
+ADR-0032 *restores* it where the code had drifted: the downstream `QuarantineWorkload` had
+been auto-firing **unconditionally** (via `is_live_corroborated`'s special case), bypassing
+this very gate. ADR-0032 removes that bypass so every auto-eligible cut on the path passes the
+gate again.
+
+What ADR-0032 *evolves*: the adjudicator's role here is a one-way **veto** over a
+deterministically-selected action; under ADR-0032 the model becomes the **selector** of the
+cut (from a deterministically-enumerated menu). The asymmetry (live evidence acts, latent
+exposure proposes) is unchanged, but "acts" now means *the model's cut decision*, and
+auto-action is confined to internet-facing adjudicated paths — an internal-only actively-
+exploited pod is **propose-only** (per ADR-0032, superseding the JEF-284 "internal pods
+included" stance in [ADR-0022](0022-quarantine-the-entry-is-the-default-containment.md)).
