@@ -400,13 +400,15 @@ fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
 /// (a Secret) or, if a workload, one with neither a CVE nor a live signal — reached ≠
 /// exploited. `ActivelyExploited` takes precedence when a pod meets both bars.
 ///
-/// **JEF-322 thesis-check note:** bar 1's [`compromisable`] is the *static* CVE/KEV
-/// predicate, not a live signal — so `RemotelyExploitable` fires on reachability + CVE
-/// *presence* alone, with no runtime evidence or model judgement required (unlike the
-/// entry-foothold lane, which ADR-0013 gates on the model's affirmative verdict — "CVE
-/// presence no longer auto-cuts"). This is a deliberate, verified asymmetry, not an
-/// oversight: see `pivot_quarantine_tests.rs` for the characterizing regression tests
-/// and the ticket's `DECISION NEEDED` for the two ways to resolve the tension.
+/// **JEF-322/JEF-566 note:** bar 1's [`compromisable`] is the *static* CVE/KEV
+/// predicate, not a live signal — so `RemotelyExploitable` still fires on reachability
+/// and CVE *presence* alone at THIS (proof) layer, identifying a *candidate* target. It
+/// no longer auto-actions on that alone, though: `respond::Mitigation::is_live_corroborated`
+/// (JEF-566) additionally requires the target's justifying chain to be corroborated or
+/// model-promoted, adjudicated, and breach-relevant before the actuator will apply it,
+/// the same ADR-0013 bar the entry-foothold lane clears. A candidate behind a clean,
+/// unpromoted edge stays a human-facing proposal. See `pivot_quarantine_tests.rs` for
+/// the regression coverage of both layers.
 pub(super) fn quarantine_targets_on_path(
     graph: &SecurityGraph,
     entry: NodeIndex,

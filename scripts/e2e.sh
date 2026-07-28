@@ -167,9 +167,11 @@ managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 #     "exploitable" verdict (ADR-0011). It is gated: no cut on mere CVE presence.
 #   - the PIVOT quarantine (role=store): a *remotely-exploitable* pod — a non-entry
 #     workload reachable from the internet-exposed entry that runs a critical/KEV CVE —
-#     is quarantined DETERMINISTICALLY (JEF-284), needing neither a model nor a live
-#     alert. This is a separate high bar (reachable + critical CVE), not the model-gated
-#     entry path, and it is applied first (it waits on nothing).
+#     is IDENTIFIED as a quarantine candidate DETERMINISTICALLY (JEF-284: reachable +
+#     critical CVE, no model needed). But auto-ACTION on it now clears the SAME bar as
+#     the entry (JEF-566 / ADR-0032): its justifying chain must be corroborated/promoted,
+#     adjudicated, and breach-relevant. Corroborated ⇒ auto-quarantined; otherwise it
+#     stays propose-only. Reachability + CVE presence alone no longer auto-cuts the pivot.
 # The two race, and store's policy-name can sort either side of web's, so the old
 # `managed_np_name | head -n1`-selects-web check was inherently flaky.
 managed_np_roles() {
@@ -512,16 +514,19 @@ pf_reset
 # auto-eligible under the asymmetric action bar.
 post_alert
 # Wait for the ENTRY cut specifically (role=web) — the corroboration-driven control this
-# step exists to prove — not "the first managed policy". The engine also applies a SECOND,
-# deterministic quarantine on the remotely-exploitable pivot `store` (JEF-284: reachable
-# from the internet-exposed entry + a critical CVE), which lands first (it waits on no
-# corroboration); the two race, so naming the role is the only stable assertion.
+# step exists to prove — not "the first managed policy". The SAME live alert that
+# corroborates web's chain also corroborates the pivot `store`'s justifying chain (they
+# share it), so the engine ALSO auto-quarantines the remotely-exploitable pivot `store`:
+# JEF-284 identifies the candidate (reachable from the entry + a critical CVE), and
+# JEF-566 clears it to auto-action because that chain is now corroborated. The two race,
+# so naming the role is the only stable assertion.
 wait_until "engine cuts the corroborated entry web" 120 managed_np_for web
 pass "engine quarantined role=web — live corroboration met the asymmetric action bar (ADR-0009)"
-# The pivot is ALSO isolated, on the independent deterministic bar (no model/alert needed).
+# The pivot is ALSO isolated — its justifying chain is corroborated by the same alert
+# (JEF-566: the pivot clears the same auto-action bar as the entry, not a separate one).
 managed_np_for store \
-  || fail "engine did not quarantine the remotely-exploitable pivot role=store (JEF-284)"
-pass "engine also quarantined role=store — a remotely-exploitable pivot (reachable + critical CVE)"
+  || fail "engine did not quarantine the remotely-exploitable pivot role=store (corroborated chain)"
+pass "engine also quarantined role=store — a remotely-exploitable pivot on a corroborated chain"
 
 step "8/11  SELF-REVERT: remove the durable allow; web is no longer provable AND store is no longer reachable-from-internet, so the engine reverts BOTH controls"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
@@ -588,13 +593,15 @@ sleep 10
 managed_np_for_absent web \
   || fail "engine auto-cut the web foothold on mere CVE presence with no model — the positive-gate is violated"
 pass "web foothold left uncut: the model, not a rule, must decide to promote+cut the entry"
-# The remotely-exploitable PIVOT (store) IS quarantined here (JEF-284, deterministic:
-# reachable + critical CVE) — a separate high-bar control, independent of the model that
-# gates the entry foothold. Its presence is expected and correct, not a thesis violation;
-# assert it so the two lanes stay legible and a regression in either is caught.
-managed_np_for store \
-  || fail "engine did not quarantine the remotely-exploitable pivot role=store (JEF-284)"
-pass "pivot store quarantined deterministically — the model gates the entry, not the remotely-exploitable pivot"
+# The remotely-exploitable PIVOT (store) is IDENTIFIED as a candidate deterministically
+# (JEF-284: reachable + critical CVE), but with NO model and NO live signal its justifying
+# chain is uncorroborated/unadjudicated — so under JEF-566 / ADR-0032 it is PROPOSE-ONLY,
+# exactly like the entry. Reachability + CVE presence alone no longer auto-cuts the pivot;
+# the incident responder (a model verdict or live corroboration) must decide. Assert the
+# pivot is NOT auto-quarantined so a regression back to deterministic pivot-cutting is caught.
+managed_np_for_absent store \
+  || fail "engine auto-quarantined the pivot role=store on reachability + CVE presence alone, with no model or corroboration — JEF-566/ADR-0032 makes it propose-only"
+pass "pivot store left uncut: without a model verdict or live corroboration it stays propose-only, same bar as the entry (JEF-566)"
 
 if model_available; then
   step "10/11  LOG4J + MODEL: the model examines the proven path, judges log4shell EXPLOITABLE, and the engine cuts — the determination is the model's"
