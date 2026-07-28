@@ -41,6 +41,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::ingest_guard::{
     DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
+    require_token,
 };
 
 /// Upper bound on any single string lifted out of an audit event. Audit events are
@@ -279,40 +280,29 @@ async fn ingest(
 
 /// Serve the k8s audit-log ingest (JEF-269). One route (`/`) accepts the apiserver's audit
 /// webhook POSTs. Guarded exactly like the runtime ingest ([`super::runtime::serve_runtime`]):
-/// a bearer token (rejected 401 before deserialization; a loud WARNING if unconfigured so
-/// the engine can deploy ahead of the Secret), a per-peer rate limit, and a body-size cap.
-/// This is the cluster-facing glue; the parser and store it drives are what the tests cover.
+/// a REQUIRED bearer token (rejected 401 before deserialization; a missing token refuses
+/// to bind at all — JEF-576), a per-peer rate limit, and a body-size cap. This is the
+/// cluster-facing glue; the parser and store it drives are what the tests cover.
 pub async fn serve_audit(
     addr: SocketAddr,
     events: Arc<AuditEvents>,
     notify: Sender<()>,
 ) -> anyhow::Result<()> {
-    let token = IngestToken::from_env();
+    // REQUIRED, not optional (JEF-576): a missing token refuses to start this listener
+    // rather than serving it unauthenticated — see `serve_runtime`'s comment for the full
+    // rationale (the same posture applies here).
+    let token = require_token(IngestToken::from_env(), "k8s audit-log ingest", addr)?;
     let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/", post(ingest))
         // An audit batch is small; cap the body so the apiserver can't OOM the engine with
         // a giant POST (mirrors the runtime ingest and the webhook server).
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .with_state((events, notify));
-
-    app = app.layer(axum::middleware::from_fn_with_state(limiter, rate_limit));
-
-    match token {
-        Some(token) => {
-            app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
-            tracing::info!(%addr, "k8s audit-log ingest listening (/) — bearer-authenticated");
-        }
-        None => {
-            tracing::warn!(
-                %addr,
-                "k8s audit-log ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN_FILE \
-                 to require a bearer token. Any caller that can reach this port could post \
-                 forged secret-read observations."
-            );
-        }
-    }
+        .with_state((events, notify))
+        .layer(axum::middleware::from_fn_with_state(limiter, rate_limit))
+        .layer(axum::middleware::from_fn_with_state(token, bearer_auth));
+    tracing::info!(%addr, "k8s audit-log ingest listening (/) — bearer-authenticated (required)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
