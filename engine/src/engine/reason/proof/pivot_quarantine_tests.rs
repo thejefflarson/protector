@@ -1,23 +1,28 @@
-//! JEF-322 (thesis-check on JEF-284): does `quarantine_targets_on_path`'s
+//! JEF-322 (thesis-check on JEF-284), resolved by JEF-566: does `quarantine_targets_on_path`'s
 //! `RemotelyExploitable` trigger require on-pod exploitation *evidence* — a live
 //! runtime signal, per the "presence ≠ exploitability, the model decides" thesis
 //! (ADR-0011/0013/0016) — or does it fire on mere reachability + static CVE
 //! *presence*, the exact pattern ADR-0013 forbids for the entry-foothold lane
 //! ("CVE presence no longer auto-cuts")?
 //!
-//! **Finding: it fires on reachability + CVE presence alone.** [`quarantine_targets_on_path`]'s
-//! `RemotelyExploitable` arm is `node != entry && net_reachable(node) && compromisable(node)` —
-//! [`compromisable`] is the *static* CVE/KEV predicate, not [`actively_exploited`]'s live-signal
-//! one. No runtime evidence, no corroboration, and no model verdict is required. Worse, the
-//! actuator's `Mitigation::is_live_corroborated` treats every `QuarantineWorkload` mitigation —
-//! including a `RemotelyExploitable` one — as unconditionally auto-actionable (see the comment
-//! at that method), bypassing the `corroborated || promoted` gate ADR-0013 requires for the
-//! entry. This file is a **characterizing** regression suite: it locks the CURRENT behavior in
-//! place (so it can't silently drift further) without endorsing it. Split out of `tests.rs`
-//! purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
+//! **JEF-322 finding:** [`quarantine_targets_on_path`]'s `RemotelyExploitable` arm is
+//! `node != entry && net_reachable(node) && compromisable(node)` — [`compromisable`] is the
+//! *static* CVE/KEV predicate, not [`actively_exploited`]'s live-signal one. No runtime
+//! evidence, no corroboration, and no model verdict is required to become a *candidate*
+//! quarantine target — that stays true, deliberately: the proof layer still proposes on
+//! presence alone (a human always sees the finding).
 //!
-//! See the ticket's structured result for the `DECISION NEEDED` writeup (model-gate the pivot
-//! vs. accept deterministic pivot-quarantine as intended).
+//! **JEF-566 fix:** the actuator's `Mitigation::is_live_corroborated` previously
+//! special-cased every `QuarantineWorkload` mitigation — including a `RemotelyExploitable`
+//! one — as unconditionally auto-actionable, bypassing the `corroborated || promoted`
+//! gate ADR-0013 requires for the entry lane. It now runs the SAME gate as every other
+//! action: `(corroborated || promoted) && adjudicated && breach_relevant` on the pod's
+//! justifying chain. A downstream `RemotelyExploitable` pod behind a clean/unpromoted edge
+//! is now propose-only; an internal-only actively-exploited pod (no internet-facing entry,
+//! `breach_relevant == false`) is propose-only too. This file pins both halves: the proof
+//! layer still *identifies* the candidate (unchanged), the actuation layer no longer
+//! *auto-acts* on it without the model gate. Split out of `tests.rs` purely to keep every
+//! file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]
 
 use super::*;
@@ -116,15 +121,14 @@ fn web_to_store_chain(chains: &[ProvenChain]) -> &ProvenChain {
         .expect("web → store → secret chain")
 }
 
-/// CHARACTERIZING (not endorsing): a pivot pod that is network-reachable from an
-/// exposed entry and carries a critical CVE — but has ZERO runtime/live evidence —
-/// is CURRENTLY promoted to a `RemotelyExploitable` quarantine target. This is the
-/// exact "reachable + CVE present, no evidence" shape JEF-322 asks about; per
-/// ADR-0013 ("CVE presence no longer auto-cuts") this is in tension with the
-/// product thesis as applied to the entry. See the file header for the finding and
-/// the ticket's `DECISION NEEDED`.
+/// A pivot pod that is network-reachable from an exposed entry and carries a critical
+/// CVE — but whose justifying chain has ZERO runtime/live evidence (a clean, unpromoted
+/// edge) — is still IDENTIFIED as a `RemotelyExploitable` quarantine candidate at the
+/// proof layer (unchanged), but JEF-566 makes it **propose-only**: the actuator no
+/// longer auto-acts on reachability + CVE presence alone, matching the entry-foothold
+/// lane's ADR-0013 bar ("CVE presence no longer auto-cuts").
 #[test]
-fn pivot_reachable_plus_cve_alone_currently_promotes_to_remotely_exploitable() {
+fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
     let chains = web_reaches_pivot_store();
     let chain = web_to_store_chain(&chains);
 
@@ -140,8 +144,8 @@ fn pivot_reachable_plus_cve_alone_currently_promotes_to_remotely_exploitable() {
         .iter()
         .find(|t| t.node == store_node)
         .expect(
-            "CURRENT behavior: reachable + critical-CVE alone promotes the pivot pod to a \
-             quarantine target, with no live evidence required",
+            "reachable + critical-CVE alone still identifies the pivot pod as a quarantine \
+             CANDIDATE — the proof layer's target selection is unchanged by JEF-566",
         );
     assert_eq!(
         target.reason,
@@ -149,26 +153,66 @@ fn pivot_reachable_plus_cve_alone_currently_promotes_to_remotely_exploitable() {
         "the trigger is the static compromisable() CVE predicate, not actively_exploited()"
     );
 
-    // The actuator's auto-action gate (`Mitigation::is_live_corroborated`) special-cases
-    // every `QuarantineWorkload` mitigation as unconditionally auto-actionable — it does not
-    // require this chain's own `corroborated`/`promoted`/`adjudicated` bar, unlike the entry
-    // lane (ADR-0013). Asserting it here pins the actuation-side half of the same finding.
-    let mitigation = crate::engine::respond::Mitigation {
-        cut: crate::engine::reason::proof::Link {
-            from: chain.entry.clone(),
-            to: store_node.clone(),
-            relation: "quarantine".into(),
-            technique: None,
-            from_labels: Default::default(),
-            to_labels: Default::default(),
+    // Build the mitigation the way the response layer actually does — through the
+    // ledger, so the justification carries this chain's real corroborated/adjudicated/
+    // breach_relevant state, not a hand-rolled empty vec.
+    let mut ledger = crate::engine::respond::MitigationLedger::new();
+    let delta = ledger.reconcile(&chains);
+    let mitigation = delta
+        .proposed
+        .iter()
+        .find(|m| {
+            m.action == crate::engine::respond::ProposedAction::QuarantineWorkload
+                && m.cut.from == store_node
+        })
+        .expect("the pivot's QuarantineWorkload mitigation is proposed");
+    assert!(
+        !mitigation.is_live_corroborated(),
+        "JEF-566: a downstream RemotelyExploitable pod behind a clean/unpromoted edge is \
+         propose-only — it must NOT clear the auto-action gate on CVE presence alone"
+    );
+}
+
+/// The positive contrast: the SAME pivot shape, but the entry now carries a live alert
+/// (any "attack happening now" signal corroborates any objective). That makes the
+/// justifying chain corroborated + breach-relevant + adjudicated, so the pivot's
+/// `RemotelyExploitable` quarantine now DOES clear the auto-action gate — the model/
+/// corroboration governs, not the pod's static CVE alone.
+#[test]
+fn pivot_behind_a_corroborated_breach_relevant_edge_is_auto_actionable() {
+    use crate::engine::observe::Attribution;
+
+    let chains = web_reaches_pivot_store_with_runtime(vec![RuntimeObservation {
+        attribution: Attribution::by_namespaced_name("app", "web"),
+        source: Some("alert".into()),
+        observed_at_ms: None,
+        node: None,
+        behavior: Behavior::Alert {
+            rule: "Terminal shell in container".into(),
         },
-        action: crate::engine::respond::ProposedAction::QuarantineWorkload,
-        justifications: Vec::new(),
-    };
+    }]);
+    let chain = web_to_store_chain(&chains);
+    assert!(
+        chain.corroborated,
+        "a live alert on the entry corroborates the chain"
+    );
+    assert!(chain.is_breach_relevant(), "the entry is internet-facing");
+
+    let store_node = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
+    let mut ledger = crate::engine::respond::MitigationLedger::new();
+    let delta = ledger.reconcile(&chains);
+    let mitigation = delta
+        .proposed
+        .iter()
+        .find(|m| {
+            m.action == crate::engine::respond::ProposedAction::QuarantineWorkload
+                && m.cut.from == store_node
+        })
+        .expect("the pivot's QuarantineWorkload mitigation is proposed");
     assert!(
         mitigation.is_live_corroborated(),
-        "CURRENT behavior: a QuarantineWorkload mitigation is treated as auto-actionable \
-         regardless of the chain's own corroboration/promotion — see is_live_corroborated"
+        "a corroborated, adjudicated, breach-relevant justifying chain clears the same \
+         gate every other action clears — auto-actionable"
     );
 }
 
