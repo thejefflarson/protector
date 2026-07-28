@@ -101,6 +101,7 @@ mod tests {
                 NodeKey("secret/app/session-key".into()),
                 EXPLOIT_PUBLIC_FACING,
             )],
+            downstream: vec![],
             prompt: "unused in the compact line".into(),
             fingerprint: "fp123".into(),
             sections: PromptSections {

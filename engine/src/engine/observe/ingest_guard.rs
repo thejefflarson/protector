@@ -8,10 +8,13 @@
 //!   * [`bearer_auth`] — a per-request middleware that requires
 //!     `Authorization: Bearer <token>` matching a shared secret, rejecting a
 //!     missing/incorrect bearer with `401` BEFORE the body is deserialized. The
-//!     compare is constant-time so a wrong token leaks no timing signal. When no
-//!     token is configured the layer is absent and a startup WARNING is logged, so
-//!     the engine can be deployed before the Secret/agent roll out (see the chart
-//!     README for the rollout ordering).
+//!     compare is constant-time so a wrong token leaks no timing signal. The token is
+//!     REQUIRED (JEF-576): a caller of [`serve_runtime`](super::runtime::serve_runtime) /
+//!     [`serve_audit`](super::audit::serve_audit) with no token configured gets a loud
+//!     startup error and the ingest port never binds — there is no
+//!     unauthenticated-but-warned fallback. Provision `PROTECTOR_INGEST_TOKEN_FILE`
+//!     (the chart does this by default — see the chart's `ingestAuth` values) before
+//!     pointing `PROTECTOR_BEHAVIOR_ADDR`/`PROTECTOR_AUDIT_ADDR` at a real listener.
 //!
 //!   * [`RateLimit`] — a small in-process token bucket keyed per peer IP, so a
 //!     single source can't drive unbounded ingest work even with a valid token.
@@ -22,7 +25,7 @@
 //! complementary, not redundant.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -35,8 +38,10 @@ use subtle::ConstantTimeEq;
 
 /// The shared secret the ingest requires on every request, read once at startup.
 ///
-/// `None` means no token is configured — the ingest is left unauthenticated (with a
-/// loud startup warning) so the engine can be deployed ahead of the Secret/agent.
+/// `None` means no token is configured. Callers (`serve_runtime`/`serve_audit`) treat
+/// that as fatal for the affected listener (JEF-576): the token is required, not
+/// optional-with-a-warning, so a forged behavioral/audit observation can never reach
+/// the corroboration path unauthenticated.
 #[derive(Clone)]
 pub struct IngestToken(Arc<String>);
 
@@ -121,6 +126,26 @@ fn unauthorized() -> Response {
         .header(header::WWW_AUTHENTICATE, "Bearer")
         .body(Body::empty())
         .expect("static 401 response is always valid")
+}
+
+/// Require a configured [`IngestToken`] before a listener may bind (JEF-576): the token
+/// is REQUIRED, not optional-with-a-warning, so `serve_runtime`/`serve_audit` call this
+/// before `TcpListener::bind` and propagate its `Err` straight out, refusing to serve
+/// `what` on `addr` at all rather than falling open unauthenticated. The message names
+/// both the affected listener and the fix so the resulting startup log is actionable.
+pub fn require_token(
+    token: Option<IngestToken>,
+    what: &str,
+    addr: SocketAddr,
+) -> anyhow::Result<IngestToken> {
+    token.ok_or_else(|| {
+        anyhow::anyhow!(
+            "PROTECTOR_INGEST_TOKEN_FILE is not configured — refusing to start the {what} on \
+             {addr} unauthenticated. Any caller that can reach this port could post forged \
+             observations into the corroboration path. Mount the ingest token (the chart's \
+             `ingestAuth` values provision one by default) and restart."
+        )
+    })
 }
 
 /// A per-peer token-bucket rate limiter. Each source IP gets `burst` tokens that

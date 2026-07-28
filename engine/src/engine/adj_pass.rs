@@ -113,11 +113,16 @@ impl Engine {
             objectives.sort_by(|a, b| a.0.0.cmp(&b.0.0));
             objectives.dedup_by(|a, b| a.0 == b.0);
 
+            // JEF-565: the deduped, sorted workload set on this entry's PROVEN paths, excluding
+            // the entry itself — every workload the model's prompt now renders its own evidence
+            // block for (see `downstream_workloads`).
+            let downstream = downstream_workloads(&entry, idxs, chains);
+
             // Build the entry's delta-aware pending record (prompt + fingerprint + projected
             // surface) and read its baseline — see [`Engine::prepare_pending`] (ADR-0023 / JEF-350
             // / JEF-387). `additive` says whether the delta since the baseline is additive.
             let (pending, additive, baseline) =
-                self.prepare_pending(entry_key, entry, objectives, idxs, graph, &asn);
+                self.prepare_pending(entry_key, entry, objectives, downstream, idxs, graph, &asn);
             // The layered re-judge gate (JEF-390 LRU / JEF-391 delta hold / JEF-234 breaker +
             // backoff / re-judge), decided WITHOUT a model call — see [`adj_gate`].
             match adj_gate::classify_adjudication(
@@ -172,6 +177,7 @@ impl Engine {
                         &pending.objectives,
                         graph_ref,
                         &pending.prompt,
+                        &pending.downstream,
                     )
                     .await;
                 (pending, verdict, started.elapsed())
@@ -383,4 +389,28 @@ impl Engine {
             );
         }
     }
+}
+
+/// The deduped, sorted workload [`graph::NodeKey`]s on this entry's PROVEN paths (JEF-565),
+/// EXCLUDING the entry itself (its own evidence is the entry's dedicated prompt fields). Scope
+/// is deliberately EVERY workload node across ALL of `idxs`' chains' `ProvenChain::paths` — not
+/// just `quarantine_targets`, which is narrower (only nodes that already carry their OWN
+/// exploitation evidence) and so can't render the "checked, found nothing" clean marker for an
+/// intermediate hop the model should still be told was looked at. Deterministic: sorted + deduped
+/// so the same proven paths always yield the same downstream set, in the same order.
+fn downstream_workloads(
+    entry: &graph::NodeKey,
+    idxs: &[usize],
+    chains: &[reason::proof::ProvenChain],
+) -> Vec<graph::NodeKey> {
+    let mut nodes: Vec<graph::NodeKey> = idxs
+        .iter()
+        .flat_map(|&i| chains[i].paths.iter())
+        .flat_map(|path| path.iter())
+        .flat_map(|link| [link.from.clone(), link.to.clone()])
+        .filter(|k| k != entry && k.kind() == "workload")
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    nodes
 }

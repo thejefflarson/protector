@@ -238,6 +238,7 @@ impl reason::adjudicate::Adjudicator for AlwaysUncertain {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         self.0.fetch_add(1, Ordering::SeqCst);
         Verdict::Uncertain("model unavailable".into())
@@ -283,6 +284,7 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
         _objectives: &[(NodeKey, AttackRef)],
         _graph: &SecurityGraph,
         _prompt: &str,
+        _downstream: &[NodeKey],
     ) -> Verdict {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.down_for {

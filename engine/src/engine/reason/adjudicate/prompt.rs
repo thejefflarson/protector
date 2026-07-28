@@ -11,19 +11,13 @@ use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 
 use super::Verdict;
-use super::evidence::{entry_evidence, entry_findings, objective_outcome};
+use super::downstream::{self, DownstreamRendered};
+use super::evidence::{
+    entry_evidence, entry_findings, objective_outcome, render_behavior_lines, retain_reachable_cves,
+};
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
 use super::surface::{ChangesSince, JudgedSurface};
 use crate::engine::observe::asn::AsnDb;
-// JEF-113: exec *classification* (shell / package-manager in container) moved out of the
-// shared `Behavior` wire type into engine policy; the prompt re-applies the notable-exec
-// annotation here so the model still sees "executed /bin/bash (interactive shell in
-// container)" rather than the bare path `Behavior::summary` now returns.
-use crate::engine::observe::exec_class::annotated_summary;
-// JEF-380: for INTERNET egress the prompt renders the deduped, sorted PROVIDER set
-// (`INTERNET egress: GitHub [AS36459], OVH SAS [AS16276]`) via the offline ASN dataset —
-// the salient provider signal AND the CDN-rotation churn fix. Cluster peers are untouched.
-use crate::engine::observe::peer_class::internet_egress_line;
 
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
@@ -115,7 +109,11 @@ pub(super) fn build_judgment_prompt_with(
     behaviors: &[Behavior],
     asn: &AsnDb,
 ) -> (String, PromptSections) {
-    let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn);
+    // No downstream nodes: these callers (the non-delta `build_judgment_prompt*` family, kept
+    // for tests and any caller that only wants the entry-scoped prompt) don't have a proven-path
+    // node set to render — the "Downstream evidence" section renders `(none)`, byte-identical to
+    // the entry-only prompt shape. The live engine always goes through [`build_delta_prompt_asn`].
+    let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn, &[]);
     // Empty `changes_block` ⇒ byte-identical to the pre-ADR-0023 full-state prompt (the
     // non-delta callers/tests). The delta path passes the rendered "Changes since…" section.
     assemble(entry, &ev, "")
@@ -129,23 +127,36 @@ pub(super) fn build_judgment_prompt_with(
 /// baseline on a decisive verdict) and whether the delta is ADDITIVE (`baseline` absent — first
 /// judgment — or something was added), which the re-judge gate reads: a non-additive (purely
 /// subtractive / unchanged) delta means the prior decisive verdict still holds, no fresh call.
+///
+/// `downstream` is the deduped, sorted set of workload [`NodeKey`]s on this entry's PROVEN
+/// paths (`ProvenChain::paths`), EXCLUDING the entry itself (JEF-565): the model finally sees
+/// the whole internet-facing path, not just the entry's own evidence — a popped pod two hops in
+/// is no longer invisible. Each gets its own fenced CVE/secret/behavior block (a clean node
+/// renders a one-line "no evidence observed" marker), under a per-incident aggregate free-text
+/// budget (see [`super::downstream`]) so a wide entry (argo, ~110 objectives) stays bounded.
 pub fn build_delta_prompt_asn(
     entry: &NodeKey,
     objectives: &[(NodeKey, AttackRef)],
     graph: &SecurityGraph,
     asn: &AsnDb,
     baseline: Option<&JudgedSurface>,
+    downstream: &[NodeKey],
 ) -> DeltaBuild {
     let (cves, behaviors) = entry_evidence(graph, entry);
-    let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn);
+    let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn, downstream);
     // Project the surface from the SAME rendered lines the prompt carries — no second source of
     // truth (ADR-0023): a change the model would see is exactly a change the surface records.
+    // The downstream category (JEF-565) is projected from the SAME per-node lines the downstream
+    // blocks render, so a downstream-only change (a new CVE two hops in) is a surface addition,
+    // not just a prompt addition — closing the trap where the model sees new evidence but the
+    // re-judge gate never fires on it.
     let surface = JudgedSurface::from_lines(
         &ev.objective_lines,
         &ev.cves,
         &ev.secret_lines,
         &ev.posture_lines,
         &ev.behavior_lines,
+        &ev.downstream.surface_lines,
     );
     let changes = surface.additions_since(baseline);
     // ADDITIVE ⇒ re-judge: no baseline yet (first judgment) OR something new appeared. A
@@ -205,6 +216,9 @@ struct RenderedEvidence {
     secret_lines: Vec<String>,
     /// Static-posture (misconfig + RBAC) lines.
     posture_lines: Vec<String>,
+    /// The downstream-workload evidence (JEF-565) — per-node blocks + the flat surface lines
+    /// behind them. See [`super::downstream::render_downstream`].
+    downstream: DownstreamRendered,
 }
 
 /// Render an entry's evidence into the deterministic prompt lines ([`RenderedEvidence`]). Split
@@ -219,6 +233,7 @@ fn render_evidence(
     cves: &[String],
     behaviors: &[Behavior],
     asn: &AsnDb,
+    downstream: &[NodeKey],
 ) -> RenderedEvidence {
     let mut cves = cves.to_vec();
     // Render the observed behaviors into sorted, deduped prompt lines. Notable execs (shell /
@@ -233,20 +248,11 @@ fn render_evidence(
     // in are the already-budgeted lines; sort+dedup is just for stable ordering.
     cves.sort();
     cves.dedup();
-    // JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
-    // the ONLY CVE category that is exploitation evidence is `[reachability: loaded-at-runtime]`
-    // (vulnerable code observed running on the reachable path). CVEs that are present-but-not-running
-    // (`not-observed`), static-binary-unknowable, or unknown-reachability are CONTEXT — "how bad IF
-    // exploited" — never a breach on their own, and they stay on the dashboard for operators. Sending
-    // them to the JUDGE only hands a small model a non-evidence CVE to fabricate a `loaded-at-runtime`
-    // tag onto (JEF-451, the recurring false `exploitable`). So the judge's CVE field carries only the
-    // reachable (running) CVEs; `(none)` otherwise. This is enrichment/filtering of NON-evidence, not
-    // the objective-breadth capping ADR-0029 forbids (a not-observed CVE can never change a correct
-    // verdict). Measured on the deployed qwen3:1.7b: it collapses the temp-0.8 flip mass 15%→0% with
-    // no false negatives. The anti-fabrication guards read the FULL list separately (`model_call`), so
-    // their behaviour is unchanged. NOTE: `objective_reach` is not this — this is the CVE image-reach.
-    const LOADED_AT_RUNTIME: &str = "[reachability: loaded-at-runtime]";
-    cves.retain(|line| line.contains(LOADED_AT_RUNTIME));
+    // JEF-453 (skip non-reachable CVEs, see `evidence::retain_reachable_cves`): the judge
+    // decides breach from EXPLOITATION EVIDENCE, and the ONLY CVE category that is exploitation
+    // evidence is `[reachability: loaded-at-runtime]`. The anti-fabrication guards read the FULL
+    // list separately (`model_call`), so their behaviour is unchanged.
+    retain_reachable_cves(&mut cves);
     // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
     // high-severity-outcome branches.
@@ -284,12 +290,16 @@ fn render_evidence(
     // breach on their own (the JEF-134 over-promotion guardrail). Both lists are already
     // fenced/capped/budgeted lines from `entry_findings`.
     let (secret_lines, posture_lines) = entry_findings(graph, entry);
+    // JEF-565: every workload on this entry's PROVEN paths, not just the entry itself — the
+    // model finally sees the whole internet-facing path. See [`downstream::render_downstream`].
+    let downstream = downstream::render_downstream(graph, downstream, asn);
     RenderedEvidence {
         cves,
         behavior_lines,
         objective_lines,
         secret_lines,
         posture_lines,
+        downstream,
     }
 }
 
@@ -335,18 +345,33 @@ fn assemble(
     // not breach drivers. Evidence is fenced as untrusted data so a malicious CVE id / node key
     // can't inject. The anti-fabrication backstop (guard_fabricated_cve) still catches a cited
     // CVE absent from the evidence.
+    //
+    // JEF-588: a DOWNSTREAM node's loaded-at-runtime CVE was previously framed as promoting
+    // "exactly as if it were on the entry" — that over-promotes. Network/RBAC/mount reachability
+    // proves a PATH to a downstream node exists; it says nothing about whether attacker input
+    // actually flows through that path to TRIGGER that node's vulnerable code (an application-
+    // dataflow question the reach tags can't answer). So only the ENTRY's own loaded-at-runtime
+    // CVE — the workload directly hit by the attacker, no intermediate hop's dataflow to prove —
+    // is CVE exploitation evidence. A downstream CVE stays in the prompt, but strictly as
+    // CONTEXT/SEVERITY: this node's vulnerability surface / blast radius IF it were ever popped,
+    // the same calibrated footing as reach breadth (ADR-0029's severity-vs-breach line). A
+    // downstream node's own BEHAVIOR (a live alert / hands-on-keyboard signal — on-box evidence
+    // it actually WAS popped) and a downstream exposed secret are unaffected: both still promote
+    // exactly as if on the entry, same as before.
     let prompt = format!(
         r#"You are a senior security analyst making one call: is this internet-facing workload a real BREACH risk?
 
 A deterministic analysis already PROVED this workload can reach every objective listed below — that reachability is a GIVEN, not the question. Reaching things — however broadly, however many tenants, however high-impact, whether granted by RBAC, mounted, or over the network (same-namespace OR cross-namespace) — is NEVER a breach by itself. Breadth, tenancy, and the severity of what is reached are how BAD it would be if exploited; they are not whether it IS being exploited.
 
 A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one of these three IS exploitation evidence — if ANY one is present, the reached objective is exploitable:
-  - a CVE in the "Critical CVEs observed loading at runtime" list below — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
+  - a CVE in the "Critical CVEs observed loading at runtime" list below (the ENTRY's own field — the workload the attacker directly hits, not a downstream hop) — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
   - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now), OR
   - a credential listed in the "Exposed secrets baked into this image" field below (a usable API key, token, or private key committed into the image — an immediately-usable breach primitive).
 If NONE of the three is present, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
-Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)".
+Two of these three extend to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A live alert/hands-on-keyboard signal, or an exposed secret, found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: on-box evidence that node actually WAS popped completes the chain. A downstream node's OWN loaded-at-runtime CVE is DIFFERENT and is NOT exploitation evidence on its own: reachability (network/RBAC/mount) proves a PATH to that node exists, it does not prove attacker input flows THROUGH that path to trigger that node's specific vulnerable code — an application-dataflow question this analysis cannot answer from reach tags alone. Treat a downstream CVE as CONTEXT/SEVERITY ONLY: that node's vulnerability surface — how bad it would be IF that node were ever popped — never a breach driver by itself, on the same calibrated footing as reach breadth below. A downstream workload marked "no evidence observed" carries none of any of this.
+
+Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)". The same filter applies to every downstream node's CVE block.
 
 Traps that are NOT evidence, no matter how they are labeled:
   - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
@@ -367,14 +392,16 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
+Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
+{downstream}
 
 Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal, OR a credential listed in the (non-empty) "Exposed secrets baked into this image" field.
+  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the ENTRY's "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal (entry OR downstream), a credential listed in the (non-empty) "Exposed secrets baked into this image" field (entry OR downstream). A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only.
   "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
   "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
   "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
 
-Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above — never invent, recall, or copy a CVE id from anywhere else; if the CVE list is "(none)", do not name any CVE."#,
+Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above or in a downstream workload's block below — never invent, recall, or copy a CVE id from anywhere else; if both are "(none)", do not name any CVE."#,
         entry = fence(&entry.0),
         cves = fence_list(&ev.cves),
         secrets = fence_list(&ev.secret_lines),
@@ -382,6 +409,11 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         posture = fence_list(&ev.posture_lines),
         objectives = objectives,
         changes = changes_block,
+        downstream = if ev.downstream.blocks.is_empty() {
+            "  (none)".to_string()
+        } else {
+            ev.downstream.blocks.join("\n")
+        },
     );
     (prompt, sections)
 }
@@ -397,46 +429,6 @@ fn render_changes_block(changes: &ChangesSince) -> String {
         "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list). A NEW element is normally new reachable SURFACE (more breadth), NOT new exploitation evidence: a newly-reachable objective — including a newly-reachable `secret/…` objective — is more surface to reach, never evidence in itself. It is exploitation evidence ONLY if it is a [reachability: loaded-at-runtime] CVE, a live alert/hands-on-keyboard signal, or a credential listed in the (non-empty) exposed-secrets field. Judge these NEW elements by that same bar: {}",
         fence_list(&changes.rendered_lines()),
     )
-}
-
-/// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
-/// runtime behavior" field carries. Two engine policies apply here, not in the shared wire
-/// type: notable-exec annotation (JEF-113) and INTERNET-egress provider grouping (JEF-380).
-///
-/// - When the ASN dataset is EMPTY (no feed wired / unreadable file), every behavior —
-///   including each internet connection — renders one line via [`annotated_summary`], exactly
-///   as it did before the feed existed (the graceful-degrade contract).
-/// - When the dataset is present, INTERNET egress connections are pulled out and collapsed
-///   into ONE deduped, sorted provider line ([`internet_egress_line`]); every other behavior
-///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
-///   `annotated_summary` as before.
-///
-/// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
-/// changes the prompt or its verdict-cache hash.
-fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::with_capacity(behaviors.len());
-    if asn.is_empty() {
-        // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
-        lines.extend(behaviors.iter().map(annotated_summary));
-    } else {
-        // Collapse INTERNET egress to a provider set; everything else renders as before.
-        let mut internet_peers: Vec<&str> = Vec::new();
-        for behavior in behaviors {
-            match behavior {
-                Behavior::NetworkConnection {
-                    peer,
-                    internet: true,
-                } => internet_peers.push(peer),
-                other => lines.push(annotated_summary(other)),
-            }
-        }
-        if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
-            lines.push(line);
-        }
-    }
-    lines.sort();
-    lines.dedup();
-    lines
 }
 
 /// The verdict-cache key for a built prompt (JEF-350): the SHA-256 of the prompt string,

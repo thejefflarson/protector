@@ -52,13 +52,16 @@ RUN set -eux; ver=0.16.0; \
     case "$(uname -m)" in x86_64) a=x86_64 ;; aarch64) a=aarch64 ;; *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; esac; \
     wget -qO- "https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-${a}-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin --strip-components=1 "sccache-v${ver}-${a}-unknown-linux-musl/sccache"
-ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 \
-    SCCACHE_REDIS=redis://sccache-redis.dev.svc.cluster.local:6379
-# Opt-out for builds that CANNOT reach the in-cluster redis. The github-hosted e2e
-# (scripts/e2e.sh, runs-on: ubuntu-latest) does a plain `docker build` of this Dockerfile and can
-# never reach sccache-redis.dev, so the hard gate would always trip there. Default empty => sccache
-# stays a HARD GATE for the real deploy build on the meshed BuildKit; the e2e passes
-# `--build-arg SCCACHE_DISABLE=1` to build plain (uncached) instead of failing.
+ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0
+# sccache backend = the shared Cloudflare R2 bucket (cluster repo: charts/sccache,
+# ADR-0020, JEF-584), replacing the in-cluster Redis this used to hardcode. Config +
+# bucket-scoped token arrive as BuildKit build SECRETS below — never ENV or a build-arg,
+# both of which persist in `docker history` on every image we push to ghcr.
+#
+# SCCACHE_DISABLE is now belt-and-braces rather than load-bearing: the backend is no
+# longer a hard gate (scripts/start-sccache-docker.sh degrades to a local disk cache),
+# so the github-hosted e2e would pass without it. scripts/e2e.sh still sets it to skip
+# the sccache path entirely on a builder that has no reason to touch the shared cache.
 ARG SCCACHE_DISABLE=""
 
 # Build application
@@ -74,12 +77,19 @@ COPY --from=web /web/dist/dashboard.js engine/web/dist/dashboard.js
 RUN --mount=type=cache,target=/app/target,id=protector-target-v2,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=secret,id=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=SCCACHE_BUCKET \
+    --mount=type=secret,id=SCCACHE_ENDPOINT \
+    --mount=type=secret,id=SCCACHE_REGION \
+    --mount=type=secret,id=SCCACHE_S3_KEY_PREFIX \
+    --mount=type=secret,id=SCCACHE_S3_USE_SSL \
     set -e; \
     if [ -n "$SCCACHE_DISABLE" ]; then \
-      echo "sccache disabled (SCCACHE_DISABLE set) — plain build, no redis"; unset RUSTC_WRAPPER; \
+      echo "sccache disabled (SCCACHE_DISABLE set) — plain build, no shared cache"; unset RUSTC_WRAPPER; \
     else \
       export SCCACHE_SERVER_PORT=$(awk 'BEGIN{srand(); print int(20000+rand()*40000)}'); \
-      timeout 10 sccache --start-server; \
+      sh scripts/start-sccache-docker.sh; \
     fi; \
     cargo build --release; \
     cp /app/target/release/protector ./protector; \

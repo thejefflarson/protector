@@ -118,6 +118,77 @@ fn tier_grants_config_fails_loud_but_serves_on_valid_or_absent() {
     clear();
 }
 
+// JEF-560: an operational incident reported the protector container exiting cleanly
+// (exit 0) and restart-looping, never reaching Ready — read from the tail of its logs as
+// "the engine is doing real work, then the process just stops" and hypothesized as a
+// run-to-completion bug (the driving loop returning after a single pass instead of
+// blocking for the next one). These tests exercise `wait_for_wake`, the actual primitive
+// `run_watch`'s `loop {}` calls each iteration, in isolation (no `kube::Client` needed) and
+// disprove that hypothesis: the loop only ever stops when the `change` channel's Sender has
+// been dropped EVERYWHERE it was cloned to (every reflector task, plus the loop's own
+// retained handle) — never merely because one pass finished.
+
+/// Many passes in a row: `wait_for_wake` must keep returning `true` — i.e. the driving loop
+/// keeps running — for as long as ANY clone of `change_tx` (mirroring a live reflector task)
+/// is still held, exactly like `run_watch` itself holds one for its entire body. A regression
+/// to "process the first pass and return" would fail this on the second iteration.
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_channel_survives_many_passes_and_only_closes_when_every_sender_drops() {
+    let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<()>(64);
+
+    // Mirror `run_watch`'s reflector tasks: each holds its OWN clone, independent of the
+    // driving loop's retained `change_tx`, and sends one tick per simulated cluster change.
+    let reflector_tx = change_tx.clone();
+
+    const PASSES: usize = 5;
+    for pass in 0..PASSES {
+        reflector_tx
+            .send(())
+            .await
+            .expect("reflector clone can still send");
+        assert!(
+            super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+            "pass {pass}: the loop must keep running while a Sender clone is alive — a \
+             run-to-completion regression would return false after the very first pass"
+        );
+    }
+
+    // Drop every clone (the "reflector" one, then the loop's own retained original) — only
+    // now, with the Sender fully gone, may `wait_for_wake` report shutdown.
+    drop(reflector_tx);
+    drop(change_tx);
+    assert!(
+        !super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+        "once every Sender clone is dropped, the loop must be told to stop"
+    );
+}
+
+/// A burst of several already-queued ticks on the SAME pass coalesces into one wake, exactly
+/// as the comment on `wait_for_wake` documents (a Deployment rollout's several rapid changes
+/// must not fan out into a rebuild per tick).
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_burst_coalesces_into_one_wake() {
+    let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<()>(64);
+
+    for _ in 0..4 {
+        change_tx.send(()).await.expect("send queues fine");
+    }
+    assert!(
+        super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+        "a queued burst still wakes the loop"
+    );
+    // The burst was fully drained by that one call — nothing left queued for a second wake
+    // without a fresh send.
+    assert!(
+        change_rx.try_recv().is_err(),
+        "wait_for_wake must drain the whole burst, not leave a residual tick queued"
+    );
+}
+
 /// The reflected element type asks the apiserver for metadata only. `metadata_api()`
 /// is what drives both `watcher(Api::<PartialObjectMeta<Secret>>, _)` and
 /// `Api::<Secret>::list_metadata` to issue `.../secrets` requests that return

@@ -4,6 +4,12 @@ These rules apply to all work in this repo. Architectural *decisions* live in
 `docs/adr/`; this file captures the engineering *conventions* contributors and agents
 must follow.
 
+**North star:** the product's reason for existing is that **the model acts as an incident
+responder** — along internet-facing attack paths it decides what is an attack and what to
+cut, at the minimum scope; determinism proves + enriches + *feeds* the model, it never
+decides the cut. See [`docs/VISION.md`](docs/VISION.md). Work should point toward it (the
+downstream/pivot lane is not there yet — tracked from JEF-547).
+
 ## File size — hard limit
 
 **No source file may exceed 1,000 lines.** This is a hard cap, not a guideline. A file
@@ -22,6 +28,24 @@ that grows unbounded becomes unreadable and unreviewable; that must not recur an
 - **Zero egress**: the security graph and evidence never leave the cluster.
 - Presentation is a **view, never a decision gate** (ADR-0016).
 - Untrusted text (CVE / verdict / prompt / advisory) is always escaped at render.
+
+## Configuration — detection on by default; two gates only
+
+Protector's job is detection, and **shadow already makes every detector inert of action**,
+so a per-detector on/off flag guards nothing. **Do not add `PROTECTOR_*_ENABLE`-style
+toggles** for detection / corroboration / enrichment features — wire them on. If a detector
+is noisy, fix its **scope** (add a discriminator), don't add a toggle.
+
+Only two boundaries justify a setting:
+
+- **Enforcement** — `PROTECTOR_MODE` (`audit` = shadow, the default; `enforce` +
+  `enforceScope` arms the reversible cuts, ADR-0021). The single shadow-vs-act gate.
+- **Egress** — the zero-egress invariant. A flag that guards an *outbound* call is
+  legitimate (e.g. `PROTECTOR_REKOR_ENABLE`, `PROTECTOR_ENGINE_NOTIFY_URL`,
+  `PROTECTOR_ALLOW_EXTERNAL_*`).
+
+Everything else is a deployment essential (binds, TLS, endpoints, feed mounts) or a tuning
+knob with a sane default — not an operator toggle. Prefer a good default over a new setting.
 
 ## Workflow
 

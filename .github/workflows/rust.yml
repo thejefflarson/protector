@@ -25,11 +25,19 @@ jobs:
     # 6Gi/8Gi + anti-affinity onto the 16GB nodes); the base 3Gi runner OOM-killed this.
     runs-on: protector-runners
     env:
-      # sccache → shared in-cluster redis (cluster repo: charts/sccache). Reachable only
-      # through Linkerd mTLS (the protector runner identity is admitted); it carries no
-      # credentials, so it lives here. CARGO_INCREMENTAL=0 — sccache needs it off.
+      # sccache -> the shared Cloudflare R2 bucket (cluster repo: charts/sccache,
+      # ADR-0020). The backend config -- SCCACHE_BUCKET/ENDPOINT/REGION plus the
+      # bucket-scoped S3 token -- is injected into the runner POD from the `sccache-r2`
+      # Secret via envFrom, so none of it belongs in this workflow and no credential is
+      # committed here.
+      #
+      # The redis backend is deliberately NOT set here any more (JEF-564): sccache selects
+      # ONE backend from its env, so setting both would make which one you get an
+      # implementation detail of sccache's precedence -- the R2 cutover could read as done
+      # while every build still went to redis. If the pod env is missing, sccache degrades
+      # to a local disk cache: slower, green, and obvious.
+      # CARGO_INCREMENTAL=0 -- sccache can't cache incremental artefacts.
       RUSTC_WRAPPER: sccache
-      SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
       CARGO_INCREMENTAL: "0"
       # Authenticate binstall's GitHub REST API calls (release-artifact lookups). The
       # self-hosted runners share one egress IP, so the anonymous 60-req/hr/IP limit is
@@ -96,8 +104,9 @@ jobs:
       contents: read
     runs-on: protector-runners
     env:
+      # sccache backend comes from the runner pod's `sccache-r2` envFrom -- see the
+      # note on the first job. The redis backend is deliberately unset (JEF-564).
       RUSTC_WRAPPER: sccache
-      SCCACHE_REDIS: redis://sccache-redis.dev.svc.cluster.local:6379
       CARGO_INCREMENTAL: "0"
       # Authenticate binstall's GitHub REST API calls (release-artifact lookups). The
       # self-hosted runners share one egress IP, so the anonymous 60-req/hr/IP limit is
@@ -227,6 +236,22 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # sccache's R2 backend for the in-image cargo build (JEF-584, ADR-0020).
+          # `secret-envs` (key=envname) reads these straight out of the RUNNER POD's env,
+          # where the `sccache-r2` Secret is injected via envFrom (cluster repo:
+          # charts/actions/runners/values-protector.yaml) — the repo has no Actions secret
+          # for R2, and this needs no lift step or on-disk secret file. Secrets, not
+          # build-args: a build-arg persists in `docker history` on every pushed image.
+          # Unset (e.g. the Secret is missing) -> the mounts are empty and
+          # scripts/start-sccache-docker.sh degrades to a local disk cache, not a failure.
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+            SCCACHE_BUCKET=SCCACHE_BUCKET
+            SCCACHE_ENDPOINT=SCCACHE_ENDPOINT
+            SCCACHE_REGION=SCCACHE_REGION
+            SCCACHE_S3_KEY_PREFIX=SCCACHE_S3_KEY_PREFIX
+            SCCACHE_S3_USE_SSL=SCCACHE_S3_USE_SSL
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache,mode=max
           # SLSA build provenance + SBOM attestations, matching the other images.

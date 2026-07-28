@@ -184,25 +184,22 @@ impl Mitigation {
     /// foothold is not required, but an internet-facing entry is — the engine
     /// auto-acts only on remote-exploitation paths, never on internal-only activity.
     /// The actuator requires this before any auto-application.
+    ///
+    /// **JEF-566: `QuarantineWorkload` clears the SAME gate as every other action —
+    /// no special case.** A workload quarantine (JEF-284) still identifies its target
+    /// deterministically at the proof layer (a pod on-path that is either network-
+    /// reachable + running a critical/KEV CVE, or carries a live on-pod exploitation
+    /// signal — `reason::proof::chain::quarantine_targets_on_path`), but that
+    /// per-pod evidence is now only a *proposal* trigger. Auto-*action* additionally
+    /// requires the pod's justifying chain — the one whose internet-facing entry it
+    /// sits on — to be corroborated/promoted, adjudicated, and breach-relevant, per
+    /// ADR-0032 ("the model is the incident responder"): a downstream
+    /// `RemotelyExploitable` pod behind a clean/unpromoted edge is propose-only, and
+    /// an internal-only actively-exploited pod (no internet-facing entry) is
+    /// propose-only too. This is a **reduction** in auto-action versus the prior
+    /// unconditional-`true` special case — it can only move a mitigation from
+    /// AutoApply to Propose, never the reverse.
     pub fn is_live_corroborated(&self) -> bool {
-        // A workload quarantine (JEF-284) already cleared a HIGH *per-pod* exploitation
-        // bar at target selection in the proof layer: either a critical/KEV CVE running
-        // on a pod network-reachable from an internet foothold (remotely exploitable), or
-        // a live on-pod alert / hands-on-keyboard exec (actively exploited). That per-pod
-        // evidence — not the entry-scoped, breach-relevant corroboration below — is the
-        // auto-action trigger, and it deliberately holds for INTERNAL actively-exploited
-        // pods too (condition 2 acts regardless of network position). The remaining safety
-        // gates (blast-radius, enabled class, scope) still apply in [`decide`]; audit arms
-        // nothing, so this stays PROPOSE-only until an operator enforces `network`.
-        //
-        // JEF-322 thesis-check note: for `RemotelyExploitable`, that "per-pod evidence" is
-        // CVE *presence* + reachability (`compromisable`), not a live signal — so this
-        // branch auto-actions without the model-affirmation ADR-0013 requires for the
-        // entry-foothold lane. Verified deliberate, not a bug; see
-        // `reason::proof::chain::quarantine_targets_on_path`'s JEF-322 note.
-        if self.action == ProposedAction::QuarantineWorkload {
-            return true;
-        }
         self.justifications
             .iter()
             .any(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
