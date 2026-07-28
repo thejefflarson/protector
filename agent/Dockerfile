@@ -32,8 +32,7 @@ RUN set -eux; ver=0.16.0; \
     case "$(uname -m)" in x86_64) a=x86_64 ;; aarch64) a=aarch64 ;; *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;; esac; \
     wget -qO- "https://github.com/mozilla/sccache/releases/download/v${ver}/sccache-v${ver}-${a}-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin --strip-components=1 "sccache-v${ver}-${a}-unknown-linux-musl/sccache"
-ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 \
-    SCCACHE_REDIS=redis://sccache-redis.dev.svc.cluster.local:6379
+ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0
 # Prebuilt bpf-linker (sha256-pinned, per-arch) + nightly/rust-src for the bpf target's
 # build-std. Prebuilt so the image build stays light (no LLVM source build).
 # ARCH-AWARE: with native multi-arch builders (JEF-295/#161) this builder stage runs on
@@ -59,17 +58,34 @@ RUN rustup toolchain install nightly --component rust-src --profile minimal
 # The agent workspace (protector-agent + common + the excluded ebpf crate) and the shared
 # behavior crate it depends on. build.rs compiles agent/protector-agent-ebpf during the
 # userspace build.
+COPY scripts/start-sccache-docker.sh /app/scripts/start-sccache-docker.sh
 COPY agent/ agent/
 COPY behavior/ behavior/
 WORKDIR /app/agent
 # Workspace target is /app/agent/target; the excluded ebpf crate keeps its own.
+# sccache backend = the shared Cloudflare R2 bucket (charts/sccache, ADR-0020, JEF-584).
+# Config + bucket-scoped token arrive as build SECRETS, never ENV/build-arg (those persist
+# in `docker history`). Fail-soft: scripts/start-sccache-docker.sh probes, retries, then
+# degrades to a local disk cache rather than failing the build.
+#
+# SCCACHE_LOCAL_CACHE_DIR override: WORKDIR is /app/agent here and this image's BuildKit
+# target cache mount is /app/agent/target, so point the degraded-build local cache inside
+# it rather than at the script's /app/target default (no cache mount there in this image).
 RUN --mount=type=cache,target=/app/agent/target,sharing=locked \
     --mount=type=cache,target=/app/agent/protector-agent-ebpf/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=secret,id=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=SCCACHE_BUCKET \
+    --mount=type=secret,id=SCCACHE_ENDPOINT \
+    --mount=type=secret,id=SCCACHE_REGION \
+    --mount=type=secret,id=SCCACHE_S3_KEY_PREFIX \
+    --mount=type=secret,id=SCCACHE_S3_USE_SSL \
     set -e; \
     export SCCACHE_SERVER_PORT=$(awk 'BEGIN{srand(); print int(20000+rand()*40000)}'); \
-    timeout 10 sccache --start-server; \
+    SCCACHE_LOCAL_CACHE_DIR=/app/agent/target/.sccache-local \
+      sh /app/scripts/start-sccache-docker.sh; \
     cargo build --release -p protector-agent --features ebpf; \
     cp target/release/protector-agent /app/protector-agent-bin; \
     sccache --show-stats
