@@ -32,6 +32,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::ingest_guard::{
     DEFAULT_BURST, DEFAULT_RATE_PER_SEC, IngestToken, RateLimit, bearer_auth, rate_limit,
+    require_token,
 };
 use super::{RuntimeObservation, RuntimeReport};
 use crate::engine::state::AgentLivenessStore;
@@ -250,18 +251,22 @@ pub async fn serve_runtime(
     notify: Sender<()>,
     liveness: Arc<AgentLivenessStore>,
 ) -> anyhow::Result<()> {
-    // App-layer authn (Fix A): require `Authorization: Bearer <token>` matching a
-    // configured shared secret, rejected 401 BEFORE deserialization. Resolved once at
-    // startup (file-before-env). If unconfigured the layer is omitted and we log a loud
-    // WARNING — so the engine can be deployed ahead of the Secret/agent roll out. This
-    // is authentication (who may post); the mesh's Linkerd authz (which identities may
-    // connect) is layered separately in the cluster repo.
-    let token = IngestToken::from_env();
+    // App-layer authn (Fix A, hardened JEF-576): require `Authorization: Bearer <token>`
+    // matching a configured shared secret, rejected 401 BEFORE deserialization. Resolved
+    // once at startup (mounted file only, ADR-0021). REQUIRED, not optional: an operator
+    // who points `PROTECTOR_BEHAVIOR_ADDR` at a real listener without also provisioning
+    // `PROTECTOR_INGEST_TOKEN_FILE` gets a loud startup error and the port never binds —
+    // fail-closed, since any caller that could reach an unauthenticated :9999 could forge
+    // the "corroborated-now" observations that make a proven attack chain actionable
+    // (ADR-0032 raised what that evidence gates). This is authentication (who may post);
+    // the mesh's Linkerd authz (which identities may connect) is layered separately in
+    // the cluster repo and already scopes the port to the eBPF agent's ServiceAccount.
+    let token = require_token(IngestToken::from_env(), "runtime-evidence ingest", addr)?;
     // Per-peer rate limit (Fix B): bound ingest request-rate per source even with a
     // valid token. In-process token bucket; well above legitimate agent volume.
     let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
 
-    let mut app = Router::new()
+    let app = Router::new()
         // One endpoint (JEF-336): the report envelope carries observations AND the per-node
         // agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
         .route("/behavior", post(ingest_behavior))
@@ -269,25 +274,14 @@ pub async fn serve_runtime(
         // with a giant POST (mirrors the webhook server). The body cap, MAX_EVENTS, and
         // the per-batch MAX_BATCH all remain in force alongside authn + rate limiting.
         .layer(DefaultBodyLimit::max(256 * 1024))
-        .with_state((events, notify, liveness));
-
-    // Rate limit runs on every request, authenticated or not.
-    app = app.layer(axum::middleware::from_fn_with_state(limiter, rate_limit));
-
-    match token {
-        Some(token) => {
-            app = app.layer(axum::middleware::from_fn_with_state(token, bearer_auth));
-            tracing::info!(%addr, "runtime-evidence ingest listening (/behavior) — bearer-authenticated");
-        }
-        None => {
-            tracing::warn!(
-                %addr,
-                "runtime-evidence ingest is UNAUTHENTICATED — set PROTECTOR_INGEST_TOKEN_FILE \
-                 to require a bearer token. Any caller that can reach :9999 can post forged \
-                 observations."
-            );
-        }
-    }
+        .with_state((events, notify, liveness))
+        // Rate limit runs on every request, ahead of authn.
+        .layer(axum::middleware::from_fn_with_state(limiter, rate_limit))
+        .layer(axum::middleware::from_fn_with_state(token, bearer_auth));
+    tracing::info!(
+        %addr,
+        "runtime-evidence ingest listening (/behavior) — bearer-authenticated (required)"
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // ConnectInfo is required by the per-peer rate limiter — serve with peer addresses.

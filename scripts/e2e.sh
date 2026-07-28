@@ -51,6 +51,17 @@ IMAGE="${IMAGE:-protector:e2e}"
 NS=protector
 APP_NS=app
 CM_VERSION="${CM_VERSION:-v1.16.2}"
+# JEF-576: the :9999 behavioral ingest now REQUIRES a bearer token — no more
+# unauthenticated-but-warned fallback. Generated fresh per run (this cluster is
+# throwaway); provisioned to the pod as a Secret mounted at PROTECTOR_INGEST_TOKEN_FILE
+# (deploy_protector, below — mirrors the production chart's `ingestAuth` contract,
+# which is file-based only per ADR-0021) and presented by every ingest POST
+# (post_alert, below) as `Authorization: Bearer $INGEST_TOKEN`.
+# openssl (not `tr </dev/urandom | head -c`): under `set -o pipefail` (L47), `head`
+# closing the pipe after 32 bytes gives `tr` an EPIPE, whose non-zero status pipefail
+# promotes to the pipeline's — aborting the whole script before k3d even starts. A
+# single openssl invocation has no pipe to break. 16 bytes → 32 hex chars.
+INGEST_TOKEN="e2e-$(openssl rand -hex 16)"
 # The model that makes the exploitability determination (ADR-0013). k3d pods reach
 # the host's Ollama via host.docker.internal (Docker Desktop resolves it inside
 # pods; host.k3d.internal only works in the node containers, not pods). Override
@@ -142,7 +153,10 @@ post_alert() {
   # POST an `Alert` behavior on `web` to the tool-agnostic behavioral port
   # (`/behavior`, ADR-0003) — the same corroboration effect any sensor gets. An `Alert`
   # is the "something alarming, now" signal that flips a proven chain to corroborated.
-  curl -fsS -XPOST localhost:9999/behavior -H 'content-type: application/json' -d '[{
+  # JEF-576: the ingest requires the same bearer token the pod was provisioned with.
+  curl -fsS -XPOST localhost:9999/behavior \
+    -H "Authorization: Bearer $INGEST_TOKEN" \
+    -H 'content-type: application/json' -d '[{
     "namespace": "app",
     "pod": "web",
     "source": "e2e",
@@ -254,6 +268,13 @@ deploy_protector() {
   fi
 
   kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # JEF-576: provision the ingest bearer token as a Secret (idempotent, like the
+  # namespace above) — the Deployment below mounts it and the :9999 listener refuses
+  # to bind without it.
+  kubectl -n "$NS" create secret generic protector-ingest-token \
+    --from-literal=token="$INGEST_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   # Hard mode grants the actuator create/delete/patch on NetworkPolicies so it can
   # apply (and self-revert) its default-deny isolation policy.
@@ -379,12 +400,15 @@ spec:
             - { name: PROTECTOR_ENFORCE_SCOPE_NAMESPACES, value: "$enforce_scope" }
             - { name: RUST_LOG, value: "protector=info,sigstore=error,warn" }
             - { name: PROTECTOR_ENGINE_ACTUATOR, value: "networkpolicy" }
-            - { name: PROTECTOR_BEHAVIOR_ADDR, value: "0.0.0.0:9999" }$model_env
+            - { name: PROTECTOR_BEHAVIOR_ADDR, value: "0.0.0.0:9999" }
+            - { name: PROTECTOR_INGEST_TOKEN_FILE, value: /etc/protector/ingest-token/token }$model_env
           volumeMounts:
             - { name: tls, mountPath: /etc/protector/tls, readOnly: true }
+            - { name: ingest-token, mountPath: /etc/protector/ingest-token, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: tls, secret: { secretName: protector-tls } }
+        - { name: ingest-token, secret: { secretName: protector-ingest-token } }
         - { name: tmp, emptyDir: {} }
 YAML
 }
