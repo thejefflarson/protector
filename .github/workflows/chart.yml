@@ -231,6 +231,33 @@ jobs:
             echo "engine auto-wired advisory despite feedSync.enabled=false"; exit 1
           fi
           echo "ok"
+      - name: "Assert liveness/readiness probes tolerate a sweep-CPU burst (JEF-560)"
+        run: |
+          # JEF-560: a protector container was crashlooping (Ready never latching, restart
+          # count climbing, clean exit 0) because the default 1s probe timeout / 3-strike
+          # (30s) budget was too tight for the CPU the per-pass signing/provenance sweep
+          # legitimately bursts under the chart's CPU limit — kubelet SIGTERM'd a healthy,
+          # working engine. Both probes must carry an explicit, more forgiving timeout +
+          # failure budget so a busy-but-alive process isn't mistaken for a dead one.
+          render=$(helm template protector charts/protector --namespace protector)
+          live=$(echo "$render" | awk '/livenessProbe:/,/readinessProbe:/')
+          echo "$live" | grep -q 'timeoutSeconds: 5' \
+            || { echo "livenessProbe missing the widened timeoutSeconds"; exit 1; }
+          echo "$live" | grep -q 'failureThreshold: 6' \
+            || { echo "livenessProbe missing the widened failureThreshold"; exit 1; }
+          # readinessProbe through the container's own resources block (bounded by the
+          # NEXT section, `env:`) — `resources:` alone isn't unique enough to scope on
+          # (RBAC rules and the feed-fetcher sidecar both render their own).
+          ready=$(echo "$render" | awk '/readinessProbe:/,/^          env:/')
+          echo "$ready" | grep -q 'timeoutSeconds: 5' \
+            || { echo "readinessProbe missing the widened timeoutSeconds"; exit 1; }
+          echo "$ready" | grep -q 'failureThreshold: 3' \
+            || { echo "readinessProbe missing an explicit failureThreshold"; exit 1; }
+          # The CPU limit that produced the throttling-induced probe misses also needs
+          # headroom (the RAM-tight request is unchanged; only the burst ceiling moves).
+          echo "$ready" | grep -q 'cpu: 500m' \
+            || { echo "cpu limit not raised past the JEF-560 250m ceiling"; exit 1; }
+          echo "ok"
       - name: Assert the feed-fetcher sidecar is unprivileged and has NO apiserver access
         run: |
           # JEF-238 egress boundary: the sidecar is the ONLY container with egress. It must
