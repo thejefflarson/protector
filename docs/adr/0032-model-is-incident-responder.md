@@ -2,6 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-07-27
+- Refined by [ADR-0034](0034-cut-choice-contract.md): §3's *mechanism-menu* (`cuts:[menu-id]`)
+  becomes **target-choice** (`contain:[node-key]` — the model names the compromised nodes,
+  determinism resolves each to its narrowest legal cut), and the 4-value verdict collapses to
+  a 3-value assessment. This ADR's vocabulary/shapes/ladder/entry-exclusion all survive as the
+  resolver + proposal fallback.
 
 ## Context
 
