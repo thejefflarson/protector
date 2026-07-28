@@ -57,9 +57,11 @@ CM_VERSION="${CM_VERSION:-v1.16.2}"
 # (deploy_protector, below — mirrors the production chart's `ingestAuth` contract,
 # which is file-based only per ADR-0021) and presented by every ingest POST
 # (post_alert, below) as `Authorization: Bearer $INGEST_TOKEN`.
-# LC_ALL=C: /dev/urandom's raw bytes aren't valid UTF-8, and `tr` errors
-# ("illegal byte sequence") reading them under a UTF-8 locale (common on macOS).
-INGEST_TOKEN="e2e-$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32)"
+# openssl (not `tr </dev/urandom | head -c`): under `set -o pipefail` (L47), `head`
+# closing the pipe after 32 bytes gives `tr` an EPIPE, whose non-zero status pipefail
+# promotes to the pipeline's — aborting the whole script before k3d even starts. A
+# single openssl invocation has no pipe to break. 16 bytes → 32 hex chars.
+INGEST_TOKEN="e2e-$(openssl rand -hex 16)"
 # The model that makes the exploitability determination (ADR-0013). k3d pods reach
 # the host's Ollama via host.docker.internal (Docker Desktop resolves it inside
 # pods; host.k3d.internal only works in the node containers, not pods). Override
