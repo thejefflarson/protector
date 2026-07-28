@@ -299,6 +299,33 @@ fn build_adjudicator(
     }
 }
 
+/// Block until the driving loop has something to do, then drain any already-queued burst so
+/// it coalesces into one pass. Wakes on either a cluster change or a behavioral/audit report
+/// — the behavioral/audit channels only fire when the ingest actually changed the evidence
+/// store (a new observation, not a repeat), so mundane churn never reaches here.
+///
+/// Returns `true` to keep looping, `false` only once `change_rx` has PERMANENTLY closed —
+/// i.e. every clone of its `Sender` (each reflector task's, and the loop's own retained one)
+/// has been dropped, which happens only on total shutdown, never after a single pass (JEF-560:
+/// pinned by [`tests::wake_channel_survives_many_passes_and_only_closes_when_every_sender_drops`],
+/// a regression test for an operational incident where the engine container was suspected —
+/// wrongly, per that test — of running to completion instead of looping).
+async fn wait_for_wake(
+    change_rx: &mut tokio::sync::mpsc::Receiver<()>,
+    runtime_rx: &mut tokio::sync::mpsc::Receiver<()>,
+    audit_rx: &mut tokio::sync::mpsc::Receiver<()>,
+) -> bool {
+    tokio::select! {
+        next = change_rx.recv() => if next.is_none() { return false },
+        _ = runtime_rx.recv() => {},
+        _ = audit_rx.recv() => {},
+    }
+    while change_rx.try_recv().is_ok() {}
+    while runtime_rx.try_recv().is_ok() {}
+    while audit_rx.try_recv().is_ok() {}
+    true
+}
+
 /// Event-driven observer: the default. Reflectors keep an in-memory store of each
 /// watched resource current via `list`-then-`watch` (the periodic relist is the
 /// resync floor ADR-0004 calls for). The engine reacts to *events* — it sits quiet
@@ -691,21 +718,9 @@ pub async fn run_watch(
 
     tracing::info!("engine: watching cluster (event-driven)");
     loop {
-        // Wake on either a cluster change or a behavioral report. The behavioral channel
-        // only fires when the ingest actually changed the evidence store (a new
-        // observation, not a repeat) — see `ingest_behavior`. So a report that tells us
-        // nothing new never reaches here, and we don't burn a graph rebuild + CRD lists
-        // for it; mundane churn (the same connections, again) is dropped at ingest.
-        tokio::select! {
-            next = change_rx.recv() => if next.is_none() { break },
-            _ = runtime_rx.recv() => {},
-            _ = audit_rx.recv() => {},
+        if !wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await {
+            break;
         }
-        // Coalesce an already-queued burst (a Deployment rollout, or several material
-        // reports) into one pass.
-        while change_rx.try_recv().is_ok() {}
-        while runtime_rx.try_recv().is_ok() {}
-        while audit_rx.try_recv().is_ok() {}
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;

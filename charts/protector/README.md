@@ -273,7 +273,7 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `feedSync.epssUrl`           | FIRST.org EPSS scores CSV (gzipped)  | EPSS source (gzipped CSV, gunzipped in place). See feeds section. |
 | `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
 | `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy (its scope is derived from `enforceScope`). |
-| `resources`                  | 10m/64Mi → 250m/256Mi                | RAM-tight, arm64-friendly.                          |
+| `resources`                  | 10m/64Mi → 500m/256Mi                | RAM-tight, arm64-friendly; the CPU limit has headroom for signing-sweep bursts (JEF-560). |
 
 See [`values.yaml`](values.yaml) for the fully commented set.
 
