@@ -156,6 +156,38 @@ fn rate_limit_is_per_peer() {
     assert!(limiter.allow(b, now));
 }
 
+#[test]
+fn require_token_accepts_a_configured_token() {
+    // JEF-576: a configured token is returned unchanged so the caller can install it.
+    let token = IngestToken::from_literal("s3cr3t");
+    let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
+    let resolved = require_token(Some(token.clone()), "runtime-evidence ingest", addr)
+        .expect("a configured token must be accepted");
+    assert!(resolved.matches("s3cr3t"));
+}
+
+#[test]
+fn require_token_refuses_to_start_when_unconfigured() {
+    // JEF-576: the token is REQUIRED — no token configured must be a hard `Err` (the
+    // caller propagates it out of `serve_runtime`/`serve_audit` and never binds the
+    // port), not a warn-and-continue-unauthenticated fallback.
+    let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
+    // `IngestToken` deliberately doesn't derive `Debug` (it wraps a secret), so match
+    // rather than `expect_err`/`unwrap_err` (which require `T: Debug`).
+    let message = match require_token(None, "runtime-evidence ingest", addr) {
+        Ok(_) => panic!("an unconfigured token must refuse to start the listener"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains("runtime-evidence ingest"),
+        "error should name the affected listener: {message}"
+    );
+    assert!(
+        message.contains("PROTECTOR_INGEST_TOKEN_FILE"),
+        "error should name the fix: {message}"
+    );
+}
+
 /// The rate-limit middleware rejects an over-limit peer with 429 (a burst of 1).
 #[tokio::test]
 async fn rate_limit_middleware_returns_429_over_limit() {
