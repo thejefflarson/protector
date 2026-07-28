@@ -235,7 +235,12 @@ const QUARANTINE_WORKLOAD_RELATION: &str = "quarantine-workload";
 /// entry pod precisely (ADR-0010). Returns `None` when the entry has no labels — we
 /// will not widen a quarantine to a whole namespace (that would punish bystanders);
 /// such a chain falls through to durable-fix/no-cut instead.
-fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
+///
+/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's entry line reuses the
+/// SAME [`containment_for`] ladder this module's own `reconcile` runs, so a helper it calls
+/// (this one, transitively) must be visible outside `respond`. `reconcile` itself is
+/// untouched — only this pure builder's visibility widens.
+pub(crate) fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
     // The first hop's `from` is always the entry (the path is reconstructed from the
     // entry outward), and its `from_labels` are the entry workload's labels.
     let first = chain.links.first()?;
@@ -257,7 +262,13 @@ fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
 /// pod precisely (ADR-0010). Returns `None` when the pod has no labels — we decline
 /// (never widen a quarantine to a whole namespace, punishing bystanders), exactly as
 /// [`quarantine_link`] does for the entry.
-fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link> {
+///
+/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's downstream lines
+/// resolve each `quarantine_targets` workload through this exact builder — the SAME
+/// `None`-on-unlabeled decline the ledger's `reconcile` uses — so the menu and the ledger
+/// can never disagree on which downstream nodes are containable. `reconcile` itself is
+/// untouched — only this pure builder's visibility widens.
+pub(crate) fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link> {
     if target.labels.is_empty() {
         return None;
     }
