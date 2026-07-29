@@ -714,3 +714,51 @@ async fn a_model_chosen_cut_only_proposes_in_shadow_by_default() {
         "nothing armed ⇒ nothing actually applied, even for a decisive model-chosen cut"
     );
 }
+
+/// The positive contrast, in ENFORCE mode: the SAME decisive Attack, on an
+/// uncorroborated-but-promoted chain (`judgement` opt-in, ADR-0011), with the `network`
+/// class armed, actually reaches the (dry-run) actuator's apply — the full
+/// `Engine::process` path this ticket wires, exercised unconditionally in CI (unlike
+/// `scripts/e2e.sh`'s Ollama-gated model phase, which exercises the same path against a
+/// real cluster + a real model).
+#[tokio::test]
+async fn a_model_chosen_cut_auto_applies_in_enforce_mode() {
+    struct AlwaysAttacksTheEntry;
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for AlwaysAttacksTheEntry {
+        async fn judge(
+            &self,
+            entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+            _prompt: &str,
+            _downstream: &[NodeKey],
+            menu: &Menu,
+        ) -> IncidentDecision {
+            let cut = menu
+                .resolve(entry)
+                .expect("the entry is selectable on its own menu");
+            IncidentDecision {
+                assessment: Assessment::Attack,
+                reason: "RCE reaches the secret".to_string(),
+                cuts: vec![cut],
+            }
+        }
+    }
+    // `network` arms the cut classes; `judgement` lets the model's own Attack PROMOTE an
+    // uncorroborated chain to auto-eligible (ADR-0011) — `exposed_snapshot(true)` carries
+    // a CVE but no live runtime signal, so promotion is what clears the gate here.
+    let mut engine = Engine::new(
+        EnabledActions::from_names(["network", "judgement"]),
+        ActuationScope::unscoped(),
+        Box::new(DryRunActuator),
+        Box::new(AlwaysAttacksTheEntry),
+    );
+    engine.process(&exposed_snapshot(true)).await;
+
+    assert!(
+        engine.actions.active_count() > 0,
+        "network armed + the model's own Attack promoting the chain ⇒ the dry-run \
+         actuator actually applies the model-chosen cut"
+    );
+}

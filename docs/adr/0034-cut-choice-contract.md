@@ -133,6 +133,10 @@ ladder, and entry-exclusion all survive as the resolver + fallback.)
   1.7B's over-cut mass is acceptable.
 - **Model unavailable** ⇒ fallback proposals only; standing cuts persist until chain-clear
   (§7's deliberate asymmetry).
+- **ADR-0034 supersedes ADR-0009's corroboration-alone auto-cut**: under enforce mode with no
+  live model, determinism only *proposes* (the `containment_for` fallback, stamped
+  `adjudicated=false`) — nothing auto-cuts on live corroboration by itself anymore. Only a
+  model's decisive `attack` naming a node (§1/§6) arms an auto-eligible cut now.
 - Refines [ADR-0032](0032-model-is-incident-responder.md) §3 (mechanism-menu → target-choice)
   and its 4-value output (→ 3-value). Judge tier remains [ADR-0033] (pending T2b).
 - Deferred: edge-granular downstream cuts (no actuator lever — the schema versions forward via
