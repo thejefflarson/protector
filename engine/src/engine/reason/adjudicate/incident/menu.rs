@@ -35,6 +35,11 @@ use super::ChosenCut;
 pub struct MenuLine {
     pub node: NodeKey,
     pub action: ProposedAction,
+    /// The concrete edge/self-reference this line's mechanism severs (JEF-570) — the SAME
+    /// `Link` [`containment_for`]/[`quarantine_workload_link`] resolved, carried forward so a
+    /// caller resolving a model-chosen node (via [`Menu::resolve`]) can build the ledger's own
+    /// [`crate::engine::respond::Mitigation`] without re-deriving it from `cut_signature` alone.
+    pub cut: Link,
     pub cut_signature: String,
     /// The advisory [`predict_blast_radius`] note for this line — fixed-shape, no
     /// untrusted text (a responder should weigh collateral before naming a node, but the
@@ -68,6 +73,7 @@ impl Menu {
             .map(|l| ChosenCut {
                 node: l.node.clone(),
                 action: l.action,
+                cut: l.cut.clone(),
                 cut_signature: l.cut_signature.clone(),
             })
     }
@@ -156,6 +162,19 @@ pub fn build_menu(chain: &ProvenChain, graph: &SecurityGraph, health: &HealthRep
         }
     }
 
+    normalize(&mut selectable, &mut uncontainable);
+    Menu {
+        selectable,
+        uncontainable,
+    }
+}
+
+/// Sort + dedup a menu's two lists into the canonical shape [`Menu`] always carries, and drop
+/// any uncontainable entry a selectable line also covers. Shared by [`build_menu`] and by the
+/// caller that unions several chains' menus into one per-entry menu (an entry judged over
+/// several objectives has several [`ProvenChain`]s, JEF-570) — so the SAME normalization runs
+/// whether a menu comes from one chain or several, and the two can never drift.
+pub(crate) fn normalize(selectable: &mut Vec<MenuLine>, uncontainable: &mut Vec<NodeKey>) {
     selectable.sort_by(|a, b| a.node.cmp(&b.node));
     selectable.dedup_by(|a, b| a.node == b.node);
     uncontainable.sort();
@@ -163,11 +182,6 @@ pub fn build_menu(chain: &ProvenChain, graph: &SecurityGraph, health: &HealthRep
     // Defensive: a node can never be both selectable and uncontainable, but keep the
     // selectable line authoritative if a chain ever produced a redundant target entry.
     uncontainable.retain(|n| !selectable.iter().any(|l| &l.node == n));
-
-    Menu {
-        selectable,
-        uncontainable,
-    }
 }
 
 /// Resolve one menu line: the cut signature and the advisory blast-radius note, built the
@@ -191,6 +205,7 @@ fn menu_line(
         node,
         action,
         cut_signature: mitigation.cut_signature(),
+        cut: mitigation.cut,
         blast_note: blast_note(&blast),
     }
 }

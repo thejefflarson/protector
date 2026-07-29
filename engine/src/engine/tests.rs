@@ -9,10 +9,37 @@ use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::observe::{SecretMeta, Snapshot};
 use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, Menu};
 use crate::engine::respond::actuator::DryRunActuator;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Translate a legacy [`Verdict`] literal into the [`IncidentDecision`] shape a test double
+/// returns (JEF-570) — test-only, and deliberately lossy for `Confirmed` (mapped to `Attack`,
+/// same as every other test double; no test double here needs the Confirmed/Exploitable
+/// distinction ADR-0034 D2 retired). Never carries cuts: none of these doubles exercise
+/// cut-selection, only the caching/gate/dispatch machinery `to_verdict()` bridges back exactly.
+pub(super) fn decision_of(verdict: Verdict) -> IncidentDecision {
+    match verdict {
+        Verdict::Confirmed => IncidentDecision {
+            assessment: Assessment::Attack,
+            reason: "confirmed".to_string(),
+            cuts: Vec::new(),
+        },
+        Verdict::Exploitable(reason) => IncidentDecision {
+            assessment: Assessment::Attack,
+            reason,
+            cuts: Vec::new(),
+        },
+        Verdict::Refuted(reason) => IncidentDecision {
+            assessment: Assessment::NoAttack,
+            reason,
+            cuts: Vec::new(),
+        },
+        Verdict::Uncertain(reason) => IncidentDecision::uncertain(reason),
+    }
+}
 
 /// An adjudicator that counts how many times it's consulted (and confirms).
 pub(super) struct CountingAdjudicator(pub(super) Arc<AtomicUsize>);
@@ -26,9 +53,10 @@ impl reason::adjudicate::Adjudicator for CountingAdjudicator {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Verdict::Refuted("counted".into())
+        decision_of(Verdict::Refuted("counted".into()))
     }
 }
 
@@ -216,8 +244,9 @@ impl reason::adjudicate::Adjudicator for FixedAdjudicator {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
-        self.0.clone()
+        _menu: &Menu,
+    ) -> IncidentDecision {
+        decision_of(self.0.clone())
     }
 }
 
@@ -285,11 +314,12 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
             _graph: &SecurityGraph,
             _prompt: &str,
             _downstream: &[NodeKey],
-        ) -> Verdict {
+            _menu: &Menu,
+        ) -> IncidentDecision {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                Verdict::Exploitable("RCE reaches the secret".into())
+                decision_of(Verdict::Exploitable("RCE reaches the secret".into()))
             } else {
-                Verdict::Uncertain("model unavailable".into())
+                IncidentDecision::uncertain("model unavailable")
             }
         }
     }
@@ -487,13 +517,14 @@ impl reason::adjudicate::Adjudicator for ConcurrencyProbe {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(now, Ordering::SeqCst);
         // Linger so concurrent calls overlap and are seen by the max counter above.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        Verdict::Refuted("counted".into())
+        decision_of(Verdict::Refuted("counted".into()))
     }
 }
 
@@ -540,11 +571,12 @@ async fn one_entrys_model_failure_does_not_poison_the_others() {
             _graph: &SecurityGraph,
             _prompt: &str,
             _downstream: &[NodeKey],
-        ) -> Verdict {
+            _menu: &Menu,
+        ) -> IncidentDecision {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                Verdict::Uncertain("model unavailable".into())
+                IncidentDecision::uncertain("model unavailable")
             } else {
-                Verdict::Exploitable("RCE reaches the secret".into())
+                decision_of(Verdict::Exploitable("RCE reaches the secret".into()))
             }
         }
     }
@@ -574,5 +606,111 @@ async fn one_entrys_model_failure_does_not_poison_the_others() {
         N - 1,
         "one entry's failure leaves the other {} entries' decisive verdicts intact",
         N - 1
+    );
+}
+
+// --- ADR-0034 (JEF-570): the cut-choice contract wired into the live ledger ---
+
+/// ADR-0034 D7 (the retirement asymmetry, the safety-critical half of this ticket): a
+/// PREVIOUSLY model-chosen cut must NOT retire just because the model comes back `Uncertain`
+/// on a later pass — a transient outage may neither open a live attack path (this test) nor
+/// sever one (D7's other half, unit-tested directly on `IncidentDecision`/guards in the
+/// `incident` module). Pass 1 decisively chooses the entry's own menu line; pass 2's fresh
+/// `Uncertain` must leave that exact mitigation active.
+#[tokio::test]
+async fn a_fresh_uncertain_does_not_retire_a_previously_chosen_cut() {
+    struct AttackThenUncertain(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for AttackThenUncertain {
+        async fn judge(
+            &self,
+            entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+            _prompt: &str,
+            _downstream: &[NodeKey],
+            menu: &Menu,
+        ) -> IncidentDecision {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                let cut = menu
+                    .resolve(entry)
+                    .expect("the entry is selectable on its own menu");
+                IncidentDecision {
+                    assessment: Assessment::Attack,
+                    reason: "RCE reaches the secret".to_string(),
+                    cuts: vec![cut],
+                }
+            } else {
+                IncidentDecision::uncertain("model unavailable")
+            }
+        }
+    }
+    let mut engine =
+        engine_with_adjudicator(Box::new(AttackThenUncertain(Arc::new(AtomicUsize::new(0)))));
+
+    // Pass 1: decisive Attack naming the entry — the cut goes active.
+    engine.process(&exposed_snapshot(true)).await;
+    let active_after_first: Vec<String> =
+        engine.ledger.active().map(|m| m.cut_signature()).collect();
+    assert!(
+        !active_after_first.is_empty(),
+        "the decisive Attack's chosen cut is active after pass 1"
+    );
+
+    // Pass 2 ADDS nothing (identical facts), so the entry re-verifies (JEF-445 — a cached
+    // Exploitable/Attack is never served from cache) and this time comes back Uncertain. The
+    // ledger's active set must be UNCHANGED — inert, not retired.
+    engine.process(&exposed_snapshot(true)).await;
+    let active_after_second: Vec<String> =
+        engine.ledger.active().map(|m| m.cut_signature()).collect();
+    assert_eq!(
+        active_after_second, active_after_first,
+        "a fresh Uncertain must retire nothing — the standing cut persists (ADR-0034 D7)"
+    );
+}
+
+/// Rail: shadow stays the default posture (CLAUDE.md / ADR-0021) — even a decisive `Attack`
+/// naming a real cut on a corroborated, breach-relevant chain only ever PROPOSES with no
+/// action classes armed; nothing reaches the (dry-run) actuator.
+#[tokio::test]
+async fn a_model_chosen_cut_only_proposes_in_shadow_by_default() {
+    struct AlwaysNamesTheEntry;
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for AlwaysNamesTheEntry {
+        async fn judge(
+            &self,
+            entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+            _prompt: &str,
+            _downstream: &[NodeKey],
+            menu: &Menu,
+        ) -> IncidentDecision {
+            let cut = menu
+                .resolve(entry)
+                .expect("the entry is selectable on its own menu");
+            IncidentDecision {
+                assessment: Assessment::Attack,
+                reason: "RCE reaches the secret".to_string(),
+                cuts: vec![cut],
+            }
+        }
+    }
+    // `engine_with_adjudicator` builds with `EnabledActions::from_names(std::iter::empty())`
+    // (shadow — nothing armed) and a `DryRunActuator` — the default posture (CLAUDE.md).
+    let mut engine = engine_with_adjudicator(Box::new(AlwaysNamesTheEntry));
+    engine.process(&exposed_snapshot(true)).await;
+
+    let active: Vec<_> = engine.ledger.active().cloned().collect();
+    assert!(
+        !active.is_empty(),
+        "the model-chosen cut is proposed (ledger-active), even in shadow"
+    );
+    // Shadow is the DEFAULT (CLAUDE.md / ADR-0021) — `engine_with_adjudicator` arms no action
+    // class, so the actuator never sees an apply: the applied-action log stays empty.
+    assert_eq!(
+        engine.actions.active_count(),
+        0,
+        "nothing armed ⇒ nothing actually applied, even for a decisive model-chosen cut"
     );
 }

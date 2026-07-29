@@ -3,9 +3,18 @@ use super::*;
 use crate::engine::respond::ProposedAction;
 
 fn line(node: &str, action: ProposedAction) -> MenuLine {
+    let key = NodeKey(node.to_string());
     MenuLine {
-        node: NodeKey(node.to_string()),
+        node: key.clone(),
         action,
+        cut: crate::engine::reason::proof::Link {
+            from: key.clone(),
+            to: key,
+            relation: "test".to_string(),
+            technique: None,
+            from_labels: Default::default(),
+            to_labels: Default::default(),
+        },
         cut_signature: format!("sig:{node}"),
         blast_note: "blast radius: no alive collateral".to_string(),
     }

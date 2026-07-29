@@ -110,6 +110,10 @@ pub trait Adjudicator: Send + Sync {
     /// `downstream` is the same deduped, sorted set of workload [`NodeKey`]s on the entry's
     /// proven paths that `prompt` renders a per-node evidence block for (JEF-565) — so an
     /// implementation's own backstops can weigh downstream evidence exactly as the prompt does.
+    /// `menu` is the deterministic cut-choice menu (ADR-0034 D4) the caller built for this exact
+    /// entry — the SAME menu `prompt`'s containment-options section renders — so an
+    /// implementation parses its reply's `contain` against it and resolves each surviving node
+    /// key through it (never carrying a cut as model text, ADR-0034 D1).
     async fn judge(
         &self,
         entry: &NodeKey,
@@ -117,11 +121,16 @@ pub trait Adjudicator: Send + Sync {
         graph: &SecurityGraph,
         prompt: &str,
         downstream: &[NodeKey],
-    ) -> Verdict;
+        menu: &incident::Menu,
+    ) -> incident::IncidentDecision;
 }
 
-/// The default: confirm everything. Absent a model the deterministic action bar
-/// alone governs — behaviour is unchanged, no veto is applied.
+/// The default: no decisive decision. Absent a model there is no cut-choosing analyst to
+/// consult, so every breach-relevant entry it covers falls through to the ADR-0034 D6
+/// human-proposal fallback (`containment_for`, stamped `adjudicated=false`) — never an
+/// auto-applied cut. This RETIRES the pre-ADR-0034 "confirm everything, the deterministic
+/// action bar alone governs" behavior: that bar (the `quarantine_targets`/`containment_for`
+/// desired-set insertion) is no longer an auto-action path at all without a live model.
 pub struct NullAdjudicator;
 
 #[async_trait::async_trait]
@@ -133,8 +142,11 @@ impl Adjudicator for NullAdjudicator {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
-        Verdict::Confirmed
+        _menu: &incident::Menu,
+    ) -> incident::IncidentDecision {
+        incident::IncidentDecision::uncertain(
+            "no adjudicator configured — a model is required for a cut decision",
+        )
     }
 }
 
@@ -153,9 +165,9 @@ mod surface;
 pub use evidence::{EntryCoverage, entry_coverage};
 pub use model_call::ModelAdjudicator;
 pub use prompt::{
-    DeltaBuild, PromptSections, build_delta_prompt_asn, build_judgment_prompt,
-    build_judgment_prompt_with_asn, build_judgment_prompt_with_sections_asn, chain_shape_hash,
-    parse_verdict, prompt_cache_key,
+    DeltaBuild, PromptSections, build_delta_prompt_asn, build_delta_prompt_with_menu_asn,
+    build_judgment_prompt, build_judgment_prompt_with_asn, build_judgment_prompt_with_sections_asn,
+    chain_shape_hash, parse_verdict, prompt_cache_key,
 };
 pub use surface::JudgedSurface;
 // The cross-module helpers the rest of the crate imports by the stable

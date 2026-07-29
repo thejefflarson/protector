@@ -53,9 +53,9 @@ impl Engine {
     /// (re-judge) vs subtractive (the prior verdict holds), and the baseline itself (the gate
     /// serves its verdict on a subtractive hold). Built before the cache lookup so the cached-on
     /// and sent prompt bytes can never drift.
-    // 8 args (JEF-565 added `downstream`): each is a distinct, already-computed piece of this
-    // pass's per-entry state (no natural sub-grouping that wouldn't just be a wrapper struct for
-    // its own sake — see the same call already made in `run_loop.rs`/`supply_chain/mod.rs`).
+    // 9 args (JEF-570 added `menu`): each is a distinct, already-computed piece of this pass's
+    // per-entry state (no natural sub-grouping that wouldn't just be a wrapper struct for its
+    // own sake — see the same call already made in `run_loop.rs`/`supply_chain/mod.rs`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_pending(
         &self,
@@ -66,19 +66,23 @@ impl Engine {
         idxs: &[usize],
         graph: &graph::SecurityGraph,
         asn: &crate::engine::observe::asn::AsnDb,
+        menu: reason::adjudicate::incident::Menu,
     ) -> (PendingEntry, bool, Option<state::VerdictBaseline>) {
         let baseline = self.verdicts.baseline_for(entry_key);
-        let delta = reason::adjudicate::build_delta_prompt_asn(
+        let delta = reason::adjudicate::build_delta_prompt_with_menu_asn(
             &entry,
             &objectives,
             graph,
             asn,
             baseline.as_ref().map(|b| &b.surface),
             &downstream,
+            &menu,
         );
         // The verdict-cache key is the FULL-STATE hash (excludes the "Changes since…" section) so
         // an identical full state always keys identically regardless of the delta — see
-        // `build_delta_prompt_asn` for why (ADR-0023's fingerprint↔delta-gate resolution).
+        // `build_delta_prompt_asn` for why (ADR-0023's fingerprint↔delta-gate resolution). The
+        // menu is part of that full state (JEF-570): a mapping change is a prompt change is a
+        // re-judge (ADR-0034 D4).
         let fingerprint = delta.cache_key;
         let chain = reason::adjudicate::chain_shape_hash(&objectives);
         let pending = PendingEntry {
@@ -92,6 +96,7 @@ impl Engine {
             chain,
             surface: delta.surface,
             idxs: idxs.to_vec(),
+            menu,
         };
         (pending, delta.additive, baseline)
     }

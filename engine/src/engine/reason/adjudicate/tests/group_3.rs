@@ -51,11 +51,12 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
 
     // The whole prompt is small despite the megabyte input — the cap bounds it hard. The
     // bound is on the UNTRUSTED payload, not the static template (the floor here is the
-    // ~5.5 KB static prompt after the JEF-402 grounding-rule wording + the per-field-capped
-    // title); a megabyte of title would blow past this by orders of magnitude if the cap
-    // failed, so the assertion still proves the payload is capped, not the template.
+    // ~6 KB static prompt after the JEF-402 grounding-rule wording + the ADR-0034 cut-choice
+    // instruction + an empty containment-options menu + the per-field-capped title); a
+    // megabyte of title would blow past this by orders of magnitude if the cap failed, so the
+    // assertion still proves the payload is capped, not the template.
     assert!(
-        prompt.len() < 8_000,
+        prompt.len() < 9_000,
         "prompt must stay bounded; was {} bytes",
         prompt.len()
     );

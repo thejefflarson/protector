@@ -118,6 +118,11 @@ struct PendingEntry {
     /// baseline when this pass judges it decisively, so the next pass measures additions against it.
     surface: reason::adjudicate::JudgedSurface,
     idxs: Vec<usize>,
+    /// The deterministic cut-choice menu (ADR-0034 D4, JEF-570) `prompt`'s containment-options
+    /// section rendered — carried alongside the prompt so [`reason::adjudicate::Adjudicator::judge`]
+    /// parses/resolves the model's `contain` reply against the EXACT menu the entry's prompt
+    /// showed (never rebuilt, so the two can never drift).
+    menu: reason::adjudicate::incident::Menu,
 }
 
 /// The engine's stateful processing core. It owns everything that persists across
@@ -176,6 +181,15 @@ pub struct Engine {
     /// end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral workloads,
     /// removed exposure).
     verdicts: std::sync::Arc<state::VerdictStore>,
+    /// This pass's per-entry cut-choice decision (ADR-0034, JEF-570): the model's last
+    /// DECISIVE [`reason::adjudicate::incident::IncidentDecision`], keyed by entry key. Engine-
+    /// local (no `Arc`, no reader shares it — only [`respond::MitigationLedger::reconcile`]
+    /// consumes it, via [`adj_pass::run_adjudication_pass`]'s return value). Retained across a
+    /// cache-hit/backoff pass exactly like [`Self::verdicts`]'s cache (D7's retirement
+    /// asymmetry: a this-pass `Uncertain` never clears it); pruned to present entries each pass;
+    /// NOT persisted (a restart starts empty — every entry cold-re-judges for cuts before any
+    /// auto-apply, JEF-570's deliberately conservative stand-in for the deferred journal v2).
+    decisions: std::collections::BTreeMap<String, reason::adjudicate::incident::IncidentDecision>,
     /// Per-node agent-liveness (JEF-308), shared with the ingest; classified each pass into the
     /// runtime-corroboration coverage the readiness row reads. `None` when no ingest is wired.
     agent_liveness: Option<std::sync::Arc<state::AgentLivenessStore>>,
@@ -231,6 +245,7 @@ impl Engine {
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
             verdicts,
+            decisions: std::collections::BTreeMap::new(),
             agent_liveness: None,
             // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
             // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
@@ -523,8 +538,11 @@ impl Engine {
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant path — group
         // the breach-relevant chains by their internet-facing entry, judge each entry once, and
         // fold the verdicts back into the store / journal / notifier, stamping each chain in
-        // place. Extracted whole (JEF-370); see [`adj_pass`] for the four-phase detail.
-        self.run_adjudication_pass(&mut chains, &graph, pass_now)
+        // place. Extracted whole (JEF-370); see [`adj_pass`] for the four-phase detail. Returns
+        // this pass's per-entry cut-choice decisions (ADR-0034, JEF-570), consumed by the ledger
+        // reconcile below.
+        let decisions = self
+            .run_adjudication_pass(&mut chains, &graph, &health, pass_now)
             .await;
         // Re-publish the enriched chains — promotions move into remediations, vetoes flip
         // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
@@ -548,8 +566,9 @@ impl Engine {
             }
         }
 
-        // Reconcile proposed mitigations against the current chains (Q4 and Q5).
-        let ledger_delta = self.ledger.reconcile(&chains);
+        // Reconcile proposed mitigations against the current chains AND this pass's model
+        // decisions (Q4 and Q5, ADR-0034 D6/D7).
+        let ledger_delta = self.ledger.reconcile(&chains, &decisions);
         if !ledger_delta.is_empty() {
             ledger_delta.emit();
         }
