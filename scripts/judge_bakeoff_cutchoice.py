@@ -30,7 +30,14 @@ import json, re, sys, time, urllib.request
 from collections import Counter
 
 import os
+from urllib.parse import urlparse
+# OLLAMA_URL is operator-supplied config for a local dev bench (whoever runs the script points it at
+# their own ollama — localhost, a port-forward, or a remote eval box), NOT untrusted network input,
+# so there is deliberately no host allowlist (that would defeat the point-anywhere design). Reject
+# only non-HTTP(S) schemes so a stray file://-style value fails loudly instead of silently.
 OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")  # point at a port-forwarded cluster pod for the AUTHORITATIVE deployed-judge run
+if urlparse(OLLAMA).scheme not in ("http", "https"):
+    raise SystemExit(f"OLLAMA_URL must be http:// or https://, got: {OLLAMA!r}")
 NUM_CTX = 16384
 KEEP_ALIVE = "60s"
 MODELS = ["qwen3:1.7b", "qwen3:4b"]
@@ -64,7 +71,12 @@ Downstream evidence on the entry's proven paths — each reachable workload with
 Containment options — each line is a reversible cut you MAY choose; name its node key in "contain" to apply it. Choose the FEWEST that stop the breach; [] to leave everything running:
 {menu}
 
-Output ONLY a JSON object with exactly three keys: "assessment" (one of "attack", "no_attack", "uncertain"), "reason" (one sentence on what makes it a breach or not), and "contain" (a JSON array of workload node keys). Put in the "contain" array ONLY workloads copied EXACTLY from the Containment options above whose OWN evidence shows exploitation (entry: loaded-at-runtime CVE / live signal / exposed secret; downstream: live signal / exposed secret — NEVER a downstream loaded CVE alone). Name the FEWEST workloads that stop the breach and leave every uncompromised workload running; use an empty array when nothing is compromised. The "contain" array MUST be empty when "assessment" is "no_attack" or "uncertain"."""
+Output ONLY a JSON object with exactly three keys: "assessment" (one of "attack", "no_attack", "uncertain"), "reason" (one sentence on what makes it a breach or not), and "contain" (a JSON array of workload node keys copied EXACTLY from the Containment options above).
+Fill "contain" with EXACTLY the compromised workloads — every workload whose OWN evidence shows exploitation, and no others:
+  - a compromised workload IS: the entry with a loaded-at-runtime CVE, a live alert/hands-on-keyboard signal, or an exposed secret; OR a downstream workload with a live alert/hands-on-keyboard signal or an exposed secret (a downstream loaded CVE ALONE does NOT count).
+  - do NOT add an uncompromised workload — in particular a CLEAN entry that is merely the path to a compromised downstream stays running (name the downstream, not the entry).
+  - do NOT omit a compromised one.
+If "assessment" is "attack", "contain" MUST name at least the workload that carries the evidence — an "attack" with an empty "contain" is contradictory and wrong. If "assessment" is "no_attack" or "uncertain", "contain" MUST be []."""
 
 
 # (name, expected_assessment, expected_contain(set), entry, cves, secrets, runtime, objectives, downstream, menu)
