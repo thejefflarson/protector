@@ -145,6 +145,7 @@ impl Adjudicator for NullAdjudicator {
 mod downstream;
 mod evidence;
 mod guards;
+pub mod incident;
 mod model_call;
 mod prompt;
 mod surface;
