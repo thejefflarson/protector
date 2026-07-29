@@ -56,6 +56,69 @@ fn web_chain(chains: &[ProvenChain]) -> &ProvenChain {
         .expect("web entry chain")
 }
 
+/// An internet-facing `web` pod that REACHES a downstream `store` pivot (a critical CVE makes
+/// it a `RemotelyExploitable` quarantine candidate) which mounts the secret. The entry's OWN
+/// `containment_for` default is the surgical `reaches` edge-cut — a DIFFERENT cut signature
+/// than `store`'s `QuarantineWorkload` line — so a decision naming `store` produces a standing
+/// cut `containment_for(chain)` would never rebuild on its own. Exactly the shape the D7
+/// retirement-asymmetry bug (a fresh Uncertain silently dropping a differing-signature standing
+/// cut) needs to be exercised against.
+fn web_reaches_pivot_store_snapshot() -> Snapshot {
+    use crate::engine::graph::{Provenance, Severity, Vulnerability};
+    use crate::engine::observe::ImageVulnerabilities;
+    use std::time::SystemTime;
+
+    let web = json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"role": "web"}},
+        "spec": {"containers": [{"name": "c", "image": "web:1"}]}
+    });
+    let lb = json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "web-lb", "namespace": "app"},
+        "spec": {"type": "LoadBalancer", "selector": {"role": "web"}}
+    });
+    let store = json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "store", "namespace": "app", "labels": {"role": "store"}},
+        "spec": {
+            "containers": [{
+                "name": "c", "image": "store:1",
+                "envFrom": [{"secretRef": {"name": "store-creds"}}]
+            }]
+        }
+    });
+    let policy = json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+        "metadata": {"name": "store-ingress", "namespace": "app"},
+        "spec": {
+            "podSelector": {"matchLabels": {"role": "store"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{"from": [{"podSelector": {"matchLabels": {"role": "web"}}}]}]
+        }
+    });
+    Snapshot {
+        pods: vec![
+            serde_json::from_value(web).unwrap(),
+            serde_json::from_value(store).unwrap(),
+        ],
+        services: vec![serde_json::from_value(lb).unwrap()],
+        network_policies: vec![serde_json::from_value(policy).unwrap()],
+        image_vulns: vec![ImageVulnerabilities {
+            image: "store:1".into(),
+            vulnerabilities: vec![Vulnerability {
+                id: "CVE-2026-0570".into(),
+                severity: Severity::Critical,
+                exploited_in_wild: false,
+                epss: None,
+                sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    }
+}
+
 /// D6: no decision at all ⇒ the `containment_for` FALLBACK proposes, but stamped
 /// `adjudicated = false` so it can NEVER clear the auto-action gate — even though the chain
 /// itself is genuinely corroborated. The human-proposal fallback is never auto-applied.
@@ -223,4 +286,132 @@ fn a_non_member_reply_degrades_to_uncertain_and_reconcile_falls_back() {
         .find(|m| m.cut.from == chain.entry)
         .expect("the degraded decision falls back to containment_for, like no decision at all");
     assert!(!mitigation.is_live_corroborated());
+}
+
+/// ADR-0034 D7 (the retirement-asymmetry SAFETY bug this test locks down): a DOWNSTREAM
+/// `QuarantineWorkload` cut chosen on pass N — whose signature is NOT `containment_for`'s own
+/// default for the entry (the entry's default here is the surgical `reaches` edge-cut) — must
+/// still be standing on pass N+1 when the entry comes back with NO decision at all (model
+/// unavailable / not yet judged / the cold-start window). A fresh Uncertain must be INERT, not
+/// silently rebuild the desired set from `containment_for` and drop it into `retired` (which
+/// would tear down the live isolation NetworkPolicy in enforce mode).
+#[test]
+fn a_downstream_cut_persists_across_a_pass_with_no_decision() {
+    let graph = build_graph(&web_reaches_pivot_store_snapshot(), &default_adapters());
+    let chains = prove(&graph);
+    let chain = web_chain(&chains);
+    let store = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
+
+    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let store_cut = menu.resolve(&store).expect("store is selectable");
+    let store_signature = store_cut.cut_signature.clone();
+    // Sanity: this really is a DIFFERENT signature than the entry's own containment_for
+    // default — the exact shape the bug needs to be exercised against.
+    let (entry_default_cut, _) = containment_for(chain).expect("entry has a default containment");
+    assert_ne!(
+        store_signature,
+        cut_signature(&entry_default_cut),
+        "sanity: the downstream cut's signature must differ from containment_for's own default"
+    );
+
+    let mut decisions = BTreeMap::new();
+    decisions.insert(
+        chain.entry.0.clone(),
+        IncidentDecision {
+            assessment: Assessment::Attack,
+            reason: "store shows exploitation evidence".to_string(),
+            cuts: vec![store_cut],
+        },
+    );
+    let mut ledger = MitigationLedger::new();
+
+    // Pass N: the model names `store` — the downstream cut goes active.
+    ledger.reconcile(&chains, &decisions);
+    assert!(
+        ledger
+            .active()
+            .any(|m| m.cut_signature() == store_signature),
+        "the downstream cut is active after the decisive pass"
+    );
+
+    // Pass N+1: SAME chains, but no decision for this entry at all this cycle (model down /
+    // not yet re-judged). The standing downstream cut must persist — not retire.
+    let delta = ledger.reconcile(&chains, &BTreeMap::new());
+    assert!(
+        ledger
+            .active()
+            .any(|m| m.cut_signature() == store_signature),
+        "D7: a pass with no decision must be inert — the standing downstream cut must still be \
+         active, got active={:?}",
+        ledger
+            .active()
+            .map(Mitigation::cut_signature)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        delta
+            .retired
+            .iter()
+            .all(|m| m.cut_signature() != store_signature),
+        "the downstream cut must NOT appear in this pass's retired set, got {:?}",
+        delta.retired
+    );
+}
+
+/// The regression guard for the fix above: the carry-forward must not make a standing cut
+/// UN-retirable. A decisive `NoAttack` on a LATER pass still clears it, exactly as D6/D7 intend.
+#[test]
+fn a_decisive_no_attack_still_retires_a_standing_cut() {
+    let graph = build_graph(&web_reaches_pivot_store_snapshot(), &default_adapters());
+    let chains = prove(&graph);
+    let chain = web_chain(&chains);
+    let store = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
+
+    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let store_cut = menu.resolve(&store).expect("store is selectable");
+    let store_signature = store_cut.cut_signature.clone();
+
+    let mut attack_decisions = BTreeMap::new();
+    attack_decisions.insert(
+        chain.entry.0.clone(),
+        IncidentDecision {
+            assessment: Assessment::Attack,
+            reason: "store shows exploitation evidence".to_string(),
+            cuts: vec![store_cut],
+        },
+    );
+    let mut ledger = MitigationLedger::new();
+    ledger.reconcile(&chains, &attack_decisions);
+    assert!(
+        ledger
+            .active()
+            .any(|m| m.cut_signature() == store_signature)
+    );
+
+    // A LATER pass decisively clears the entry — the standing cut retires, same as before this
+    // fix (the carry-forward only applies to Uncertain/no-decision, never to a decisive call).
+    let mut clear_decisions = BTreeMap::new();
+    clear_decisions.insert(
+        chain.entry.0.clone(),
+        IncidentDecision {
+            assessment: Assessment::NoAttack,
+            reason: "store's CVE was patched and reachability closed".to_string(),
+            cuts: Vec::new(),
+        },
+    );
+    let delta = ledger.reconcile(&chains, &clear_decisions);
+    assert!(
+        delta
+            .retired
+            .iter()
+            .any(|m| m.cut_signature() == store_signature),
+        "a decisive NoAttack still retires the standing cut, got retired={:?}",
+        delta.retired
+    );
+    assert!(
+        !ledger
+            .active()
+            .any(|m| m.cut_signature() == store_signature),
+        "no longer active after the decisive clear"
+    );
 }
