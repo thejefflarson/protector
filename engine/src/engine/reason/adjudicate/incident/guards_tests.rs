@@ -15,6 +15,14 @@ fn attack(reason: &str, cuts: Vec<ChosenCut>) -> IncidentDecision {
 
 fn cut(node: NodeKey) -> ChosenCut {
     ChosenCut {
+        cut: crate::engine::reason::proof::Link {
+            from: node.clone(),
+            to: node.clone(),
+            relation: "test".to_string(),
+            technique: None,
+            from_labels: Default::default(),
+            to_labels: Default::default(),
+        },
         node,
         action: ProposedAction::QuarantineWorkload,
         cut_signature: "sig".to_string(),

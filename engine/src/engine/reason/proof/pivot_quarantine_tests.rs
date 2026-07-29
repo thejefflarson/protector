@@ -67,7 +67,9 @@ fn critical_image(image: &str) -> crate::engine::observe::ImageVulnerabilities {
 /// `store` mounts a secret (the objective) and runs a critical-CVE image; `runtime`
 /// is the caller's to vary — empty for "no live evidence", or one alarming signal for
 /// the actively-exploited contrast case.
-fn web_reaches_pivot_store_with_runtime(runtime: Vec<RuntimeObservation>) -> Vec<ProvenChain> {
+fn web_reaches_pivot_store_with_runtime(
+    runtime: Vec<RuntimeObservation>,
+) -> (crate::engine::graph::SecurityGraph, Vec<ProvenChain>) {
     let web = pod(json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": "web", "namespace": "app", "labels": {"role": "web"}},
@@ -105,12 +107,14 @@ fn web_reaches_pivot_store_with_runtime(runtime: Vec<RuntimeObservation>) -> Vec
         runtime_events: runtime,
         ..Default::default()
     };
-    prove(&build_graph(&snap, &default_adapters()))
+    let graph = build_graph(&snap, &default_adapters());
+    let chains = prove(&graph);
+    (graph, chains)
 }
 
 /// [`web_reaches_pivot_store_with_runtime`] with **no runtime events at all** — no alert,
 /// no notable exec, no alarming write.
-fn web_reaches_pivot_store() -> Vec<ProvenChain> {
+fn web_reaches_pivot_store() -> (crate::engine::graph::SecurityGraph, Vec<ProvenChain>) {
     web_reaches_pivot_store_with_runtime(Vec::new())
 }
 
@@ -121,6 +125,38 @@ fn web_to_store_chain(chains: &[ProvenChain]) -> &ProvenChain {
         .expect("web → store → secret chain")
 }
 
+/// ADR-0034 (JEF-570): a breach-relevant chain's `QuarantineWorkload` mitigation is now
+/// PROPOSED only when a decisive `Attack` decision named the node in `contain` — the
+/// deterministic `quarantine_targets` desired-set insertion this file's tests used to rely on
+/// is gone for breach-relevant chains (it stays, unchanged, for a non-breach-relevant one). So
+/// these tests supply the decision the model WOULD have made naming `store`, built through the
+/// real menu resolver (never hand-rolled), to isolate what they actually test: the JEF-566
+/// `is_live_corroborated` gate on the resulting mitigation, independent of how it got proposed.
+fn decisions_naming_store(
+    chain: &ProvenChain,
+    graph: &crate::engine::graph::SecurityGraph,
+) -> std::collections::BTreeMap<String, crate::engine::reason::adjudicate::incident::IncidentDecision>
+{
+    use crate::engine::observe::health::HealthReport;
+    use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, build_menu};
+
+    let store_node = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
+    let menu = build_menu(chain, graph, &HealthReport::default());
+    let cut = menu
+        .resolve(&store_node)
+        .expect("store is selectable on the menu");
+    let mut decisions = std::collections::BTreeMap::new();
+    decisions.insert(
+        chain.entry.0.clone(),
+        IncidentDecision {
+            assessment: Assessment::Attack,
+            reason: "store shows exploitation evidence".to_string(),
+            cuts: vec![cut],
+        },
+    );
+    decisions
+}
+
 /// A pivot pod that is network-reachable from an exposed entry and carries a critical
 /// CVE — but whose justifying chain has ZERO runtime/live evidence (a clean, unpromoted
 /// edge) — is still IDENTIFIED as a `RemotelyExploitable` quarantine candidate at the
@@ -129,7 +165,7 @@ fn web_to_store_chain(chains: &[ProvenChain]) -> &ProvenChain {
 /// lane's ADR-0013 bar ("CVE presence no longer auto-cuts").
 #[test]
 fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
-    let chains = web_reaches_pivot_store();
+    let (graph, chains) = web_reaches_pivot_store();
     let chain = web_to_store_chain(&chains);
 
     // No runtime evidence anywhere in the snapshot ⇒ nothing is live-corroborated.
@@ -155,9 +191,12 @@ fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
 
     // Build the mitigation the way the response layer actually does — through the
     // ledger, so the justification carries this chain's real corroborated/adjudicated/
-    // breach_relevant state, not a hand-rolled empty vec.
+    // breach_relevant state, not a hand-rolled empty vec. ADR-0034 (JEF-570): a
+    // breach-relevant chain's workload quarantine is proposed only when a decisive
+    // Attack decision named it — supply the decision the model would have made.
+    let decisions = decisions_naming_store(chain, &graph);
     let mut ledger = crate::engine::respond::MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &decisions);
     let mitigation = delta
         .proposed
         .iter()
@@ -182,7 +221,7 @@ fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
 fn pivot_behind_a_corroborated_breach_relevant_edge_is_auto_actionable() {
     use crate::engine::observe::Attribution;
 
-    let chains = web_reaches_pivot_store_with_runtime(vec![RuntimeObservation {
+    let (graph, chains) = web_reaches_pivot_store_with_runtime(vec![RuntimeObservation {
         attribution: Attribution::by_namespaced_name("app", "web"),
         source: Some("alert".into()),
         observed_at_ms: None,
@@ -199,8 +238,11 @@ fn pivot_behind_a_corroborated_breach_relevant_edge_is_auto_actionable() {
     assert!(chain.is_breach_relevant(), "the entry is internet-facing");
 
     let store_node = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
+    // ADR-0034 (JEF-570): supply the decisive Attack decision the model would have made
+    // naming `store` — see `decisions_naming_store`.
+    let decisions = decisions_naming_store(chain, &graph);
     let mut ledger = crate::engine::respond::MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &decisions);
     let mitigation = delta
         .proposed
         .iter()
@@ -222,7 +264,7 @@ fn pivot_behind_a_corroborated_breach_relevant_edge_is_auto_actionable() {
 /// `RemotelyExploitable` bar is weaker than the entry's own foothold bar.
 #[test]
 fn entry_foothold_alone_does_not_meet_the_stricter_action_bar() {
-    let chains = web_reaches_pivot_store();
+    let (_graph, chains) = web_reaches_pivot_store();
     let chain = web_to_store_chain(&chains);
     assert!(
         !chain.meets_action_bar(),
@@ -238,7 +280,7 @@ fn entry_foothold_alone_does_not_meet_the_stricter_action_bar() {
 fn pivot_with_live_signal_is_actively_exploited_not_remotely_exploitable() {
     use crate::engine::observe::Attribution;
 
-    let chains = web_reaches_pivot_store_with_runtime(vec![RuntimeObservation {
+    let (_graph, chains) = web_reaches_pivot_store_with_runtime(vec![RuntimeObservation {
         attribution: Attribution::by_namespaced_name("app", "store"),
         source: None,
         observed_at_ms: None,

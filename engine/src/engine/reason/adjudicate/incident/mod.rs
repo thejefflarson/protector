@@ -23,6 +23,7 @@
 //!   all downgrade to `Uncertain`, never `Refuted`, never hide evidence.
 
 use crate::engine::graph::NodeKey;
+use crate::engine::reason::proof::Link;
 use crate::engine::respond::ProposedAction;
 
 /// The model's 3-value call on a proven incident (ADR-0034 D1/D2). Collapses the old
@@ -51,6 +52,10 @@ pub enum Assessment {
 pub struct ChosenCut {
     pub node: NodeKey,
     pub action: ProposedAction,
+    /// The concrete edge/self-reference this cut severs — the SAME [`Link`] the menu itself
+    /// resolved (JEF-570), so a caller (the ledger's `reconcile`) can build the mitigation
+    /// directly rather than re-deriving a `Link` from the signature string.
+    pub cut: Link,
     /// The stable cut identity ([`crate::engine::respond::cut_signature`]) — the ledger's
     /// and journal's key for this cut (ADR-0034 D6/D8, JEF-570).
     pub cut_signature: String,
@@ -78,6 +83,26 @@ impl IncidentDecision {
             cuts: Vec::new(),
         }
     }
+
+    /// Bridge to the legacy 4-value [`super::Verdict`] (JEF-570), so the ADR-0023 verdict
+    /// cache / re-judge gate / breaker+backoff / journal `Breach` line / dashboard / notifier —
+    /// every rail this ticket must leave intact — keep consuming exactly the type they already
+    /// do, unchanged. `Confirmed` is never produced here: it collapsed into `Attack`
+    /// (ADR-0034 D2 — the `Confirmed`-vs-`Exploitable` split encoded a DETERMINISTIC fact,
+    /// `ProvenChain::corroborated`, that never needed the model to restate it), which is why
+    /// `Verdict::is_confirmed()`/`promotes()` — the only two predicates the caching/promotion
+    /// logic reads — are preserved bit-for-bit: `is_confirmed()` is true for `Confirmed` OR
+    /// `Exploitable`, and `promotes()` true only for `Exploitable`, so mapping every `Attack`
+    /// uniformly to `Exploitable` changes neither. `Confirmed` remains a valid `Verdict` value
+    /// only for backward-reading an old journal line (JEF-301 replay) written before this
+    /// ticket landed.
+    pub fn to_verdict(&self) -> super::Verdict {
+        match self.assessment {
+            Assessment::Attack => super::Verdict::Exploitable(self.reason.clone()),
+            Assessment::NoAttack => super::Verdict::Refuted(self.reason.clone()),
+            Assessment::Uncertain => super::Verdict::Uncertain(self.reason.clone()),
+        }
+    }
 }
 
 mod guards;
@@ -87,6 +112,7 @@ mod parse;
 pub use guards::{
     guard_assessment_cuts_consistency, guard_containment_grounding, guard_fabrication,
 };
+pub(crate) use menu::normalize as normalize_menu;
 pub use menu::{Menu, MenuLine, build_menu};
 pub use parse::parse_incident_decision;
 

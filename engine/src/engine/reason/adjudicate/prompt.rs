@@ -16,8 +16,19 @@ use super::evidence::{
     entry_evidence, entry_findings, objective_outcome, render_behavior_lines, retain_reachable_cves,
 };
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
+use super::incident::Menu;
 use super::surface::{ChangesSince, JudgedSurface};
 use crate::engine::observe::asn::AsnDb;
+
+/// The empty containment-options section ("(none)") that every non-live-path prompt builder
+/// below renders (JEF-570): [`build_judgment_prompt`] and its siblings are kept for tests and
+/// callers that only want the entry-scoped evidence prompt (mirrors the existing "no
+/// downstream nodes" precedent those same builders already document for JEF-565) — only the
+/// live engine's [`build_delta_prompt_with_menu_asn`] renders a REAL menu, built from the
+/// entry's actual proven chains.
+fn no_menu() -> String {
+    Menu::default().render()
+}
 
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
@@ -116,7 +127,9 @@ pub(super) fn build_judgment_prompt_with(
     let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn, &[]);
     // Empty `changes_block` ⇒ byte-identical to the pre-ADR-0023 full-state prompt (the
     // non-delta callers/tests). The delta path passes the rendered "Changes since…" section.
-    assemble(entry, &ev, "")
+    // No real menu (JEF-570, see `no_menu`): these callers don't have a proven chain to build
+    // one from.
+    assemble(entry, &ev, "", &no_menu())
 }
 
 /// The delta-aware prompt build (ADR-0023, JEF-391): the FULL-state prompt PLUS the "Changes
@@ -141,6 +154,58 @@ pub fn build_delta_prompt_asn(
     asn: &AsnDb,
     baseline: Option<&JudgedSurface>,
     downstream: &[NodeKey],
+) -> DeltaBuild {
+    // No real menu (JEF-570, see `no_menu`): kept for tests/callers that don't have a proven
+    // chain (and so no containment options) to build one from. The live engine calls
+    // [`build_delta_prompt_with_menu_asn`] instead.
+    build_delta_prompt_inner(
+        entry,
+        objectives,
+        graph,
+        asn,
+        baseline,
+        downstream,
+        &no_menu(),
+    )
+}
+
+/// As [`build_delta_prompt_asn`], but with the deterministic cut-choice menu (ADR-0034 D4)
+/// spliced into the prompt (JEF-570) — the live engine's ONLY delta-prompt entry point.
+/// `menu` is built ONCE by the caller (from this entry's proven chains) and rendered via
+/// [`Menu::render`] into the SAME containment-options section [`incident::parse_incident_decision`]
+/// resolves `contain` against — the render is deterministic (sorted, deduped, same snapshot),
+/// so it is part of the full-state prompt exactly like every other section: a mapping change is
+/// a prompt change is a re-judge (the ADR-0023 `prompt_cache_key`/delta gate covers it
+/// unchanged, since it hashes the assembled prompt bytes, menu included).
+pub fn build_delta_prompt_with_menu_asn(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+    baseline: Option<&JudgedSurface>,
+    downstream: &[NodeKey],
+    menu: &Menu,
+) -> DeltaBuild {
+    build_delta_prompt_inner(
+        entry,
+        objectives,
+        graph,
+        asn,
+        baseline,
+        downstream,
+        &menu.render(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_delta_prompt_inner(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+    baseline: Option<&JudgedSurface>,
+    downstream: &[NodeKey],
+    menu: &str,
 ) -> DeltaBuild {
     let (cves, behaviors) = entry_evidence(graph, entry);
     let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn, downstream);
@@ -171,10 +236,10 @@ pub fn build_delta_prompt_asn(
     // true EXACT-STATE guard (an identical full state always HITS, restart-safe with JEF-301) and
     // leaves the surface-delta gate as the sole ADDITIVE re-judge driver. `sections` (JEF-387) are
     // likewise full-state only, so they never depend on `changes`.
-    let (state_prompt, sections) = assemble(entry, &ev, "");
+    let (state_prompt, sections) = assemble(entry, &ev, "", menu);
     let cache_key = prompt_cache_key(&state_prompt);
     // The prompt SENT to the model carries the full state PLUS the delta section (attention).
-    let prompt = assemble(entry, &ev, &render_changes_block(&changes)).0;
+    let prompt = assemble(entry, &ev, &render_changes_block(&changes), menu).0;
     DeltaBuild {
         prompt,
         cache_key,
@@ -306,11 +371,15 @@ fn render_evidence(
 /// Assemble the final prompt + per-section fingerprints from rendered `ev`. `changes_block` is
 /// spliced in after the reachable-objectives list: empty (`""`) for the full-state prompt (the
 /// non-delta callers — byte-identical to the pre-ADR-0023 prompt), or the rendered "Changes
-/// since…" section for the delta build.
+/// since…" section for the delta build. `menu` is the deterministic cut-choice containment-
+/// options section (ADR-0034 D4/D9, JEF-570) — ALWAYS rendered, immediately before the output
+/// instruction (recency maximizes copy fidelity); `"  (none)"` (see `no_menu`) for a caller with
+/// no proven chain to build one from.
 fn assemble(
     entry: &NodeKey,
     ev: &RenderedEvidence,
     changes_block: &str,
+    menu: &str,
 ) -> (String, PromptSections) {
     // No cap on objectives: the model judges every reachable objective. Truncating to a
     // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
@@ -395,13 +464,18 @@ Reachable objectives (each states the OUTCOME an attacker achieves by reaching i
 Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
 {downstream}
 
-Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the ENTRY's "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal (entry OR downstream), a credential listed in the (non-empty) "Exposed secrets baked into this image" field (entry OR downstream). A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only.
-  "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
-  "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
-  "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
+You are ALSO the incident responder (ADR-0032/0034): if this is a breach, decide which workloads on this proven path must be CONTAINED, at minimum scope. A workload is compromised only with EXPLOITATION EVIDENCE ON THAT WORKLOAD (the same three-anchor bar above, entry or downstream) — reaching it, however broadly, is never by itself a reason to contain it. A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only, never a reason to contain it alone.
+Absence of evidence anywhere on the path is a confident "no_attack", not "uncertain" — reserve "uncertain" for self-contradictory or unintelligible evidence only.
 
-Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above or in a downstream workload's block below — never invent, recall, or copy a CVE id from anywhere else; if both are "(none)", do not name any CVE."#,
+Containment options — each line is a reversible cut you MAY choose; name its node key in "contain" to apply it. Choose the FEWEST that stop the breach; [] to leave everything running:
+{menu}
+
+Output ONLY a JSON object with exactly three keys: "assessment" (one of "attack", "no_attack", "uncertain"), "reason" (one sentence on what makes it a breach or not), and "contain" (a JSON array of workload node keys copied EXACTLY from the Containment options above — never invent, recall, or copy a node key from anywhere else).
+Fill "contain" with EXACTLY the compromised workloads — every workload whose OWN evidence shows exploitation, and no others:
+  - a compromised workload IS: the entry with a loaded-at-runtime CVE, a live alert/hands-on-keyboard signal, or an exposed secret; OR a downstream workload with a live alert/hands-on-keyboard signal or an exposed secret.
+  - do NOT add an uncompromised workload — in particular a CLEAN entry that is merely the path to a compromised downstream stays running (name the downstream, not the entry).
+  - do NOT omit a compromised one.
+If "assessment" is "attack", "contain" MUST name at least the workload that carries the evidence — an "attack" with an empty "contain" is contradictory and wrong. If "assessment" is "no_attack" or "uncertain", "contain" MUST be []."#,
         entry = fence(&entry.0),
         cves = fence_list(&ev.cves),
         secrets = fence_list(&ev.secret_lines),
@@ -414,6 +488,7 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         } else {
             ev.downstream.blocks.join("\n")
         },
+        menu = menu,
     );
     (prompt, sections)
 }

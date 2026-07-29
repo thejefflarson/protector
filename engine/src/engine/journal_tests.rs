@@ -10,12 +10,14 @@ use super::*;
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::adjudicate::incident::{IncidentDecision, Menu};
 use crate::engine::respond::actuator::DryRunActuator;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::tests::{
-    CountingAdjudicator, FixedAdjudicator, engine_with, engine_with_adjudicator, exposed_snapshot,
+    CountingAdjudicator, FixedAdjudicator, decision_of, engine_with, engine_with_adjudicator,
+    exposed_snapshot,
 };
 
 /// A unique temp journal path for a test, without a temp-file crate.
@@ -239,9 +241,10 @@ impl reason::adjudicate::Adjudicator for AlwaysUncertain {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Verdict::Uncertain("model unavailable".into())
+        IncidentDecision::uncertain("model unavailable")
     }
 }
 
@@ -285,12 +288,13 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.down_for {
-            Verdict::Uncertain("model unavailable".into())
+            IncidentDecision::uncertain("model unavailable")
         } else {
-            Verdict::Exploitable("RCE reaches the secret".into())
+            decision_of(Verdict::Exploitable("RCE reaches the secret".into()))
         }
     }
 }
