@@ -125,6 +125,23 @@ struct PendingEntry {
     menu: reason::adjudicate::incident::Menu,
 }
 
+/// A journal-restored per-entry cut-choice decision (ADR-0034 D8, JEF-639), held until the
+/// DOUBLE replay-lock verifies it against THIS RUN's own freshly-rebuilt state (see
+/// [`adj_pass::rearm_restored_decision`]). Deliberately NOT an
+/// [`incident::IncidentDecision`](reason::adjudicate::incident::IncidentDecision) — its cuts
+/// carry only the two facts the journal persisted (node key + resolved cut signature); the
+/// mechanism/edge are re-derived from the CURRENT menu on a lock hold, never trusted from
+/// disk (see [`journal::JournaledCut`]).
+struct RestoredDecision {
+    /// The full-prompt fingerprint this decision was judged against — the first lock.
+    fingerprint: String,
+    assessment: reason::adjudicate::incident::Assessment,
+    reason: String,
+    /// The cuts the model chose, as recorded — re-resolved against the current menu before
+    /// ever being trusted (the second lock).
+    cuts: Vec<journal::JournaledCut>,
+}
+
 /// The engine's stateful processing core. It owns everything that persists across
 /// observations — the prior graph state, the mitigation ledger, and the applied-
 /// action log — and exposes one operation, [`Engine::process`], run once per
@@ -181,15 +198,25 @@ pub struct Engine {
     /// end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral workloads,
     /// removed exposure).
     verdicts: std::sync::Arc<state::VerdictStore>,
-    /// This pass's per-entry cut-choice decision (ADR-0034, JEF-570): the model's last
+    /// This pass's per-entry cut-choice decision (ADR-0034, JEF-570/JEF-639): the model's last
     /// DECISIVE [`reason::adjudicate::incident::IncidentDecision`], keyed by entry key. Engine-
     /// local (no `Arc`, no reader shares it — only [`respond::MitigationLedger::reconcile`]
     /// consumes it, via [`adj_pass::run_adjudication_pass`]'s return value). Retained across a
     /// cache-hit/backoff pass exactly like [`Self::verdicts`]'s cache (D7's retirement
-    /// asymmetry: a this-pass `Uncertain` never clears it); pruned to present entries each pass;
-    /// NOT persisted (a restart starts empty — every entry cold-re-judges for cuts before any
-    /// auto-apply, JEF-570's deliberately conservative stand-in for the deferred journal v2).
+    /// asymmetry: a this-pass `Uncertain` never clears it); pruned to present entries each pass.
+    /// Seeded ACROSS a restart from the durable journal (ADR-0034 D8, JEF-639) — see
+    /// [`Self::restored_decisions`] and [`adj_pass::rearm_restored_decision`] — so a standing
+    /// model-chosen cut survives the model's cold-start window rather than dropping to the
+    /// `containment_for` human-proposal fallback until re-judged.
     decisions: std::collections::BTreeMap<String, reason::adjudicate::incident::IncidentDecision>,
+    /// Journal-restored decisions (ADR-0034 D8, JEF-639), pending the double replay-lock
+    /// verification against THIS RUN's own freshly-rebuilt state — see
+    /// [`adj_pass::rearm_restored_decision`]. Seeded once at boot from the journal's `Incident`
+    /// lines ([`Self::replay_journal`], chronological replay ⇒ last-write-wins per entry);
+    /// each entry is consumed (removed) the first pass it's checked, whether the lock holds or
+    /// not — a hold arms it into [`Self::decisions`], a miss discards it (cold re-judge, never
+    /// repointed or retried blind on a later pass). Nothing else ever reads this map directly.
+    restored_decisions: std::collections::BTreeMap<String, RestoredDecision>,
     /// Per-node agent-liveness (JEF-308), shared with the ingest; classified each pass into the
     /// runtime-corroboration coverage the readiness row reads. `None` when no ingest is wired.
     agent_liveness: Option<std::sync::Arc<state::AgentLivenessStore>>,
@@ -246,6 +273,7 @@ impl Engine {
             actions: ActionLog::new(),
             verdicts,
             decisions: std::collections::BTreeMap::new(),
+            restored_decisions: std::collections::BTreeMap::new(),
             agent_liveness: None,
             // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
             // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
@@ -314,6 +342,7 @@ impl Engine {
         let mut latest_at = std::time::SystemTime::UNIX_EPOCH;
         let mut restored_verdicts = 0usize;
         let mut restored_reversions = 0usize;
+        let mut restored_decisions = 0usize;
         // The boot instant the recency tracker stamps as a restored entry's synthetic
         // `first_seen` (JEF-201) — a past instant relative to any later pass, so a restored
         // entry is never mislabeled NEW. (Restored ages are suppressed regardless.)
@@ -358,6 +387,31 @@ impl Engine {
                     });
                     restored_reversions += 1;
                 }
+                // ADR-0034 D8 (JEF-639): stage this entry's cut-choice decision for the double
+                // replay-lock — held in `restored_decisions`, NEVER written straight into the
+                // live `decisions` map here (there is no current menu/fingerprint to check it
+                // against yet; that only exists once a real pass runs). Chronological replay
+                // means the LAST line for an entry wins, matching every other last-write-wins
+                // restore in this loop.
+                journal::Decision::Incident {
+                    entry: key,
+                    assessment,
+                    reason,
+                    cuts,
+                    fingerprint,
+                    ..
+                } => {
+                    self.restored_decisions.insert(
+                        key.clone(),
+                        RestoredDecision {
+                            fingerprint: fingerprint.clone(),
+                            assessment: *assessment,
+                            reason: reason.clone(),
+                            cuts: cuts.clone(),
+                        },
+                    );
+                    restored_decisions += 1;
+                }
                 // Applies are durable for the audit trail but don't seed output state directly
                 // (the live ledger re-derives the active set from current proof each pass).
                 journal::Decision::Apply { .. } => {}
@@ -380,6 +434,7 @@ impl Engine {
             decisions = entries.len(),
             restored_verdicts,
             restored_reversions,
+            restored_decisions,
             "replayed decision journal on boot (output state populated from durable history)"
         );
     }

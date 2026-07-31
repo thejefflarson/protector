@@ -30,7 +30,11 @@ use crate::engine::respond::ProposedAction;
 /// 4-value [`super::Verdict`]: `Confirmed` vs `Exploitable` encoded a *deterministic* fact
 /// (`ProvenChain::corroborated`) into the model's vocabulary — that fact never needed the
 /// model to restate it, so fewer output values means fewer temp>0 boundary flips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` (ADR-0034 D8, JEF-639) let a journaled decision's assessment
+/// round-trip through the durable journal's `Incident` line — see
+/// [`crate::engine::journal::Decision::Incident`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Assessment {
     /// A real, contextually-exploitable attack. Valid with an EMPTY `cuts` list too
     /// (ADR-0034 D1 — "attack, but no cut warranted"; routes to the human-proposal
