@@ -1,5 +1,5 @@
-//! Shared, zero-egress test scaffolding for the OIDC auth suites (JEF-485 verifier unit tests +
-//! JEF-487 enforcement integration tests). Fixed test RSA keypairs are embedded, and the JWKS is
+//! Shared, zero-egress test scaffolding for the OIDC auth suites (verifier unit tests +
+//!  enforcement integration tests). Fixed test RSA keypairs are embedded, and the JWKS is
 //! served in-memory by [`TestFetcher`] — so the whole suite runs with NO network: the verifier's
 //! [`JwksFetcher`] seam is what lets a test hand it a key set without a fetch. Extracted here so the
 //! two suites mint valid/invalid/rotated tokens from ONE source (no fixture duplication).

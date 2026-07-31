@@ -1,4 +1,4 @@
-//! The would-have-acted report aggregation (JEF-143): the [`Report`] shape and its
+//! The would-have-acted report aggregation: the [`Report`] shape and its
 //! [`WouldActEntry`] / [`LeftAloneEntry`] rows, the [`aggregate_report`] fold over the journal's
 //! breach decisions, and [`default_window_report`] — the default-window aggregation the engine's
 //! per-pass OTLP mirror reads.
@@ -64,7 +64,7 @@ pub struct LeftAloneEntry {
     pub verdict: String,
 }
 
-/// The aggregated shadow report (JEF-143): the would-have-acted diff over a rolling
+/// The aggregated shadow report: the would-have-acted diff over a rolling
 /// window. JSON-serializable; the engine mirrors its headline counts to OTLP per pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
@@ -117,13 +117,13 @@ pub(crate) fn verdict_would_act(verdict: &str) -> bool {
 }
 
 /// A would-act decision fired during an enrichment-coverage gap when the model had NO
-/// real enrichment to weigh: no CVE evidence AND no behavioral signal (JEF-145). The
+/// real enrichment to weigh: no CVE evidence AND no behavioral signal. The
 /// classification reads the breach line's STRUCTURED [`EnrichmentCoverage`] — the same
 /// evidence the model was given at decision time — never the verdict prose. A prose
 /// mention of a CVE no longer reads as covered, and a well-enriched verdict that happens
 /// not to print a CVE id no longer reads as a gap.
 ///
-/// Back-compat (AC #3): a pre-JEF-145 line has no structured coverage (`None`). That is
+/// Back-compat (AC #3): a pre- line has no structured coverage (`None`). That is
 /// "unknown", deliberately NOT a gap — an old record never inflates the scrutinize-first
 /// count with a false positive.
 pub(crate) fn is_coverage_gap(coverage: Option<&EnrichmentCoverage>) -> bool {
@@ -133,7 +133,7 @@ pub(crate) fn is_coverage_gap(coverage: Option<&EnrichmentCoverage>) -> bool {
     }
 }
 
-/// Aggregate the journal's breach decisions into the would-have-acted diff (JEF-143).
+/// Aggregate the journal's breach decisions into the would-have-acted diff.
 /// Pure and total: takes the replayed entries (any order — they are sorted here by
 /// time) and the wall-clock `now` (injected for testability), and folds each entry's
 /// breach decisions into would-act episodes vs. left-alone clears. Read-only.
@@ -159,7 +159,7 @@ pub(crate) fn aggregate_report(
 
     // Collect breach decisions per entry, in time order, restricted to the window.
     // BTreeMap keeps the output stable (entry-keyed) before the final sustained-first sort.
-    // Each breach carries its structured enrichment-coverage (JEF-145) so the gap is
+    // Each breach carries its structured enrichment-coverage so the gap is
     // classified from the model's actual evidence, not the verdict prose.
     type Breach<'a> = (u64, &'a str, Option<&'a EnrichmentCoverage>); // (at_ms, verdict, coverage)
     let mut by_entry: BTreeMap<&str, Vec<Breach>> = BTreeMap::new();
@@ -287,8 +287,8 @@ pub(crate) fn aggregate_report(
     }
 }
 
-/// Aggregate the would-have-acted report over the DEFAULT window from a journal handle
-/// (JEF-143), for the engine to mirror its headline counts to OTLP per pass — the in-process
+/// Aggregate the would-have-acted report over the DEFAULT window from a journal handle,
+/// for the engine to mirror its headline counts to OTLP per pass — the in-process
 /// metrics mirror like the bake counts. A disabled journal replays nothing, so this is an empty
 /// report (all-zero headline). This aggregation exists solely to feed the OTLP mirror in
 /// `engine::mod`.

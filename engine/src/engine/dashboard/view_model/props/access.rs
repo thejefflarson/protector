@@ -1,4 +1,4 @@
-//! The "Access" view presentation props (JEF-490) — the operator's window onto the read-only MCP
+//! The "Access" view presentation props — the operator's window onto the read-only MCP
 //! server's forensic/raw disclosure audit (ADR-0031 §4). Two halves:
 //!
 //! - **your access** — the caller's OWN tier ([`AccessTier`]) as a chip, over a `cov-rows`-style

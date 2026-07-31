@@ -1,4 +1,4 @@
-//! Acceptance tests for the Rekor reconciliation pass (JEF-266): history-seed (corroboration),
+//! Acceptance tests for the Rekor reconciliation pass: history-seed (corroboration),
 //! no-history local-only fallback, divergence in both directions, unreachable degrade, and the
 //! off-by-default no-op. The transparency log is a fake [`RekorClient`] keyed by image, so the
 //! whole rule table runs with no network.

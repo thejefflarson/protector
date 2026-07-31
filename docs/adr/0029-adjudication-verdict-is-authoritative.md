@@ -71,14 +71,14 @@ guard, not the former; and it adds no new guards.
   entries are **accepted as a known tail cost**, mitigated only by choosing a better judge model, not
   by overriding or starving the model.
 - No "evidence guard" and no objective-list cap will be added; proposals to add them are closed by
-  pointing here. (JEF-414 is cancelled against this decision.)
+  pointing here. (Any such proposal is cancelled against this decision.)
 - The bakeoff remains the sanctioned lever: it stays synced to the live `build_judgment_prompt` and
   carries the real full-scale entries as fixtures, so model choice is evaluated against what prod
   actually sends.
 - If tail flips ever become frequent enough to matter operationally, the response is a model change
   (evaluated via the bakeoff) — a bounded, reversible knob — never a deterministic gate on the verdict.
 
-## Amendment (2026-07-19): tag-grounding is grounding, not a verdict gate (JEF-451)
+## Amendment (2026-07-19): tag-grounding is grounding, not a verdict gate
 
 The tail flip recurred on protector's own pod, and a full audit (fable architect, 2026-07-19;
 `scratchpad/false-positive-audit.md`) isolated its dominant shape: the model cites a **real** CVE id
@@ -113,7 +113,7 @@ restructuring is being planned (split the CVE field by tag; rename the `[reachab
 is the deterministic backstop for the *grounding* failure the prompt fixes shrink but cannot
 guarantee, not a substitute for them.
 
-## Amendment (2026-07-20): the judge sees only reachable CVEs — not-evidence, not capping (JEF-453)
+## Amendment (2026-07-20): the judge sees only reachable CVEs — not-evidence, not capping
 
 The prompt now shows the judge ONLY `[reachability: loaded-at-runtime]` CVEs — the sole CVE category
 that is exploitation evidence. `not-observed`, `present-static-binary`, and `unknown`-reachability
@@ -131,7 +131,7 @@ judge non-evidence," not "cap the evidence" — the objective list is still show
 Why it matters: the audit's root cause R1 for the recurring false `exploitable` was that
 `loaded-at-runtime` is the most-primed phrase in the prompt while the judge is shown not-observed
 CVEs — a non-evidence target to fabricate the tag onto. Removing that target is the source-level fix
-the guard (JEF-451) backstops. Measured on the deployed qwen3:1.7b, A/B old-vs-new: the temp-0.8
+the guard backstops. Measured on the deployed qwen3:1.7b, A/B old-vs-new: the temp-0.8
 boundary-mass on the protector flip prompt collapses **15% → 0%** with no false negatives (log4j /
 live-signal / exposed-secret all still flag). Bakeoff-validated per the discipline; the bakeoff SYS +
 fixtures are resynced and gain a `--temp` boundary-mass A/B mode.

@@ -1,4 +1,4 @@
-//! The per-entry evidence projections (JEF-133 + JEF-244): [`CveEvidence`],
+//! The per-entry evidence projections (+): [`CveEvidence`],
 //! [`FindingEvidence`], and the [`EntryEvidence`] aggregate the engine attaches to each
 //! finding. Split out of the `findings` root purely to keep every file under the 1,000-line cap
 //! (CLAUDE.md). These are projections of the graph's domain types, read through the SAME
@@ -9,16 +9,16 @@ use serde::Serialize;
 
 use crate::engine::graph::{Behavior, ScanFinding, SecurityGraph, Vulnerability};
 
-/// A single CVE on the entry's image, the projection of a [`Vulnerability`] (JEF-133). The same
+/// A single CVE on the entry's image, the projection of a [`Vulnerability`]. The same
 /// fields `cve_evidence` surfaces to the model: id, severity, the CVSS score when trivy reported
-/// it (JEF-242), reachability, fix availability, and the trivy title. ADR-0016: this is a
+/// it, reachability, fix availability, and the trivy title. ADR-0016: this is a
 /// SEVERITY/reachability input — "how bad IF exploited" — never on its own the breach call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CveEvidence {
     pub id: String,
     /// `low` / `medium` / `high` / `critical` (from [`graph::Severity::label`]).
     pub severity: String,
-    /// The CVSS base score trivy reported (JEF-242), if any, formatted to one decimal
+    /// The CVSS base score trivy reported, if any, formatted to one decimal
     /// (`"9.8"`) — the same static-severity signal the model is shown. `None` when the
     /// scanner omits it. Stored pre-formatted (a `String`, not an `f64`) so the projection
     /// keeps `Eq` and any consumer reads the exact token the prompt rendered.
@@ -26,7 +26,7 @@ pub struct CveEvidence {
     /// Whether the CVE is listed in a known-exploited catalogue (CISA KEV) — the
     /// stronger-than-severity exploitation signal.
     pub kev: bool,
-    /// The EPSS exploit-prediction probability (JEF-243) as a percent string (`"90%"`) — the
+    /// The EPSS exploit-prediction probability as a percent string (`"90%"`) — the
     /// same exploit-likelihood signal the model is shown. `None` when the FIRST.org feed has
     /// no score for this id. Pre-formatted (a `String`) so the projection keeps `Eq`.
     pub epss: Option<String>,
@@ -55,7 +55,7 @@ impl CveEvidence {
             id: v.id.clone(),
             severity: v.severity.label().to_string(),
             // Format to one decimal so any consumer shows the SAME `cvss` token the prompt
-            // renders (JEF-242) and the projection stays `Eq`.
+            // renders and the projection stays `Eq`.
             score: v.score.map(|s| format!("{s:.1}")),
             kev: v.exploited_in_wild,
             // EPSS is a probability in [0,1]; render as a whole percent (the prompt's form).
@@ -67,7 +67,7 @@ impl CveEvidence {
     }
 }
 
-/// A non-CVE scanner finding on the entry, the projection of a [`ScanFinding`] (JEF-244): an
+/// A non-CVE scanner finding on the entry, the projection of a [`ScanFinding`]: an
 /// exposed secret, a config-audit misconfiguration, or an RBAC-assessment finding. The same
 /// STRUCTURED coordinates the model is shown — id, severity, category, and a short untrusted
 /// title. For an exposed secret the title carries trivy's already-REDACTED match only; the raw
@@ -97,8 +97,7 @@ impl FindingEvidence {
     }
 }
 
-/// The two evidence blocks ADR-0016 keeps distinct, attached to a finding's entry
-/// (JEF-133):
+/// The two evidence blocks ADR-0016 keeps distinct, attached to a finding's entry:
 ///
 /// - `cves` — the entry image's foothold-relevant CVEs (KEV or critical), the
 ///   SEVERITY/reachability input.
@@ -108,25 +107,25 @@ impl FindingEvidence {
 ///   load/privilege-change) ride along as context, exactly as the model sees them.
 ///
 /// Both empty is the honest "no evidence" state (a consumer shows "none" / "unknown", never
-/// an implied-absent blank — JEF-161 coverage-gap idiom).
+/// an implied-absent blank — coverage-gap idiom).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EntryEvidence {
     pub cves: Vec<CveEvidence>,
     pub runtime: Vec<Behavior>,
-    /// Exposed secrets baked into the entry's image (JEF-244) — the EXPLOITATION-grade
+    /// Exposed secrets baked into the entry's image — the EXPLOITATION-grade
     /// exposure block. Empty when trivy-operator's `ExposedSecretReport`s are absent.
     pub exposed_secrets: Vec<FindingEvidence>,
-    /// Config-audit misconfigurations on the entry's workload (JEF-244) — static posture.
+    /// Config-audit misconfigurations on the entry's workload — static posture.
     pub misconfigs: Vec<FindingEvidence>,
-    /// RBAC-assessment findings on the entry's namespace (JEF-244) — structural RBAC
-    /// exposure that informs (does not double-count) the JEF-79 authorization reasoning.
+    /// RBAC-assessment findings on the entry's namespace — structural RBAC
+    /// exposure that informs (does not double-count) the authorization reasoning.
     pub rbac_findings: Vec<FindingEvidence>,
 }
 
 impl EntryEvidence {
     /// Pull the entry's evidence from the graph — the SAME selection the adjudicator
     /// reads ([`SecurityGraph::entry_evidence`]: KEV-or-critical CVEs + the entry's
-    /// runtime behaviors, plus the JEF-244 scanner findings from
+    /// runtime behaviors, plus the scanner findings from
     /// [`SecurityGraph::entry_findings`]), projected into the evidence shape.
     pub(crate) fn for_entry(graph: &SecurityGraph, entry: &crate::engine::graph::NodeKey) -> Self {
         let (vulns, runtime) = graph.entry_evidence(entry);

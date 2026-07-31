@@ -1,5 +1,5 @@
 //! Adjudicator unit tests, group 2: the model-call path — the null adjudicator, the
-//! "every breach-relevant entry is handed to the model" invariant (JEF-134), judgement
+//! "every breach-relevant entry is handed to the model" invariant, judgement
 //! journaling, and the live-model calibration gate. Split from the adjudicate tests
 //! purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]
@@ -18,7 +18,7 @@ use crate::engine::reason::proof::{ProvenChain, prove};
 use serde_json::json;
 use std::time::SystemTime;
 
-/// ADR-0034 (JEF-570): absent a model there is no cut-choosing analyst to consult, so
+/// ADR-0034: absent a model there is no cut-choosing analyst to consult, so
 /// `NullAdjudicator` is now `Uncertain` (no decisive decision) rather than the old unconditional
 /// `Confirmed` — every breach-relevant entry it covers falls through to the D6 human-proposal
 /// fallback, never an auto-applied cut (retires the pre-ADR-0034 "deterministic action bar
@@ -57,7 +57,7 @@ async fn null_adjudicator_is_uncertain() {
     assert!(decision.cuts.is_empty());
 }
 
-/// JEF-134: the deterministic pre-decision is GONE. An entry that under the old
+/// the deterministic pre-decision is GONE. An entry that under the old
 /// promotion-ground filter would have been refuted WITHOUT a model call — a same-ns
 /// own-app DB over the network, no CVE, no alert, a Collection (not high-severity)
 /// objective — must now be HANDED TO THE MODEL like every other breach-relevant entry.
@@ -93,7 +93,7 @@ async fn every_breach_relevant_entry_is_handed_to_the_model() {
 }
 
 /// With a journal attached, every judgement is captured in the judgement record WITH the full
-/// prompt the model saw — there is no longer a prompt-less pre-filter refute (JEF-134
+/// prompt the model saw — there is no longer a prompt-less pre-filter refute (
 /// retired it). Both an own-app entry and a cross-ns entry record the prompt they built;
 /// the reply is `None` here only because the endpoint is unreachable. This is the
 /// diagnostic the operator reads to see why an entry was judged the way it was.
@@ -105,7 +105,7 @@ async fn judgements_are_journaled_with_prompt_and_verdict() {
         .with_journal(journal.clone());
 
     // An own-app same-ns entry — formerly refuted without a model call; now judged. The
-    // engine builds the prompt (JEF-350) and hands it to `judge`; mirror that here.
+    // engine builds the prompt and hands it to `judge`; mirror that here.
     let (g, entry, objs) = entry_reaching_db("app", "app", "postgres-0", DATA_FROM_REPOSITORY);
     let prompt = build_judgment_prompt(&entry, &objs, &g);
     adjudicator
@@ -275,7 +275,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     };
     eprintln!("[{model}] analyst competence: {verdict}");
 
-    // Calibration GATE (JEF-109). When this gated test is run against a candidate
+    // Calibration GATE. When this gated test is run against a candidate
     // model as the pre-swap check (see docs/model-calibration.md), the two anchor
     // cases are hard requirements, not just a classification print: a model that
     // fails either is not allowed in prod. (a) The log4shell chain — a critical,
@@ -295,7 +295,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
              got {bare_verdict:?} from {model}"
     );
 
-    // (c) JEF-134 argo anchor — the live false positive this ticket fixes. An
+    // (c) argo anchor — the live false positive this ticket fixes. An
     // internet-facing controller whose ServiceAccount is RBAC-granted secrets across
     // MANY tenant namespaces (broad, some high-impact), with NO CVE and NO runtime
     // signal. Every objective is [RBAC-GRANTED] — authorized by design — so it is NOT a
@@ -388,13 +388,13 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     eprintln!("[{model}] argo: broad RBAC-granted secrets, NO cve/behavior: {argo_verdict:?}");
     assert!(
         matches!(argo_verdict, Verdict::Refuted(_)),
-        "calibration gate (JEF-134 argo anchor): broad RBAC-granted access with no \
+        "calibration gate (argo anchor): broad RBAC-granted access with no \
              exploit evidence is authorized-by-design and must be Refuted, got {argo_verdict:?} \
              from {model}"
     );
 }
 
-/// JEF-451 (G1): the model cites a REAL CVE id but fabricates its `[reachability: loaded-at-runtime]`
+///  (G1): the model cites a REAL CVE id but fabricates its `[reachability: loaded-at-runtime]`
 /// TAG — the exact protector flip. `guard_fabricated_cve` passes (the id is real); the tag guard
 /// downgrades the promotion to the skeptic `Uncertain` because no evidence line carries that tag.
 #[test]

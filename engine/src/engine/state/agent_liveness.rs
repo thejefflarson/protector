@@ -1,4 +1,4 @@
-//! Per-node **agent-liveness** (JEF-308): the live [`AgentLivenessStore`] the ingest feeds from
+//! Per-node **agent-liveness**: the live [`AgentLivenessStore`] the ingest feeds from
 //! the agent's [`AgentReport`] beacons, the **expected-node set** derived from the in-cluster pod
 //! informer, and the pure [`derive_runtime_coverage`] that classifies each expected node
 //! healthy / degraded / blind — the honest data behind the collapsed "Runtime corroboration"
@@ -14,11 +14,11 @@
 //!     HEALTHY-quiet — a quiet cluster is not a down sensor.
 //!   * **Out-of-scope ≠ blind.** The expected-node set is exactly where the scheduler placed the
 //!     agent DaemonSet (it already honoured the agent's nodeSelector/tolerations — today
-//!     `kubernetes.io/arch: arm64`, JEF-295). A node the agent is NOT scheduled on has no agent
+//!     `kubernetes.io/arch: arm64`). A node the agent is NOT scheduled on has no agent
 //!     pod, so it is simply absent from the expected set — out-of-scope, never blind.
 //!
 //! Zero-egress: liveness is derived from the observations/beacons the agent already POSTs plus the
-//! in-cluster informer (JEF-131) — the agent's OTLP/metrics endpoint is never consumed.
+//! in-cluster informer — the agent's OTLP/metrics endpoint is never consumed.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
@@ -137,7 +137,7 @@ impl AgentLivenessStore {
     }
 }
 
-/// The **expected-node set** for the agent (JEF-308): the distinct nodes the agent DaemonSet's own
+/// The **expected-node set** for the agent: the distinct nodes the agent DaemonSet's own
 /// pods are scheduled on, read straight from the pod informer. Because the scheduler already
 /// honoured the agent's nodeSelector/tolerations when it placed those pods, this set IS the
 /// "should be running the agent" set — a node the agent isn't scheduled on simply has no agent pod
@@ -235,7 +235,7 @@ impl RuntimeCoverage {
     }
 
     /// How many expected nodes are blind — the count-only companion to [`blind_nodes`], for the
-    /// OTLP mirror (JEF-422) which needs the number, not the names.
+    /// OTLP mirror which needs the number, not the names.
     ///
     /// [`blind_nodes`]: Self::blind_nodes
     pub fn blind_count(&self) -> usize {
@@ -243,7 +243,7 @@ impl RuntimeCoverage {
     }
 
     /// How many expected nodes are reporting only partial probes — the count-only companion to
-    /// [`degraded_nodes`], for the OTLP mirror (JEF-422).
+    /// [`degraded_nodes`], for the OTLP mirror.
     ///
     /// [`degraded_nodes`]: Self::degraded_nodes
     pub fn degraded_count(&self) -> usize {
@@ -293,7 +293,7 @@ impl RuntimeCoverage {
 }
 
 /// Classify the runtime-corroboration coverage from the expected-node set and the live liveness
-/// snapshot (JEF-308). Pure and total — the tested honesty core:
+/// snapshot. Pure and total — the tested honesty core:
 ///
 ///   * an expected node with a fresh report + probes loaded ⇒ [`Healthy`] (quiet or not);
 ///   * an expected node reporting `probes_loaded == 0` ⇒ [`Blind`]`(ProbesFailed)` — Ready-but-blind;

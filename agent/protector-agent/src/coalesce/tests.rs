@@ -1,4 +1,4 @@
-//! Unit tests for the agent-side debounce/coalescer (JEF-296).
+//! Unit tests for the agent-side debounce/coalescer.
 
 use super::*;
 use protector_behavior::{Behavior, SecretReadSource};

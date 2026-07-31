@@ -1,4 +1,4 @@
-//! Per-pass build-provenance sweep (ADR-0020 §5, JEF-275) — the provenance twin of
+//! Per-pass build-provenance sweep (ADR-0020 §5) — the provenance twin of
 //! [`signing_sweep`](super::signing_sweep).
 //!
 //! Where the signing sweep observes *who signed* each running image, this sweep observes *how it was
@@ -12,16 +12,16 @@
 //! `Provenance/<image>`; the source repo + builder identity ride the row's reason (UNTRUSTED
 //! predicate text, escaped at render).
 //!
-//! ## Provenance-change findings (JEF-275, ADR-0020 §5)
+//! ## Provenance-change findings (ADR-0020 §5)
 //!
 //! After recording each posture, the sweep classifies it against the repo's CURRENT provenance
-//! baseline (JEF-263, extended by JEF-275) via the pure [`provenance_drift`](super::provenance_drift)
+//! baseline (extended by) via the pure [`provenance_drift`](super::provenance_drift)
 //! classifier and, on a **change** against an established provenance identity (an unexpected builder
 //! or source), records a provenance-**change** finding onto the SAME admission-decision log — keyed
 //! `ProvenanceChange/<repo>`, decision `allow`. This is **audit-only — still admitted** (the shadow
 //! invariant, ADR-0016): the finding is surfaced, never acted on. NO enforcement here.
 //!
-//! ## Default-on, zero extra egress (JEF-410)
+//! ## Default-on, zero extra egress
 //!
 //! Detection features are on by default — only enforcement and egress are gated, never a
 //! per-detector `PROTECTOR_*_ENABLE` flag — so the run-loop wires a [`ProvenanceScanner`]
@@ -96,7 +96,7 @@ fn record_postures(log: &PolicyDecisionLog, map: &ProvenanceMap) {
     }
 }
 
-/// Encode a provenance-change finding as an admission-decision-log row (JEF-275, ADR-0020 §5).
+/// Encode a provenance-change finding as an admission-decision-log row (ADR-0020 §5).
 ///
 /// Routing mirrors the signing-regression row: it rides the SAME admission-decision log, keyed
 /// `ProvenanceChange/<repo>` so it folds one-per-repo and the Admission view_model partitions it out
@@ -140,7 +140,7 @@ fn change_record(
     )
 }
 
-/// Classify each observed provenance posture against the repo's CURRENT baseline (JEF-275) and record
+/// Classify each observed provenance posture against the repo's CURRENT baseline and record
 /// a provenance-change finding for any change against an established provenance identity. Runs BEFORE
 /// [`learn_provenance`] so a new source/builder is still visible as not-yet-in the learned sets. Pure
 /// classification + append-only recording — never a gate; the store is read, not mutated.
@@ -166,7 +166,7 @@ fn detect_changes(store: &SigningBaselineStore, log: &PolicyDecisionLog, map: &P
     }
 }
 
-/// Fold this pass's verified provenance into the durable per-repo baseline (JEF-275), persisting each
+/// Fold this pass's verified provenance into the durable per-repo baseline, persisting each
 /// changed repo's full-state line (which now carries the provenance identity). Augment-only: a repo
 /// with no signing baseline learns nothing (the store enforces this), so a signature-only cluster is
 /// unaffected. A no-op on a disabled journal / cold store.

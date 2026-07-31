@@ -28,7 +28,7 @@ pub enum InputStateProps {
     /// DISTINCT from `Absent` (never enabled, may stay green) and `Stalled` (the cross-pass edge).
     /// Serialized as `"blind"`; forbids the green all-clear.
     Blind,
-    /// A WAS-COVERING input has STALLED (JEF-421) — was reporting, now fully dark past the debounce.
+    /// A WAS-COVERING input has STALLED — was reporting, now fully dark past the debounce.
     /// The loud edge, DISTINCT from `Absent` (never enabled). Serialized as `"stalled"`.
     Stalled,
 }
@@ -94,13 +94,13 @@ pub struct ReadinessRowProps {
     pub detail: String,
     /// Whether this input being absent WEAKENS the model's decision.
     pub weakens_decisions: bool,
-    /// The per-node runtime-corroboration breakdown (JEF-308) — populated ONLY for the
+    /// The per-node runtime-corroboration breakdown — populated ONLY for the
     /// `runtime-corroboration` row, empty otherwise. Rendered as a server-side `<table>` inside
     /// `<details>` (no JS) so an operator can see exactly which node is blind.
     pub nodes: Vec<NodeRowProps>,
 }
 
-/// One node's line in the runtime-corroboration per-node breakdown (JEF-308). Every string is
+/// One node's line in the runtime-corroboration per-node breakdown. Every string is
 /// UNTRUSTED at render (the node name can be attacker-influenced) — the component auto-escapes it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -112,7 +112,7 @@ pub struct NodeRowProps {
     pub detail: String,
 }
 
-/// One expected node's honest liveness state (JEF-308) — colour + glyph + word, never colour alone.
+/// One expected node's honest liveness state — colour + glyph + word, never colour alone.
 /// "Quiet" and "blind" never collapse into one word: a quiet-but-healthy node is not a down sensor.
 /// Serialized as a STABLE kebab-case string tag (`"healthy"` / `"blind"` / `"out-of-scope"` …) —
 /// ADR-0025.

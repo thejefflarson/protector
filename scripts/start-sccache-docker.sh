@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fail-soft sccache backend selection INSIDE the Rust image builds (JEF-584).
+# Fail-soft sccache backend selection INSIDE the Rust image builds.
 # The in-build twin of .github/scripts/start-sccache.sh — same shape, different
 # transport for the config: the CI script reads the runner pod's env directly,
 # this one reads BuildKit build secrets mounted at /run/secrets by the RUN that
@@ -7,7 +7,7 @@
 #
 # Adopted verbatim (bar the overridable LOCAL_CACHE_DIR below) from the murmurify
 # repo's scripts/start-sccache-docker.sh, which landed this pattern first in
-# JEF-589 — same reasoning, same fixtures. Keep them in step when either changes.
+# Same reasoning, same fixtures. Keep them in step when either changes.
 #
 # Usage:
 #   sh scripts/start-sccache-docker.sh              # start a server, never fail

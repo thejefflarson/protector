@@ -1,4 +1,4 @@
-//! Keep the sigstore TUF client's atomic temp writes OFF `/tmp` (JEF-377).
+//! Keep the sigstore TUF client's atomic temp writes OFF `/tmp`.
 //!
 //! sigstore-rs 0.14 builds its `tough` TUF client via `RepositoryLoader` WITHOUT calling
 //! `.datastore(...)`, so `tough` falls back to `Datastore::new(None)` → `TempDir::new()` — a
@@ -41,7 +41,7 @@ fn resolve_tmpdir(existing: Option<OsString>, cache_dir: &Path) -> Option<PathBu
 ///
 /// MUST be called from `main` BEFORE the async runtime spawns any worker thread:
 /// [`std::env::set_var`] is only sound while the process is single-threaded (edition 2024). A
-/// best-effort no-op if the dir can't be created — the worst case is the pre-JEF-377 behavior (a
+/// best-effort no-op if the dir can't be created — the worst case is the pre- behavior (a
 /// `/tmp` temp write), never a startup failure (the `CosignChecker` cache-dir create surfaces any
 /// real misconfiguration with context).
 pub fn pin_from_env() {

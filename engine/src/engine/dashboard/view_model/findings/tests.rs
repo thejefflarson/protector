@@ -10,7 +10,7 @@ use crate::engine::state::{
     CveEvidence, Delta, EntryEvidence, Finding, Judgement, PathStep, RecencyInfo,
 };
 
-/// An empty blind-node set — most mapping tests aren't exercising the JEF-308 caveat path.
+/// An empty blind-node set — most mapping tests aren't exercising the caveat path.
 fn no_blind() -> HashSet<String> {
     HashSet::new()
 }
@@ -40,7 +40,7 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
     }
 }
 
-/// JEF-424 (from JEF-308 coverage): a latent / propose-only finding whose workload sits on a BLIND
+///  (from coverage): a latent / propose-only finding whose workload sits on a BLIND
 /// node carries the finding-level "runtime-blind on <node>" caveat — its calm propose-only reading
 /// would be dishonest (blind ≠ green), so the detail says absence of a signal isn't evidence of
 /// safety AND NAMES the node. A corroborated finding, or one on a sensored node, gets no caveat.
@@ -56,7 +56,7 @@ fn latent_finding_on_a_blind_node_carries_the_caveat() {
     let caveat = props
         .blind_node_caveat
         .expect("a latent finding on a blind node carries the caveat");
-    // The caveat NAMES the blind node and reads "runtime-blind on <node>" (JEF-424).
+    // The caveat NAMES the blind node and reads "runtime-blind on <node>".
     assert!(caveat.contains("runtime-blind on node-b"), "{caveat}");
     assert!(caveat.contains("not evidence of safety"), "{caveat}");
 
@@ -77,7 +77,7 @@ fn latent_finding_on_a_blind_node_carries_the_caveat() {
     );
 }
 
-/// JEF-424 honesty invariant: the caveat is PRESENTATION METADATA ONLY. Adding it (the finding is on
+///  honesty invariant: the caveat is PRESENTATION METADATA ONLY. Adding it (the finding is on
 /// a blind node) must NOT change the verdict, the proposed action (cut), or the report content — the
 /// SAME finding mapped with and without its node in the blind set is identical except for the
 /// `blind_node_caveat` field. The verdict is unchanged (ADR-0016: presentation is a view, never a
@@ -282,7 +282,7 @@ fn path_props_carry_node_glyphs_and_mark_the_cut() {
 
 #[test]
 fn multi_path_marks_edges_shared_across_all_paths() {
-    // JEF-281: an objective reachable two ways through a common first hop (a shared bottleneck)
+    // an objective reachable two ways through a common first hop (a shared bottleneck)
     // then divergent second hops. The shared edge must be marked in BOTH paths; the divergent
     // edges must not — that marking is what makes redundancy (and the cut/no-cut reason) legible.
     let mut f = finding(

@@ -1,4 +1,4 @@
-//! Peer-classification policy (JEF-307): is a `NetworkConnection`'s peer a *high-signal
+//! Peer-classification policy: is a `NetworkConnection`'s peer a *high-signal
 //! foothold* peer — a cloud instance-metadata (IMDS) credential endpoint or the Kubernetes
 //! API server?
 //!
@@ -6,7 +6,7 @@
 //! the shared wire type. The node-local agent has NO cluster credentials (ADR-0014), so it
 //! cannot know *what* a peer is — it emits only a raw `IP:port` and an `internet` flag. The
 //! engine, which does have cluster access, resolves the peer to a cluster object via the
-//! JEF-131 informer-backed index (`super::ip_index`, zero-egress, pure in-memory) *before*
+//!  informer-backed index (`super::ip_index`, zero-egress, pure in-memory) *before*
 //! the behavior becomes graph state (in `super::adapter::enrich`). By the time these
 //! classifiers see a `NetworkConnection`, its `peer` is already the enriched string:
 //!   - a raw `IP:port` for internet / unresolved peers (`169.254.169.254:80`), or
@@ -15,7 +15,7 @@
 //!
 //! We classify from that enriched string — no cluster calls of our own, no new egress.
 //!
-//! Foothold-peer corroboration (JEF-307): a cloud-metadata-service contact and a Kubernetes
+//! Foothold-peer corroboration: a cloud-metadata-service contact and a Kubernetes
 //! API-server contact are both high-signal foothold moves. The agent saw those only as a plain
 //! `NetworkConnection`, so an outbound IMDS credential-grab / cluster-API abuse from a
 //! compromised entry was dropped on the corroboration path. These classifiers close that gap
@@ -49,7 +49,7 @@ const CLOUD_METADATA_IPS: &[&str] = &["169.254.169.254", "fd00:ec2::254"];
 
 /// The in-cluster Kubernetes API server, addressed as the `kubernetes` Service in the
 /// `default` namespace — a cluster-invariant name Kubernetes guarantees exists. After
-/// JEF-131 peer resolution, an in-cluster connection to its ClusterIP is enriched to
+///  peer resolution, an in-cluster connection to its ClusterIP is enriched to
 /// `default/kubernetes:port (raw-ip)`, so we match the resolved `namespace/name` label
 /// (the segment before the first `:`). Matching the whole label means a look-alike such as
 /// `default/kubernetes-dashboard` does NOT match.
@@ -82,7 +82,7 @@ pub fn is_cloud_metadata(peer: &str) -> bool {
 }
 
 /// Whether an enriched `NetworkConnection` peer is the in-cluster Kubernetes API server —
-/// the JEF-131-resolved `default/kubernetes` Service label ("Contact K8S API Server From
+/// the -resolved `default/kubernetes` Service label ("Contact K8S API Server From
 /// Container"). Matches the whole `namespace/name` label so look-alikes don't.
 pub fn is_api_server(peer: &str) -> bool {
     peer.split(':').next() == Some(API_SERVER_LABEL)
@@ -111,7 +111,7 @@ pub fn foothold_peer(behavior: &Behavior) -> Option<&'static str> {
 }
 
 /// The resolved namespace of an enriched in-cluster peer — the `namespace` segment of a
-/// JEF-131-resolved `namespace/name:port (raw-ip)` label — or `None` when the peer is not a
+/// -resolved `namespace/name:port (raw-ip)` label — or `None` when the peer is not a
 /// resolved cluster peer (a bare `IP:port` internet / unresolved peer has no namespace).
 ///
 /// A resolved peer always carries a `namespace/name` label before the first `:`; we take the
@@ -124,12 +124,12 @@ fn resolved_peer_namespace(peer: &str) -> Option<&str> {
 }
 
 /// Whether an enriched `NetworkConnection` `peer` resolves to a workload in a **different**
-/// namespace than `source_ns` — the cross-tenant lateral-movement shape (JEF-319). A
+/// namespace than `source_ns` — the cross-tenant lateral-movement shape. A
 /// connection from the proven entry/foothold to a service/pod in another namespace/tenant is
 /// the classic lateral move an attacker makes once they own the front door.
 ///
 /// Conservative on purpose (ADR-0011 / ADR-0014): this returns `true` ONLY for a peer that
-/// JEF-131 resolved to a real `namespace/name` label whose namespace differs from the source.
+///  resolved to a real `namespace/name` label whose namespace differs from the source.
 /// A same-namespace peer, an unresolved `IP:port`, or an internet peer all return `false`, so
 /// ordinary in-cluster and internet traffic never look cross-tenant. Whether this actually
 /// corroborates is gated further upstream (only from the proven internet-facing entry/foothold),
@@ -138,12 +138,12 @@ pub fn is_cross_tenant(source_ns: &str, peer: &str) -> bool {
     resolved_peer_namespace(peer).is_some_and(|peer_ns| peer_ns != source_ns)
 }
 
-/// The rendered prefix for the collapsed INTERNET-egress line (JEF-380). Kept as a single
+/// The rendered prefix for the collapsed INTERNET-egress line. Kept as a single
 /// constant so the prompt renderer and the tests agree on the exact byte string.
 const INTERNET_EGRESS_PREFIX: &str = "INTERNET egress: ";
 
 /// Attribute one raw internet peer (`IP:port`) to its network PROVIDER, rendered as
-/// `org [ASxxxxx]` (e.g. `GitHub [AS36459]`), via the offline ASN dataset (JEF-380). Falls
+/// `org [ASxxxxx]` (e.g. `GitHub [AS36459]`), via the offline ASN dataset. Falls
 /// back to the raw peer string verbatim when the address has no ASN attribution — an unknown
 /// / unrouted IPv4 range, an IPv6 literal (the v4 dataset can't attribute it), or an
 /// unparseable host — so a peer is NEVER dropped, only enriched when we can.
@@ -159,7 +159,7 @@ fn attribute_internet_peer(peer: &str, asn: &AsnDb) -> String {
 }
 
 /// Collapse a set of INTERNET egress peers into ONE deterministic line grouped by PROVIDER
-/// (JEF-380): `INTERNET egress: Amazon [AS16509], GitHub [AS36459], OVH SAS [AS16276]`. This
+/// : `INTERNET egress: Amazon [AS16509], GitHub [AS36459], OVH SAS [AS16276]`. This
 /// is both the feature (the adjudicator sees WHICH provider a workload egresses to — the
 /// salient signal) and the churn fix (rotating CDN IPs within one AS collapse to a single
 /// stable provider entry, so the prompt fingerprint is byte-identical across IP rotation).
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn api_server_matches_only_the_resolved_default_kubernetes_label() {
-        // The JEF-131-resolved apiserver peer (ClusterIP -> default/kubernetes).
+        // The -resolved apiserver peer (ClusterIP -> default/kubernetes).
         assert!(is_api_server("default/kubernetes:443 (10.96.0.1)"));
         // NEGATIVE: a look-alike service name in default, and the same name elsewhere.
         assert!(!is_api_server(
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(internet_egress_line(std::iter::empty(), &asn_db()), None);
     }
 
-    /// The fingerprint-stability guarantee (JEF-380, the churn fix): two DIFFERENT sets of
+    /// The fingerprint-stability guarantee (the churn fix): two DIFFERENT sets of
     /// internet IPs that resolve to the SAME providers must render a BYTE-IDENTICAL line, so a
     /// CDN rotating through IPs never churns the adjudicator prompt.
     #[test]
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn cross_tenant_is_true_only_for_a_resolved_peer_in_a_different_namespace() {
-        // A resolved peer in ANOTHER namespace than the source is cross-tenant (JEF-319).
+        // A resolved peer in ANOTHER namespace than the source is cross-tenant.
         assert!(is_cross_tenant("frontend", "backend/api:8080 (10.42.3.9)"));
         assert!(is_cross_tenant(
             "frontend",

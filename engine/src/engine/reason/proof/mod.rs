@@ -57,7 +57,7 @@ pub struct Link {
 }
 
 /// Why a workload on a proven chain qualifies for a full-isolation quarantine
-/// (JEF-284). Both bars are HIGH — full isolation of a pod is coarse, so it is
+/// . Both bars are HIGH — full isolation of a pod is coarse, so it is
 /// reserved for a pod with real *exploitation* evidence, never a merely-reached one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuarantineReason {
@@ -69,7 +69,7 @@ pub enum QuarantineReason {
     RemotelyExploitable,
     /// **Actively exploited** — the pod has direct live on-pod runtime evidence (any
     /// "alarming-now" signal: an `Alert`, a hands-on-keyboard `notable_exec`, or
-    /// an alarming file write — sensitive-path drop-and-execute / config tamper, JEF-309) —
+    /// an alarming file write — sensitive-path drop-and-execute / config tamper) —
     /// exploitation *now* — regardless of its network position (internal pods included).
     ActivelyExploited,
 }
@@ -87,7 +87,7 @@ impl QuarantineReason {
 }
 
 /// A workload on a proven chain that qualifies for a full-isolation quarantine
-/// (JEF-284) — the node, its labels (so the isolation `NetworkPolicy` selects it
+/// The node, its labels (so the isolation `NetworkPolicy` selects it
 /// precisely), and the reason it qualifies. Never the merely-reached objective:
 /// only a pod with its own exploitation evidence appears here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,13 +148,13 @@ pub struct ProvenChain {
     /// EVERY proven path entry → objective, bounded to [`chain::MAX_PROVEN_PATHS`] and
     /// shortest-first (the first entry mirrors [`links`](Self::links)). A wide objective —
     /// reachable by several redundant paths — carries them all here, so the finding detail can
-    /// show the whole reachability picture rather than one path (JEF-281). Crucially, multiple
+    /// show the whole reachability picture rather than one path. Crucially, multiple
     /// paths ARE the explanation for an empty [`single_edge_cuts`](Self::single_edge_cuts): a
     /// chain is no-single-edge-cut precisely because redundant paths route around any one edge.
     pub paths: Vec<Vec<Link>>,
     /// `true` when there are MORE proven paths than the [`chain::MAX_PROVEN_PATHS`] bound shown
     /// in [`paths`](Self::paths) (or the enumeration budget was hit) — the detail renders a
-    /// bounded "+N more" note rather than an unbounded wall (JEF-281).
+    /// bounded "+N more" note rather than an unbounded wall.
     pub paths_truncated: bool,
     /// Edges on the path whose removal alone disconnects `entry` from `objective`
     /// — the minimal-cut candidates (ADR-0002). Empty means no single edge
@@ -162,7 +162,7 @@ pub struct ProvenChain {
     /// cut. That emptiness is itself a finding, not a failure.
     pub single_edge_cuts: Vec<Link>,
     /// Workloads *on this chain* that carry their own exploitation evidence and so
-    /// qualify for a full-isolation quarantine (JEF-284) — remotely-exploitable pods
+    /// qualify for a full-isolation quarantine — remotely-exploitable pods
     /// reachable from an internet foothold with a critical/KEV CVE, and
     /// actively-exploited pods with a live on-pod runtime signal. The chain **entry**
     /// is deliberately excluded from the remotely-exploitable set: its containment is
@@ -174,7 +174,7 @@ pub struct ProvenChain {
 
 impl ProvenChain {
     /// The quarantine reason for the chain's **entry**, if the entry itself is an
-    /// actively-exploited target (JEF-284 condition 2). The entry is never a
+    /// actively-exploited target (condition 2). The entry is never a
     /// remotely-exploitable target (that set excludes it, deferring to the ADR-0022
     /// precedence), so this surfaces only the "actively exploited" case — the internal
     /// hands-on-keyboard pod that is the front of its own (non-breach) chain. Drives the
@@ -289,8 +289,8 @@ pub fn prove_with(
         // once here rather than re-looking-up the node inside `corroborated_for` per
         // objective.
         let runtime = entry_runtime(graph, entry);
-        // The entry-scoped context for the entry-scoped corroboration shapes (JEF-319
-        // cross-tenant lateral, JEF-314 privilege escalation on the foothold): the entry's
+        // The entry-scoped context for the entry-scoped corroboration shapes (
+        // cross-tenant lateral privilege escalation on the foothold): the entry's
         // own namespace and whether it's a proven internet-facing foothold. Constant across
         // objectives, so build it once.
         let entry_ctx = EntryContext {
@@ -302,7 +302,7 @@ pub fn prove_with(
                 continue;
             }
             // Per-objective: this objective's technique decides which behaviors corroborate
-            // — plus the entry's foothold tactic, when it has one (JEF-77), so a vuln-matched
+            // — plus the entry's foothold tactic, when it has one, so a vuln-matched
             // library load on the front door corroborates the foothold even though no
             // objective is ever tagged INITIAL_ACCESS.
             let corroborated = corroborated_for(runtime, &attack, foothold.as_ref(), entry_ctx);
@@ -319,7 +319,7 @@ pub fn prove_with(
                 .map(|&(u, v, e)| link_of(graph, u, v, e))
                 .collect();
             // Enumerate EVERY proven path to this objective (bounded), not just the shortest —
-            // the multi-path picture the finding detail restores (JEF-281). Redundant paths are
+            // the multi-path picture the finding detail restores. Redundant paths are
             // exactly why `single_edge_cuts` can be empty.
             let (path_steps_all, paths_truncated) =
                 proven_paths(graph, entry, objective, MAX_PROVEN_PATHS);

@@ -1,8 +1,8 @@
-//! Page composition (ADR-0019 §2, cut over by ADR-0025, and by JEF-408 to a ROOT-ONLY body):
+//! Page composition (ADR-0019 §2, cut over by ADR-0025, and by to a ROOT-ONLY body):
 //! assemble the document shell — the `<head>` (title with the cluster label, meta, css link) around
 //! the single Preact mount point. This is the only place that knows the document `<head>`.
 //!
-//! Under JEF-408 (superseding ADR-0025's "strip + nav stay SERVER-RENDERED"): the body is now
+//! Under (superseding ADR-0025's "strip + nav stay SERVER-RENDERED"): the body is now
 //! ROOT-ONLY — just `<div id="dash-root" data-tab=…>` + the deferred bundle `<script>`. EVERY piece
 //! of body HTML (the status strip, the tab nav, and every view body) renders in the Preact client
 //! reconciling from `/api/{tab}.json`. The honesty contract holds because a blank before the first
@@ -32,7 +32,7 @@ pub fn page(cluster: &str, tab: Tab) -> Markup {
                 link rel="stylesheet" href="/assets/dashboard.css";
             }
             body {
-                // ROOT-ONLY (JEF-408): the Preact client mounts here and renders ALL body HTML — the
+                // ROOT-ONLY: the Preact client mounts here and renders ALL body HTML — the
                 // status strip, the tab nav, and the view body — reconciling from `/api/{tab}.json`.
                 // A blank before the first fetch is honest (absent ≠ green); the honesty tokens stay
                 // server-derived in the JSON.

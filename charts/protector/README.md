@@ -165,7 +165,7 @@ feed and the FIRST.org EPSS feed into a shared `emptyDir`, then re-fetches on
 automatically, no further configuration. The engine degrades gracefully if either file is
 missing or empty (the first-boot race before the sidecar's first fetch).
 
-**Two feeds, not the retired advisory feed.** The NVD advisory feed was retired (JEF-242):
+**Two feeds, not the retired advisory feed.** The NVD advisory feed was retired:
 it was redundant with Trivy's CVE metadata (Trivy already supplies `title`, `severity`,
 `fixedVersion`, and the CVSS `score` per vulnerability), the only net-new field (`cwe[]`) was
 one trivy-operator omits anyway, and the NVD "recent" feed had a poor hit-rate against the
@@ -181,8 +181,8 @@ retained — no untrusted free-text from the feed reaches the model prompt.
 **Why a sidecar, not a ConfigMap?** Raw CISA KEV JSON is ~1.5 MiB — over Kubernetes'
 1 MiB ConfigMap limit (the retired CronJob path had to lossily strip it to CVE IDs); the
 EPSS feed is similarly large. An `emptyDir` has no size limit, so the sidecar fetches and
-the engine reads both feeds in **full**. This supersedes the JEF-228 CronJob and the
-cancelled JEF-110 engine-fetch (see ADR-0015).
+the engine reads both feeds in **full**. This supersedes the CronJob and the
+cancelled engine-fetch (see ADR-0015).
 
 Override the cadence with `feedSync.interval` (e.g. `12h`), the sources with
 `feedSync.kevUrl` / `feedSync.epssUrl`, and the curl image with `feedSync.image.*`.
@@ -273,7 +273,7 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `feedSync.epssUrl`           | FIRST.org EPSS scores CSV (gzipped)  | EPSS source (gzipped CSV, gunzipped in place). See feeds section. |
 | `feedSync.interval`          | `"12h"`                              | Re-fetch interval for the sidecar (a `sleep` arg, e.g. `6h`, `30m`). |
 | `webhook.enforcedFailurePolicy` | `Fail`                            | The fail-closed enforcing webhook's policy (its scope is derived from `enforceScope`). |
-| `resources`                  | 10m/64Mi → 500m/256Mi                | RAM-tight, arm64-friendly; the CPU limit has headroom for signing-sweep bursts (JEF-560). |
+| `resources` | 10m/64Mi → 500m/256Mi | RAM-tight, arm64-friendly; the CPU limit has headroom for signing-sweep bursts. |
 
 See [`values.yaml`](values.yaml) for the fully commented set.
 

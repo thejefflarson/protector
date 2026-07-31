@@ -149,7 +149,7 @@ fn hop_signature(h: &PathStep) -> String {
     format!("{} -[{}]-> {}", h.from, h.relation, h.to)
 }
 
-/// Map ALL proven paths to the objective into stacked hop-lists (JEF-281), marking every edge
+/// Map ALL proven paths to the objective into stacked hop-lists, marking every edge
 /// that appears in EVERY path as [`HopProps::shared`] so redundancy — and the reason a chain is
 /// no-single-edge-cut — is visible. A single path shares nothing (there is nothing to compare).
 /// Falls back to the representative `path` when the complete set is empty, so a finding always
@@ -244,7 +244,7 @@ fn judgement_props(entry: &str, judgements: &[Judgement]) -> JudgementProps {
     }
 }
 
-/// The set of blind node names from the readiness snapshot (JEF-308) — the runtime-corroboration
+/// The set of blind node names from the readiness snapshot — the runtime-corroboration
 /// row's per-node breakdown, filtered to the `Blind` state. Used to add the blind-node caveat to a
 /// finding whose node has no live sensor.
 pub(super) fn blind_nodes_of(readiness: &Readiness) -> HashSet<String> {
@@ -264,7 +264,7 @@ pub(super) fn blind_nodes_of(readiness: &Readiness) -> HashSet<String> {
 
 /// Map one [`Finding`] into its presentation props. `judgements` is the newest-first judgement
 /// snapshot, used to attach the verbatim prompt/reply for the "show model prompt" disclosure.
-/// `blind_nodes` is the set of nodes with no live runtime sensor (JEF-308) — a finding on a blind
+/// `blind_nodes` is the set of nodes with no live runtime sensor — a finding on a blind
 /// node that isn't corroborated carries a caveat so its calm propose-only reading isn't dishonest.
 pub(super) fn finding_props(
     f: &Finding,
@@ -294,13 +294,13 @@ pub(super) fn finding_props(
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),
         blind_node_caveat: blind_node_caveat(f, blind_nodes),
-        // The live alarming-now signals on this chain's entry (JEF-323) — the same seam the Alerts
+        // The live alarming-now signals on this chain's entry — the same seam the Alerts
         // tab projects from, so the "alarming activity observed" annotation and the tab agree.
         alerts: super::alerts::alarming_signals_of(f),
     }
 }
 
-/// The finding-level "runtime-blind on this node" caveat (JEF-424, from the JEF-308 coverage), or
+/// The finding-level "runtime-blind on this node" caveat (from the coverage), or
 /// `None`. Applies when the finding is NOT live-corroborated AND its workload sits on a node with no
 /// live sensor: its calm propose-only reading would be dishonest there, because we can't see whether
 /// the path is being exploited — blind ≠ green, absence of a signal is not evidence of safety. This

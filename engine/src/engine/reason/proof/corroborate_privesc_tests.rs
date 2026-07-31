@@ -1,4 +1,4 @@
-//! Tests for the JEF-314 entry-scoped corroboration shape — privilege escalation on the
+//! Tests for the entry-scoped corroboration shape — privilege escalation on the
 //! foothold — kept in its own `*_tests.rs` file (repo CLAUDE.md: tests count toward the
 //! 1,000-line cap). `super` resolves to the proof module, so these exercise the `pub(super)`
 //! `corroborate` seam directly.

@@ -1,11 +1,11 @@
-//! Tests for the shared per-image registry-auth resolver (JEF-339, JEF-352).
+//! Tests for the shared per-image registry-auth resolver.
 //!
 //! [`RegistryAuth::from_env`] reads three **process-global** env vars
 //! (`PROTECTOR_REGISTRY_USERNAME` / `PROTECTOR_REGISTRY_PASSWORD` /
 //! `PROTECTOR_REGISTRY_AUTH_FILE`). Rust's default test harness runs tests as parallel
 //! threads within one process, so a `set_var`/`remove_var` in one test is visible to any
-//! sibling that reads the same var mid-flight — a data race that made these cases flaky
-//! (JEF-412). Every case that touches those vars therefore goes through [`EnvGuard`], which
+//! sibling that reads the same var mid-flight — a data race that made these cases flaky.
+//! Every case that touches those vars therefore goes through [`EnvGuard`], which
 //! serializes them on a shared lock and restores the prior values on drop (even on panic),
 //! so no test can observe another's env mutation.
 
@@ -111,7 +111,7 @@ const MULTI_REGISTRY: &str = r#"{"auths":{
 }}"#;
 
 /// A dockerconfig with several registries resolves EACH image to that registry's own creds — the
-/// core JEF-352 fix (before this, only ghcr.io authenticated and every other private image 401ed).
+/// core fix (before this, only ghcr.io authenticated and every other private image 401ed).
 #[test]
 fn resolves_per_image_across_multiple_registries() {
     let path = write_config("multi", MULTI_REGISTRY);
@@ -161,7 +161,7 @@ fn docker_io_variants_match_the_index_v1_config_key() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
-/// JEF-339 must still hold: a private `ghcr.io/thejefflarson/*` image resolves to `Basic` from the
+///  must still hold: a private `ghcr.io/thejefflarson/*` image resolves to `Basic` from the
 /// mounted fixture dockerconfig (the exact production shape — only the auth file is set).
 #[test]
 fn ghcr_private_image_still_resolves_basic_from_the_auth_file() {

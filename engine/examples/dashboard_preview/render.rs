@@ -72,7 +72,7 @@ fn preview_admission(state: &DashboardState) -> view_model::props::AdmissionView
     view_model::build_admission_view(preview_strip(state), &state.policy_log.snapshot())
 }
 
-/// Build the "Access" view props (JEF-490) through the public render path — a raw-tier preview
+/// Build the "Access" view props through the public render path — a raw-tier preview
 /// caller over the scenario's (empty) audit sink, so the preview exercises the same builder
 /// production serves.
 fn preview_access(state: &DashboardState) -> view_model::props::AccessViewProps {
@@ -84,7 +84,7 @@ fn preview_access(state: &DashboardState) -> view_model::props::AccessViewProps 
     )
 }
 
-/// Render the ROOT-ONLY document shell for a tab through the dashboard's PUBLIC render path (JEF-408,
+/// Render the ROOT-ONLY document shell for a tab through the dashboard's PUBLIC render path (
 /// superseding ADR-0025's server-rendered strip/nav): the `<head>` + the Preact `#dash-root` mount.
 /// ALL body HTML — the status strip, the tab nav, and the view body — is client-rendered from the
 /// `/api/{tab}.json` snapshot (served below), so this preview exercises the SAME path production serves.

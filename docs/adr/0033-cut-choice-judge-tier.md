@@ -7,7 +7,7 @@
 
 [ADR-0034](0034-cut-choice-contract.md) fixes the cut-choice contract — the model emits
 `{assessment, reason, contain:[node-key…]}`, determinism resolves each named node to its
-narrowest reversible cut — but left one question to be **measured, not assumed** (JEF-568 /
+narrowest reversible cut — but left one question to be **measured, not assumed** (
 T2b): can the deployed judge (qwen3:1.7b, a 1.7B CPU model) emit it reliably — correct 3-value
 assessment, exact minimal cut-set, no over-cut — or must the judge escalate to a 4B model?
 ADR-0034's own premise is that the contract "must be one **1.7b can emit reliably** … escalate
@@ -17,15 +17,15 @@ prompt.
 ## Decision
 
 **The judge stays qwen3:1.7b.** A cut-choice bench (`scripts/judge_bakeoff_cutchoice.py`,
-JEF-568) scores the ADR-0034 schema on the deployed judge across both evidence directions
+) scores the ADR-0034 schema on the deployed judge across both evidence directions
 (entry loaded-CVE; downstream behavioral / exposed-secret), the minimality centerpiece (clean
-entry + live-compromised downstream → contain the downstream *only*), the JEF-588
-downstream-CVE cut trap, and the JEF-402 / broad-RBAC refute traps. On the **deployed pod**
+entry + live-compromised downstream → contain the downstream *only*), the
+downstream-CVE cut trap, and the / broad-RBAC refute traps. On the **deployed pod**
 (temp-0, the greedy prod path):
 
 - **Assessment: 8/8**, and **every refute/cut trap passes** — 1.7b never over-cuts a clean
   workload, and correctly returns `no_attack` / `[]` on a downstream loaded-CVE behind a clean
-  edge (JEF-588) and on broad RBAC / reachable-secret-no-evidence (JEF-402).
+  edge and on broad RBAC / reachable-secret-no-evidence.
 - **The cut-set lands with a tightened output instruction.** The first deployed run exposed an
   *under-cut*: 1.7b recognized the attack but returned `contain=[]` on 3 of 4 real attacks — a
   recognized breach with no proposed cut. Pinning `contain` to **exactly the evidence-bearing
@@ -34,7 +34,7 @@ downstream-CVE cut trap, and the JEF-402 / broad-RBAC refute traps. On the **dep
   entry-loaded-CVE → `{entry}`; clean-entry + live-downstream → `{downstream}` only (the
   minimality centerpiece, no entry over-cut); both-evidenced → `{entry, downstream}`.
 
-**That tuned prompt is the one JEF-570 wires into `build_judgment_prompt`.** It is validated on
+**That tuned prompt is the one wired into `build_judgment_prompt`.** It is validated on
 the deployed judge, not guessed. Escalation to 4B is deferred — unnecessary on this evidence,
 and not authoritatively comparable without first adding 4B to a cluster ollama pod (see
 Methodology).
@@ -58,5 +58,5 @@ for exactly this reason.
   score and `--flip` over-cut mass, **run on the deployed pod**.
 - A future escalation to 4B (e.g. if the downstream/pivot lane stresses 1.7b) requires an
   on-cluster 4B bench first; local numbers do not transfer.
-- [JEF-570] wires the `incident/` module (ADR-0034, merged in #296) and this validated prompt
+- wires the `incident/` module (ADR-0034, merged in #296) and this validated prompt
   into `adj_pass` / `reconcile` / the journal.

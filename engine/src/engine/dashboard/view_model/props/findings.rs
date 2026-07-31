@@ -205,7 +205,7 @@ pub struct HopProps {
     /// Whether the proposed cut severs at this hop.
     pub is_cut: bool,
     /// Whether this edge is SHARED across every proven path to the objective — a common
-    /// bottleneck (JEF-281). When several paths share an edge it is a single-edge-cut candidate;
+    /// bottleneck. When several paths share an edge it is a single-edge-cut candidate;
     /// when they share none, no single edge severs the objective. Only meaningful in the
     /// multi-path view; `false` for a lone path. Marked visually so redundancy is legible.
     pub shared: bool,
@@ -303,24 +303,24 @@ pub struct FindingProps {
     /// The REPRESENTATIVE (shortest) proven path — kept for the row's one-line summary.
     pub path: Vec<HopProps>,
     /// EVERY proven path to the objective (bounded, shortest-first), each a hop-list — the
-    /// complete reachability picture the finding detail renders as stacked chains (JEF-281).
+    /// complete reachability picture the finding detail renders as stacked chains.
     /// Edges shared across all paths carry [`HopProps::shared`] so redundancy is visible; when
     /// several redundant paths exist and none is a single cut, that IS the no-cut explanation.
     pub paths: Vec<Vec<HopProps>>,
     /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
-    /// detail shows a "+N more" note rather than an unbounded wall (JEF-281).
+    /// detail shows a "+N more" note rather than an unbounded wall.
     pub paths_truncated: bool,
     /// The proposed/applied cut signature, if one exists.
     pub cut: Option<String>,
     pub evidence: EvidenceProps,
     pub judgement: JudgementProps,
-    /// The blind-node caveat (JEF-308): set when this finding sits on a node with NO live runtime
+    /// The blind-node caveat: set when this finding sits on a node with NO live runtime
     /// sensor and its disposition is latent / propose-only (uncorroborated). Its calm propose-only
     /// reading would be dishonest there — absence of a corroborating signal is not evidence of
     /// safety — so the detail renders this caveat. `None` when the node has a live sensor, the
     /// finding is corroborated, or the node isn't known.
     pub blind_node_caveat: Option<String>,
-    /// The live "alarming-now" signals observed on this chain's entry THIS pass (JEF-323) — each a
+    /// The live "alarming-now" signals observed on this chain's entry THIS pass — each a
     /// `"drop-and-execute on web (2m ago)"`-style annotation the detail panel renders under
     /// "alarming activity observed". EVIDENCE, not a verdict: an alarming signal never concludes a
     /// breach (ADR-0016), and this is deliberately NOT labelled "corroborated" (the engine reserves

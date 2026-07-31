@@ -1,4 +1,4 @@
-//! The decision journal (JEF-141): a durable, append-only record of what the engine
+//! The decision journal: a durable, append-only record of what the engine
 //! decided, so a pod restart doesn't wipe decision history and leave the output state
 //! blank for ~20 min while the caches and the CPU model warm.
 //!
@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 /// total on-disk size is at most ~`2 × MAX_BYTES`.
 const MAX_BYTES: u64 = 1024 * 1024;
 
-/// The structured enrichment-coverage behind a breach decision (JEF-145): the SAME
+/// The structured enrichment-coverage behind a breach decision: the SAME
 /// CVE/behavioral evidence the model was handed in the adjudication prompt, persisted at
 /// journal-append time so the would-have-acted report aggregation can classify an
 /// enrichment-coverage gap from FACT
@@ -49,7 +49,7 @@ const MAX_BYTES: u64 = 1024 * 1024;
 /// that omits the id reads as a gap).
 ///
 /// "Backed" = the model had at least one CVE OR a behavioral signal to weigh. The ABSENCE
-/// of this struct on an older journal line (pre-JEF-145) is "unknown" — deliberately NOT
+/// of this struct on an older journal line (pre-) is "unknown" — deliberately NOT
 /// a gap (see [`Decision::Breach::coverage`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrichmentCoverage {
@@ -88,28 +88,29 @@ pub enum Decision {
         objectives: usize,
         /// The model's verdict summary (its own words — both positive and negative).
         verdict: String,
-        /// The structured enrichment-coverage behind this decision (JEF-145): the
+        /// The structured enrichment-coverage behind this decision: the
         /// CVE/behavioral evidence the model was given. `None` on records written before
-        /// JEF-145 (via `#[serde(default)]`) — back-compat "unknown", which the
+        ///  (via `#[serde(default)]`) — back-compat "unknown", which the
         /// would-have-acted report aggregation treats as NOT a coverage gap rather than a
         /// false positive.
         #[serde(default)]
         coverage: Option<EnrichmentCoverage>,
-        /// The evidence FINGERPRINT this decisive verdict was judged against (JEF-301) — the
+        /// The evidence FINGERPRINT this decisive verdict was judged against — the
         /// freshness key. On boot the engine re-seeds the verdict cache from this line, so an
         /// entry whose current fingerprint still MATCHES is served from cache with NO model
         /// call (the big request-volume cut across a protector/Ollama restart); the moment the
         /// fingerprint CHANGES (new CVE / runtime / objective) the cache misses and the entry
         /// re-judges — a stale verdict is never served for changed evidence. `None` on lines
-        /// written before JEF-301 (via `#[serde(default)]`): those replay display-only, exactly
+        /// written before (via `#[serde(default)]`): those replay display-only, exactly
         /// today's behaviour, never a cache hit against an unknown fingerprint.
         #[serde(default)]
         fingerprint: Option<String>,
-        /// The TYPED decisive verdict (JEF-301), so replay restores the EXACT prior decision
+        /// The TYPED decisive verdict, so replay restores the EXACT prior decision
         /// into the verdict cache — a persisted `Exploitable` (a breach) stays `Exploitable`
         /// on boot, never downgraded to a benign or display-only string. Only decisive
         /// verdicts are ever journaled (an `Uncertain`/backed-off timeout never is), so this is
-        /// never a persisted "awaiting". `None` on pre-JEF-301 lines (display-only restore).
+        /// never a persisted "awaiting". `None` on journal lines written before this field
+        /// existed (display-only restore).
         #[serde(default)]
         verdict_typed: Option<crate::engine::reason::adjudicate::Verdict>,
     },
@@ -126,7 +127,7 @@ pub enum Decision {
         /// Why it was lifted (health divergence, posture cleared, …).
         reason: String,
     },
-    /// One admission decision the webhook resolved (JEF-237): the deduped per-workload
+    /// One admission decision the webhook resolved: the deduped per-workload
     /// signature/mesh allow/audit/deny record the admission decision log holds. Persisted so
     /// the admission log survives a restart and repopulates on boot (parallel to how
     /// [`Breach`](Decision::Breach) repopulates the findings snapshot), rather than going
@@ -137,7 +138,7 @@ pub enum Decision {
         /// decision / reason / count / last-seen). Low-cardinality, no secret values.
         record: crate::engine::policy_log::PolicyDecisionRecord,
     },
-    /// A per-repository TOFU signing baseline (JEF-263, ADR-0020): the learned set of
+    /// A per-repository TOFU signing baseline (ADR-0020): the learned set of
     /// identities/issuers that have signed images under one `registry/repo`, plus when the
     /// repo was first seen signed and whether that history is `established` yet. Written as a
     /// **compacted, full-state** line — the latest line for a repo supersedes every earlier
@@ -165,12 +166,12 @@ pub enum Decision {
         #[serde(default)]
         established: bool,
         /// Whether the public Rekor transparency log corroborates this repo's signing history
-        /// (JEF-266, ADR-0020 §4) — `true` is real provenance read from the append-only log
+        /// (ADR-0020 §4) — `true` is real provenance read from the append-only log
         /// (stronger than local-only TOFU). `#[serde(default)]` so lines predating the Rekor lane
         /// replay as local-only (`false`), never a fabricated corroboration.
         #[serde(default)]
         log_corroborated: bool,
-        /// The strongest signing-posture rank ever learned under this repo (JEF-280) — the yardstick
+        /// The strongest signing-posture rank ever learned under this repo — the yardstick
         /// baseline-relative downgrade detection compares a fresh posture against. `#[serde(default)]`
         /// so a line written before this field existed replays as `Keyless`
         /// ([`PostureRank::default`](crate::policies::signature::PostureRank::default)) — the honest
@@ -179,14 +180,14 @@ pub enum Decision {
         #[serde(default)]
         rank: crate::policies::signature::PostureRank,
         /// Every source repository observed in a VERIFIED SLSA build-provenance attestation under
-        /// this repo (JEF-275, ADR-0020 §5) — the provenance continuity axis, TOFU-learned like the
+        /// this repo (ADR-0020 §5) — the provenance continuity axis, TOFU-learned like the
         /// signer identities (sorted, deduped). `#[serde(default)]` so lines predating the
         /// provenance axis replay with an empty set (cold provenance), never a fabricated identity.
         /// UNTRUSTED predicate text — escape at render.
         #[serde(default)]
         provenance_sources: Vec<String>,
         /// Every builder identity (SLSA `builder.id`) observed in a VERIFIED provenance attestation
-        /// under this repo (JEF-275). `#[serde(default)]` for the same forward-compat reason.
+        /// under this repo. `#[serde(default)]` for the same forward-compat reason.
         /// UNTRUSTED — escape at render.
         #[serde(default)]
         provenance_builders: Vec<String>,
@@ -245,7 +246,7 @@ pub struct DecisionJournal {
 
 impl DecisionJournal {
     /// A disabled journal — records nothing, reloads nothing. The honest default when no
-    /// volume is configured: behaviour is byte-identical to the pre-JEF-141 engine.
+    /// volume is configured: behaviour is byte-identical to the pre- engine.
     pub fn disabled() -> Self {
         Self::default()
     }
@@ -449,7 +450,7 @@ mod tests {
         let reopened = DecisionJournal::open(&path);
         let entries = reopened.replay();
         assert_eq!(entries.len(), 3, "all three decisions survive the reopen");
-        // JEF-301: the breach line carries the evidence fingerprint AND the TYPED decisive
+        // the breach line carries the evidence fingerprint AND the TYPED decisive
         // verdict across the reopen, so the post-restart engine can re-seed the verdict cache
         // (serve an unchanged entry with no model call) and replay the EXACT prior decision.
         match &entries[0].decision {
@@ -612,7 +613,7 @@ mod tests {
 
     #[test]
     fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
-        // Back-compat (JEF-145): a journal line written before the structured
+        // Back-compat: a journal line written before the structured
         // enrichment-coverage field existed has no `coverage` key. `#[serde(default)]`
         // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per the
         // would-have-acted report aggregation) NOT a false coverage gap.
@@ -629,7 +630,7 @@ mod tests {
                     coverage.is_none(),
                     "absent coverage degrades to unknown, not a gap"
                 );
-                // JEF-301 back-compat: a line written before the fingerprint/typed-verdict
+                //  back-compat: a line written before the fingerprint/typed-verdict
                 // fields existed has neither key. `#[serde(default)]` must yield `None` for
                 // both — the replay then restores it display-only (exactly today's behaviour)
                 // and never treats a missing fingerprint as a cache hit against changed
@@ -677,7 +678,7 @@ mod tests {
 
     #[test]
     fn admission_decisions_round_trip_across_a_reopen() {
-        // JEF-237 persistence: an admission record written before a "restart" replays after
+        //  persistence: an admission record written before a "restart" replays after
         // it, with its dedup count + last-seen intact, so the admission decision log
         // repopulates on boot.
         use crate::engine::policy_log::PolicyDecisionRecord;

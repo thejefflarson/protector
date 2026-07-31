@@ -1,4 +1,4 @@
-// Presentation lookup tables for the Findings view (ADR-0025 / JEF-397). The JSON ships each
+// Presentation lookup tables for the Findings view (ADR-0025). The JSON ships each
 // posture / live-tag / delta as a STABLE lowercase string TAG (`"breach"`, `"live"`, `"new"`);
 // these tables map that tag to its glyph + word, exactly as the maud `Posture::glyph/word` etc. do
 // in Rust. Every posture keeps GLYPH + WORD + colour token so meaning never rides on colour alone

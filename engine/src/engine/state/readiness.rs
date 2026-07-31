@@ -1,4 +1,4 @@
-//! The readiness aggregation (JEF-160): the [`Readiness`] snapshot and its rows, and the
+//! The readiness aggregation: the [`Readiness`] snapshot and its rows, and the
 //! pure [`derive_readiness`] that builds them from the engine's config summary + live state.
 //!
 //! This is data, not markup — it holds no rendering. It is the coverage shape derived from the
@@ -36,7 +36,7 @@ pub enum InputState {
     /// sensor fleet exists but has no live signal right now", which must FORBID the green all-clear.
     /// This is the cold-start / crash-loop case the stall edge can't catch (never `was_covering`).
     Blind,
-    /// A WAS-COVERING input has STALLED (JEF-421) — it was reporting and has now gone fully dark
+    /// A WAS-COVERING input has STALLED — it was reporting and has now gone fully dark
     /// (held past the debounce). The loud, cross-pass edge: DISTINCT from `Absent` (never enabled)
     /// and `Degraded` (partial). Applied only to the runtime-corroboration row, and only by the
     /// server-side stall overlay ([`Readiness::with_coverage_stall`]); [`derive_readiness`] never
@@ -68,14 +68,14 @@ pub struct ReadinessRow {
     /// Whether this input being absent WEAKENS the model's decision (the enrichment /
     /// adjudication inputs — ADR-0016).
     pub weakens_decisions: bool,
-    /// The per-node runtime-corroboration breakdown (JEF-308) — populated ONLY for the
+    /// The per-node runtime-corroboration breakdown — populated ONLY for the
     /// `runtime-corroboration` row, empty for every other input. Rendered as a server-side
     /// `<table>` inside `<details>` (no JS) so an operator can see exactly which node is blind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<NodeCoverageRow>,
 }
 
-/// One node's line in the runtime-corroboration per-node breakdown (JEF-308) — the node name,
+/// One node's line in the runtime-corroboration per-node breakdown — the node name,
 /// its honest state, and a short live detail. Node names are UNTRUSTED-adjacent: the render
 /// escapes them (maud default), never `PreEscaped`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,7 +88,7 @@ pub struct NodeCoverageRow {
     pub detail: String,
 }
 
-/// One expected node's honest liveness reading (JEF-308) — the per-node mirror of the coarse
+/// One expected node's honest liveness reading — the per-node mirror of the coarse
 /// [`InputState`], kept distinct so "quiet" and "blind" never collapse into one word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -103,7 +103,7 @@ pub enum NodeCoverageState {
     OutOfScope,
 }
 
-/// The whole readiness snapshot (JEF-160): every decision input's LIVE state plus the
+/// The whole readiness snapshot: every decision input's LIVE state plus the
 /// cold-start flag. JSON-serializable. `warming_up` means no pass has completed, so the first
 /// verdicts are still loading (expected on a CPU model).
 #[derive(Debug, Clone, Serialize)]
@@ -138,7 +138,7 @@ impl Readiness {
         self.unmet_count() > 0
     }
 
-    /// Overlay the coverage-stall register (JEF-421) onto the runtime-corroboration row. The stall is
+    /// Overlay the coverage-stall register onto the runtime-corroboration row. The stall is
     /// a CROSS-PASS edge (`state::CoverageState`) the per-pass [`derive_readiness`] can't see, so the
     /// caller (`DashboardState::readiness`) folds it in here: when a covering runtime feed has gone
     /// dark past the debounce, the row escalates to [`InputState::Stalled`] and its detail names the
@@ -157,7 +157,7 @@ impl Readiness {
         self
     }
 
-    /// Whether a model adjudicator is CONFIGURED at all (JEF-255) — the model row is anything
+    /// Whether a model adjudicator is CONFIGURED at all — the model row is anything
     /// but `Absent`. Distinct from [`model_judging`](Self::model_judging) (configured AND
     /// answering): a consumer needs to tell "no model" from "model down" honestly.
     #[allow(dead_code)]
@@ -169,7 +169,7 @@ impl Readiness {
     }
 }
 
-/// Derive the readiness snapshot (JEF-160) from the engine's config summary and LIVE
+/// Derive the readiness snapshot from the engine's config summary and LIVE
 /// state. PURE and total — no model call, no I/O: the model row reads the piggybacked
 /// last-adjudication outcome, the runtime row reads the per-node coverage, and the
 /// cold-start flag reads `last_pass`. This is the tested core.
@@ -184,7 +184,7 @@ pub(crate) fn derive_readiness(
 
     // The model is "judging" — giving live verdicts a consumer can lean on — only when it
     // is attached AND its last fresh call was decisive. A timeout, a cold start, or no model
-    // at all all mean "not judging right now" (JEF-174): the decision still falls through to
+    // at all all mean "not judging right now": the decision still falls through to
     // the deterministic skeptic, but that is not a clearance (ADR-0016).
     let model_judging = config.model_attached && model_health == ModelHealth::Ok;
 
@@ -215,19 +215,19 @@ pub(crate) fn derive_readiness(
     let kev_state = present_if(config.kev_count > 0);
     let epss_state = present_if(config.epss_count > 0);
 
-    // Runtime corroboration (JEF-308): ONE agent-sourced, per-node row. The honesty ladder —
+    // Runtime corroboration: ONE agent-sourced, per-node row. The honesty ladder —
     // healthy / degraded (blind on N, named) / blind (no live signal) — and the per-node
     // breakdown come from the derived per-node coverage.
     let (runtime_state, runtime_detail, runtime_nodes) = runtime_corroboration_row(runtime);
 
     let journal_state = present_if(config.journal_durable);
 
-    // The sigstore TUF trust-root freshness (JEF-280): a stale/starved root, or a fleet-wide spike
+    // The sigstore TUF trust-root freshness: a stale/starved root, or a fleet-wide spike
     // in unverifiable signatures, mass-blinds signing detection — surfaced non-green so it can't
     // read as a silent green.
     let (tuf_state, tuf_detail) = tuf_row(config.tuf_cache_age_secs, config.unverifiable_spike);
 
-    // Signature-verification reachability (JEF-326): images left in the transient `Checking` state
+    // Signature-verification reachability: images left in the transient `Checking` state
     // have an UNKNOWN posture (verification couldn't complete), never a clean one. A persistent
     // backlog is surfaced non-green so perpetual "checking" is honestly visible, not silent.
     let (verify_state, verify_detail) = signature_verification_row(config.checking_images);
@@ -263,7 +263,7 @@ pub(crate) fn derive_readiness(
             weakens_decisions: true,
             nodes: Vec::new(),
         },
-        // ONE agent-sourced runtime-corroboration row (JEF-308). Its state IS the honesty
+        // ONE agent-sourced runtime-corroboration row. Its state IS the honesty
         // ladder; its `nodes` carry the per-node breakdown the view renders as a
         // `<details>`/`<table>`.
         ReadinessRow {
@@ -339,7 +339,7 @@ pub(crate) fn derive_readiness(
     }
 }
 
-/// The TUF trust-root readiness row's `(state, detail)` (JEF-280). Honest and non-green whenever
+/// The TUF trust-root readiness row's `(state, detail)`. Honest and non-green whenever
 /// the root can't be trusted to catch a downgrade:
 ///   * no cache fetched yet ⇒ `Absent` (signature verification hasn't populated the root),
 ///   * cache older than [`TUF_STALE_AFTER_SECS`] ⇒ `Degraded` (stale — refresh may be starved),
@@ -377,7 +377,7 @@ fn tuf_row(age_secs: Option<u64>, spike: bool) -> (InputState, String) {
     }
 }
 
-/// The signature-verification reachability row's `(state, detail)` (JEF-326). `Present` when no
+/// The signature-verification reachability row's `(state, detail)`. `Present` when no
 /// image is stuck in the transient `Checking` state (verification is completing), `Degraded` when
 /// one or more images could not be resolved this pass — their posture is unknown, not clean, so the
 /// row goes non-green and names the count. Never `Absent`: the sweep always runs; a stuck backlog
@@ -416,7 +416,7 @@ fn humanize_age(secs: u64) -> String {
     }
 }
 
-/// The escalated detail line for a STALLED runtime-corroboration row (JEF-421): the honest "went
+/// The escalated detail line for a STALLED runtime-corroboration row: the honest "went
 /// dark" message plus the last time the sensors were observed live, so an operator sees at a glance
 /// how long the fleet has been silent.
 fn stalled_detail(alert: &CoverageAlert) -> String {
@@ -444,7 +444,7 @@ fn coverage_detail(count: usize, noun: &str) -> String {
     }
 }
 
-/// Build the collapsed **Runtime corroboration** row (JEF-308) — its coarse [`InputState`], the
+/// Build the collapsed **Runtime corroboration** row — its coarse [`InputState`], the
 /// honest ladder detail, and the per-node breakdown — from the derived per-node coverage. The
 /// ladder, in order of increasing coverage:
 ///
@@ -530,7 +530,7 @@ fn runtime_corroboration_row(
     )
 }
 
-/// Project the derived coverage into the per-node display rows (JEF-308). Each line names the
+/// Project the derived coverage into the per-node display rows. Each line names the
 /// node, its honest state, and a short live detail — quiet is spelled out as quiet, blind names
 /// its reason, so the two never collapse into one word.
 fn node_rows(runtime: &RuntimeCoverage) -> Vec<NodeCoverageRow> {

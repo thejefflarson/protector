@@ -23,13 +23,13 @@ use protector::policies::signature::{
 use protector::policy::{EnforceScope, Engine};
 use protector::server;
 
-/// Fixed mount paths for the exploitation-intel feeds. JEF-273 owns the feed *mechanism*
+/// Fixed mount paths for the exploitation-intel feeds. A dedicated fetcher sidecar owns the feed *mechanism*
 /// (the fetcher that writes these files); the engine only reads them, from a fixed path
 /// rather than an operator knob (ADR-0021 config collapse). `PROTECTOR_KEV_FILE` /
 /// `PROTECTOR_EPSS_FILE` remain as escape-hatch overrides.
 const FEEDS_KEV_PATH: &str = "/var/lib/protector/feeds/kev.json";
 const FEEDS_EPSS_PATH: &str = "/var/lib/protector/feeds/epss.csv";
-/// The offline IP→ASN dataset (JEF-380): iptoasn.com's `ip2asn-v4.tsv`, synced into the feeds
+/// The offline IP→ASN dataset: iptoasn.com's `ip2asn-v4.tsv`, synced into the feeds
 /// mount by a CronJob (ADR-0015 feed pattern) — the engine only READS it. `PROTECTOR_ASN_FILE`
 /// is the escape-hatch override; a missing/empty file degrades to raw-IP rendering.
 const FEEDS_ASN_PATH: &str = "/var/lib/protector/feeds/ip2asn-v4.tsv";
@@ -120,8 +120,8 @@ impl Posture {
 
     /// What the engine may auto-actuate. Under `enforce`: the reversible network cuts are
     /// armed — the surgical edge-cut (`DenyNetworkPath`), the default-deny entry quarantine
-    /// (`QuarantineEntry`), and the compromised-workload quarantine (`QuarantineWorkload`,
-    /// JEF-284), all additive/reversible network denies (ADR-0010) — confined to
+    /// (`QuarantineEntry`), and the compromised-workload quarantine (`QuarantineWorkload`),
+    /// all additive/reversible network denies (ADR-0010) — confined to
     /// `enforceScope` (namespaces or Pod labels). Under `audit`: nothing armed (dry-run) and
     /// unscoped — the shadow default.
     fn engine_arming(&self) -> (EnabledActions, ActuationScope) {
@@ -139,7 +139,7 @@ impl Posture {
     }
 }
 
-/// The scoped "exception accepted" config (JEF-265, ADR-0020 Stage 3): a mounted file
+/// The scoped "exception accepted" config (ADR-0020 Stage 3): a mounted file
 /// (`PROTECTOR_SIGNING_EXCEPTIONS_FILE`) merged with an env spec (`PROTECTOR_SIGNING_EXCEPTIONS`).
 /// Each entry is `<scope> <fingerprint>` where scope is `repo:<registry/repo>` or `image:<ref>`.
 /// Empty (neither set) ⇒ nothing is excepted — every repo stays enforced. Reversible: remove the
@@ -150,7 +150,7 @@ fn signing_exceptions() -> SigningExceptions {
     SigningExceptions::from_sources(file.as_deref(), &env_spec)
 }
 
-/// The back-compat identity PINs (JEF-265, ADR-0020): `PROTECTOR_SIGNING_PINS`, a `;`-separated list
+/// The back-compat identity PINs (ADR-0020): `PROTECTOR_SIGNING_PINS`, a `;`-separated list
 /// of `prefix=identity_regexp`. Each is "every image under `prefix` must always be signed by an
 /// identity matching `identity_regexp`" — the pinned special case of the pre-ADR-0020 prefix gate.
 ///
@@ -179,7 +179,7 @@ fn signing_pins() -> Vec<SigningPin> {
         .collect()
 }
 
-/// Build the webhook's signing-posture OBSERVER for the continuity gate (JEF-265) — the same
+/// Build the webhook's signing-posture OBSERVER for the continuity gate — the same
 /// sanctioned cosign/Rekor observation path ADR-0020 §1 defines for admitted images. It needs no
 /// trusted-identity config (the Fulcio/Rekor chain is the anchor), so a match-nothing regexp keeps
 /// the constructor happy. Bounded by the same `max_images` + TTL the gate honors. `None` (continuity
@@ -213,7 +213,7 @@ fn build_webhook_signing_observer(
 fn main() -> Result<()> {
     // Route the sigstore/tough TUF client's atomic temp writes (latest_known_time.json + the
     // refreshed root/timestamp/snapshot metadata) OFF /tmp and onto protector's own TUF cache
-    // dir (JEF-377). sigstore-rs 0.14 gives tough no datastore path, so it defaults to a
+    // dir. sigstore-rs 0.14 gives tough no datastore path, so it defaults to a
     // `/tmp/.tmp<rand>/` TempDir that both churns the prompt and masquerades as a drop-and-execute
     // IOC; $TMPDIR is the only lever. This MUST run before the tokio runtime spawns any worker
     // thread — `set_var` is only sound single-threaded (edition 2024). See `tuf_tmpdir`.
@@ -275,7 +275,7 @@ async fn run() -> Result<()> {
             "signature gating off (PROTECTOR_GATED_PREFIXES empty) — no images are signature-checked"
         );
     }
-    // Same default the startup `$TMPDIR` pin uses (JEF-377), so tough's atomic temp writes land
+    // Same default the startup `$TMPDIR` pin uses, so tough's atomic temp writes land
     // in exactly this cache dir rather than under /tmp/.tmp<rand>/.
     let tuf_cache = PathBuf::from(env_or(
         "PROTECTOR_TUF_CACHE",
@@ -283,7 +283,7 @@ async fn run() -> Result<()> {
     ));
     // 20s (was 5s): a keyless Fulcio+Rekor+TUF verify of a first-party signed image on the arm64
     // engine — especially with a cold TUF cache after a restart — routinely needs >5s, so a 5s
-    // budget left those images stuck in "checking" forever (JEF-326). Still env-overridable, and
+    // budget left those images stuck in "checking" forever. Still env-overridable, and
     // shared with the engine's running-pod sweep (the path that was actually stuck). NOTE: the
     // *admission* verify is additionally bounded by the ValidatingWebhookConfiguration's
     // `timeoutSeconds` (5s in the chart), so on the webhook path the effective budget is the
@@ -324,7 +324,7 @@ async fn run() -> Result<()> {
         cache_ttl,
     );
 
-    // The read-only, cross-task signing-baseline snapshot (JEF-265, ADR-0020 Stage 3): shared with
+    // The read-only, cross-task signing-baseline snapshot (ADR-0020 Stage 3): shared with
     // the analysis engine, which is its SOLE writer (it publishes after each sweep). The webhook only
     // ever reads it, so admission can consult signature continuity but can never poison the baseline.
     let shared_baseline = SharedSigningBaseline::new();
@@ -332,7 +332,7 @@ async fn run() -> Result<()> {
     // the engine sweep's render, so the gate and the inventory can never disagree.
     let engine_exceptions = signing_exceptions();
 
-    // Arm the admission-time signing-CONTINUITY gate (JEF-265) ONLY under `mode: enforce`. This
+    // Arm the admission-time signing-CONTINUITY gate ONLY under `mode: enforce`. This
     // keeps invariant #1 exact: an unconfigured / audit-mode deploy adds NO webhook observation and
     // can NEVER deny — byte-identical shadow. Enforcement (and its ADR-0020 §1 observation) is
     // strictly opt-in via `mode: enforce` + `enforceScope`; even then a deny fires only for an
@@ -368,13 +368,13 @@ async fn run() -> Result<()> {
     // server's /metrics scrape endpoint.
     let metrics = Arc::new(Metrics::new());
 
-    // The bounded, deduped admission-decision ring (JEF-226/237): the webhook engine writes
+    // The bounded, deduped admission-decision ring (237): the webhook engine writes
     // each resolved decision — clean admit, audit, or deny — here. On boot the mitigation
     // engine repopulates it from the durable journal so the admission-decision log survives a
     // restart.
     let policy_log = Arc::new(PolicyDecisionLog::new());
 
-    // The durable decision journal (JEF-141/237): the webhook engine persists each resolved
+    // The durable decision journal (237): the webhook engine persists each resolved
     // admission so the admission-decision log survives a restart. Unset/unwritable
     // `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no crash). The mitigation
     // engine opens its own handle to the same path; both append-only writers share the file
@@ -401,7 +401,7 @@ async fn run() -> Result<()> {
         // What the engine may actuate, derived from the same two-setting posture as the
         // webhooks (ADR-0021): `enforce` arms the reversible network cut confined to
         // `enforceScope`; `audit` (the default) is dry-run + unscoped (shadow). `active`
-        // says what classes are armed; `scope` says where a cut may land — the JEF-104
+        // says what classes are armed; `scope` says where a cut may land — the
         // seam, now fed by one source instead of two independent env knobs.
         let (active, scope) = posture.engine_arming();
         // Runtime-evidence ingest endpoint (the first-party agent, and any sensor, POSTs
@@ -412,39 +412,39 @@ async fn run() -> Result<()> {
             .or_else(|_| env::var("PROTECTOR_FALCO_ADDR"))
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
-        // The k8s audit-log ingest endpoint (JEF-269): the apiserver's audit webhook POSTs
+        // The k8s audit-log ingest endpoint: the apiserver's audit webhook POSTs
         // secret GET/LIST/WATCH events here for the RBAC-granted "corroborated-now" signal.
         // Unset = no audit feed. The apiserver's audit-policy + webhook config is a
-        // deploy-repo concern (see the JEF-269 PR); this is the in-cluster ingest.
+        // deploy-repo concern (see the PR); this is the in-cluster ingest.
         let audit_addr = env::var("PROTECTOR_AUDIT_ADDR")
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
         // KEV catalogue (the exploited-in-wild feed) for the ExploitIntel signal. The path
-        // defaults to the fixed feeds mount (JEF-273 owns the feed mechanism); the env is a
+        // defaults to the fixed feeds mount (a dedicated fetcher sidecar owns the feed mechanism); the env is a
         // code-defaulted escape hatch. A missing/empty file degrades to no exploit intel.
-        // Wrapped in a ReloadableFeed (JEF-384): the engine re-reads the file on an interval so a
+        // Wrapped in a ReloadableFeed: the engine re-reads the file on an interval so a
         // daily CronJob refresh takes effect without a restart, hot-swapping the snapshot without
         // disrupting an in-flight sweep. Still a repeated FILE read — zero egress preserved.
         let kev = ReloadableFeed::<KevCatalog>::load_initial(env_or(
             "PROTECTOR_KEV_FILE",
             FEEDS_KEV_PATH,
         ));
-        // EPSS scores (the FIRST.org predictive feed, JEF-243) — same fixed mount default.
+        // EPSS scores (the FIRST.org predictive feed) — same fixed mount default.
         // Missing/empty ⇒ no EPSS evidence; a CVE's `epss` stays `None` and the prompt omits
-        // the `[epss: …]` token. Reloaded on the same interval as KEV (JEF-384).
+        // the `[epss: …]` token. Reloaded on the same interval as KEV.
         let epss = ReloadableFeed::<EpssStore>::load_initial(env_or(
             "PROTECTOR_EPSS_FILE",
             FEEDS_EPSS_PATH,
         ));
-        // Offline IP→ASN dataset (JEF-380) — same fixed feeds mount, hot-reloaded like KEV/EPSS.
+        // Offline IP→ASN dataset — same fixed feeds mount, hot-reloaded like KEV/EPSS.
         // Missing/empty ⇒ no attribution; every INTERNET egress peer falls back to its raw
         // `IP:port` (today's pre-feed behavior), never a crash. Zero egress: a FILE read only.
         let asn =
             ReloadableFeed::<AsnDb>::load_initial(env_or("PROTECTOR_ASN_FILE", FEEDS_ASN_PATH));
-        // The mitigation engine restores the webhook's admission-decision log (JEF-226) from
+        // The mitigation engine restores the webhook's admission-decision log from
         // the durable journal on boot — the same `Arc` the webhook engine writes to.
         let engine_policy_log = policy_log.clone();
-        // The engine is the SOLE writer of the shared signing baseline (JEF-265): move the handle
+        // The engine is the SOLE writer of the shared signing baseline: move the handle
         // into the engine task, which publishes a snapshot each sweep pass for the webhook to read.
         let engine_shared_baseline = shared_baseline.clone();
         match kube::Client::try_default().await {

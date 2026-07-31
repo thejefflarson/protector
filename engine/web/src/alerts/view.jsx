@@ -1,4 +1,4 @@
-// The Alerts view (ADR-0025 / JEF-400) — a 1:1 Preact port of maud `alerts_view.rs`: the live
+// The Alerts view (ADR-0025) — a 1:1 Preact port of maud `alerts_view.rs`: the live
 // "alarming-now" activity list, or the honest calm/blind empty state. A CURRENT-WINDOW projection
 // of the runtime signals alarming THIS pass (NOT a scrolling audit log), each an honest EVIDENCE
 // note, never a verdict.

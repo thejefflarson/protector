@@ -1,6 +1,6 @@
-//! The per-repo signing-baseline **strength** row (JEF-266, ADR-0020 §4 render).
+//! The per-repo signing-baseline **strength** row (ADR-0020 §4 render).
 //!
-//! The inventory (JEF-262) renders per-image posture rows; this adds the per-repo *strength* of the
+//! The inventory renders per-image posture rows; this adds the per-repo *strength* of the
 //! learned baseline behind them: **log-corroborated** (the public transparency log vouches for the
 //! repo's signing history — real provenance) vs **local-only** (trust-on-first-local-sight, the
 //! weaker default and the ONLY state when the Rekor lane is off). Encoded as a self-describing

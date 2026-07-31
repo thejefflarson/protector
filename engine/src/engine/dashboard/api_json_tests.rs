@@ -1,9 +1,9 @@
-//! HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025, JEF-395):
+//! HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025):
 //! `GET /api/{findings,action,readiness,admission,alerts}.json`. They assert that each endpoint
 //! serves the SAME view-model its tab renders (byte-for-byte the serialized props — no drift, no
 //! second DTO), that it is GET-only (a write verb 405s — the view is never a gate), and that it
 //! carries `Cache-Control: no-store` (the per-session-gated, zero-egress snapshot must never sit
-//! in a shared edge cache — JEF-283). They drive the real axum router via `tower::oneshot`.
+//! in a shared edge cache —). They drive the real axum router via `tower::oneshot`.
 
 use std::sync::Arc;
 
@@ -178,7 +178,7 @@ async fn an_empty_engine_never_serves_a_false_green() {
 /// REAL router and asserts the header is present and strict on `GET /api/findings.json`. It is the
 /// regression net that a future router edit can't silently drop the layer off the JSON API: pin
 /// `connect-src 'self'` / `script-src 'self'` / `frame-ancestors 'none'` / `form-action 'self'`,
-/// and forbid `'unsafe-inline'` / `'unsafe-eval'` (Finding 1, JEF-395 / JEF-396).
+/// and forbid `'unsafe-inline'` / `'unsafe-eval'` (Finding 1).
 #[tokio::test]
 async fn the_json_api_carries_the_strict_csp() {
     let router = super::router(empty_state(), None);

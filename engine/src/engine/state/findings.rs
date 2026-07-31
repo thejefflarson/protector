@@ -26,10 +26,10 @@ use super::recency::RecencyInfo;
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictStore};
 
 /// The cross-pass runtime-coverage **transition** a single [`stamp_runtime_coverage`] observed —
-/// the edge the operator push (JEF-427) fires on. `None` on every steady-state pass (staying
+/// the edge the operator push fires on. `None` on every steady-state pass (staying
 /// covered, staying stalled, or a partial degrade that never crossed the stall edge), so the caller
-/// notifies EXACTLY ONCE per collapse and once per recovery, never per pass. Reuses JEF-421's stall
-/// hysteresis: `Collapsed` fires only after the fleet has been fully dark past the debounce.
+/// notifies EXACTLY ONCE per collapse and once per recovery, never per pass. Reuses the
+/// same stall hysteresis: `Collapsed` fires only after the fleet has been fully dark past the debounce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoverageEdge {
     /// A was-covering fleet has JUST gone fully dark past the stall debounce — the collapse edge.
@@ -51,15 +51,15 @@ pub enum CoverageEdge {
 }
 
 /// One ENTRY-rooted proven attack path, its evidence, and the model's typed verdict — the
-/// unit the engine publishes per pass (JEF-255). It carries the proven facts (topology, cut),
+/// unit the engine publishes per pass. It carries the proven facts (topology, cut),
 /// the model's inputs (evidence), and its TYPED [`Verdict`] — the single source of truth for
-/// posture, so no verdict prose is ever re-parsed downstream (the JEF-255 typed-verdict SSOT).
+/// posture, so no verdict prose is ever re-parsed downstream (the typed-verdict SSOT).
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub entry: String,
     pub objective: String,
     /// The ATT&CK technique this entry→objective chain realizes (the same `AttackRef` the
-    /// proven chain carried, JEF-488). Published so a downstream egress surface — the read-only
+    /// proven chain carried). Published so a downstream egress surface — the read-only
     /// MCP server (ADR-0031) — can surface the low-cardinality technique ID at the redacted tier
     /// without re-walking the graph. Copied from `ProvenChain::attack` at construction.
     pub attack: AttackRef,
@@ -80,7 +80,7 @@ pub struct Finding {
     /// path and an assume-breach access path. Only breach-relevant chains are surfaced;
     /// see [`ProvenChain::is_breach_relevant`].
     pub breach_relevant: bool,
-    /// The model's TYPED adjudication, if it judged this entry (JEF-255) — the single source
+    /// The model's TYPED adjudication, if it judged this entry — the single source
     /// of truth for posture and the verbatim "why". `None` if no model was consulted. Resolved
     /// from the shared [`VerdictStore`] at [`Findings::snapshot`] time, so posture is never
     /// re-parsed from verdict prose.
@@ -90,27 +90,27 @@ pub struct Finding {
     /// for the complete set when the objective is reachable several ways.
     pub path: Vec<PathStep>,
     /// EVERY proven path to the objective (bounded, shortest-first; the first mirrors
-    /// [`path`](Self::path)) — the complete reachability picture the finding detail restores
-    /// (JEF-281). When an objective is reachable by several redundant paths, showing them all is
+    /// [`path`](Self::path)) — the complete reachability picture the finding detail restores.
+    /// When an objective is reachable by several redundant paths, showing them all is
     /// what makes a no-single-edge-cut disposition legible: the redundancy IS the reason.
     pub paths: Vec<Vec<PathStep>>,
     /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
-    /// detail renders a "+N more" note rather than an unbounded wall (JEF-281).
+    /// detail renders a "+N more" note rather than an unbounded wall.
     pub paths_truncated: bool,
-    /// The evidence the adjudicator weighed for this path's entry (JEF-133) — the CVEs
+    /// The evidence the adjudicator weighed for this path's entry — the CVEs
     /// on the entry's image and the runtime signals observed on it. Pulled from the same
     /// [`SecurityGraph::entry_evidence`] the model reads, so the evidence is the model's own
     /// inputs. ADR-0016 frames the two as divergent: CVEs are a SEVERITY/reachability input,
     /// runtime alerts the LIVE corroboration signal.
     pub evidence: EntryEvidence,
-    /// The per-entry recency / Δ facts (JEF-201) — what changed for this entry since the last
+    /// The per-entry recency / Δ facts — what changed for this entry since the last
     /// pass (NEW / escalated / de-escalated / unchanged-age / restored). Resolved from the
     /// shared verdict store at [`Findings::snapshot`] time, like [`verdict`](Self::verdict),
     /// so the Δ tracks the stored first-seen / posture history rather than the render clock.
     /// `None` on a row published before any recency update. Pure presentation metadata
     /// (ADR-0016).
     pub recency: Option<RecencyInfo>,
-    /// The Kubernetes node the entry workload runs on (JEF-308), stamped by the engine from the
+    /// The Kubernetes node the entry workload runs on, stamped by the engine from the
     /// snapshot when it builds the pass's findings. `None` when the entry isn't a single pod (a
     /// multi-replica workload or a non-pod entry) or its node isn't known. Used ONLY to add the
     /// blind-node caveat: a latent/propose-only finding on a node with no live sensor must not
@@ -141,7 +141,7 @@ fn path_steps_of(links: &[crate::engine::reason::proof::Link]) -> Vec<PathStep> 
 
 impl Finding {
     /// Build a finding from a proven chain and the graph it was proven over. The graph is
-    /// needed for the per-entry evidence blocks (JEF-133): the chain alone carries the
+    /// needed for the per-entry evidence blocks: the chain alone carries the
     /// topology, but the CVEs and runtime signals live on the entry's graph node — the same
     /// place the adjudicator reads them.
     pub fn from_chain(chain: &ProvenChain, graph: &SecurityGraph) -> Self {
@@ -162,12 +162,12 @@ impl Finding {
                 .as_ref()
                 .map(|(cut, _)| crate::engine::respond::cut_signature(cut)),
             breach_relevant: chain.is_breach_relevant(),
-            // The verdict is the model's per-ENTRY call (JEF-157), held in the shared verdict
+            // The verdict is the model's per-ENTRY call, held in the shared verdict
             // store and resolved by [`Findings::snapshot`] at read time. The published row
             // carries none of its own.
             verdict: None,
             path: path_steps_of(&chain.links),
-            // The complete proven-path set (bounded, JEF-281). Fall back to the representative
+            // The complete proven-path set (bounded). Fall back to the representative
             // path if the enumeration produced nothing (it always finds at least the shortest,
             // but never render an empty multi-path list).
             paths: if chain.paths.is_empty() {
@@ -183,7 +183,7 @@ impl Finding {
         }
     }
 
-    /// Stamp the entry's node (JEF-308) — builder-style, called by the engine when it has the
+    /// Stamp the entry's node — builder-style, called by the engine when it has the
     /// snapshot to resolve the entry pod's `spec.nodeName`.
     pub fn with_node(mut self, node: Option<String>) -> Self {
         self.node = node;
@@ -207,7 +207,7 @@ pub(crate) fn classify(
     action: Option<crate::engine::respond::ProposedAction>,
 ) -> String {
     use crate::engine::respond::ProposedAction as A;
-    // JEF-284: a pod that is itself actively exploited (condition 2) is quarantined even
+    // a pod that is itself actively exploited (condition 2) is quarantined even
     // when its chain has no additive-live containment of its own — name that WHY here.
     // But when the primary containment already contains the entry with an additive-live
     // control (a surgical edge-cut or the ADR-0022 entry quarantine), that takes
@@ -223,7 +223,7 @@ pub(crate) fn classify(
         // The default containment (ADR-0010): a full default-deny on the internet-facing
         // entry — distinct from the surgical edge-cut and from a durable-fix PR.
         Some(A::QuarantineEntry) => "quarantine entry (default-deny)",
-        // `containment_for` never returns a workload quarantine (it is a JEF-284 sibling
+        // `containment_for` never returns a workload quarantine (it is a sibling
         // pass, not a chain's primary containment; the per-pod WHY is named above via
         // `entry_quarantine_reason`). Handled for exhaustiveness.
         Some(A::QuarantineWorkload) => "quarantine workload (default-deny)",
@@ -250,36 +250,36 @@ pub(crate) fn classify(
 #[derive(Default)]
 pub struct Findings {
     rows: Mutex<Vec<Finding>>,
-    /// The single per-entry verdict store (JEF-157): each finding's verdict is derived
+    /// The single per-entry verdict store: each finding's verdict is derived
     /// from this at [`snapshot`](Self::snapshot) time, so the snapshot reflects a verdict
     /// the instant the engine writes it — never only at end-of-pass.
     verdicts: Arc<VerdictStore>,
-    /// The most recent behavioral-bake snapshot (JEF-48), replaced each pass alongside
+    /// The most recent behavioral-bake snapshot, replaced each pass alongside
     /// the findings rows.
     bake: Mutex<BakeStats>,
-    /// When the engine last completed a pass (JEF-141), surfaced as "last pass NNs ago"
+    /// When the engine last completed a pass, surfaced as "last pass NNs ago"
     /// so a quiet/loading consumer reads as *fresh*, not broken. `None` until the first
     /// pass completes (or is seeded from the journal on boot).
     last_pass: Mutex<Option<SystemTime>>,
-    /// The engine's config summary for the readiness aggregation (JEF-160) — presence/absence
+    /// The engine's config summary for the readiness aggregation — presence/absence
     /// of each decision input, captured once at boot. Defaults to all-absent until set, so the
     /// snapshot reads as "unconfigured" rather than falsely "ready".
     readiness: Mutex<ReadinessConfig>,
-    /// The LIVE model health (JEF-160), stamped by the judging loop from the LAST
+    /// The LIVE model health, stamped by the judging loop from the LAST
     /// adjudication outcome — `0`/`1`/`2` per [`ModelHealth::as_u8`]. Cheap: no extra model
     /// call, just the result of the call the engine already makes.
     model_health: std::sync::atomic::AtomicU8,
-    /// The per-node runtime-corroboration coverage (JEF-308), replaced each pass alongside the
+    /// The per-node runtime-corroboration coverage, replaced each pass alongside the
     /// findings rows: the expected-node set classified healthy/degraded/blind against the live
     /// agent-liveness beacons. The readiness aggregation reads it to build the collapsed
     /// "Runtime corroboration" row. Defaults to empty (no expected nodes) until the first pass.
     runtime_coverage: Mutex<RuntimeCoverage>,
-    /// The cross-pass coverage-stall tracker (JEF-421): remembers whether the runtime fleet was ever
+    /// The cross-pass coverage-stall tracker: remembers whether the runtime fleet was ever
     /// corroborating and how long it has been fully dark, so the loud `stalled` edge fires only on a
     /// was-covering → now-silent transition held past the debounce. Updated in lock-step with
     /// `runtime_coverage` each pass.
     stall_tracker: Mutex<CoverageStallTracker>,
-    /// The most recent server-derived coarse coverage register (JEF-421) — the strip chip's
+    /// The most recent server-derived coarse coverage register — the strip chip's
     /// covered/degraded/absent/stalled reading, decided by the [`stall_tracker`](Self::stall_tracker)
     /// this pass. Defaults to `Absent` (coverage not yet observed).
     coverage_state: Mutex<CoverageState>,
@@ -290,7 +290,7 @@ impl Findings {
         Self::default()
     }
 
-    /// The single per-entry verdict store (JEF-157), shared with the engine. The engine
+    /// The single per-entry verdict store, shared with the engine. The engine
     /// writes verdicts here the instant they land; [`snapshot`](Self::snapshot) reads
     /// them, so a reader never lags behind a judgement.
     pub fn verdicts(&self) -> Arc<VerdictStore> {
@@ -303,7 +303,7 @@ impl Findings {
     }
 
     /// Build and publish this pass's findings from the proven chains, stamping each finding's entry
-    /// node (JEF-308) from the snapshot so a latent finding on a blind node can carry its "no live
+    /// node from the snapshot so a latent finding on a blind node can carry its "no live
     /// sensor here" caveat. Keeps the engine's `process` free of the per-finding node resolution.
     pub fn publish_chains(
         &self,
@@ -321,7 +321,7 @@ impl Findings {
         );
     }
 
-    /// Classify the expected-node set against the live agent-liveness beacons (JEF-308) and stamp
+    /// Classify the expected-node set against the live agent-liveness beacons and stamp
     /// the resulting runtime-corroboration coverage. The expected set is exactly the agent
     /// DaemonSet's pods in `pods` — the scheduler already honoured the agent's nodeSelector/
     /// tolerations, so a node the agent isn't scheduled on is out-of-scope, never blind.
@@ -335,7 +335,7 @@ impl Findings {
 
     /// The `now`-injected seam behind [`stamp_runtime_coverage`](Self::stamp_runtime_coverage) — the
     /// deterministic clock the stall-edge tests drive. Besides publishing this pass's per-node
-    /// coverage, it advances the cross-pass [`CoverageStallTracker`] (JEF-421): when a was-covering
+    /// coverage, it advances the cross-pass [`CoverageStallTracker`]: when a was-covering
     /// fleet has been fully dark past the debounce, the derived [`CoverageState::Stalled`] is stamped
     /// and a loud `tracing::warn!` is emitted ONCE on the transition into the stall.
     pub fn stamp_runtime_coverage_at(
@@ -354,7 +354,7 @@ impl Findings {
             .observe(&coverage, now);
 
         // Swap in the new register under one lock, keeping the previous one to fire the warn +
-        // operator push (JEF-427) on the EDGE only (not every pass while stalled): a was-covering
+        // operator push on the EDGE only (not every pass while stalled): a was-covering
         // fleet has JUST gone dark, or a stalled fleet has JUST recovered.
         let mut cell = self
             .coverage_state
@@ -365,7 +365,7 @@ impl Findings {
         let edge = if let CoverageState::Stalled(alert) = &state
             && !was_stalled
         {
-            // Collapse edge: warn once, and hand the caller a counts-only push (JEF-427).
+            // Collapse edge: warn once, and hand the caller a counts-only push.
             let blind = coverage.blind_nodes().len();
             tracing::warn!(
                 feed = %alert.feed_label,
@@ -401,7 +401,7 @@ impl Findings {
         edge
     }
 
-    /// The most recent server-derived coarse coverage register (JEF-421) — covered / degraded /
+    /// The most recent server-derived coarse coverage register — covered / degraded /
     /// absent / stalled, decided by the stall tracker on the last pass. `Absent` until the first
     /// pass stamps coverage.
     pub fn coverage_state(&self) -> CoverageState {
@@ -412,14 +412,14 @@ impl Findings {
     }
 
     /// The current findings, each with its verdict resolved from the shared verdict
-    /// store (JEF-157) at read time. The published rows carry no verdict of their own;
+    /// store at read time. The published rows carry no verdict of their own;
     /// the verdict is looked up per entry here, so a verdict the engine just wrote is
     /// visible immediately — there is no end-of-pass re-publish needed to surface it.
     pub fn snapshot(&self) -> Vec<Finding> {
         self.snapshot_at(Instant::now())
     }
 
-    /// The findings snapshot resolved against an injected `now` (JEF-201) — the seam the
+    /// The findings snapshot resolved against an injected `now` — the seam the
     /// recency tests drive deterministically (no real sleeps). The live [`snapshot`] passes
     /// `Instant::now()`. Only the human AGE in the recency cell uses `now`; the Δ GLYPH was
     /// already computed (and stored) at pass time with the pass's clock, so it is stable
@@ -434,10 +434,10 @@ impl Findings {
             // their (absent) verdict. Resolving here means publishing the rows once is
             // enough — the verdict tracks the store, not the last `replace`.
             if f.breach_relevant {
-                // The TYPED verdict (JEF-255) is the single source of truth for posture — a
+                // The TYPED verdict is the single source of truth for posture — a
                 // consumer derives posture from it once, never re-parsing the summary prose.
                 f.verdict = self.verdicts.display_verdict(&f.entry);
-                // The Δ / recency facts track the same per-entry store (JEF-201): the glyph is
+                // The Δ / recency facts track the same per-entry store: the glyph is
                 // the one computed at pass time, only the age is freshened at `now`.
                 f.recency = self.verdicts.recency_for(&f.entry, now);
             }
@@ -445,7 +445,7 @@ impl Findings {
         rows
     }
 
-    /// Replace the behavioral-bake snapshot (JEF-48) with this pass's figures.
+    /// Replace the behavioral-bake snapshot with this pass's figures.
     pub fn set_bake(&self, bake: BakeStats) {
         *self.bake.lock().expect("bake mutex poisoned") = bake;
     }
@@ -455,7 +455,7 @@ impl Findings {
         self.bake.lock().expect("bake mutex poisoned").clone()
     }
 
-    /// Mark a pass as just completed (JEF-141) — drives the "last pass NNs ago"
+    /// Mark a pass as just completed — drives the "last pass NNs ago"
     /// freshness line. Also used to seed freshness from the journal on boot.
     pub fn mark_pass(&self, at: SystemTime) {
         *self.last_pass.lock().expect("last_pass mutex poisoned") = Some(at);
@@ -467,7 +467,7 @@ impl Findings {
         *self.last_pass.lock().expect("last_pass mutex poisoned")
     }
 
-    /// Record the engine's config summary for the readiness aggregation (JEF-160) — set once
+    /// Record the engine's config summary for the readiness aggregation — set once
     /// at boot from the env/handles the engine already reads. Presence/absence only; no secret
     /// names, no values.
     pub fn set_readiness_config(&self, config: ReadinessConfig) {
@@ -481,7 +481,7 @@ impl Findings {
         *self.readiness.lock().expect("readiness mutex poisoned")
     }
 
-    /// Stamp the LIVE model health from the LAST adjudication outcome (JEF-160). Called by
+    /// Stamp the LIVE model health from the LAST adjudication outcome. Called by
     /// the judging loop on every fresh model call (cache miss) — cheap, no extra call.
     pub fn set_model_health(&self, health: ModelHealth) {
         self.model_health
@@ -495,7 +495,7 @@ impl Findings {
         ModelHealth::from_u8(self.model_health.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Replace the per-node runtime-corroboration coverage (JEF-308) with this pass's classification.
+    /// Replace the per-node runtime-corroboration coverage with this pass's classification.
     pub fn set_runtime_coverage(&self, coverage: RuntimeCoverage) {
         *self
             .runtime_coverage
@@ -513,7 +513,7 @@ impl Findings {
     }
 }
 
-/// Resolve an entry key's node (JEF-308). Only a single **Pod** entry
+/// Resolve an entry key's node. Only a single **Pod** entry
 /// (`workload/<ns>/Pod/<name>`) maps to one node — its `spec.nodeName`. A controller workload
 /// (a Deployment / DaemonSet entry, whose replicas may span nodes) or a non-pod entry stays
 /// node-unattributed (`None`), so the blind-node caveat is never applied to an ambiguous row.
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn entry_node_resolves_a_pod_entry_and_none_for_ambiguous_entries() {
-        // JEF-308: a single-Pod entry resolves to its node; a controller / non-pod entry doesn't.
+        // a single-Pod entry resolves to its node; a controller / non-pod entry doesn't.
         let pod: Pod = serde_json::from_value(json!({
             "apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": "web-1", "namespace": "app"},
@@ -605,7 +605,7 @@ mod tests {
         );
     }
 
-    /// JEF-284: an internal pod with a live on-pod alert (actively exploited, no internet
+    /// an internal pod with a live on-pod alert (actively exploited, no internet
     /// path) is quarantined, and the dashboard disposition names the WHY — distinct from
     /// the entry-foothold quarantine and a durable-fix PR. Untrusted text isn't involved:
     /// the label is a fixed internal string.
@@ -649,8 +649,8 @@ mod tests {
         );
     }
 
-    /// JEF-427: the coverage EDGE fires EXACTLY ONCE per collapse and once per recovery — never
-    /// per pass. A was-covering fleet that goes dark past the JEF-421 stall debounce yields one
+    /// the coverage EDGE fires EXACTLY ONCE per collapse and once per recovery — never
+    /// per pass. A was-covering fleet that goes dark past the stall debounce yields one
     /// `Collapsed`; the following still-dark passes yield `None`; a recovery yields one `Recovered`.
     #[test]
     fn coverage_edge_fires_once_per_collapse_and_recovery() {
@@ -700,7 +700,7 @@ mod tests {
         record(6);
         assert_eq!(tick(&findings), None);
 
-        // Go fully dark and stay dark. The JEF-421 stall debounce holds the loud edge for a few
+        // Go fully dark and stay dark. The stall debounce holds the loud edge for a few
         // passes, then fires it — but EXACTLY ONCE across the whole dark stretch (edge-triggered,
         // never per-pass). Ticking well past the hold window must still surface a single Collapsed.
         record(0);

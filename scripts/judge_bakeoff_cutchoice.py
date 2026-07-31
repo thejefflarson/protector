@@ -44,7 +44,7 @@ MODELS = ["qwen3:1.7b", "qwen3:4b"]
 
 CRED = "could read a credential store if exploited (Credential Access, T1552)"
 
-# Cut-choice prompt: the calibrated evidence framing (JEF-134 holistic, no few-shot) + the
+# Cut-choice prompt: the calibrated evidence framing (holistic, no few-shot) + the
 # ADR-0034 target-choice output. "quarantine"/"isolate" appear ONLY in the fixed menu strings.
 SYS = """You are a senior security analyst acting as the incident responder for this internet-facing workload. Decide TWO things: (1) is a real breach happening along its proven attack path, and (2) if so, which workloads on that path must be contained — at MINIMUM scope.
 
@@ -114,7 +114,7 @@ CASES = [
      ENTRY, "(none)", "(none)", "<<<connects to 10.42.3.5:8080 (cluster)>>>", OBJS,
      f"  - <<<{CACHE}>>>: CVEs observed loading at runtime: <<<(none)>>> | Exposed secrets: <<<AWS secret access key committed in /app/.env (aws-secret-access-key)>>> | Observed runtime behavior: <<<(none)>>>",
      menu(ENTRY_LINE, CACHE_LINE)),
-    # CUT TRAP (JEF-588): downstream loaded CVE, NO behavior, clean entry -> no_attack, contain [].
+    # CUT TRAP: downstream loaded CVE, NO behavior, clean entry -> no_attack, contain [].
     # The downstream CVE is context only; naming the cache in `contain` is the failure.
     ("downstream_cve_only", "no_attack", set(),
      ENTRY, "(none)", "(none)", "<<<connects to 10.42.3.5:8080 (cluster)>>>", OBJS,
@@ -129,7 +129,7 @@ CASES = [
      "  - (+109 more reachable objectives, all [RBAC-GRANTED] by its ClusterRole)",
      "  - (no downstream workloads on a proven path)",
      "  - <<<workload/argocd/Pod/argocd-server-774f9cc6d7>>>: isolate the internet-facing entry — deny all ingress + egress (reversible NetworkPolicy) [blast radius: drops argocd-server; 3 alive peers isolated]"),
-    # REFUTE TRAP (JEF-402): reachable secret objective + not-observed CVEs (filtered to none) +
+    # REFUTE TRAP: reachable secret objective + not-observed CVEs (filtered to none) +
     # no exposed secret -> no_attack, contain []. The hallucinated-exposed-secret false breach.
     ("reachable_secret_no_evidence", "no_attack", set(),
      "workload/argocd/Pod/argocd-server-774f9cc6d7", "<<<(none)>>>", "(none)",

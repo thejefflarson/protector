@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn shadow_in_scope_unmeshed_is_would_fail_verified() {
-        // JEF-246: an in-scope (enforced) unmeshed service shadow-evaluates to a would-fail —
+        // an in-scope (enforced) unmeshed service shadow-evaluates to a would-fail —
         // the status() is `would-fail` (enforced + failed).
         let p = policy();
         let spec = json!({"containers": [{"name": "app", "image": "x"}]});
@@ -241,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn shadow_out_of_scope_unmeshed_is_would_fail_and_admits() {
-        // JEF-246 acceptance: an out-of-scope (runner ns "dev") unmeshed service WOULD be denied
+        //  acceptance: an out-of-scope (runner ns "dev") unmeshed service WOULD be denied
         // if enforced — the shadow status is `would-fail` — yet the ACTUAL decision is `audit`
         // (allowed). The what-if is decoupled from enforcement.
         let p = policy();
@@ -258,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn shadow_out_of_scope_meshed_would_admit() {
-        // JEF-246 acceptance: an out-of-scope MESHED service WOULD pass — `would-pass` (out of
+        //  acceptance: an out-of-scope MESHED service WOULD pass — `would-pass` (out of
         // scope, shadow-checked, would pass) — not empty/ambiguous.
         let p = policy();
         let spec = json!({"containers": [

@@ -1,6 +1,6 @@
-// Unit tests for the poll engine (ADR-0025 / JEF-397 / JEF-411): same-origin URL construction, the
+// Unit tests for the poll engine (ADR-0025): same-origin URL construction, the
 // defer-apply-while-text-selection rule (ported from v3), and stale-not-blank on a failed poll. The
-// poll takes plain `onSnapshot` / `onStale` callbacks now (no store dependency — JEF-411); tests
+// poll takes plain `onSnapshot` / `onStale` callbacks now (no store dependency —); tests
 // spy those directly.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -66,7 +66,7 @@ describe("startPolling", () => {
     await vi.waitFor(() => expect(onStale).toHaveBeenCalledTimes(1));
   });
 
-  // JEF-489: once OIDC is configured, /api/*.json answers 401/403 — a distinct signal from a stale
+  // once OIDC is configured, /api/*.json answers 401/403 — a distinct signal from a stale
   // connection. The auth statuses route to onAuthError (with the code), NEVER onStale/onSnapshot.
   it("routes a 401 to onAuthError(401) — not onStale, not onSnapshot", async () => {
     const onStale = vi.fn();
@@ -166,13 +166,13 @@ describe("startPolling", () => {
   });
 });
 
-// JEF-408 regression: the DEFAULT setIntervalImpl must adapt native `setInterval` (whose signature
+//  regression: the DEFAULT setIntervalImpl must adapt native `setInterval` (whose signature
 // is `(fn, ms)`) to the `(ms, fn)` shape this module calls it with. The pre-fix default passed native
 // `setInterval` directly, so `setInterval(POLL_MS, tick)` handed the NUMBER 5000 as the handler — the
 // recurring poll never fired (dead poll / blank tab-swaps) AND the browser coerced the number to the
 // string "5000" and took the legacy string-handler eval path, which the strict CSP (`script-src
 // 'self'`, no unsafe-eval) correctly BLOCKED. Both symptoms have the same root cause: reversed args.
-describe("startPolling default interval (JEF-408 regression)", () => {
+describe("startPolling default interval (regression)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 

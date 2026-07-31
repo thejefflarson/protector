@@ -138,7 +138,7 @@ fn projected_volume_without_a_secret_source_is_not_a_secret() {
     assert_eq!(secret_for_path(&p, "/var/run/proj/token"), None);
 }
 
-// --- JEF-51: the library-name matcher ---------------------------------------
+// --- the library-name matcher ---------------------------------------
 
 #[test]
 fn library_matcher_table() {
@@ -173,7 +173,7 @@ fn library_matcher_table() {
     }
 }
 
-// --- JEF-51: the end-to-end correlation pass --------------------------------
+// --- the end-to-end correlation pass --------------------------------
 
 use crate::engine::graph::Vulnerability;
 use crate::engine::observe::{ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -230,7 +230,7 @@ fn loaded_matching_library_is_loaded_at_runtime() {
     );
 }
 
-/// As [`reachability_for`], but the image's main binary is statically linked (JEF-404).
+/// As [`reachability_for`], but the image's main binary is statically linked.
 /// Builds the graph (structural adapters set `static_binary: None`), flips the Image's
 /// `static_binary` flag on, then re-runs ONLY the [`CveReachabilityAdapter`] so the static
 /// case is exercised through the real correlation code, not a reimplementation.
@@ -274,7 +274,7 @@ fn reachability_for_static(pkg: &str, loaded_lib: Option<&str>) -> Reachability 
 
 #[test]
 fn static_binary_cve_without_a_load_is_present_static_binary_not_not_observed() {
-    // JEF-404: a Go / musl-static image whose vulnerable package can never emit a per-`.so`
+    // a Go / musl-static image whose vulnerable package can never emit a per-`.so`
     // load must NOT read as observed-absent — it is indeterminate (PresentStaticBinary).
     assert_eq!(
         reachability_for_static("openssl", None),
@@ -288,20 +288,20 @@ fn static_binary_cve_without_a_load_is_present_static_binary_not_not_observed() 
 #[test]
 fn static_binary_still_yields_loaded_at_runtime_on_a_real_load() {
     // Some static binaries dlopen a plugin: an actual matching load still wins over the
-    // static-indeterminate tag — real exploitation evidence is never downgraded (JEF-405).
+    // static-indeterminate tag — real exploitation evidence is never downgraded.
     assert_eq!(
         reachability_for_static("log4j-core", Some("log4j-core-2.14.jar")),
         Reachability::LoadedAtRuntime
     );
 }
 
-/// JEF-407 end-to-end: build the graph for an image carrying a critical CVE on `pkg`, run
+///  end-to-end: build the graph for an image carrying a critical CVE on `pkg`, run
 /// by pod app/web, where the AGENT reported the entrypoint's linkage over the behavioral
 /// wire (an `ImageLinkage` observation, `static_linkage`) — no manual `static_binary` flip.
 /// The full pipeline runs: the RuntimeAdapter maps the linkage report onto `Image::static_binary`,
 /// then the CveReachabilityAdapter reads it. Returns the CVE's resulting reachability, so a
 /// static report → `PresentStaticBinary` while a dynamic report → `NotObserved`, activating the
-/// dormant JEF-404 machinery from a real prod-shaped signal source.
+/// dormant machinery from a real prod-shaped signal source.
 fn reachability_via_agent_linkage(
     pkg: &str,
     static_linkage: bool,
@@ -339,7 +339,7 @@ fn reachability_via_agent_linkage(
     let idx = graph.index_of(&img_key).expect("image node exists");
     match graph.node(idx) {
         Some(Node::Image(img)) => {
-            // The linkage report must have landed on the Image — this is the plumbing JEF-407
+            // The linkage report must have landed on the Image — this is the plumbing
             // adds. A static report sets Some(true); a dynamic one Some(false).
             assert_eq!(
                 img.static_binary,
@@ -354,8 +354,8 @@ fn reachability_via_agent_linkage(
 
 #[test]
 fn agent_static_linkage_report_activates_present_static_binary() {
-    // JEF-407: a static-linkage report from the agent (the prod byte source) makes a
-    // would-be `not-observed` critical CVE render `present-static-binary` — the JEF-404
+    // a static-linkage report from the agent (the prod byte source) makes a
+    // would-be `not-observed` critical CVE render `present-static-binary` — the
     // feature that was dormant because Image::static_binary was always None in prod.
     assert_eq!(
         reachability_via_agent_linkage("openssl", true, None),
@@ -376,7 +376,7 @@ fn agent_dynamic_linkage_report_keeps_not_observed() {
 #[test]
 fn agent_linkage_report_never_downgrades_a_real_load() {
     // Even on a static-linkage report, an actual matching library load still wins — real
-    // exploitation evidence (LoadedAtRuntime) is never downgraded (JEF-405).
+    // exploitation evidence (LoadedAtRuntime) is never downgraded.
     assert_eq!(
         reachability_via_agent_linkage("log4j-core", true, Some("log4j-core-2.14.jar")),
         Reachability::LoadedAtRuntime
@@ -432,7 +432,7 @@ fn lib(name: &str) -> RuntimeObservation {
 }
 
 /// The `LibraryLoaded` names surviving on the (single) workload after the full
-/// adapter pipeline — i.e. what's left after the JEF-75 prune.
+/// adapter pipeline — i.e. what's left after the prune.
 fn surviving_libs(snap: Snapshot) -> Vec<String> {
     let graph = super::super::build_graph(&snap, &super::super::default_adapters());
     graph
@@ -457,7 +457,7 @@ fn surviving_libs(snap: Snapshot) -> Vec<String> {
 fn non_cve_library_loads_are_pruned_from_runtime() {
     // libssl matches the openssl CVE; libpthread matches nothing → only the
     // vulnerable-library load survives, so the noise never reaches the prompt or the
-    // verdict fingerprint (JEF-75).
+    // verdict fingerprint.
     let web = pod(json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
@@ -641,7 +641,7 @@ fn web_conn(peer: &str, internet: bool) -> RuntimeObservation {
 
 #[test]
 fn runtime_adapter_keeps_a_cluster_peer_stable_across_a_transient_informer_miss() {
-    // JEF-375: the SAME cluster peer must render the SAME token on two consecutive
+    // the SAME cluster peer must render the SAME token on two consecutive
     // passes even when the informer index transiently MISSES the peer pod on the
     // second pass. Without the memo it would flip
     //   analytics/influxdb-0:8086 (10.42.1.159)  ->  10.42.1.159:8086

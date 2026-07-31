@@ -1,4 +1,4 @@
-// Presentation lookup tables for the signing inventory (ADR-0025 / JEF-400). The JSON ships each
+// Presentation lookup tables for the signing inventory (ADR-0025). The JSON ships each
 // signing posture / provenance posture / continuity verdict / regression kind / baseline strength
 // as a STABLE kebab-case string tag; these tables map that tag to its CSS token + glyph + word,
 // exactly as the maud `SigningPosture::glyph/word/token` etc. do in Rust. Every state keeps

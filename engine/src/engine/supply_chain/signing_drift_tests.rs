@@ -1,4 +1,4 @@
-//! Pure, deterministic tests for the signing-drift classifier (JEF-264). Every case is a total
+//! Pure, deterministic tests for the signing-drift classifier. Every case is a total
 //! function of `(baseline, posture)` — no clock, no I/O — so the whole rule table is exercised
 //! here without reaching a registry, a journal, or a sweep.
 
@@ -101,7 +101,7 @@ fn one_of_several_known_identities_is_continuous() {
     );
 }
 
-// ---- JEF-325: tag-agnostic continuity — a new release TAG is not a new signer -------------------
+// ---- tag-agnostic continuity — a new release TAG is not a new signer -------------------
 
 const WF: &str = "https://github.com/thejefflarson/protector/.github/workflows/agent.yml";
 
@@ -282,7 +282,7 @@ fn checking_is_never_a_regression_even_against_an_established_baseline() {
 
 #[test]
 fn key_based_or_unverifiable_downgrade_on_an_established_keyless_repo_is_a_regression() {
-    // JEF-280: a key-based / unverifiable posture is individually calm (JEF-276), but on a repo
+    // a key-based / unverifiable posture is individually calm, but on a repo
     // whose established baseline was KEYLESS-verified it is a rank DOWNGRADE — the
     // registry-substitution signal that previously evaded the drift alarm. It fires now.
     let b = baseline(&[CI], true);
@@ -309,7 +309,7 @@ fn key_based_or_unverifiable_downgrade_on_an_established_keyless_repo_is_a_regre
 #[test]
 fn a_calm_posture_with_no_baseline_stays_continuous() {
     // No keyless baseline to downgrade FROM (an always-key-based cert-manager repo has no learned
-    // baseline at all) ⇒ Continuous. This is the JEF-276 false-alarm fix, preserved.
+    // baseline at all) ⇒ Continuous. This is the false-alarm fix, preserved.
     assert_eq!(
         classify(None, &SigningPosture::SignedKeyBased),
         SigningDrift::Continuous
@@ -345,7 +345,7 @@ fn a_calm_posture_at_the_baseline_rank_stays_continuous() {
 
 #[test]
 fn a_downgrade_against_a_cold_keyless_baseline_is_uncertain_not_silent() {
-    // JEF-280 acceptance: a downgrade against a freshly-learned (cold) keyless baseline still FIRES
+    //  acceptance: a downgrade against a freshly-learned (cold) keyless baseline still FIRES
     // — as a reduced-intensity `established: false` regression (maps to uncertain / non-green), not
     // silence.
     let b = baseline(&[CI], false);

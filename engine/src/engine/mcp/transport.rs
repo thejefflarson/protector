@@ -1,4 +1,4 @@
-//! Transport + mount (ADR-0031 §5/§6, JEF-488). rmcp's streamable-HTTP [`StreamableHttpService`] is
+//! Transport + mount (ADR-0031 §5/§6). rmcp's streamable-HTTP [`StreamableHttpService`] is
 //! mounted as an axum service BEHIND our OIDC verifier layer: [`mcp_auth`] runs the SAME
 //! [`authenticate`] seam the dashboard `/api` gate uses, so an unauthenticated MCP call is rejected
 //! by the identical path (a `401`) BEFORE a single byte reaches rmcp. On success it inserts the

@@ -29,8 +29,8 @@ fn every_input_becomes_a_row_with_state_word_and_why() {
     );
     let rows = map_readiness(&r);
     // model / kev / epss / runtime-corroboration / journal / tuf-root / signature-verification /
-    // arm-state == 8 inputs (runtime corroboration is one agent-sourced, per-node row, JEF-308;
-    // signature-verification is the JEF-326 perpetual-checking coverage row).
+    // arm-state == 8 inputs (runtime corroboration is one agent-sourced, per-node row;
+    // signature-verification is the perpetual-checking coverage row).
     assert_eq!(rows.len(), 8);
     // Every row carries a non-empty label + why + state word (meaning never by colour alone).
     for row in &rows {

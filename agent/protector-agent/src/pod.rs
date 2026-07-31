@@ -3,7 +3,7 @@
 //! An eBPF event carries a kernel identity, not a pod. There are two ways to recover the
 //! pod UID, and this module owns both:
 //!
-//! - **In-kernel cgroup id (JEF-158, the hot path).** The probe stamps each event with
+//! - **In-kernel cgroup id (the hot path).** The probe stamps each event with
 //!   `bpf_get_current_cgroup_id()` — the cgroup v2 directory inode — captured while the
 //!   process is still live. Userspace keeps a [`CgroupTable`] mapping that id to the pod
 //!   UID, built by scanning `/sys/fs/cgroup` (each kubepods cgroup directory's inode is
@@ -19,7 +19,7 @@
 //! A cgroup that isn't a pod's (a host process) yields `None` and the event is dropped —
 //! a missing signal beats a mis-attributed one.
 
-/// The outcome of resolving a pid to a pod (JEF-115). The node-wide kprobe sees the
+/// The outcome of resolving a pid to a pod. The node-wide kprobe sees the
 /// whole host firehose, so most events are *expected* non-pods, not failures. Keeping
 /// the two apart is what lets the agent's `attribution_unresolved` stat mean a GENUINE
 /// miss (matching the engine's ~1.4%) rather than the host-process noise floor:
@@ -84,7 +84,7 @@ pub fn parse_pod_uid(cgroup_path: &str) -> Option<String> {
     None
 }
 
-/// A snapshot of `cgroup_id → pod_uid`, the in-kernel attribution table (JEF-158).
+/// A snapshot of `cgroup_id → pod_uid`, the in-kernel attribution table.
 ///
 /// The eBPF probe stamps each event with `bpf_get_current_cgroup_id()` (the cgroup v2
 /// directory inode). This table maps that id straight to the pod UID, so a hot-path event
@@ -123,7 +123,7 @@ impl CgroupTable {
     }
 }
 
-/// Build a [`CgroupTable`] from `(cgroup_id, cgroup_path)` pairs (JEF-158). Pure — the
+/// Build a [`CgroupTable`] from `(cgroup_id, cgroup_path)` pairs. Pure — the
 /// filesystem walk is injected so this is unit-testable without a real `/sys/fs/cgroup`.
 /// Only paths that [`parse_pod_uid`] recognizes as a pod cgroup are kept (host cgroups are
 /// dropped); a `cgroup_id` of `0` is skipped (it can never match an event, see
@@ -145,7 +145,7 @@ pub fn build_cgroup_table(entries: impl IntoIterator<Item = (u64, String)>) -> C
 }
 
 /// Walk the cgroup v2 hierarchy under `root` (normally `/sys/fs/cgroup`) and build the
-/// [`CgroupTable`] (JEF-158). For every directory, the directory's **inode number is the
+/// [`CgroupTable`]. For every directory, the directory's **inode number is the
 /// cgroup id** that `bpf_get_current_cgroup_id()` returns for tasks in it, so we pair each
 /// directory's inode with its path and let [`build_cgroup_table`] keep the pod ones.
 ///
@@ -191,7 +191,7 @@ pub fn scan_cgroupfs(root: &std::path::Path) -> CgroupTable {
 }
 
 /// Resolve an event's attribution from its in-kernel `cgroup_id` first, falling back to
-/// the per-event `/proc/<pid>/cgroup` read only on a table miss (JEF-158). This is the
+/// the per-event `/proc/<pid>/cgroup` read only on a table miss. This is the
 /// single decision point that keeps the hot path off `/proc`:
 ///
 /// - A table hit is a [`Pod`](PodAttribution::Pod) — resolved with no `/proc` read, so it
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(classify_cgroup(None), PodAttribution::Unreadable);
     }
 
-    // ---- JEF-158: cgroup_id → pod_uid table (build, lookup, scan, resolve+fallback) ----
+    // ---- cgroup_id → pod_uid table (build, lookup, scan, resolve+fallback) ----
 
     const POD_SLICE: &str = "/sys/fs/cgroup/kubepods.slice/kubepods-besteffort.slice/\
         kubepods-besteffort-pod3f5e1a2b_4c6d_7e8f_9a0b_1c2d3e4f5a6b.slice";

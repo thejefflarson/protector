@@ -1,4 +1,4 @@
-//! Minimal kernel struct bindings for the eBPF probes (ADR-0014, JEF-324).
+//! Minimal kernel struct bindings for the eBPF probes (ADR-0014).
 //!
 //! These are NOT the full `aya-tool`-generated `vmlinux.rs` (that was ~60k lines — well
 //! over the repo's 1,000-line file cap — and, being a static snapshot, silently rots on
@@ -25,13 +25,13 @@
 //! offset on both arches (the only arm64/amd64 `super_block` divergence is `s_vop` at
 //! +192, long past `s_magic` at +96), so this single static layout is correct fleet-wide.
 //!
-//! Linux 6.11 reorganized `struct file` (JEF-324): `f_path` moved +168 -> +64, `f_inode`
+//! Linux 6.11 reorganized `struct file`: `f_path` moved +168 -> +64, `f_inode`
 //! -> +32, `f_flags` -> +40. The previous 6.8-generated bindings put `f_path` at +168,
 //! which on 7.0.0 lands in the `f_wb_err`/`f_ep` region — the verifier rejection that
 //! degraded the two `bpf_d_path` probes (secret-read `file_open` + `file_write`) to
 //! loaded=4/6 fleet-wide. Regenerate (re-verify the offsets) on any kernel struct change.
 //!
-//! # `linux_binprm.file` / `inode.i_nlink` — ON-NODE BTF VERIFICATION PENDING (JEF-317)
+//! # `linux_binprm.file` / `inode.i_nlink` — ON-NODE BTF VERIFICATION PENDING
 //!
 //! Two fields added for the fileless-exec (anon-inode) probe were derived from kernel
 //! *source* layout, not dumped from live BTF like everything else above: `linux_binprm.file`
@@ -39,7 +39,7 @@
 //! comment. Both must be confirmed against `bpftool btf dump` on BOTH fleet arches — the
 //! same process that produced the offsets above — before this probe ships past a spike
 //! deploy (docs/ebpf-testing-on-nodes.md). A wrong offset here fails the SAME way a wrong
-//! `f_path` offset would have (JEF-324): either a verifier rejection (probe degrades,
+//! `f_path` offset would have: either a verifier rejection (probe degrades,
 //! loud in the heartbeat) or, worse, a silently wrong bool if the misread pointer happens
 //! to still verify — which is why this module keeps every derivation reasoning explicit
 //! rather than asserting a bare number.
@@ -89,11 +89,11 @@ pub struct qstr {
 }
 
 /// `struct inode` — prefix through `i_nlink` (+72). `i_sb` (+40) reaches the superblock
-/// (tmpfs magic); `i_ino` (+64) is the file-write dedup key; `i_nlink` (+72, JEF-317) is
+/// (tmpfs magic); `i_ino` (+64) is the file-write dedup key; `i_nlink` (+72) is
 /// the anon-inode discriminator — `0` for an unlinked inode (a memfd, or any file `rm`'d
 /// while still executing), non-zero for a normal directory-linked file.
 ///
-/// **ON-NODE BTF VERIFICATION PENDING for `i_nlink` (JEF-317):** derived from kernel
+/// **ON-NODE BTF VERIFICATION PENDING for `i_nlink`:** derived from kernel
 /// source, not dumped from live BTF like the fields above it. `i_nlink` is the first field
 /// of an anonymous union (`union { const unsigned int i_nlink; unsigned int __i_nlink; }`)
 /// immediately after `i_ino` in `struct inode` — no padding needed since `i_ino` (an
@@ -108,7 +108,7 @@ pub struct inode {
     pub i_sb: *mut super_block, // +40
     _pad1: [u8; 16],
     pub i_ino: u64,   // +64  unsigned long
-    pub i_nlink: u32, // +72  ON-NODE BTF VERIFICATION PENDING (JEF-317, see doc above)
+    pub i_nlink: u32, // +72  ON-NODE BTF VERIFICATION PENDING (see doc above)
 }
 
 /// `struct super_block` — prefix through `s_magic` (+96), the tmpfs filter's discriminator.
@@ -136,15 +136,15 @@ pub struct cred {
 }
 
 /// `struct linux_binprm` — prefix through `filename` (+96), the resolved exec path
-/// (`char *`) the process-exec probe emits. `file` (+64, JEF-317) is the ALREADY-OPENED
+/// (`char *`) the process-exec probe emits. `file` (+64) is the ALREADY-OPENED
 /// executable's `struct file*` — by the time `security_bprm_check` fires, `bprm_execve()`
 /// (fs/exec.c) has already opened it (`do_open_execat`/`bprm->file = …`), before
 /// `exec_binprm()` → `search_binary_handler()` → `security_bprm_check()` is reached — so
 /// this read is safe at this hook, no ordering hazard.
 ///
-/// **ON-NODE BTF VERIFICATION PENDING for `file` (JEF-317):** derived from kernel source
+/// **ON-NODE BTF VERIFICATION PENDING for `file`:** derived from kernel source
 /// layout (`struct linux_binprm` in linux/binfmts.h), not dumped from live BTF like
-/// `filename` below (already verified on-node, JEF-53). Derivation: `vma`(+0) +
+/// `filename` below (already verified on-node). Derivation: `vma`(+0) +
 /// `vma_pages`(+8) + `mm`(+16) + `p`(+24) + `argmin`(+32) + the four-bit `unsigned int`
 /// bitfield (+40, padded to +48 for the next pointer's alignment) + `executable`(+48) +
 /// `interpreter`(+56) + `file`(+64) + `cred`(+72) + `unsafe`(+80) + `per_clear`(+84) +
@@ -157,7 +157,7 @@ pub struct cred {
 #[derive(Copy, Clone)]
 pub struct linux_binprm {
     _pad0: [u8; 64],
-    pub file: *mut file, // +64  ON-NODE BTF VERIFICATION PENDING (JEF-317, see doc above)
+    pub file: *mut file, // +64  ON-NODE BTF VERIFICATION PENDING (see doc above)
     _pad1: [u8; 24],
     pub filename: *const c_char, // +96
 }
@@ -178,10 +178,10 @@ const _: () = {
     assert!(offset_of!(qstr, name) == 8);
     assert!(offset_of!(inode, i_sb) == 40);
     assert!(offset_of!(inode, i_ino) == 64);
-    assert!(offset_of!(inode, i_nlink) == 72); // JEF-317, ON-NODE PENDING
+    assert!(offset_of!(inode, i_nlink) == 72); // ON-NODE PENDING
     assert!(offset_of!(super_block, s_magic) == 96);
     assert!(offset_of!(cred, uid) == 8);
     assert!(offset_of!(kuid_t, val) == 0);
-    assert!(offset_of!(linux_binprm, file) == 64); // JEF-317, ON-NODE PENDING
+    assert!(offset_of!(linux_binprm, file) == 64); // ON-NODE PENDING
     assert!(offset_of!(linux_binprm, filename) == 96);
 };

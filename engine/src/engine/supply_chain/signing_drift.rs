@@ -1,7 +1,7 @@
-//! The pure, deterministic signing-**drift** classifier (JEF-264, ADR-0020 §3).
+//! The pure, deterministic signing-**drift** classifier (ADR-0020 §3).
 //!
-//! Observation (JEF-261) reads a *snapshot* — "this image is signed by X right now". The
-//! baseline (JEF-263) remembers a repo's signed *history* — who has signed under it, and whether
+//! Observation reads a *snapshot* — "this image is signed by X right now". The
+//! baseline remembers a repo's signed *history* — who has signed under it, and whether
 //! that history has matured (`established`). This module joins the two: it classifies a **fresh
 //! posture** against a repo's **learned baseline** into one of four resting drift classes, so the
 //! sweep can surface a signing-**regression** finding when a repo with signed history suddenly
@@ -11,22 +11,22 @@
 //!
 //! [`classify`] is a total, side-effect-free function of `(baseline, posture)`: no clock, no I/O,
 //! no hidden state. The wall-clock notion of "established" is already baked into the baseline's
-//! [`SigningBaseline::established`](crate::engine::state::SigningBaseline) flag (JEF-263), so the
+//! [`SigningBaseline::established`](crate::engine::state::SigningBaseline) flag, so the
 //! classifier just *reads* it — the same `(baseline, posture)` always yields the same class,
 //! which is what makes the classifier exhaustively unit-testable.
 //!
-//! ## Scope (JEF-264)
+//! ## Scope
 //!
 //! Classification only. Recording the regression onto the admission-decision log, rendering it,
 //! and feeding the status-strip honesty model are the sweep / view_model's job (they consume this
-//! enum). Enforcement/blocking (JEF-265) and Rekor history (JEF-266) are later stages — a drift is
+//! enum). Enforcement/blocking and Rekor history are later stages — a drift is
 //! **audit-only**: it is surfaced, never acted on (the shadow invariant, ADR-0016).
 //!
 //! ## Rules (audit-only; never a gate)
 //!
 //! Against a repo's baseline (the entry BEFORE this observation is folded in):
 //!   * signed by a **known** identity — even a brand-new digest, or a new release **tag** of the
-//!     same workflow (JEF-325: identities are compared on the tag-agnostic
+//!     same workflow (identities are compared on the tag-agnostic
 //!     [`canonical_identity`](crate::policies::signature::canonical_identity), so a version bump is
 //!     not a new signer) — ⇒ [`Continuous`] (no finding: a normal deploy must never false-positive).
 //!   * signed by a **continuity identity** not in the baseline (a different repo/fork, workflow, ref
@@ -36,11 +36,11 @@
 //!     [`Unsigned`](RegressionKind::Unsigned) / [`Invalid`](RegressionKind::Invalid).
 //!   * now a **lesser-but-calm** posture (key-based / unverifiable-here) whose
 //!     [`rank`](crate::policies::signature::PostureRank) is BELOW the baseline's learned rank ⇒
-//!     [`Regression`] with [`Downgrade`](RegressionKind::Downgrade) — the JEF-280
+//!     [`Regression`] with [`Downgrade`](RegressionKind::Downgrade) — the
 //!     signing-downgrade / registry-substitution signal. A calm posture at or above the baseline
-//!     rank (an always-key-based repo with no keyless baseline) stays [`Continuous`] — the JEF-276
+//!     rank (an always-key-based repo with no keyless baseline) stays [`Continuous`] — the
 //!     false-alarm fix is preserved. This is DRIFT classification only; the per-image posture and
-//!     the trust/admit semantics (JEF-276) are unchanged.
+//!     the trust/admit semantics are unchanged.
 //!   * a transient [`Checking`](SigningPosture::Checking) ⇒ [`Continuous`] (a registry blip is
 //!     never a regression; it resolves next pass).
 //!
@@ -61,7 +61,7 @@
 use crate::engine::state::SigningBaseline;
 use crate::policies::signature::{PostureRank, SigningPosture, canonical_identity};
 
-/// Which kind of regression a fresh posture represents against a repo's baseline (JEF-264). The
+/// Which kind of regression a fresh posture represents against a repo's baseline. The
 /// identity strings are UNTRUSTED Fulcio cert text — every consumer MUST escape them at render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegressionKind {
@@ -77,10 +77,10 @@ pub enum RegressionKind {
         /// The new signer's OIDC issuer, if the cert carried one (UNTRUSTED — escape at render).
         new_issuer: Option<String>,
     },
-    /// A **signing downgrade** (JEF-280): a repo whose established baseline was a STRONGER posture
+    /// A **signing downgrade**: a repo whose established baseline was a STRONGER posture
     /// (a keyless-verified identity was learned) now serves a lesser-but-calm posture — key-based
     /// (Rekor bundle, no Fulcio cert) or unverifiable-here (a trust-root variance). These postures
-    /// are individually calm (JEF-276), but against a keyless baseline the *downgrade* is the
+    /// are individually calm, but against a keyless baseline the *downgrade* is the
     /// registry-substitution signal an attacker used to slip past the drift alarm. Carries the
     /// posture it downgraded `to` so the finding names it.
     Downgrade {
@@ -91,7 +91,7 @@ pub enum RegressionKind {
 }
 
 impl RegressionKind {
-    /// A stable FINGERPRINT identifying THIS specific drift (JEF-265, ADR-0020 Stage 3), so an
+    /// A stable FINGERPRINT identifying THIS specific drift (ADR-0020 Stage 3), so an
     /// "exception accepted" can be pinned to the exact change it accepts. A DIFFERENT subsequent
     /// change yields a different fingerprint and re-flags loud (the acceptance is scoped, never a
     /// blanket mute). For an identity change the fingerprint carries the new identity (UNTRUSTED
@@ -124,7 +124,7 @@ impl RegressionKind {
 }
 
 /// The resting drift classification of a fresh [`SigningPosture`] against a repo's learned
-/// [`SigningBaseline`] (JEF-264). Total: every `(baseline, posture)` maps to exactly one variant.
+/// [`SigningBaseline`]. Total: every `(baseline, posture)` maps to exactly one variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningDrift {
     /// No drift: signed by a known identity (a normal redeploy, even to a new digest), or a
@@ -139,7 +139,7 @@ pub enum SigningDrift {
     Regression {
         /// What regressed (unsigned / invalid / new signer).
         kind: RegressionKind,
-        /// Whether the regressed baseline had matured past the TOFU grace window (JEF-263). An
+        /// Whether the regressed baseline had matured past the TOFU grace window. An
         /// established regression is a strong supply-chain signal (maps to breach); a cold one is
         /// a weak lead (maps to uncertain — "weak baseline, treat as a lead").
         established: bool,
@@ -153,9 +153,9 @@ impl SigningDrift {
         matches!(self, SigningDrift::Regression { .. })
     }
 
-    /// The admission-continuity BLOCK predicate (JEF-265, ADR-0020 Stage 3) — the DOMAIN source of
+    /// The admission-continuity BLOCK predicate (ADR-0020 Stage 3) — the DOMAIN source of
     /// truth a signature-continuity gate enforces in enforced scope, and the exact semantic the
-    /// JEF-297 presentation verdict
+    ///  presentation verdict
     /// [`SigningEnforcement::for_image`](crate::engine::dashboard::view_model::props::SigningEnforcement::for_image)
     /// projects (block here == its `WouldBlock`), so the "if enforced" column can never disagree
     /// with what admission actually blocks.
@@ -179,7 +179,7 @@ impl SigningDrift {
     }
 }
 
-/// Classify a fresh signing `posture` against the repo's learned `baseline` (JEF-264). PURE +
+/// Classify a fresh signing `posture` against the repo's learned `baseline`. PURE +
 /// deterministic — see the module docs for the full rule table.
 ///
 /// `baseline` MUST be the repo's entry as it stands BEFORE this observation is folded in, so a new
@@ -197,15 +197,15 @@ pub fn classify(baseline: Option<&SigningBaseline>, posture: &SigningPosture) ->
     match posture {
         // A transient blip is never a regression — it resolves into a resting posture next pass.
         SigningPosture::Checking => SigningDrift::Continuous,
-        // Signed-but-opaque states (JEF-276): key-based (verified Rekor, no Fulcio identity) and
+        // Signed-but-opaque states: key-based (verified Rekor, no Fulcio identity) and
         // unverifiable-here (a trust-root variance) are individually calm — NOT unsigned, NOT a
         // genuine failure, and never a trusted identity. But they ARE ranked BELOW keyless on the
-        // downgrade ladder (JEF-280), so against a repo whose established baseline was a stronger
+        // downgrade ladder, so against a repo whose established baseline was a stronger
         // posture (a keyless identity was learned) serving one of these is a `SigningDowngrade`
         // regression — the registry-substitution signal that previously evaded the alarm. This
         // fires ONLY on a real rank downgrade vs the baseline: a repo whose baseline is already at
         // (or below) this rank — e.g. an always-key-based cert-manager repo, which has NO keyless
-        // baseline — stays Continuous, preserving the JEF-276 false-alarm fix. The trust/admit
+        // baseline — stays Continuous, preserving the false-alarm fix. The trust/admit
         // semantics are unchanged: this changes DRIFT classification only.
         SigningPosture::SignedKeyBased | SigningPosture::UnverifiableHere => match posture.rank() {
             Some(current) if current < baseline.rank => SigningDrift::Regression {
@@ -215,7 +215,7 @@ pub fn classify(baseline: Option<&SigningBaseline>, posture: &SigningPosture) ->
             _ => SigningDrift::Continuous,
         },
         SigningPosture::Signed(signer) => {
-            // Compare on the tag-agnostic CONTINUITY identity (JEF-325), canonicalizing BOTH sides:
+            // Compare on the tag-agnostic CONTINUITY identity, canonicalizing BOTH sides:
             // a fresh baseline already stores canonical identities, but a legacy line (persisted
             // before this fix) may still carry raw per-version SANs, so canonicalizing the stored
             // set too keeps the match migration-safe. Only the release-tag VALUE is collapsed — a

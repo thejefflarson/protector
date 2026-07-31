@@ -46,7 +46,7 @@ use render::workload_namespace;
 /// self-revert ([`ProposedAction::is_additive_live`], ADR-0002/0007). The `network`
 /// class arms *all* network denies — the surgical edge-cut ([`DenyNetworkPath`]), the
 /// default-deny entry quarantine ([`QuarantineEntry`], ADR-0010), and the compromised-
-/// workload quarantine ([`QuarantineWorkload`], JEF-284) — since all are the same
+/// workload quarantine ([`QuarantineWorkload`]) — since all are the same
 /// additive/reversible mechanism. The other cut classes — `rbac`, `mount`,
 /// `identity` — are *subtractive* edits to GitOps-managed objects, so [`decide`]
 /// forbids live actuation of them regardless; and `escape` is irreversible. Accepting
@@ -72,7 +72,7 @@ fn actions_from_name(name: &str) -> &'static [ProposedAction] {
 /// A **pure armed-classes type**: it answers "what is armed?" (which cut classes, and
 /// whether model promotion is allowed) and nothing else. *Where* a cut may be actuated
 /// is a separate concern owned by [`ActuationScope`] — keeping the two apart so "is this
-/// class enabled" never blurs into "is this cut in scope" (JEF-104 follow-up).
+/// class enabled" never blurs into "is this cut in scope" (follow-up).
 #[derive(Debug, Default, Clone)]
 pub struct EnabledActions {
     enabled: HashSet<ProposedAction>,

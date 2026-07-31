@@ -1,4 +1,4 @@
-//! Tests for the JEF-321 entry-scoped corroboration shape — drop-then-execute — kept in its
+//! Tests for the entry-scoped corroboration shape — drop-then-execute — kept in its
 //! own `*_tests.rs` file (repo CLAUDE.md: tests count toward the 1,000-line cap).
 //! `super` resolves to the proof module, so these exercise the `pub(super)` `corroborate`
 //! seam directly, mirroring `corroborate_context_tests.rs`'s cross-tenant-lateral suite.

@@ -1,9 +1,9 @@
-//! Per-node downstream evidence for the adjudication prompt (JEF-565, ADR-0032 violation #1):
+//! Per-node downstream evidence for the adjudication prompt (ADR-0032 violation #1):
 //! the model was entry-scoped — it saw only the ENTRY's CVEs/secrets/behavior, and every
 //! downstream objective on the entry's proven paths was one line (name + reach tag + ATT&CK
 //! outcome). A popped pod two hops in was invisible. This module renders one evidence block
 //! PER WORKLOAD on the entry's proven paths (`ProvenChain::paths`), reusing the exact same
-//! evidence functions, JEF-453 reachable-CVE filter, fencing, and per-field caps the entry's own
+//! evidence functions reachable-CVE filter, fencing, and per-field caps the entry's own
 //! block uses (`evidence::{entry_evidence_budgeted, entry_findings_budgeted,
 //! retain_reachable_cves, render_behavior_lines_budgeted}`) — no second rendering path to drift
 //! from.
@@ -26,12 +26,12 @@ use super::evidence::{
 use super::guards::{fence, fence_list};
 
 /// The per-incident AGGREGATE free-text budget (chars) shared across EVERY downstream node
-/// rendered for one entry's prompt (JEF-565) — the downstream counterpart of
+/// rendered for one entry's prompt — the downstream counterpart of
 /// [`super::evidence::ENTRY_FREETEXT_BUDGET`], which is per-node. Without an incident-wide cap a
 /// wide entry (argo, ~110 objectives, though typically far fewer distinct downstream WORKLOADS)
 /// could multiply the per-node budget into an unbounded prompt. Structural fields (CVE
 /// id/severity/reachability/fix, secret id/severity, behavior KIND) are NEVER dropped — only
-/// the free-text beyond the budget (JEF-106 structural-first stance), exactly like the entry's
+/// the free-text beyond the budget (structural-first stance), exactly like the entry's
 /// own budget. CVE prose, finding prose, and behavior-line prose (a security-review follow-up:
 /// `Behavior::summary` embeds attacker-influenced free-text — an exec'd path, a file path, a raw
 /// peer string — fenced+sanitized but otherwise unbounded) are each charged to their OWN
@@ -48,14 +48,14 @@ pub(crate) struct DownstreamRendered {
     /// evidence always yields the same blocks in the same order, so the prompt is a stable
     /// verdict-cache key). Either the fenced evidence block or the clean one-line marker.
     pub blocks: Vec<String>,
-    /// The flat, node-prefixed evidence lines behind `blocks` — the surface category JEF-565
+    /// The flat, node-prefixed evidence lines behind `blocks` — the surface category
     /// adds to [`super::surface::JudgedSurface`]. Node-prefixed so the SAME evidence text on two
     /// different nodes can't collide in the set, and so a node transitioning
     /// clean→evidence-bearing (or the reverse) reads as a genuine line change.
     pub surface_lines: Vec<String>,
 }
 
-/// Render the downstream-evidence section for one entry's prompt (JEF-565). `nodes` is the
+/// Render the downstream-evidence section for one entry's prompt. `nodes` is the
 /// caller's deduped, sorted set of workload [`NodeKey`]s on the entry's proven paths, EXCLUDING
 /// the entry itself (its own evidence is the entry's dedicated prompt fields). Defensively
 /// sorts + dedups again here so this function is correct standalone, regardless of what the
@@ -72,7 +72,7 @@ pub(crate) fn render_downstream(
     let mut cve_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;
     let mut finding_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;
     // A THIRD independent incident-wide pool for behavior-line free text (security-review
-    // follow-up to JEF-565): `Behavior::summary` embeds attacker-influenced free-text (an
+    // follow-up to): `Behavior::summary` embeds attacker-influenced free-text (an
     // exec'd path, a file path, a raw peer string) fenced+sanitized but previously uncapped and
     // unbudgeted — harmless on one entry, but multiplied across every downstream node here.
     let mut behavior_budget = INCIDENT_DOWNSTREAM_FREETEXT_BUDGET;

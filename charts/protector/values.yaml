@@ -20,12 +20,12 @@
 # EGRESS POSTURE — read this. The ENGINE itself stays ZERO-EGRESS (ADR-0015): the
 # security graph and evidence never leave the cluster, and it makes no breach-notify
 # call, no OTLP export, and no live feed fetch (it only reads mounted files).
-# As of JEF-238/JEF-243 the chart ships ONE component with network egress, ON BY DEFAULT: the
+# As of the chart ships ONE component with network egress, ON BY DEFAULT: the
 # feed-fetcher SIDECAR on the engine pod (feedSync.enabled: true). It is the SOLE
 # component the chart grants egress to. It makes outbound GETs to PUBLIC, READ-ONLY feeds
 # (the CISA KEV catalogue and the FIRST.org EPSS scores) and writes the results into a shared
 # emptyDir the engine reads. It NEVER reads cluster state and NEVER transmits any cluster data
-# outward — only the plain feed downloads leave. (This supersedes the JEF-228 feed-sync CronJob:
+# outward — only the plain feed downloads leave. (This supersedes the feed-sync CronJob:
 # raw CISA KEV is ~1.5 MiB, over the 1 MiB ConfigMap limit; an emptyDir holds the FULL data.)
 #
 #   * ENGINE ZERO-EGRESS preserved   engine never calls out (feeds are read from a volume)
@@ -118,7 +118,7 @@ service:
 
 # RAM-tight, arm64-friendly: a webhook that mostly idles with occasional signature
 # verification (network I/O to the registry + Rekor) plus the async engine loop.
-# The 250m limit (JEF-560) proved too tight: a per-pass signing/provenance sweep across a
+# The 250m limit proved too tight: a per-pass signing/provenance sweep across a
 # fleet's worth of images does a burst of TLS handshakes + JSON/crypto work on the SAME cgroup
 # the probe HTTP server shares, and the CFS quota can throttle the whole container — including
 # the probe response — long enough to look dead. 500m gives that burst headroom without
@@ -133,7 +133,7 @@ resources:
 
 # Probes hit the HTTPS server; kubelet doesn't verify the cert for probes. `/healthz` and
 # `/readyz` are both served from process start (no engine-sweep dependency), so a probe
-# failure here means the process is either genuinely wedged or — the JEF-560 incident — was
+# failure here means the process is either genuinely wedged or — the incident — was
 # merely CPU-throttled long enough to miss the default 1s timeout / 3-strike (30s) budget
 # during a legitimate sweep burst. Widened timeout + failure budget so a busy-but-alive engine
 # isn't mistaken for a dead one and SIGTERM'd into a restart loop; liveness (which restarts the
@@ -320,7 +320,7 @@ engine:
     port: 8080
     # The cluster label shown in the dashboard's status strip.
     clusterLabel: cluster
-    # App-level OIDC verification (ADR-0030 / JEF-487) — closes the port-forward hole. Protector
+    # App-level OIDC verification (ADR-0030) — closes the port-forward hole. Protector
     # is a RESOURCE SERVER: it verifies the JWT the edge (or any conformant OIDC IdP) already
     # issues; it runs no login flow of its own. This is DISTINCT from `signature.oidcIssuer` (the
     # cosign keyless CERT-IDENTITY issuer) — a different concern, its own env namespace
@@ -341,10 +341,10 @@ engine:
       # Cloudflare Access application AUD tag.
       audience: ""
       # The claim path the operator's authorization tier is read from (governs how much of the
-      # already-read-only view an identity sees; JEF-489). Default `tier`; supports a flat namespaced
+      # already-read-only view an identity sees;). Default `tier`; supports a flat namespaced
       # key or a dotted path (e.g. `authz.tier`).
       tierClaim: "tier"
-      # Operator identity→tier grants (JEF-501): resolves the forensic/raw ceiling from the
+      # Operator identity→tier grants: resolves the forensic/raw ceiling from the
       # VERIFIED token identity (`sub`/`email`) when the IdP mints no `tier` claim at all — e.g.
       # Cloudflare Access relaying GitHub, which emits neither. Format `tier=id1,id2;tier=id3`,
       # e.g. `raw=alice@example.com;forensic=bob@example.com`. An explicit `tier` claim (when the
@@ -356,12 +356,12 @@ engine:
       tierGrants: ""
   # Two exploitation-intel feeds drive the engine's exploit intel + model reasoning
   # (ADR-0015): the CISA KEV catalogue (actively-exploited CVEs, known NOW) and the FIRST.org
-  # EPSS scores (the PREDICTIVE per-CVE exploitation probability — JEF-243). The engine NEVER
+  # EPSS scores (the PREDICTIVE per-CVE exploitation probability —). The engine NEVER
   # fetches either over the network (zero egress) — it only READS files from a shared
   # emptyDir. By default the feed-fetcher SIDECAR (feedSync below, ON by default) fetches both
   # in FULL into that volume and the engine auto-reads them at /var/lib/protector/feeds/kev.json
   # (PROTECTOR_KEV_FILE) and /var/lib/protector/feeds/epss.csv (PROTECTOR_EPSS_FILE), both set
-  # automatically. No further config. (The NVD advisory feed was retired in JEF-242 — redundant
+  # automatically. No further config. (The NVD advisory feed was retired in — redundant
   # with Trivy; KEV + EPSS are the two distinct exploitation axes alongside Trivy's CVSS.)
   #
   # AIR-GAPPED: set feedSync.enabled=false (no sidecar, no egress) and, to keep enrichment
@@ -384,7 +384,7 @@ engine:
   notify:
     url: ""
     verbose: false
-  # Decision journal (JEF-141): an append-only, size-rotated record of every breach
+  # Decision journal: an append-only, size-rotated record of every breach
   # decision + mitigation apply/revert, on a PERSISTENT volume so it survives a restart.
   # Stays in-cluster (zero egress). Disable to fall back to in-memory only (degrades
   # gracefully — the engine never crashes on a missing path).
@@ -393,7 +393,7 @@ engine:
     # File the engine appends to; it rotates to <path>.1 in the same dir (~2 MiB total).
     # The dir is the PVC mount; must be writable (fsGroup 65532 owns it).
     path: /var/lib/protector/journal/decisions.jsonl
-    # Durable forensic/raw MCP disclosure audit (JEF-490, ADR-0031 §4): a DISTINCT append-only
+    # Durable forensic/raw MCP disclosure audit (ADR-0031 §4): a DISTINCT append-only
     # file on the SAME journal PVC/mount (never overloaded onto the decision journal above). It
     # backs the dashboard's "Access" tab; durable-on-PVC so an empty log honestly reads "nobody
     # pulled" rather than "resets on restart". Rotates to <path>.1 like the decision journal.
@@ -456,21 +456,21 @@ agent:
   tolerations:
   - operator: Exists
 
-# --- feed-fetcher sidecar (JEF-238, JEF-243) ---
+# --- feed-fetcher sidecar ---
 # ON BY DEFAULT (feedSync.enabled: true). A co-located feed-fetcher SIDECAR (a native
 # sidecar = an initContainer with restartPolicy: Always) on the engine pod fetches the
 # FULL public CISA KEV catalogue AND the FIRST.org EPSS scores into a shared emptyDir the
 # engine reads — so both exploitation-intel feeds are fresh out of the box with no operator
 # syncing them by hand and no further config.
 #
-# TWO FEEDS, TWO EXPLOITATION AXES. The NVD advisory feed was retired (JEF-242): it was
+# TWO FEEDS, TWO EXPLOITATION AXES. The NVD advisory feed was retired: it was
 # redundant with Trivy's CVE metadata (title ~ summary, fixedVersion ~ fix_ref) and had a
 # poor hit-rate against the base-image CVEs Trivy finds. What stays are the two SIGNALS Trivy
 # does NOT supply: KEV's `exploited_in_wild` (known-exploited NOW) and EPSS's per-CVE
 # probability (PREDICTIVE — likely-to-be-exploited next). Together with Trivy's CVSS (static
 # severity) they are the three distinct axes the breach model weighs (ADR-0016).
 #
-# WHY A SIDECAR, NOT A CONFIGMAP (supersedes JEF-228). Raw CISA KEV JSON is ~1.5 MiB,
+# WHY A SIDECAR, NOT A CONFIGMAP (supersedes). Raw CISA KEV JSON is ~1.5 MiB,
 # over the 1 MiB ConfigMap limit (the CronJob path had to lossily strip it to CVE-IDs); the
 # EPSS feed is similarly large. An emptyDir has NO size limit, so the sidecar fetches both in
 # FULL (gunzipping EPSS in place) and the engine reads the complete files.
@@ -494,7 +494,7 @@ feedSync:
   # size limit):
   #   * kevUrl  — the canonical CISA KEV catalogue (plain JSON, known-exploited NOW); and
   #   * epssUrl — the FIRST.org EPSS scores (gzipped CSV, the PREDICTIVE per-CVE exploitation
-  #     probability — JEF-243). The sidecar gunzips it in place (busybox gunzip).
+  #     probability —). The sidecar gunzips it in place (busybox gunzip).
   kevUrl: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
   epssUrl: "https://epss.cyentia.com/epss_scores-current.csv.gz"
   # Re-fetch interval (a `sleep` arg: e.g. "12h", "6h", "30m"). KEV changes at most daily and

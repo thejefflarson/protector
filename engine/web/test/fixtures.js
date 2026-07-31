@@ -1,5 +1,5 @@
 // Test fixtures shaped exactly like the server's serde JSON (kebab-case keys, stable string tags)
-// for the Findings view (ADR-0025 / JEF-397). Hand-built to the `FindingsViewProps` contract so the
+// for the Findings view (ADR-0025). Hand-built to the `FindingsViewProps` contract so the
 // client tests exercise the real wire shape, not an invented one.
 
 /** A live, judging status strip (nothing green forced — depends on the counts the caller sets). */
@@ -21,10 +21,10 @@ export function strip(overrides = {}) {
     "signing-regression-uncertain": 0,
     "all-clear": false,
     watching: false,
-    // The server-derived app-level auth mode (JEF-487/JEF-489). Defaults to the server's own most-
+    // The server-derived app-level auth mode. Defaults to the server's own most-
     // conservative default (`edge-only`); tests override to `oidc` to exercise the calm pill.
     "auth-mode": "edge-only",
-    // The single server-derived judging-axis token (JEF-408) the client strip switches on. Defaults
+    // The single server-derived judging-axis token the client strip switches on. Defaults
     // to "judging" (model up, nothing green forced); tests override it to exercise each register.
     "judging-state": "judging",
     ...overrides,
@@ -71,7 +71,7 @@ export function findingsView(findings, stripOverrides = {}) {
   return { strip: strip(stripOverrides), findings };
 }
 
-// ----- JEF-400: fixtures for the four secondary views, shaped exactly like the server serde JSON.
+// ----- fixtures for the four secondary views, shaped exactly like the server serde JSON.
 
 /** One Alerts row (an alarming-now event). No stable id by design — keyed on a content hash. */
 export function alert(overrides = {}) {
@@ -207,7 +207,7 @@ export function signingRepo(repo, images, overrides = {}) {
   };
 }
 
-// ----- JEF-490: fixtures for the "Access" view (forensic/raw MCP disclosure audit).
+// ----- fixtures for the "Access" view (forensic/raw MCP disclosure audit).
 
 /** One tier-reveal row (Section 1: what a tier reveals/withholds + whether the caller holds it). */
 export function accessReveal(tier, overrides = {}) {

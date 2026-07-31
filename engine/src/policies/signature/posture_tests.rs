@@ -1,4 +1,4 @@
-//! Unit tests for the tag-agnostic continuity identity (JEF-325): [`canonical_identity`] and
+//! Unit tests for the tag-agnostic continuity identity: [`canonical_identity`] and
 //! [`Signer::canonical_identity`]. Kept in their own file per the repo's 1,000-line cap (CLAUDE.md).
 
 use super::*;
@@ -69,7 +69,7 @@ fn signer_canonical_identity_delegates_to_the_helper() {
     assert_eq!(signer.canonical_identity(), format!("{WF_SAN}@refs/tags/*"));
 }
 
-// --- JEF-326: the per-sweep posture summary (the INFO line the sweep logs) ---
+// --- the per-sweep posture summary (the INFO line the sweep logs) ---
 
 #[test]
 fn posture_summary_tallies_every_variant() {

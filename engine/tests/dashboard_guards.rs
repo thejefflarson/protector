@@ -1,7 +1,7 @@
 //! Dashboard honesty / boundary guards (ADR-0019, cut over to Preact by ADR-0025, and to a
-//! ROOT-ONLY body by JEF-408). These are SOURCE-level guards over the server-emitted document shell.
+//! ROOT-ONLY body by). These are SOURCE-level guards over the server-emitted document shell.
 //!
-//! Under JEF-408 the LAST server-rendered body parts — the status strip + the tab nav — moved to the
+//! Under the LAST server-rendered body parts — the status strip + the tab nav — moved to the
 //! client, so the `dashboard/components/` module (the pure `Props -> Markup` shell renderers) is
 //! deleted: the server now emits a ROOT-ONLY body (`<head>` + the `#dash-root` mount). These guards
 //! therefore pin the SHELL contract:
@@ -33,36 +33,36 @@ fn read_engine_src(rel: &str) -> String {
 
 #[test]
 fn the_server_rendered_components_stay_retired() {
-    // JEF-408: the `dashboard/components/` module (the server-rendered status strip + tab nav) is
+    // the `dashboard/components/` module (the server-rendered status strip + tab nav) is
     // deleted — the client renders ALL body HTML now. Guard that neither the module nor its renderers
     // silently regrow a server-rendered body.
     let dir = repo_root().join("engine/src/engine/dashboard/components");
     assert!(
         !dir.exists(),
-        "the dashboard/components module must stay deleted (JEF-408) — the strip + nav are \
+        "the dashboard/components module must stay deleted — the strip + nav are \
          client-rendered ({dir:?} exists)"
     );
     let page = read_engine_src("engine/dashboard/page.rs");
     for gone in ["status_strip", "nav_bar", "components::"] {
         assert!(
             !page.contains(gone),
-            "page.rs must not reference the retired server-rendered component `{gone}` (JEF-408)"
+            "page.rs must not reference the retired server-rendered component `{gone}`"
         );
     }
 }
 
 #[test]
 fn the_body_is_root_only_no_server_strip_or_nav() {
-    // JEF-408: the server body is ROOT-ONLY — no `.strip` header and no `.tabs` nav markup. Those
+    // the server body is ROOT-ONLY — no `.strip` header and no `.tabs` nav markup. Those
     // moved to the client (`strip.jsx` / `app.jsx`); the server must not re-emit them.
     let page = read_engine_src("engine/dashboard/page.rs");
     assert!(
         !page.contains("header.strip") && !page.contains("class=\"strip\""),
-        "the status strip must not be server-rendered — it is client-only now (JEF-408)"
+        "the status strip must not be server-rendered — it is client-only now"
     );
     assert!(
         !page.contains("nav.tabs") && !page.contains("nav_bar"),
-        "the tab nav must not be server-rendered — it is client-only now (JEF-408)"
+        "the tab nav must not be server-rendered — it is client-only now"
     );
     // The mount is present so the client has somewhere to render the strip + nav + body.
     assert!(
@@ -96,7 +96,7 @@ fn page_composition_emits_no_inline_style() {
 
 #[test]
 fn page_serves_the_preact_bundle_same_origin_with_a_mount_point() {
-    // JEF-408: the ROOT-ONLY shell carries the client mount (`dash-root`) and loads the built bundle
+    // the ROOT-ONLY shell carries the client mount (`dash-root`) and loads the built bundle
     // same-origin (no CDN). The client renders ALL body HTML (strip, nav, view) into the mount.
     let page = read_engine_src("engine/dashboard/page.rs");
     assert!(
@@ -138,7 +138,7 @@ fn strip_block_comments(src: &str) -> String {
 
 #[test]
 fn stylesheet_uses_tokens_not_stray_raw_px() {
-    // JEF-256: sizing/spacing must come from tokens (--space-*, --fs/--lh-*, geometry), not
+    // sizing/spacing must come from tokens (--space-*, --fs/--lh-*, geometry), not
     // ad-hoc raw px values scattered through the rules. Mirrors the no-raw-hex spirit: raw `px`
     // is allowed ONLY inside the `:root { … }` token-definition block (where the tokens are
     // declared); anywhere else it is a stray one-off and fails the build.
@@ -185,8 +185,7 @@ fn stylesheet_uses_tokens_not_stray_raw_px() {
     }
     assert!(
         offenders.is_empty(),
-        "the stylesheet must size everything from tokens — no stray raw px outside :root \
-         (JEF-256):\n{}",
+        "the stylesheet must size everything from tokens — no stray raw px outside :root:\n{}",
         offenders.join("\n")
     );
 }
@@ -282,9 +281,9 @@ fn block<'a>(src: &'a str, sel: &str) -> &'a str {
 
 #[test]
 fn v4_transitional_states_are_tokenized_and_honest() {
-    // JEF-401: the Preact client (ADR-0025) added states maud never had — a first-load "connecting…",
+    // the Preact client (ADR-0025) added states maud never had — a first-load "connecting…",
     // the load-bearing "not updating" stale banner, and the one-shot cleared-row tombstone. After the
-    // JEF-398 cutover their classes carried NO CSS (off colour, no padding). This pins them to the
+    //  cutover their classes carried NO CSS (off colour, no padding). This pins them to the
     // token system and to the honesty register: the stale banner is a distinct NON-GREEN warning, and
     // the calm states never borrow the cleared/green token.
     let css = repo_root().join("engine/web/dist/dashboard.css");
@@ -302,7 +301,7 @@ fn v4_transitional_states_are_tokenized_and_honest() {
     ] {
         assert!(
             src.contains(&format!("{sel} {{")) || src.contains(&format!("{sel}::")),
-            "the v4 transitional class `{sel}` must be styled (JEF-401)"
+            "the v4 transitional class `{sel}` must be styled"
         );
     }
 

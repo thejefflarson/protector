@@ -1,6 +1,6 @@
-//! Integration tests for the LIVE-router OIDC enforcement (JEF-487 / ADR-0030 §6). They drive the
+//! Integration tests for the LIVE-router OIDC enforcement (ADR-0030 §6). They drive the
 //! REAL `dashboard::router` with a configured [`Enforcer`] built over an in-memory JWKS (no egress,
-//! via the JEF-485 `test_support` seam), and assert the content-negotiated fail-closed contract:
+//! via the `test_support` seam), and assert the content-negotiated fail-closed contract:
 //! `/api/*.json` denials are `401` JSON and are NEVER `302`'d; a document `GET /` denial is a `302`
 //! to login; a below-tier identity is `403`; JWKS-down is `503`; every rejection still carries the
 //! strict CSP + `no-store`; and the unconfigured router (no enforcer) serves without rejecting.
@@ -216,7 +216,7 @@ async fn api_findings_with_valid_token_is_200_with_the_view_model_and_oidc_auth_
 // -------------------------------------------------------------------------------------------------
 
 // -------------------------------------------------------------------------------------------------
-// /api/access.json (JEF-490) — inherits the OIDC gate (401 unauthenticated), and the audit rows are
+// /api/access.json — inherits the OIDC gate (401 unauthenticated), and the audit rows are
 // redacted to the CALLER's own tier: a redacted-tier caller never learns a raw pull's target; a
 // forensic/raw-tier caller does.
 // -------------------------------------------------------------------------------------------------
@@ -371,7 +371,7 @@ async fn a_401_still_carries_the_strict_csp_and_no_store() {
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-store",
-        "a cached 401/302 is the JEF-283 edge bug — every rejection is no-store"
+        "a cached 401/302 is the Cloudflare edge bug — every rejection is no-store"
     );
 }
 
@@ -386,7 +386,7 @@ async fn a_302_login_redirect_is_no_store() {
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-store",
-        "a cached 302->login is exactly the Cloudflare edge bug (JEF-283)"
+        "a cached 302->login is exactly the Cloudflare edge bug"
     );
 }
 

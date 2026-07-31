@@ -100,7 +100,7 @@ pub(crate) fn simple_finding(entry: &str, objective: &str) -> Finding {
     }
 }
 
-/// A wide, NO-CUT finding (JEF-281): an internet-facing front door reaching one secret via TWO
+/// A wide, NO-CUT finding: an internet-facing front door reaching one secret via TWO
 /// redundant backends, so no single edge severs the objective. Showcases the multi-path detail —
 /// both proven paths stacked, and the "reachable via N redundant paths" reason line.
 pub(crate) fn redundant_finding() -> Finding {

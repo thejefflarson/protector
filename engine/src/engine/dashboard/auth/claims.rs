@@ -64,7 +64,7 @@ impl Tier {
         }
     }
 
-    /// Resolve the CEILING tier for a verified identity (JEF-501), with this precedence:
+    /// Resolve the CEILING tier for a verified identity, with this precedence:
     ///
     /// 1. An explicit, **recognized** `tier` claim wins — the IdP's own statement is authoritative,
     ///    even over a configured grant (e.g. a claim of `forensic` beats a `raw` grant for the same
@@ -107,7 +107,7 @@ impl Tier {
 /// ever match its own field: an identifier containing `@` is an **email** (matched only against a
 /// **verified** `email` claim, case-insensitively); one without is a **sub** (matched only against
 /// `sub`, exactly). This closes a cross-field collision a single untyped OR would otherwise allow
-/// (JEF-501 HIGH fix): without typing, an operator's `raw=alice@example.com` (meant as an email)
+/// (HIGH fix): without typing, an operator's `raw=alice@example.com` (meant as an email)
 /// would ALSO match a token whose opaque `sub` happened to equal that exact string, silently
 /// widening the granted set beyond what was configured — and symmetrically for a bare `sub`
 /// identifier that happens to collide with someone's `email`. `@`-presence is an unambiguous split
@@ -131,7 +131,7 @@ impl GrantId {
     }
 
     /// Whether this identifier matches the verified identity. An [`GrantId::Email`] NEVER matches
-    /// unless `email_verified` is `true` (JEF-501 HIGH fix: a self-asserted, unverified `email`
+    /// unless `email_verified` is `true` (HIGH fix: a self-asserted, unverified `email`
     /// claim proves nothing about ownership — only that the IdP minted *a* token, not that the
     /// subject controls that address).
     fn matches(&self, sub: &str, email: Option<&str>, email_verified: bool) -> bool {
@@ -144,7 +144,7 @@ impl GrantId {
     }
 }
 
-/// Operator-configured identity→tier grants (`PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS`, JEF-501):
+/// Operator-configured identity→tier grants (`PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS`):
 /// resolves the tier ceiling from the VERIFIED token identity (`sub`/verified-`email`) when the
 /// IdP mints no `tier` claim at all — e.g. Cloudflare Access relaying GitHub, which emits neither.
 /// A grant is a CEILING like the claim it stands in for: it can only be READ here, never combined
@@ -174,7 +174,7 @@ impl TierGrants {
 
     /// The highest tier granted to a verified identity. `sub` is matched EXACTLY against a
     /// sub-typed grant only; `email` is matched CASE-INSENSITIVELY against an email-typed grant
-    /// only, and only when `email_verified` is `true` (JEF-501 — an unverified `email` claim is
+    /// only, and only when `email_verified` is `true` (— an unverified `email` claim is
     /// never a match candidate). Neither matching ⇒ [`Tier::Redacted`] (an unlisted/absent identity
     /// stays at the floor — a grant never widens beyond what's configured).
     pub fn resolve(&self, sub: &str, email: Option<&str>, email_verified: bool) -> Tier {
@@ -193,7 +193,7 @@ impl TierGrants {
 }
 
 /// The decoded token claims the verifier reads: the required `sub`, the optional `email` +
-/// `email_verified` (JEF-501 — used, together with `sub`, to match an operator-configured tier
+/// `email_verified` (— used, together with `sub`, to match an operator-configured tier
 /// grant), plus every other claim captured flat in `extra` so the operator-configured tier claim
 /// can be looked up from it without this struct having to name the IdP's claim schema (ADR-0030
 /// §1: protector reads the tier claim, it does not define it).
@@ -207,7 +207,7 @@ pub struct Claims {
     #[serde(default)]
     pub email: Option<String>,
     /// The verified token's `email_verified` claim. **Absent ⇒ `false`** — the safe default
-    /// (JEF-501 HIGH fix): a signature only proves the IdP minted the token, never that the
+    /// (HIGH fix): a signature only proves the IdP minted the token, never that the
     /// subject owns the `email` it carries, unless the IdP itself asserts it verified that
     /// ownership. An email-typed [`TierGrants`] entry never matches without this being `true`.
     #[serde(default)]

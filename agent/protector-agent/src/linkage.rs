@@ -1,6 +1,6 @@
-//! Per-workload ELF static/dynamic **linkage** classification (JEF-407).
+//! Per-workload ELF static/dynamic **linkage** classification.
 //!
-//! The engine has no in-cluster access to a workload's entrypoint bytes, so JEF-404's
+//! The engine has no in-cluster access to a workload's entrypoint bytes, so its
 //! static-linkage reachability sat dormant — `Image::static_binary` was always `None` in
 //! prod and a Go / musl-static CVE rendered `not-observed` forever. The node-local agent DOES
 //! see the running binary (`/proc/<pid>/exe`), so it is the natural byte source: on an exec it
@@ -23,7 +23,7 @@ use protector_behavior::{Behavior, elf::elf_static_linkage};
 /// `None` (unknown) — never a wrong answer (the classifier is conservative by construction).
 pub const ELF_HEAD_CAP: usize = 4096;
 
-/// Classify a pid's entrypoint linkage from its ELF header (JEF-407).
+/// Classify a pid's entrypoint linkage from its ELF header.
 ///
 /// Returns `Some(true)` for a statically linked binary (no `PT_INTERP`), `Some(false)` for a
 /// dynamically linked one, and `None` when the linkage is unknown — the exe couldn't be read

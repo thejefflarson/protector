@@ -1,5 +1,5 @@
 //! Tests for the signature module: the gated [`SignaturePolicy`] (behavior preserved
-//! through the JEF-261 split) and ADR-0020 Stage 1 signing-posture observation.
+//! through the split) and ADR-0020 Stage 1 signing-posture observation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -278,7 +278,7 @@ async fn denies_pod_exceeding_image_cap_when_enforcing() {
 }
 
 /// A checker that COUNTS calls to `is_signed`, so a test can prove the digest cache spares
-/// repeated verification across the enforce + shadow paths (JEF-246's zero-egress constraint).
+/// repeated verification across the enforce + shadow paths (the zero-egress constraint).
 struct CountingChecker {
     signed: bool,
     calls: Arc<AtomicUsize>,
@@ -294,7 +294,7 @@ impl SignatureChecker for CountingChecker {
 
 #[tokio::test]
 async fn shadow_evaluate_out_of_scope_unsigned_is_would_fail() {
-    // JEF-246: an out-of-scope (audit-only) unsigned gated image shadow-evaluates to
+    // an out-of-scope (audit-only) unsigned gated image shadow-evaluates to
     // would-fail — enforcing would deny — even though `evaluate` only audits.
     let p = policy(&[("ghcr.io/thejefflarson/app:1", false)], false);
     let req = pod_request(&["ghcr.io/thejefflarson/app:1"]);
@@ -336,7 +336,7 @@ async fn ungated_image_has_no_signature_opinion() {
 
 #[tokio::test]
 async fn digest_cache_shares_verification_across_enforce_and_shadow_paths() {
-    // The zero-egress constraint (JEF-246): shadow-verifying every request must not repeat
+    // The zero-egress constraint: shadow-verifying every request must not repeat
     // verification per replica/pass. The enforce path populates the cache; the shadow path
     // (and a second enforce) reuse it — the checker is hit ONCE for the image.
     let calls = Arc::new(AtomicUsize::new(0));
@@ -362,7 +362,7 @@ async fn digest_cache_shares_verification_across_enforce_and_shadow_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0020 Stage 1: signing-posture observation (JEF-261)
+// ADR-0020 Stage 1: signing-posture observation
 // ---------------------------------------------------------------------------
 
 /// A fake observer with canned per-image postures, and a call counter so a test can prove

@@ -1,4 +1,4 @@
-// Access view tests (JEF-490 / ADR-0031 §4): the tier chip carries colour + glyph + WORD (never
+// Access view tests (ADR-0031 §4): the tier chip carries colour + glyph + WORD (never
 // colour alone; glyph aria-hidden); Section 2 is a real semantic <table> with headers; a raw pull
 // row carries the loud keyline; untrusted identity/target strings render inert (escaped); and the
 // empty state honestly distinguishes an in-memory (resets on restart) from a durable log.

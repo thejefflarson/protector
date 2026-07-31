@@ -24,7 +24,7 @@ pub(super) struct EngineMetrics {
     /// Breach-path count by model `verdict` (the current judgement distribution).
     pub(super) verdicts: opentelemetry::metrics::Gauge<u64>,
     /// Behavioral signals ingested this pass, by `behavior` variant (alert/connection/
-    /// secret-read/library-load/file-read/priv-change/exec) — the shadow-bake (JEF-48)
+    /// secret-read/library-load/file-read/priv-change/exec) — the shadow-bake
     /// view of *what* the behavioral port is seeing, labeled low-cardinality (variant
     /// names only, never per-pod).
     pub(super) signals: opentelemetry::metrics::Counter<u64>,
@@ -49,15 +49,15 @@ pub(super) struct EngineMetrics {
     pub(super) cached: opentelemetry::metrics::Counter<u64>,
     /// Per-pass cache MISSES the engine declined to send to the model because the entry
     /// (or the whole fleet, via the global breaker) was in inconclusive-adjudication
-    /// backoff (JEF-234). A cumulative counter: a sustained nonzero rate means the model is
+    /// backoff. A cumulative counter: a sustained nonzero rate means the model is
     /// degraded and the engine is correctly NOT hammering it (the bounding is working).
     pub(super) skipped: opentelemetry::metrics::Counter<u64>,
     /// Adjudicator model-call latency in milliseconds (histogram), recorded around each
     /// fresh `judge` call so the slow CPU model's tail is visible.
     pub(super) model_latency_ms: opentelemetry::metrics::Histogram<f64>,
-    /// Shadow would-have-acted report headline (JEF-143): distinct workloads the engine
+    /// Shadow would-have-acted report headline: distinct workloads the engine
     /// WOULD have isolated over the default rolling window, as of this pass — the gates-
-    /// exiting-shadow figure (JEF-50), mirrored to OTLP like the bake counts. A gauge:
+    /// exiting-shadow figure, mirrored to OTLP like the bake counts. A gauge:
     /// the current window snapshot, the in-process mirror of the would-have-acted report
     /// aggregation.
     pub(super) report_would_act: opentelemetry::metrics::Gauge<u64>,
@@ -70,7 +70,7 @@ pub(super) struct EngineMetrics {
     /// Shadow report headline: would-acts made during an enrichment-coverage gap (no CVE
     /// backing) — the ones to scrutinize first.
     pub(super) report_coverage_gap: opentelemetry::metrics::Gauge<u64>,
-    /// Runtime-corroboration coverage (JEF-308) mirrored from the SAME
+    /// Runtime-corroboration coverage mirrored from the SAME
     /// [`derive_runtime_coverage`](crate::engine::state::derive_runtime_coverage) the dashboard
     /// reads (they must never disagree). In-scope expected nodes as of this pass — the agent
     /// DaemonSet's own pods, matching `RuntimeCoverage::expected_count`; out-of-scope reporters are
@@ -197,7 +197,7 @@ impl EngineMetrics {
         }
     }
 
-    /// Mirror this pass's runtime-corroboration coverage (JEF-422) into the OTLP gauges. A pure
+    /// Mirror this pass's runtime-corroboration coverage into the OTLP gauges. A pure
     /// mirror of already-derived state: it takes the SAME [`RuntimeCoverage`] the dashboard reads
     /// (the caller passes back what `stamp_runtime_coverage` just stored), so the two can never
     /// disagree. Counts ONLY — no per-node label dimension, because node names are
@@ -218,7 +218,7 @@ impl EngineMetrics {
     }
 }
 
-/// The five runtime-coverage gauge values (JEF-422), derived from a [`RuntimeCoverage`]. Kept as a
+/// The five runtime-coverage gauge values, derived from a [`RuntimeCoverage`]. Kept as a
 /// pure function so the mirror's arithmetic is unit-testable without an OTLP reader — the gauges
 /// [`EngineMetrics::record_coverage`] emits are exactly these values.
 struct CoverageGaugeValues {

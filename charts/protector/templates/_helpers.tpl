@@ -66,13 +66,13 @@ app.kubernetes.io/part-of: {{ include "protector.name" . }}
 {{- end }}
 
 {{/*
-Mount path of the shared emptyDir the feed-fetcher sidecar writes and the engine reads
-(JEF-238). The native-sidecar initContainer fetches the FULL public CISA KEV catalogue
+Mount path of the shared emptyDir the feed-fetcher sidecar writes and the engine reads.
+The native-sidecar initContainer fetches the FULL public CISA KEV catalogue
 into a file on a shared emptyDir under this dir; the engine container mounts the SAME
 emptyDir read-only and points PROTECTOR_KEV_FILE at the file. The engine itself stays
 zero-egress (ADR-0015): only the co-located sidecar egresses, and only to one public,
 read-only feed — it never reads or transmits any cluster data. KEV is the only feed (the
-NVD advisory feed was retired in JEF-242).
+NVD advisory feed was retired as redundant with Trivy's CVE metadata).
 */}}
 {{- define "protector.feedsDir" -}}
 {{- "/var/lib/protector/feeds" -}}

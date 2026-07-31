@@ -1,4 +1,4 @@
-//! Unit tests for the ELF static-linkage classifier (JEF-404). Fixtures are built as the
+//! Unit tests for the ELF static-linkage classifier. Fixtures are built as the
 //! smallest representative ELF byte layouts — a 64-bit little-endian header plus a program
 //! header table — so a `PT_INTERP` entry (dynamic) and its absence (static) classify
 //! differently WITHOUT shipping a real multi-megabyte binary. The classifier reads only the
@@ -84,7 +84,7 @@ fn dynamic_elf_carries_an_interp_program_header() {
 
 #[test]
 fn static_vs_dynamic_classify_differently() {
-    // The core JEF-404 distinction: the same shape with vs without PT_INTERP must differ.
+    // The core distinction: the same shape with vs without PT_INTERP must differ.
     let stat = elf64_le(&[PT_LOAD]);
     let dynm = elf64_le(&[PT_LOAD, PT_INTERP_T]);
     assert_ne!(elf_static_linkage(&stat), elf_static_linkage(&dynm));
@@ -155,7 +155,7 @@ fn out_of_range_program_header_table_is_unknown() {
 
 #[test]
 fn crafted_max_offset_returns_none_without_overflow_panicking() {
-    // JEF-407 hardening: a crafted `e_phoff` near u64::MAX must NOT overflow-panic when the
+    //  hardening: a crafted `e_phoff` near u64::MAX must NOT overflow-panic when the
     // parser forms `phoff + i*phentsize` and the per-read `off + N` slice — it must return an
     // honest `None`. Without the `checked_add` in the read helpers this panics on a debug
     // build (`attempt to add with overflow`); with it, it's a clean unknown.

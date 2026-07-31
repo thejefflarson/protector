@@ -20,7 +20,7 @@ pub const KIND_FILE_OPEN: u32 = 2;
 /// a LibraryLoaded with the basename. Reuses [`FileEvent`] (kind discriminates).
 pub const KIND_LIBRARY_LOAD: u32 = 3;
 /// A process was exec'd (fentry on `security_bprm_check`). Carries the exec'd binary's
-/// path, read from `linux_binprm->filename`, PLUS the anon-inode kernel fact (JEF-317,
+/// path, read from `linux_binprm->filename`, PLUS the anon-inode kernel fact (
 /// Route A) read from `bprm->file->f_inode`; userspace emits a `ProcessExec`. Its own
 /// [`ExecEvent`] body (not [`FileEvent`]) — the runtime signal for "unexpected process
 /// spawned" (ADR-0014).
@@ -31,7 +31,7 @@ pub const KIND_EXEC: u32 = 4;
 /// emits a [`Behavior::PrivilegeChange`].
 pub const KIND_PRIV_CHANGE: u32 = 5;
 /// A file was written (fentry on `security_file_open`, filtered in-kernel to write-intent
-/// open flags — JEF-306). Carries the written file's path (`bpf_d_path`); userspace emits
+/// open flags —). Carries the written file's path (`bpf_d_path`); userspace emits
 /// a `Behavior::FileWrite`. The runtime signal for container drift: drop-and-execute /
 /// config tampering (ADR-0014). Reuses [`FileEvent`]
 /// (the `kind` discriminates it from the read/exec/library file events).
@@ -55,7 +55,7 @@ pub struct FileEvent {
 }
 
 /// One observed process exec (kind [`KIND_EXEC`]) — the same `header`/`len`/`path` shape
-/// as [`FileEvent`], plus the pure-data anon-inode fact (JEF-317, Route A):
+/// as [`FileEvent`], plus the pure-data anon-inode fact (Route A):
 /// [`Self::exe_anon_inode`]. A dedicated struct rather than a [`FileEvent`] field, since
 /// this fact is exec-specific — the file-open/library-load/file-write probes have no
 /// `bprm` to read it from, so folding it into the shared `FileEvent` would mean carrying a
@@ -73,7 +73,7 @@ pub struct ExecEvent {
     /// rather than a normal, linked, on-disk file; `0` otherwise. A `u8`, not `bool`: a
     /// kernel-written byte is not guaranteed a valid Rust `bool` bit pattern, and `no_std`
     /// eBPF code writing this field directly must not rely on that guarantee. A KERNEL-
-    /// OBSERVABLE FACT (JEF-113), not a verdict — whether an anon-inode exec is alarming
+    /// OBSERVABLE FACT, not a verdict — whether an anon-inode exec is alarming
     /// is engine policy, conservatively scoped (see `engine::observe::exec_class` /
     /// `engine::reason::proof::corroborate`), NOT decided here.
     pub exe_anon_inode: u8,
@@ -83,7 +83,7 @@ pub struct ExecEvent {
 /// body, so userspace can read `kind` (and `pid`/`cgroup_id`) before it knows which body
 /// follows.
 ///
-/// `cgroup_id` (JEF-158) is the kernel cgroup id captured AT EVENT TIME via the stable
+/// `cgroup_id` is the kernel cgroup id captured AT EVENT TIME via the stable
 /// `bpf_get_current_cgroup_id()` helper — the cgroup v2 directory's inode number.
 /// Userspace resolves pod attribution from it through a `cgroup_id → pod_uid` table built
 /// from `/sys/fs/cgroup`, which fixes the exited-process race: a short-lived in-container
@@ -132,7 +132,7 @@ pub struct PrivEvent {
     pub new_uid: u32,
 }
 
-/// In-kernel dedup window for high-frequency repeat events (JEF-65). A connect to the
+/// In-kernel dedup window for high-frequency repeat events. A connect to the
 /// same `(pid, daddr, dport)` seen again within this many nanoseconds is coalesced —
 /// suppressed at the source so it never costs a ring-buffer slot. 1s is long enough to
 /// collapse a chatty process hammering one destination (the volume problem) yet short
@@ -140,7 +140,7 @@ pub struct PrivEvent {
 /// once a second — the additive-evidence model needs presence, not every packet.
 pub const DEDUP_WINDOW_NS: u64 = 1_000_000_000;
 
-/// Max entries in an in-kernel dedup map (JEF-65 connect, JEF-306 file-write). One slot
+/// Max entries in an in-kernel dedup map (connect file-write). One slot
 /// per live dedup key — `(pid, dest)` for connect, `(pid, inode)` for writes; an LRU map
 /// evicts the coldest when full, so a churn of distinct keys can't exhaust it (eviction
 /// just means the evicted key re-emits once — safe, never a crash). Sized to cover a busy
@@ -167,7 +167,7 @@ impl ConnKey {
     }
 }
 
-/// Dedup key for the file-write probe (JEF-306): the `(pid, inode)` tuple. Coalescing on
+/// Dedup key for the file-write probe: the `(pid, inode)` tuple. Coalescing on
 /// the inode collapses the high-frequency case — a process writing the SAME file
 /// repeatedly (appending a log, rewriting a state file) — at the source, so a suppressed
 /// write never costs a ring-buffer slot. The inode number (not the path) is the cheap
@@ -189,7 +189,7 @@ impl WriteKey {
     }
 }
 
-/// Dedup key for the credential-basename read gate (JEF-320 security rework): the
+/// Dedup key for the credential-basename read gate (security rework): the
 /// `(pid, inode)` tuple, same shape as [`WriteKey`] but a distinct type (its own LRU map,
 /// its own gate) so the two dedup domains can't be mixed up at a call site. Bounds a HIGH
 /// finding from security review: `try_file_open`'s widening past `is_tmpfs` to a small
@@ -214,7 +214,7 @@ impl ReadKey {
 }
 
 /// Whether a repeat event keyed at `last_ns` should be coalesced (suppressed) at `now_ns`,
-/// given the dedup `window_ns` (JEF-65). The single source of truth for the dedup
+/// given the dedup `window_ns`. The single source of truth for the dedup
 /// decision, shared verbatim by the kernel probe and the userspace tests so the two can't
 /// drift. Returns `true` (coalesce — drop it) when the last emit for this key was strictly
 /// within the window. A non-monotonic clock (`now_ns < last_ns`, which `bpf_ktime_get_ns`
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn write_key_distinguishes_pid_and_inode() {
-        // The file-write dedup key (JEF-306) collapses repeat writes to the SAME (pid,
+        // The file-write dedup key collapses repeat writes to the SAME (pid,
         // inode) — so it must compare equal for the same pair and differ on either field.
         let base = WriteKey::new(1234, 42);
         assert_eq!(base, WriteKey::new(1234, 42));
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn read_key_distinguishes_pid_and_inode() {
-        // The credential-basename-read dedup key (JEF-320 security rework) mirrors
+        // The credential-basename-read dedup key (security rework) mirrors
         // WriteKey's equality shape: same (pid, inode) pair compares equal, either field
         // differing does not.
         let base = ReadKey::new(1234, 42);

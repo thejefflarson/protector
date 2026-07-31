@@ -48,7 +48,7 @@ pub enum ProposedAction {
     QuarantineEntry,
     /// Quarantine a **compromised workload on the chain** — not the entry — with the
     /// same full default-deny `NetworkPolicy` (ADR-0010), driven from the qualifying
-    /// pod's labels (JEF-284). Proposed for a pod that is either *remotely exploitable*
+    /// pod's labels. Proposed for a pod that is either *remotely exploitable*
     /// (network-reachable from an internet foothold AND running a critical/KEV CVE) or
     /// *actively exploited* (a live on-pod runtime alert / hands-on-keyboard exec) —
     /// see [`crate::engine::reason::proof::QuarantineReason`]. Additive + reversible +
@@ -185,8 +185,8 @@ impl Mitigation {
     /// auto-acts only on remote-exploitation paths, never on internal-only activity.
     /// The actuator requires this before any auto-application.
     ///
-    /// **JEF-566: `QuarantineWorkload` clears the SAME gate as every other action —
-    /// no special case.** A workload quarantine (JEF-284) still identifies its target
+    /// **`QuarantineWorkload` clears the SAME gate as every other action —
+    /// no special case.** A workload quarantine still identifies its target
     /// deterministically at the proof layer (a pod on-path that is either network-
     /// reachable + running a critical/KEV CVE, or carries a live on-pod exploitation
     /// signal — `reason::proof::chain::quarantine_targets_on_path`), but that
@@ -221,7 +221,7 @@ pub fn cut_signature(cut: &Link) -> String {
 const QUARANTINE_RELATION: &str = "quarantine-entry";
 
 /// The synthetic relation on a [`ProposedAction::QuarantineWorkload`] mitigation's
-/// `cut` link (JEF-284). Like the entry quarantine it is a self-reference on the pod
+/// `cut` link. Like the entry quarantine it is a self-reference on the pod
 /// (`from == to == pod`) carrying the pod's labels, so the isolation renderer's
 /// `cut.from` selector isolates exactly that pod. It is **pod-only** (reason-independent)
 /// so a pod that qualifies on more than one chain — remotely-exploitable on one,
@@ -236,7 +236,7 @@ const QUARANTINE_WORKLOAD_RELATION: &str = "quarantine-workload";
 /// will not widen a quarantine to a whole namespace (that would punish bystanders);
 /// such a chain falls through to durable-fix/no-cut instead.
 ///
-/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's entry line reuses the
+/// `pub(crate)`: the ADR-0034 `incident/` menu resolver's entry line reuses the
 /// SAME [`containment_for`] ladder this module's own `reconcile` runs, so a helper it calls
 /// (this one, transitively) must be visible outside `respond`. `reconcile` itself is
 /// untouched — only this pure builder's visibility widens.
@@ -257,13 +257,13 @@ pub(crate) fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
     })
 }
 
-/// Build the quarantine `Link` for a JEF-284 workload target: a self-reference on the
+/// Build the quarantine `Link` for a workload target: a self-reference on the
 /// qualifying pod, carrying its labels so the isolation `NetworkPolicy` selects that
 /// pod precisely (ADR-0010). Returns `None` when the pod has no labels — we decline
 /// (never widen a quarantine to a whole namespace, punishing bystanders), exactly as
 /// [`quarantine_link`] does for the entry.
 ///
-/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's downstream lines
+/// `pub(crate)`: the ADR-0034 `incident/` menu resolver's downstream lines
 /// resolve each `quarantine_targets` workload through this exact builder — the SAME
 /// `None`-on-unlabeled decline the ledger's `reconcile` uses — so the menu and the ledger
 /// can never disagree on which downstream nodes are containable. `reconcile` itself is
@@ -452,10 +452,10 @@ impl MitigationLedger {
     }
 
     /// Reconcile the ledger against this cycle's proven chains AND this pass's per-entry
-    /// cut-choice decisions (ADR-0034 D6/D7, JEF-570). The active set becomes exactly:
+    /// cut-choice decisions (ADR-0034 D6/D7). The active set becomes exactly:
     ///
     /// - **model-chosen cuts** whose entry still has a proven, breach-relevant justifying
-    ///   chain and a DECISIVE `Attack` decision naming them (they clear the JEF-566
+    ///   chain and a DECISIVE `Attack` decision naming them (they clear the
     ///   `is_live_corroborated` auto-action gate on their own justifications, same as before);
     /// - **carried-forward standing cuts** (D7's retirement asymmetry, safety-critical) — when
     ///   this pass has NO decisive decision for a breach-relevant entry (no decision at all, or
@@ -477,7 +477,7 @@ impl MitigationLedger {
     ///
     /// The deterministic `quarantine_targets` desired-set insertion is **deleted** for
     /// breach-relevant chains — completing the ADR-0032 auto-fire removal — but UNCHANGED for
-    /// a non-breach-relevant (internal-only) chain's JEF-284 condition-2 targets: those never
+    /// a non-breach-relevant (internal-only) chain's condition-2 targets: those never
     /// reach the model at all (`adj_pass` only judges breach-relevant entries) and stay outside
     /// the north star's two lanes (ADR-0032 §6 propose-only, deferred by ADR-0034), so their
     /// proposal mechanism is untouched by this ticket.
@@ -546,10 +546,10 @@ impl MitigationLedger {
                     .justifications
                     .push(Justification::of(chain));
             }
-            // Sibling pass (JEF-284): additionally quarantine each *compromised workload on
+            // Sibling pass: additionally quarantine each *compromised workload on
             // the chain* — an internal-only actively-exploited pod (condition 2), outside the
             // north star's two lanes. The chain's entry is governed entirely by the primary
-            // above: skip it here when the primary already additively contains it (JEF-279,
+            // above: skip it here when the primary already additively contains it (
             // "prefer the narrower surgical cut").
             let entry_additively_contained = primary
                 .as_ref()
@@ -602,7 +602,7 @@ impl MitigationLedger {
 #[cfg(test)]
 mod tests;
 
-// ADR-0034 (JEF-570): the cut-choice decision-consumption tests, split into their own file
+// ADR-0034: the cut-choice decision-consumption tests, split into their own file
 // (rather than growing `tests.rs` toward the 1,000-line cap, CLAUDE.md) — the D6 desired-set
 // rules (model cuts / fallback / confident-clear) and D5's non-member whole-decision degrade
 // reaching `reconcile` end to end.

@@ -1,6 +1,6 @@
-//! Agent-side debounce/coalescing of behavioral observations before the POST (JEF-296).
+//! Agent-side debounce/coalescing of behavioral observations before the POST.
 //!
-//! Follow-on to JEF-294 (which raised the engine's per-batch cap 256→1024 so batches
+//! Follow-on to (which raised the engine's per-batch cap 256→1024 so batches
 //! stopped truncating). That stopped the *truncation*, but the real cost is VOLUME: the
 //! eBPF observer emits events as they happen, so the engine sees hundreds of near-identical
 //! observations per batch — the same workload doing the same coarse thing (repeated cluster
@@ -20,7 +20,7 @@
 //!
 //! [`Behavior::is_alert`] observations bypass the buffer entirely and are returned for an
 //! IMMEDIATE POST. Alerts are the "something alarming, now" corroboration signal that live
-//! containment depends on (JEF-284 condition-2 quarantine, JEF-117) — debouncing them would
+//! containment depends on (condition-2 quarantine) — debouncing them would
 //! add window latency to exactly the path that must stay fast. Debouncing is only ever for
 //! the high-frequency mundane stream (network / exec / file / library / secret reads).
 //!
@@ -98,7 +98,7 @@ impl Coalescer {
     /// identical near-duplicate and is dropped (the first-seen is kept). The common steady-
     /// state case returns an empty vec — the observation is buffered for the window flush.
     pub fn offer(&mut self, obs: RuntimeObservation) -> Vec<RuntimeObservation> {
-        // Alerts bypass the debounce entirely — flush now, never buffer (JEF-296 correctness
+        // Alerts bypass the debounce entirely — flush now, never buffer (correctness
         // requirement: live corroboration must not eat the window latency).
         if obs.behavior.is_alert() {
             return vec![obs];

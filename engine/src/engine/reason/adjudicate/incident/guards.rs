@@ -71,9 +71,9 @@ pub fn guard_containment_grounding(
 }
 
 /// Whether `node`'s own evidence block would show the model anything to cite: a CVE
-/// observed loading at runtime (the JEF-453 exploitation-evidence filter,
+/// observed loading at runtime (the exploitation-evidence filter,
 /// [`retain_reachable_cves`]), an exposed secret, or any observed runtime behavior — the
-/// SAME "evidenced" predicate the JEF-565 downstream prompt blocks use to choose between a
+/// SAME "evidenced" predicate the downstream prompt blocks use to choose between a
 /// fenced evidence block and the "no evidence observed" one-liner.
 fn node_has_grounding(graph: &SecurityGraph, node: &NodeKey) -> bool {
     let (mut cves, behaviors, has_secret) = node_evidence(graph, node);

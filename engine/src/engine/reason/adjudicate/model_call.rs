@@ -1,7 +1,7 @@
 //! The model-backed adjudicator: the OpenAI-compatible model call plus the
 //! diagnostic judgement log. Split out of the adjudicate module root purely to keep
 //! every file under the 1,000-line cap (repo CLAUDE.md). It calls the shared model client
-//! with the caller-built prompt (JEF-350 — the same bytes the verdict cache keyed on),
+//! with the caller-built prompt (— the same bytes the verdict cache keyed on),
 //! assembles the entry's evidence for the deterministic backstops, and runs the remaining
 //! backstop (anti-fabrication) over the parsed verdict.
 
@@ -16,7 +16,7 @@ use super::incident::{
 };
 use super::{Adjudicator, Verdict};
 
-/// The downstream counterpart of the entry's own evidence fetch below (JEF-565): every
+/// The downstream counterpart of the entry's own evidence fetch below: every
 /// downstream node on the entry's proven paths is real, structural evidence — same standing as
 /// the entry's own — so the anti-fabrication and zero-anchor backstops must ground against it
 /// too, exactly as the prompt shows it (same per-node fetch + [`retain_reachable_cves`] filter
@@ -72,7 +72,7 @@ impl ModelAdjudicator {
 
     /// Record a judgement into the diagnostic log, if one is attached. Logs the legacy
     /// [`Verdict`] shape (via [`IncidentDecision::to_verdict`]) so the diagnostic record's
-    /// format is unchanged (JEF-570) — the cuts themselves are the caller's `judge` return.
+    /// format is unchanged — the cuts themselves are the caller's `judge` return.
     fn record_judgement(
         &self,
         entry: &NodeKey,
@@ -144,7 +144,7 @@ impl Adjudicator for ModelAdjudicator {
         downstream: &[NodeKey],
         menu: &Menu,
     ) -> IncidentDecision {
-        // Fetch the entry's evidence ONCE for the two anti-fabrication backstops. JEF-134:
+        // Fetch the entry's evidence ONCE for the two anti-fabrication backstops.
         // the deterministic layer PROVES + ENRICHES only — there is no pre-call decision
         // filter and no deterministic promotion-ground gate. EVERY breach-relevant entry's
         // proven chain + enrichment is handed to the model, which decides breach holistically.
@@ -158,7 +158,7 @@ impl Adjudicator for ModelAdjudicator {
         // / RBAC) is NOT an exploitation anchor, so it is ignored here.
         let (secret_lines, _posture_lines) = entry_findings(graph, entry);
         let mut has_exposed_secret = !secret_lines.is_empty();
-        // JEF-565: the prompt now shows a fenced evidence block for every DOWNSTREAM workload on
+        // the prompt now shows a fenced evidence block for every DOWNSTREAM workload on
         // the entry's proven paths too, not just the entry — so a genuine downstream CVE/secret/
         // behavior citation is real, grounded evidence and must not trip the anti-fabrication or
         // zero-anchor backstops below. Fold it into the SAME real-evidence sets those backstops
@@ -169,7 +169,7 @@ impl Adjudicator for ModelAdjudicator {
         has_exposed_secret |= downstream_has_secret;
         behaviors.extend(downstream_behaviors);
 
-        // JEF-350: the caller already built this exact prompt to derive the verdict-cache key
+        // the caller already built this exact prompt to derive the verdict-cache key
         // (its hash); reuse those bytes for the model call rather than rebuilding, so the input
         // the cache keyed on and the input the model sees can never drift.
         let (reply, decision) =
@@ -185,7 +185,7 @@ impl Adjudicator for ModelAdjudicator {
                     // never `Refuted`/carry a hidden line of evidence): a contained downstream
                     // node with no exploitation evidence of its own, then the reused
                     // anti-fabrication backstops (a fabricated CVE id, or a fabricated
-                    // `[reachability: loaded-at-runtime]` tag — JEF-451 G1) over the
+                    // `[reachability: loaded-at-runtime]` tag — G1) over the
                     // entry+downstream evidence union, then the assessment↔cuts consistency
                     // check (idempotent — the parser already enforces it).
                     let decision = guard_containment_grounding(decision, graph, entry);

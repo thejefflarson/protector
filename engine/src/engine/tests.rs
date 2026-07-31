@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Translate a legacy [`Verdict`] literal into the [`IncidentDecision`] shape a test double
-/// returns (JEF-570) — test-only, and deliberately lossy for `Confirmed` (mapped to `Attack`,
+/// returns — test-only, and deliberately lossy for `Confirmed` (mapped to `Attack`,
 /// same as every other test double; no test double here needs the Confirmed/Exploitable
 /// distinction ADR-0034 D2 retired). Never carries cuts: none of these doubles exercise
 /// cut-selection, only the caching/gate/dispatch machinery `to_verdict()` bridges back exactly.
@@ -97,7 +97,7 @@ pub(super) fn exposed_snapshot(with_cve: bool) -> Snapshot {
                     severity: Severity::Critical,
                     exploited_in_wild: true,
                     epss: None,
-                    // Observed loading at runtime — the JEF-453 filter only shows the judge
+                    // Observed loading at runtime — the filter only shows the judge
                     // reachable CVEs, so this exploitation-evidence CVE must be loaded-at-runtime
                     // to reach the prompt (and to change it, busting the verdict cache).
                     reachability: crate::engine::graph::Reachability::LoadedAtRuntime,
@@ -115,7 +115,7 @@ pub(super) fn exposed_snapshot(with_cve: bool) -> Snapshot {
 /// `n` INDEPENDENT internet-exposed workloads, each a distinct entry: pod `app/web-{i}`
 /// behind its own LoadBalancer, mounting its own secret — so a pass has `n` breach-relevant
 /// entries the adjudicator is consulted on. Used to exercise the concurrent dispatch and its
-/// per-entry isolation (JEF-337): with one entry per snapshot the concurrency is invisible.
+/// per-entry isolation: with one entry per snapshot the concurrency is invisible.
 fn exposed_snapshot_n(n: usize) -> Snapshot {
     let mut pods = Vec::new();
     let mut services = Vec::new();
@@ -197,7 +197,7 @@ async fn judges_every_breach_relevant_path_even_without_a_cve() {
     );
 }
 
-/// JEF-350: the verdict cache is keyed on a hash of the DETERMINISTIC prompt (the model's
+/// the verdict cache is keyed on a hash of the DETERMINISTIC prompt (the model's
 /// complete input), so it hits exactly when — and only when — what the model would see is
 /// unchanged. An identical snapshot renders an identical prompt → same hash → a cache hit
 /// (no model call); a MATERIALLY changed snapshot (here a new critical CVE enters the
@@ -259,7 +259,7 @@ pub(super) fn engine_with_adjudicator(adj: Box<dyn reason::adjudicate::Adjudicat
     )
 }
 
-/// JEF-157 (the no-lag fix): a judged entry's verdict is carried in the findings snapshot by
+///  (the no-lag fix): a judged entry's verdict is carried in the findings snapshot by
 /// the single shared verdict STORE, resolved at snapshot time — not stamped onto the rows
 /// by an end-of-pass re-publish. We prove the store is the source of truth: after a
 /// pass the verdict is in the findings snapshot, AND it equals the store's value for that
@@ -297,7 +297,7 @@ async fn a_judged_verdict_lands_on_findings_via_the_shared_store() {
     );
 }
 
-/// JEF-157 carry-forward: when a later pass comes back Uncertain (a transient model
+///  carry-forward: when a later pass comes back Uncertain (a transient model
 /// timeout), the resolved posture keeps the prior DECISIVE verdict rather than
 /// regressing to "uncertain" — the store holds the carried-forward display verdict.
 #[tokio::test]
@@ -327,7 +327,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
     let mut engine = engine_with_adjudicator(Box::new(FlakyAdjudicator(calls.clone())));
 
     // Pass 1: decisive Exploitable (no CVE yet — the entry is breach-relevant because it
-    // reaches the mounted secret), resolved in the findings snapshot. This sets the JEF-391
+    // reaches the mounted secret), resolved in the findings snapshot. This sets the
     // baseline to the current, CVE-free surface.
     engine.process(&exposed_snapshot(false)).await;
     assert!(
@@ -341,7 +341,7 @@ async fn an_uncertain_re_judge_keeps_showing_the_prior_decisive_verdict() {
         "the first decisive verdict shows"
     );
 
-    // Pass 2 ADDS a critical CVE — an ADDITIVE delta since the baseline (JEF-391), so the model
+    // Pass 2 ADDS a critical CVE — an ADDITIVE delta since the baseline, so the model
     // is re-consulted — and this time it returns Uncertain. The resolved posture must keep the
     // prior decisive verdict, not regress to "uncertain". (A purely SUBTRACTIVE change would NOT
     // re-judge under ADR-0023; the additive one is what drives the re-judge here.)
@@ -377,7 +377,7 @@ async fn publishes_findings_independent_of_the_model() {
     );
 }
 
-/// The attribution-outcome metric (JEF-100) uses [`Attribution::resolves_in`] against
+/// The attribution-outcome metric uses [`Attribution::resolves_in`] against
 /// the live pod-UID set the metric loop builds once per pass — the same rule the
 /// RuntimeAdapter applies. A namespace/name attribution always resolves; a cgroup-UID
 /// one resolves only when a pod with that UID is in the snapshot (an unknown UID is
@@ -419,7 +419,7 @@ fn attribution_resolves_mirrors_the_adapter_rule() {
 }
 
 /// A live alert on a breach-relevant entry sets `corroborated` — the source the
-/// corroborations-fired counter reads (JEF-100). Pure instrumentation: this asserts
+/// corroborations-fired counter reads. Pure instrumentation: this asserts
 /// the predicate the metric counts, and that recording it doesn't disturb processing.
 #[tokio::test]
 async fn corroboration_predicate_fires_on_a_live_alert() {
@@ -449,7 +449,7 @@ async fn corroboration_predicate_fires_on_a_live_alert() {
     );
 }
 
-/// `process` publishes the behavioral-bake snapshot (JEF-48) to the findings handle
+/// `process` publishes the behavioral-bake snapshot to the findings handle
 /// each pass: signal volume by variant, attribution resolved/unresolved mirroring the
 /// adapter rule, the live-store size, and corroborations fired — the in-process
 /// mirror of the OTLP bake counters.
@@ -501,7 +501,7 @@ async fn process_publishes_the_behavioral_bake_snapshot() {
     );
 }
 
-/// JEF-337: an adjudicator that records how many `judge` calls overlap at once. Each call
+/// an adjudicator that records how many `judge` calls overlap at once. Each call
 /// lingers briefly so, if the dispatch runs them concurrently, the observed max exceeds one.
 struct ConcurrencyProbe {
     in_flight: Arc<AtomicUsize>,
@@ -528,7 +528,7 @@ impl reason::adjudicate::Adjudicator for ConcurrencyProbe {
     }
 }
 
-/// JEF-337 acceptance: a single adjudication pass dispatches its per-entry model calls
+///  acceptance: a single adjudication pass dispatches its per-entry model calls
 /// CONCURRENTLY, not one-at-a-time behind the old serialization gate. With several distinct
 /// breach entries in one snapshot, the adjudicator must see more than one `judge` in flight at
 /// once — the observable difference from the removed 1-permit gate.
@@ -551,7 +551,7 @@ async fn adjudication_dispatches_entries_concurrently() {
     );
 }
 
-/// JEF-337 isolation: one entry's model failure (an Uncertain — a 500/timeout maps to that)
+///  isolation: one entry's model failure (an Uncertain — a 500/timeout maps to that)
 /// must NOT abort or poison the other entries' adjudication in the same concurrent pass. An
 /// adjudicator that fails exactly ONE entry (the first to be polled) and decisively judges the
 /// rest must leave every other entry with its decisive verdict; only the failing one is
@@ -609,7 +609,7 @@ async fn one_entrys_model_failure_does_not_poison_the_others() {
     );
 }
 
-// --- ADR-0034 (JEF-570): the cut-choice contract wired into the live ledger ---
+// --- ADR-0034: the cut-choice contract wired into the live ledger ---
 
 /// ADR-0034 D7 (the retirement asymmetry, the safety-critical half of this ticket): a
 /// PREVIOUSLY model-chosen cut must NOT retire just because the model comes back `Uncertain`
@@ -657,7 +657,7 @@ async fn a_fresh_uncertain_does_not_retire_a_previously_chosen_cut() {
         "the decisive Attack's chosen cut is active after pass 1"
     );
 
-    // Pass 2 ADDS nothing (identical facts), so the entry re-verifies (JEF-445 — a cached
+    // Pass 2 ADDS nothing (identical facts), so the entry re-verifies (— a cached
     // Exploitable/Attack is never served from cache) and this time comes back Uncertain. The
     // ledger's active set must be UNCHANGED — inert, not retired.
     engine.process(&exposed_snapshot(true)).await;

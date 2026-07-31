@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attribute verdict-cache churn to the EXACT prompt section that changed (JEF-387).
+"""Attribute verdict-cache churn to the EXACT prompt section that changed.
 
 Stop playing whack-a-mole with re-judge churn: over a 24h window, ingest the engine's
 compact `ADJ-MISS-DIAG` log lines (one per re-judge / cache MISS) and answer, from fact,
@@ -21,7 +21,7 @@ Fields the harness uses:
   entry  — the entry key; the per-entry timeline key.
   fp     — the WHOLE-prompt hash (the verdict-cache key). Between two consecutive lines for
            an entry: fp CHANGED ⇒ prompt churn (attributed to the sec_* that moved);
-           fp UNCHANGED ⇒ an Uncertain-retry (JEF-234: the MODEL's verdict, not the prompt)
+           fp UNCHANGED ⇒ an Uncertain-retry (the MODEL's verdict changed, not the prompt)
            — counted separately and NEVER conflated with prompt churn.
   chain  — the objective/technique-SET shape hash; entries sharing it are grouped.
   sec_*  — the six per-section fingerprints (runtime, cves, secrets, posture, objectives,
@@ -99,7 +99,7 @@ def analyze(records):
     between two consecutive lines for the same entry (the first line for an entry is the
     initial judge — no predecessor to attribute against). Each transition is split by `fp`:
     changed ⇒ prompt churn (attributed to every section that moved); unchanged ⇒ an
-    Uncertain-retry (JEF-234)."""
+    Uncertain-retry."""
     by_entry = OrderedDict()
     for record in records:
         by_entry.setdefault(record["entry"], []).append(record)
@@ -163,7 +163,7 @@ def _pct(part, whole):
 def format_report(a):
     """Render the analysis as the human churn report."""
     out = []
-    out.append("=== churn attribution (JEF-387) ===")
+    out.append("=== churn attribution ===")
     out.append(
         f"events={a['total_events']}  entries={a['entries']}  "
         f"re-judges(transitions)={a['transitions']}  "
@@ -171,7 +171,7 @@ def format_report(a):
     )
 
     out.append("")
-    out.append("--- prompt-churn vs Uncertain-retry (JEF-234) split ---")
+    out.append("--- prompt-churn vs Uncertain-retry split ---")
     out.append(
         f"prompt-churn      {a['prompt_churn']:>6}  "
         f"({_pct(a['prompt_churn'], a['transitions']):5.1f}% of re-judges)"

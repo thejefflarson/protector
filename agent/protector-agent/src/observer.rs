@@ -24,7 +24,7 @@ impl NoopObserver {
         _tx: Sender<RuntimeObservation>,
         probes: std::sync::Arc<crate::ProbeStatus>,
     ) {
-        // No collection ⇒ zero probes attached: the liveness beacon (JEF-308) then honestly reports
+        // No collection ⇒ zero probes attached: the liveness beacon then honestly reports
         // this node BLIND (probes_loaded == 0), never a false healthy.
         probes.set(0, 0);
         tracing::warn!(
@@ -37,7 +37,7 @@ impl NoopObserver {
 }
 
 /// Signals-per-second over a heartbeat interval: the count of successfully attributed
-/// and forwarded observations divided by the elapsed wall-clock seconds (JEF-101). Pure
+/// and forwarded observations divided by the elapsed wall-clock seconds. Pure
 /// and kernel-free so it's unit-testable in the default build. Guards a zero/sub-tick
 /// elapsed (returns 0.0 rather than dividing by ~0 and reporting a nonsense spike).
 ///
@@ -94,7 +94,7 @@ mod ebpf {
 
     /// How often to read the kernel drop counter and (if it moved) log a heartbeat.
     /// Drops are silent loss from a full ring; 30s keeps the signal visible without
-    /// spamming the log (JEF-58).
+    /// spamming the log.
     const HEARTBEAT: Duration = Duration::from_secs(30);
 
     /// Depth of the drain→attribution hand-off channel. The drain parses ring bytes
@@ -112,7 +112,7 @@ mod ebpf {
     const PID_CACHE_CAP: usize = 8192;
 
     /// How often the attribution worker rescans `/sys/fs/cgroup` to refresh the
-    /// `cgroup_id → pod_uid` table (JEF-158). The agent has no pod watch (no cluster
+    /// `cgroup_id → pod_uid` table. The agent has no pod watch (no cluster
     /// credentials, ADR-0014), so a periodic rescan is how it tracks pods coming and going.
     /// 10s is well under a pod's lifetime: a pod created between scans simply attributes via
     /// the `/proc` fallback until the next scan, then via the table — never a lost signal.
@@ -126,7 +126,7 @@ mod ebpf {
     }
 
     /// A ring event parsed into typed fields but **not yet attributed** to a pod. This is
-    /// the unit handed across the drain→worker boundary (JEF-64): the cheap `repr(C)`
+    /// the unit handed across the drain→worker boundary: the cheap `repr(C)`
     /// decode stays on the drain, the expensive cgroup read happens in the worker. One
     /// variant per probe — mirrors the `decode` dispatch.
     enum RawEvent {
@@ -148,7 +148,7 @@ mod ebpf {
             new_uid: u32,
         },
         /// Process exec: the exec'd binary path (e.g. `/usr/bin/bash`), NUL-trimmed, plus
-        /// the anon-inode kernel fact (JEF-317, Route A) the probe read from
+        /// the anon-inode kernel fact (Route A) the probe read from
         /// `bprm->file->f_inode` — memfd/shmem-backed or unlinked, rather than a normal
         /// on-disk file.
         Exec {
@@ -158,11 +158,11 @@ mod ebpf {
         },
         /// File write: the written file's path (e.g. `/etc/cron.d/x`), NUL-trimmed. The
         /// eBPF side already filtered to write-intent opens and deduped repeats to the same
-        /// `(pid, inode)`; this just carries the path through (JEF-306).
+        /// `(pid, inode)`; this just carries the path through.
         FileWrite { attr: EventAttr, path: String },
     }
 
-    /// The pair of identities every event carries for attribution (JEF-158): the in-kernel
+    /// The pair of identities every event carries for attribution: the in-kernel
     /// `cgroup_id` (the hot path — resolved via the [`CgroupTable`], works after the process
     /// exits) and the `pid` (the `/proc/<pid>/cgroup` fallback when the table misses).
     #[derive(Clone, Copy)]
@@ -257,12 +257,12 @@ mod ebpf {
             // skipped, leaving the others (and the connect kprobe) running.
             let (fentry_loaded, fentry_total) = Self::attach_fentry(&mut ebpf);
             loaded += fentry_loaded;
-            // Publish probe-attach status (JEF-308): the liveness beacon reads it so a Ready agent
+            // Publish probe-attach status: the liveness beacon reads it so a Ready agent
             // whose probes failed to attach (loaded == 0) reads BLIND, and a partial load reads
             // degraded — signal-flow liveness, not pod-Ready.
             let total = PROBES.len() as u32 + fentry_total;
             probes.set(loaded, total);
-            tracing::info!(loaded, total, "eBPF probes attached (JEF-308 liveness)");
+            tracing::info!(loaded, total, "eBPF probes attached (liveness)");
             tracing::info!("draining events");
 
             let ring = RingBuf::try_from(
@@ -270,14 +270,14 @@ mod ebpf {
                     .ok_or_else(|| anyhow::anyhow!("EVENTS map missing"))?,
             )?;
             // The kernel's cumulative drop counter (per-CPU, one slot). Taken like
-            // EVENTS so we own a stable handle for the heartbeat reads (JEF-58).
+            // EVENTS so we own a stable handle for the heartbeat reads.
             let drops: PerCpuArray<_, u64> = PerCpuArray::try_from(
                 ebpf.take_map("DROPS")
                     .ok_or_else(|| anyhow::anyhow!("DROPS map missing"))?,
             )?;
             // The kernel's cumulative in-kernel-coalesced counter (per-CPU, one slot),
             // taken like DROPS so the heartbeat can surface how many connect repeats the
-            // dedup map suppressed at the source (JEF-65).
+            // dedup map suppressed at the source.
             let coalesced: PerCpuArray<_, u64> = PerCpuArray::try_from(
                 ebpf.take_map("COALESCED")
                     .ok_or_else(|| anyhow::anyhow!("COALESCED map missing"))?,
@@ -289,26 +289,26 @@ mod ebpf {
             heartbeat.tick().await;
             let mut last_drops: u64 = 0;
 
-            // JEF-64: attribution is OFF the drain path. The drain only parses ring bytes
+            // attribution is OFF the drain path. The drain only parses ring bytes
             // into `RawEvent`s (cheap) and hands them to this bounded channel; a separate
             // worker task does the blocking `/proc/<pid>/cgroup` read, builds the
             // `RuntimeObservation`, and forwards it to `tx`. A slow `/proc` can no longer
             // back the ring up — at worst the channel fills and we drop new raw events
             // (see `try_send` below), which the additive-evidence model tolerates.
             //
-            // JEF-65: in-kernel event aggregation now coalesces high-frequency connect
+            // in-kernel event aggregation now coalesces high-frequency connect
             // repeats at the source — a per-(pid, dest) LRU dedup map in the connect probe
             // suppresses a repeat seen within the dedup window so it never costs a ring slot
             // (cutting volume before the drain, not draining + dropping duplicates here). The
             // suppressed count surfaces as `coalesced` in the heartbeat below.
             let (raw_tx, raw_rx) = mpsc::channel::<RawEvent>(ATTRIB_QUEUE);
-            // Per-node counters shared with the attribution worker (JEF-101). All are
-            // cumulative; the heartbeat snapshots them to surface the numbers JEF-48's
-            // exit criteria need measurable per node: ring-buffer drops, the signal rate,
+            // Per-node counters shared with the attribution worker. All are
+            // cumulative; the heartbeat snapshots them to surface the numbers the
+            // behavioral-bake's exit criteria need measurable per node: ring-buffer drops, the signal rate,
             // and attribution quality. `Relaxed` is fine — these are monotonic counters
             // read for observability, not a synchronization gate.
             //
-            // JEF-115: `unresolved` now counts ONLY genuine misses (pid gone / cgroup
+            // `unresolved` now counts ONLY genuine misses (pid gone / cgroup
             // unreadable), matching the engine-side ~1.4%. The host-process firehose the
             // node-wide kprobe sees — readable cgroups that simply aren't pods — is the
             // EXPECTED case and is counted separately in `host_events`, not as a failure.
@@ -341,7 +341,7 @@ mod ebpf {
                                 // immediately so draining stays fast: a full queue means
                                 // attribution is behind, and we deliberately drop this
                                 // raw event rather than block the drain (which would
-                                // re-introduce the very ring-buffer backpressure JEF-64
+                                // re-introduce the very ring-buffer backpressure
                                 // removes). A closed channel means the worker exited
                                 // (receiver gone) — shut the drain down too.
                                 match raw_tx.try_send(raw) {
@@ -371,21 +371,21 @@ mod ebpf {
                         }
                         last_drops = total;
 
-                        // JEF-101: emit the per-node numbers JEF-48 needs measurable —
+                        // emit the per-node numbers the behavioral-bake needs measurable —
                         // cumulative ring drops, the signal rate over this interval, and
                         // attribution quality — as a structured stat line (greppable/
                         // scrapeable per node, no new deps, wire payload unchanged). Unlike
                         // the drop warning above this fires every tick so "zero drops" is
                         // observable as a present-and-zero datapoint.
                         //
-                        // JEF-115: `attribution_unresolved` is now genuine misses only
+                        // `attribution_unresolved` is now genuine misses only
                         // (should be near-zero, matching the engine's ~1.4%); the expected
                         // host-process firehose is reported separately as `host_events` so
                         // it's visible without masquerading as attribution failure.
                         let unresolved_total = unresolved.load(Ordering::Relaxed);
                         let host_total = host_events.load(Ordering::Relaxed);
                         let signals_total = signals.load(Ordering::Relaxed);
-                        // JEF-65: connect repeats coalesced in-kernel (cumulative). A
+                        // connect repeats coalesced in-kernel (cumulative). A
                         // rising `coalesced` against a flat/low `ring_drops` is the dedup
                         // working — volume cut at the source before it can pressure the ring.
                         let coalesced_total = Self::sum_percpu(&coalesced);
@@ -414,13 +414,13 @@ mod ebpf {
             result
         }
 
-        /// The attribution worker: the slow half of the split, off the drain path
-        /// (JEF-64). Receives parsed-but-unattributed [`RawEvent`]s, resolves each to a pod
+        /// The attribution worker: the slow half of the split, off the drain path.
+        /// Receives parsed-but-unattributed [`RawEvent`]s, resolves each to a pod
         /// UID, builds the `RuntimeObservation`, and forwards it to `tx`. Exits when the
         /// drain drops its sender (`recv` → `None`) or the report receiver is gone
         /// (`tx.send` errors) — either way a clean shutdown.
         ///
-        /// JEF-158: attribution now resolves the event's in-kernel `cgroup_id` against a
+        /// attribution now resolves the event's in-kernel `cgroup_id` against a
         /// [`CgroupTable`] built from `/sys/fs/cgroup` FIRST. A table hit needs no `/proc`
         /// read, so a short-lived in-container exec/shell that has already exited still
         /// attributes — the exited-process race the post-hoc `/proc/<pid>/cgroup` read keeps
@@ -430,7 +430,7 @@ mod ebpf {
         /// watch (ADR-0014), so a periodic rescan of the cgroup hierarchy is how it tracks
         /// pods coming and going.
         ///
-        /// JEF-115 (unchanged): three outcomes. A pod is forwarded; a readable non-pod
+        ///  (unchanged): three outcomes. A pod is forwarded; a readable non-pod
         /// cgroup (the host-process firehose) is dropped and counted as a `host_event`
         /// (EXPECTED, not a failure); an unreadable cgroup (pid gone) is the only case
         /// counted as `unresolved` — a genuine miss.
@@ -446,14 +446,14 @@ mod ebpf {
             let mut table = scan_cgroupfs(cgroup_root());
             tracing::info!(
                 pods = table.len(),
-                "cgroup attribution table built (JEF-158)"
+                "cgroup attribution table built"
             );
             let mut rescan = tokio::time::interval(CGROUP_RESCAN);
             rescan.tick().await; // consume the immediate first tick
             // Per-pid cache for the FALLBACK `/proc` read only — a table miss from a chatty
             // host pid shouldn't re-read `/proc` per event. Bounded; cleared wholesale at cap.
             let mut fallback_cache: HashMap<u32, PodAttribution> = HashMap::new();
-            // Pod UIDs we've already reported entrypoint linkage for (JEF-407). Linkage is a
+            // Pod UIDs we've already reported entrypoint linkage for. Linkage is a
             // stable per-image fact, so we classify `/proc/<pid>/exe` once per pod on its first
             // exec and never again — one ELF read per pod, not per exec. Bounded like the pid
             // cache; cleared wholesale at the cap (a re-report on a churned pod is harmless —
@@ -479,18 +479,18 @@ mod ebpf {
                     PodAttribution::NotAPod => {
                         // The node-wide kprobe's expected host firehose — dropped (never
                         // fatal). Counted apart from misses so it doesn't masquerade as
-                        // attribution failure (JEF-115).
+                        // attribution failure.
                         host_events.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     PodAttribution::Unreadable => {
                         // pid gone / cgroup unreadable — a genuine miss. This is what
-                        // JEF-48's "low unresolved attribution" measures per node.
+                        // the behavioral-bake's "low unresolved attribution" measures per node.
                         unresolved.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                 };
-                // JEF-407: an exec is our chance to classify the workload's ENTRYPOINT linkage
+                // an exec is our chance to classify the workload's ENTRYPOINT linkage
                 // — `/proc/<pid>/exe` is the exec'd binary. Capture the pid before `raw` is
                 // consumed; only an Exec triggers a linkage classification, and only the first
                 // time we see a given pod (linkage is a stable per-image fact).
@@ -499,7 +499,7 @@ mod ebpf {
                     attribution: Attribution::by_pod_uid(uid.clone()),
                     source: Some(SOURCE.into()),
                     observed_at_ms: now_ms(),
-                    // The agent's node (JEF-308) is stamped by the flusher in `main` from `K8S_NODE`
+                    // The agent's node is stamped by the flusher in `main` from `K8S_NODE`
                     // — kept in one place, so the ebpf worker leaves it unset here.
                     node: None,
                     behavior: raw.into_behavior(),
@@ -510,7 +510,7 @@ mod ebpf {
                 // A signal successfully attributed and forwarded — the rate numerator.
                 signals.fetch_add(1, Ordering::Relaxed);
 
-                // Emit the entrypoint's static/dynamic linkage once per pod (JEF-407). Bounds
+                // Emit the entrypoint's static/dynamic linkage once per pod. Bounds
                 // the ELF read to one-per-pod, and drops an unknown classification (unreadable
                 // exe / non-ELF) rather than guessing — the engine then keeps its prior
                 // `static_binary == None` behavior for that workload.
@@ -540,7 +540,7 @@ mod ebpf {
             }
         }
 
-        /// Resolve one event's [`EventAttr`] to a [`PodAttribution`] (JEF-158): the in-kernel
+        /// Resolve one event's [`EventAttr`] to a [`PodAttribution`]: the in-kernel
         /// `cgroup_id` against `table` first (no `/proc` — the exited-process-safe hot path),
         /// then the `/proc/<pid>/cgroup` fallback on a miss, memoized in `cache` so a flood
         /// from one pid doesn't re-read `/proc`. Every fallback outcome (pod, host non-pod,
@@ -567,8 +567,8 @@ mod ebpf {
         }
 
         /// Sum a single-slot per-CPU `u64` counter across all CPUs into its cumulative
-        /// total. Shared by the ring-drop counter (JEF-58) and the in-kernel-coalesced
-        /// counter (JEF-65) — both are the same one-slot `PerCpuArray<u64>` shape. A
+        /// total. Shared by the ring-drop counter and the in-kernel-coalesced
+        /// counter — both are the same one-slot `PerCpuArray<u64>` shape. A
         /// per-CPU read failure is treated as 0 for that read (best-effort observability —
         /// never errors the drain).
         fn sum_percpu(
@@ -584,7 +584,7 @@ mod ebpf {
         /// (program name in the object, kernel function it hooks). fentry attaches via
         /// BTF, so it's separate from the kprobe table; the BTF is loaded once. Returns
         /// `(attached, attempted)` so the caller can publish the probe-attach status the
-        /// per-node liveness beacon reads (JEF-308) — a partial load reads degraded.
+        /// per-node liveness beacon reads — a partial load reads degraded.
         fn attach_fentry(ebpf: &mut Ebpf) -> (u32, u32) {
             const FENTRY_PROBES: &[(&str, &str)] = &[
                 ("file_open", "security_file_open"),
@@ -636,7 +636,7 @@ mod ebpf {
         /// drain path: only the `repr(C)` byte parse (no `/proc`, no allocation beyond the
         /// path string). Returns `None` for a truncated event, an unknown kind, or an
         /// empty path — all dropped, never fatal. Attribution (the cgroup read) happens
-        /// later in the worker (JEF-64).
+        /// later in the worker.
         fn decode(data: &[u8]) -> Option<RawEvent> {
             if data.len() < std::mem::size_of::<EventHeader>() {
                 return None;
@@ -753,7 +753,7 @@ mod ebpf {
 
         /// Parse a process-exec event into a raw Exec. `path` is the exec'd binary path as
         /// the kernel saw it (`linux_binprm->filename`), NUL-trimmed; the behavior crate
-        /// coarsens it to the basename for the fingerprint. `exe_anon_inode` (JEF-317,
+        /// coarsens it to the basename for the fingerprint. `exe_anon_inode` (
         /// Route A) carries the probe's `bprm->file->f_inode` fact straight through — a
         /// non-zero kernel byte is `true`, never inferred from `path`. Drops empty paths.
         /// Pure (no `/proc`).
@@ -776,7 +776,7 @@ mod ebpf {
         /// as the kernel saw it (`bpf_d_path`), NUL-trimmed; the behavior crate coarsens it
         /// to the dirname for the fingerprint. The eBPF side already filtered to write-intent
         /// opens and deduped repeats to the same `(pid, inode)`, so this just carries the
-        /// path through. Drops empty paths. Pure (no `/proc`). PURE DATA (JEF-306): the
+        /// path through. Drops empty paths. Pure (no `/proc`). PURE DATA: the
         /// container-drift / tamper *classification* is engine policy (F3), not done here.
         fn file_write(ev: &FileEvent) -> Option<RawEvent> {
             let len = (ev.len as usize).min(PATH_CAP);
@@ -794,7 +794,7 @@ mod ebpf {
     }
 
     /// Read a pid's cgroup membership text (`/proc/<pid>/cgroup`). The blocking read kept
-    /// off the drain path (JEF-64): called only from the attribution worker. `None` if the
+    /// off the drain path: called only from the attribution worker. `None` if the
     /// process is gone or unreadable (a host process or an exited pid) — the event is then
     /// dropped, never fatal.
     fn read_cgroup(pid: u32) -> Option<String> {
@@ -837,7 +837,7 @@ mod rate_tests {
     #[test]
     fn zero_signals_is_zero_rate() {
         // A quiet interval must report 0.0, not absence — present-and-zero is the
-        // "no drops / no traffic" datapoint JEF-48 needs.
+        // "no drops / no traffic" datapoint the behavioral-bake needs.
         assert_eq!(signal_rate(0, Duration::from_secs(30)), 0.0);
     }
 

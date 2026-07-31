@@ -1,15 +1,15 @@
-//! The admission-decision log (JEF-226, extended JEF-237): a bounded, deduped, in-memory
+//! The admission-decision log (extended): a bounded, deduped, in-memory
 //! ring of the webhook's per-event policy decisions — the signature / mesh allow / audit /
 //! deny verdicts the admission webhook resolves on each `AdmissionReview`.
 //!
-//! JEF-226 recorded ONLY violations (audit/deny), so a healthy cluster's admission-decision
-//! log was empty and read as broken. JEF-237 records EVERY resolved admission — including clean
+//! This log used to record ONLY violations (audit/deny), so a healthy cluster's admission-decision
+//! log was empty and read as broken. It now records EVERY resolved admission — including clean
 //! admits (signed + meshed) — so the operator sees the full picture: the good pods, not just
 //! the flagged ones. Each row carries the workload subject, the image ref, the coarse
 //! signature + mesh status, the namespace, the coarse decision word, the reason, and the time.
 //!
-//! Volume is the reason JEF-226 stayed violations-only: a Deployment's N replicas and a
-//! CronJob's repeated runs would flood an admit-everything log. JEF-237 bounds it two ways:
+//! Volume is the reason the log stayed violations-only: a Deployment's N replicas and a
+//! CronJob's repeated runs would flood an admit-everything log. This bounds it two ways:
 //! **dedup** by `(subject, image, decision)` — one row per distinct workload + image +
 //! outcome, carrying a `count` and the `last_seen` time — and a **ring cap** on the number of
 //! distinct rows. So replica/CronJob churn coalesces into a single counted row instead of
@@ -21,8 +21,8 @@
 //! write handle is shared into the webhook engine and the read handle out to consumers — the
 //! two halves of one `Arc`.
 //!
-//! Persistence (JEF-237): the webhook engine ALSO mirrors each recorded decision into the
-//! durable decision journal (JEF-141) so the log survives a restart. On boot the engine
+//! Persistence: the webhook engine ALSO mirrors each recorded decision into the
+//! durable decision journal so the log survives a restart. On boot the engine
 //! replays the journal's admission lines back into this ring (parallel to `restored_verdicts`),
 //! so the admission-decision log repopulates immediately rather than going blank for ~20 min.
 //!
@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 /// Diagnostic / audit only — it complements (never replaces) the aggregate `/metrics` counter.
 ///
 /// `Serialize`/`Deserialize` are the record's JSON contract AND the durable-journal shape:
-/// every field that post-dates JEF-226 uses `#[serde(default)]` so an older journal line still
+/// every field added after the initial schema uses `#[serde(default)]` so an older journal line still
 /// parses. Every text field is operator-facing untrusted free-text and must be escaped wherever
 /// it is later emitted; an attacker-controlled image ref or workload name cannot inject markup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,16 +60,16 @@ pub struct PolicyDecisionRecord {
     /// image-scoped. Part of the dedup key with `subject` + `decision`. UNTRUSTED at render.
     #[serde(default)]
     pub image: String,
-    /// Three-state signature shadow status (JEF-246): `verified` (in scope, checked, passed),
+    /// Three-state signature shadow status: `verified` (in scope, checked, passed),
     /// `would-pass` (out of scope, shadow-checked, would pass), or `would-fail` (would deny if
     /// enforced). Empty when the signature gate has no opinion (e.g. a non-Pod). The what-if is
     /// computed for EVERY request so a green status can no longer mean "wasn't actually checked".
-    /// Pre-JEF-246 journal lines carry the old coarse words (`signed`/`unsigned`); `#[serde(default)]`
+    /// Pre- journal lines carry the old coarse words (`signed`/`unsigned`); `#[serde(default)]`
     /// keeps them parseable. Low-cardinality. UNTRUSTED at render (it's a fixed word, but the
     /// component escapes regardless).
     #[serde(default)]
     pub signature: String,
-    /// Three-state mesh shadow status (JEF-246): `verified` / `would-pass` / `would-fail`, with
+    /// Three-state mesh shadow status: `verified` / `would-pass` / `would-fail`, with
     /// the same semantics as [`signature`](Self::signature). Empty when the mesh gate has no
     /// opinion (a non-Pod, or a one-shot/Job pod out of mesh scope). Low-cardinality.
     #[serde(default)]
@@ -79,10 +79,10 @@ pub struct PolicyDecisionRecord {
     /// The human-actionable reason — the same prose the deny/audit log carries. Empty for a
     /// plain `allow`. UNTRUSTED at render (it can quote an attacker-chosen image ref).
     pub reason: String,
-    /// The net counterfactual (JEF-246): would this request be ADMITTED if every gate were
+    /// The net counterfactual: would this request be ADMITTED if every gate were
     /// enforced? `false` when any shadow-evaluated gate would fail. Display-only — it never
     /// gates the actual decision (ADR-0016); the honest API verdict is [`decision`](Self::decision).
-    /// Defaults to `true` so a pre-JEF-246 journal line (no field) reads as "no would-deny known".
+    /// Defaults to `true` so a pre- journal line (no field) reads as "no would-deny known".
     #[serde(default = "yes")]
     pub would_admit: bool,
     /// How many times this exact `(subject, image, decision)` was seen (dedup count). Starts
@@ -99,7 +99,7 @@ fn one() -> u64 {
     1
 }
 
-/// `serde` default for `would_admit` on lines that predate JEF-246: a pre-existing journal line
+/// `serde` default for `would_admit` on lines that predate a pre-existing journal line
 /// has no counterfactual, so default to "would admit" (no known would-deny).
 fn yes() -> bool {
     true
@@ -138,7 +138,7 @@ impl PolicyDecisionRecord {
         }
     }
 
-    /// Set the net would-admit counterfactual (JEF-246). Builder-style so [`now`](Self::now)
+    /// Set the net would-admit counterfactual. Builder-style so [`now`](Self::now)
     /// stays the minimal positional constructor and the back-compat default holds for callers
     /// (and journal lines) that don't set it.
     pub fn with_would_admit(mut self, would_admit: bool) -> Self {
@@ -206,7 +206,7 @@ impl PolicyDecisionLog {
         rows.push_back(decision);
     }
 
-    /// Restore a record from the durable journal (JEF-237), preserving its `count` and
+    /// Restore a record from the durable journal, preserving its `count` and
     /// `last_seen` rather than resetting to 1. Deduped like [`record`](Self::record): a replayed
     /// line whose identity is already present folds its count in (so a journal that logged the
     /// same decision across rotations still totals correctly).
@@ -263,7 +263,7 @@ impl PolicyDecisionLog {
     }
 }
 
-/// Coarse decision tallies for the admission decision log's activity totals (JEF-237): how many
+/// Coarse decision tallies for the admission decision log's activity totals: how many
 /// admissions the webhook admitted / audited / denied, summed over the deduped rows' counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecisionTallies {
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn clean_admits_are_recorded() {
-        // JEF-237: an `allow` (clean admit) is a first-class row, not dropped.
+        // an `allow` (clean admit) is a first-class row, not dropped.
         let log = PolicyDecisionLog::new();
         log.record(rec(
             "admission",
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn replica_churn_dedups_into_a_single_counted_row() {
-        // The whole point of JEF-237's bounding: a Deployment's N replicas (same subject +
+        // The whole point of the dedup+ring-cap bounding: a Deployment's N replicas (same subject +
         // image + outcome) coalesce into ONE row with count == N, not N rows.
         let log = PolicyDecisionLog::new();
         for _ in 0..50 {
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn restore_preserves_count_and_last_seen() {
-        // JEF-237 persistence: a replayed journal line keeps its count, it isn't reset to 1.
+        //  persistence: a replayed journal line keeps its count, it isn't reset to 1.
         let log = PolicyDecisionLog::new();
         let mut r = rec(
             "admission",
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn record_round_trips_through_json_with_back_compat_defaults() {
-        // The record's JSON + journal contract: a record serializes and a JEF-226-era line
+        // The record's JSON + journal contract: a record serializes and a -era line
         // (no image/signature/mesh/count) still deserializes via #[serde(default)].
         let r = rec(
             "admission",
@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(parsed.count, 1, "absent count defaults to one");
         assert!(
             parsed.would_admit,
-            "a pre-JEF-246 line with no would_admit defaults to true"
+            "an older journal line with no would_admit defaults to true"
         );
     }
 }

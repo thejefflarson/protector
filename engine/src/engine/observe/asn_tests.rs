@@ -1,4 +1,4 @@
-//! Tests for the offline ASN dataset parser + lookup (JEF-380). Split into a sibling file
+//! Tests for the offline ASN dataset parser + lookup. Split into a sibling file
 //! to keep `asn.rs` well under the 1,000-line cap (repo CLAUDE.md).
 
 use super::*;

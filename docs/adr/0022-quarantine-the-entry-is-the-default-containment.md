@@ -1,6 +1,6 @@
 # 0022. Quarantine the internet-facing entry is the default containment; the surgical edge-cut is the refinement
 
-- Status: Accepted; the **JEF-284 amendment's decision procedure is superseded in part by [ADR-0032](0032-model-is-incident-responder.md)** (the model now decides the cut). The containment vocabulary, additive/reversible shapes, and the precedence ladder survive as the menu ordering / proposal fallback.
+- Status: Accepted; the ** amendment's decision procedure is superseded in part by [ADR-0032](0032-model-is-incident-responder.md)** (the model now decides the cut). The containment vocabulary, additive/reversible shapes, and the precedence ladder survive as the menu ordering / proposal fallback.
 - Date: 2026-07-03
 
 ## Context
@@ -111,7 +111,7 @@ entry-quarantine default, not only an edge-cut) and
 **entry** by default, not the cut edge's source, and is no longer gated on a network
 edge existing).
 
-## Amendment (JEF-284): quarantine any *compromised* pod on the chain — reached ≠ exploited
+## Amendment: quarantine any *compromised* pod on the chain — reached ≠ exploited
 
 The entry quarantine above contains the *front door*. But a breach chain has more than
 a front door: a popped app two hops in, or an internal pod with hands-on-keyboard
@@ -127,7 +127,7 @@ internet-facing entry" to **any qualifying pod on a proven chain**, via a new
    actually running on it (the `compromisable` predicate — the same bar the proof walk's
    compromise gate and `entry_foothold` already use). Reachability alone is not enough.
 2. **Actively exploited** — the pod has direct live on-pod runtime evidence
-   (`Behavior::is_alert` / a hands-on-keyboard `notable_exec`, JEF-117) — exploitation
+   (`Behavior::is_alert` / a hands-on-keyboard `notable_exec`) — exploitation
    *now* — **regardless of network position**, internal pods included.
 
 **The hard guard: never quarantine a merely-reached objective.** A pod that is only a
@@ -141,7 +141,7 @@ compromises).
 The **entry itself stays governed entirely by the precedence above**: it is excluded
 from condition 1, and its condition-2 quarantine is added only when the primary
 containment did not already contain it with an additive-live control (a surgical
-edge-cut or the entry quarantine) — so JEF-279's behavior and the "prefer the narrower
+edge-cut or the entry quarantine) — so condition 1's behavior and the "prefer the narrower
 surgical cut" invariant are preserved byte-for-byte.
 
 `QuarantineWorkload` reuses the ADR-0010 `render_isolation` shape driven from the
@@ -160,12 +160,12 @@ dashboard disposition names the WHY — `quarantine — remotely exploitable` /
 `quarantine — actively exploited` — distinct from the entry-foothold
 `quarantine entry (default-deny)`; all are fixed internal strings (no untrusted text).
 
-## Amendment (JEF-547, 2026-07-27): the model decides the cut — the JEF-284 procedure is superseded by [ADR-0032](0032-model-is-incident-responder.md)
+## Amendment (2026-07-27): the model decides the cut — the procedure is superseded by [ADR-0032](0032-model-is-incident-responder.md)
 
-The JEF-284 amendment above made the **per-pod deterministic bar the auto-action trigger**
+The amendment above made the **per-pod deterministic bar the auto-action trigger**
 (remotely-exploitable on reachability + CVE presence, or actively-exploited on a live signal,
 *"regardless of network position, internal pods included"*), with the model never consulted.
-A clean fact-check (JEF-322) confirmed this contradicts the product thesis (ADR-0013/0029):
+A clean fact-check confirmed this contradicts the product thesis (ADR-0013/0029):
 the coarsest action had the weakest bar, and CVE *presence* auto-cut downstream pods.
 
 **ADR-0032 supersedes that decision procedure.** The model — as incident responder — decides

@@ -324,7 +324,7 @@ fn decide_network_needs_corroboration_and_active_to_auto_apply() {
 
 #[test]
 fn decide_scopes_auto_apply_to_the_namespace_allowlist() {
-    // JEF-104: an enabled + corroborated + collateral-free network cut auto-applies
+    // an enabled + corroborated + collateral-free network cut auto-applies
     // only when its namespaces are in PROTECTOR_ENGINE_ENFORCE_NAMESPACES. Cut runs
     // app -> data (both workload endpoints carry a namespace).
     let net = || Mitigation {

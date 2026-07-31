@@ -36,10 +36,10 @@ no Context, no signals, no new dependency.
   last-good snapshot), `strip` (global posture — its OWN state, decoupled from `data`), `status`
   (`first-load` | `live` | `stale`), and `lastGoodAt`. The store (`store.js`) is deleted. The status
   transitions are small updaters: a snapshot goes live + resets the freshness clock + persists the
-  strip (keeping the last if a snapshot omits it — JEF-410); stale never fires before the first
+  strip (keeping the last if a snapshot omits it —); stale never fires before the first
   snapshot; a tab swap nulls `data` but never touches `strip`.
 - **The poll is decoupled to callbacks** (`poll.js` takes `{ tab, onSnapshot, onStale, liveRegion,
-  … }`), so it feeds `App`'s `useState` updaters directly with no store dependency. **The JEF-408
+  … }`), so it feeds `App`'s `useState` updaters directly with no store dependency. **The
   fix is retained verbatim**: the default interval is `(ms, fn) => setInterval(fn, ms)` (a
   function-first handler, never a number coerced to a string and eval'd), the synchronous first
   `tick()`, the stale-on-failure paths, and the mid-selection defer guard all stand. The `App` poll

@@ -1,9 +1,9 @@
 # 0001. Async mitigation engine: propose / prove / respond, local-first
 
-- Status: Accepted — narrowed by the JEF-363 amendment below (the model-backed
+- Status: Accepted — narrowed by the amendment below (the model-backed
   *hypothesis / propose* half is removed; the engine runs purely on the deterministic
   proof enumerator).
-- Date: 2026-06-11 (amended 2026-07-06: model-propose stage removed, JEF-363)
+- Date: 2026-06-11 (amended 2026-07-06: model-propose stage removed)
 
 ## Context
 
@@ -139,7 +139,7 @@ Harder / accepted downsides:
   privileged path, not by a proof of exploitation. This is a deliberate, named
   bound on the claim.
 
-## Amendment (JEF-363): the model-backed *propose* half is removed — deterministic enumeration is exhaustive at this cluster's scale
+## Amendment: the model-backed *propose* half is removed — deterministic enumeration is exhaustive at this cluster's scale
 
 The original decision above framed the engine as **propose → prove → respond**, with
 a model-backed *hypothesis engine* (Decision step 2) generating candidate chains that a
@@ -175,13 +175,13 @@ layer: re-add an edge grade (a `proof`/`hypothesis` tag on `Edge`) and restore t
 `is_proof_grade` filter in the proof walk. Until then, carrying that machinery unused was
 dead cost, not insurance.
 
-**Amendment (JEF-365): the `Grade::Hypothesis` seam is removed too.** The reversibility
+**Amendment: the `Grade::Hypothesis` seam is removed too.** The reversibility
 note above originally kept the `Grade` enum and the proof-walk filter in place as a
 standing seam. Once the model-propose stage was gone, nothing constructed a
 hypothesis-grade edge — every edge in the graph is a deterministic observation by
 construction — so `Grade`, `Edge.grade`, `Edge::is_proof_grade`, and the proof-walk
 filter arms were all vestigial (a type guard against an edge that can no longer exist).
-JEF-365 deletes them. This is safe precisely because nothing constructs a hypothesis-grade
+This amendment deletes them. This is safe precisely because nothing constructs a hypothesis-grade
 edge; the proof walk now traverses all edges, which is behaviourally identical (every edge
 was already proof-grade). The seam remains reintroducible exactly as described above — re-add
 the grade and the filter if scale ever bites — but it is cheaper to reintroduce a small enum

@@ -1,4 +1,4 @@
-//! Unit tests for the Rekor transparency-log lane (JEF-266): the query-key selection, the
+//! Unit tests for the Rekor transparency-log lane: the query-key selection, the
 //! TTL cache (don't re-query an unchanged image, retry after an error), and the off-by-default
 //! config posture. The corroboration/divergence decision logic is tested where it lives
 //! (`engine::signing_rekor`); here we cover the client/cache plumbing.

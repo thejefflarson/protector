@@ -1,4 +1,4 @@
-//! ADR-0020 Stage 3 (JEF-265) — the admission-time signing-**CONTINUITY** gate: the first code
+//! ADR-0020 Stage 3 — the admission-time signing-**CONTINUITY** gate: the first code
 //! that makes protector actually BLOCK admission on a signing signal, plus its scoped
 //! "exception accepted" opt-out and the back-compat identity **PIN**.
 //!
@@ -6,7 +6,7 @@
 //!
 //! In **enforced scope only** (the shared `EnforceScope`; audit-everywhere by default), a signing
 //! **regression** against a repo's ESTABLISHED baseline DENIES admission. The block predicate is
-//! the DOMAIN verdict [`SigningDrift::would_block`] — the exact semantic JEF-297's presentation
+//! the DOMAIN verdict [`SigningDrift::would_block`] — the exact semantic the inventory's presentation
 //! `SigningEnforcement` projects, so "would block" in the inventory and "denied" at admission are
 //! the same fact. Everything else admits:
 //!
@@ -55,7 +55,7 @@ enum ExceptionScope {
     Image(String),
 }
 
-/// One recorded, scoped "exception accepted" (JEF-265): a CONFIG entry opting ONE repo or image out
+/// One recorded, scoped "exception accepted": a CONFIG entry opting ONE repo or image out
 /// of continuity enforcement for ONE specific drift. Never a global mute (ADR-0020): it admits ONLY
 /// its key and, because it is pinned to the drift [`fingerprint`](RegressionKind::fingerprint) it
 /// accepts, a DIFFERENT subsequent change re-flags loud.
@@ -68,7 +68,7 @@ struct SigningException {
     fingerprint: String,
 }
 
-/// The parsed set of "exception accepted" entries (JEF-265). Loaded from a mounted file and/or an
+/// The parsed set of "exception accepted" entries. Loaded from a mounted file and/or an
 /// env var; empty when neither is configured (nothing is excepted — every repo stays enforced).
 #[derive(Debug, Clone, Default)]
 pub struct SigningExceptions {
@@ -142,7 +142,7 @@ impl SigningExceptions {
     }
 }
 
-/// A back-compat identity PIN (JEF-265, ADR-0020): "every image under `prefix` must always be signed
+/// A back-compat identity PIN (ADR-0020): "every image under `prefix` must always be signed
 /// by an identity matching `identity`". A manually-asserted established baseline — the exact semantic
 /// of the pre-ADR-0020 prefix-gated single-identity gate. A pinned image that is not keyless-`Signed`
 /// by a matching identity is a would-block regardless of any LEARNED baseline.
@@ -178,7 +178,7 @@ impl SigningPin {
     }
 }
 
-/// The admission-time signing-continuity gate (JEF-265). Wired into
+/// The admission-time signing-continuity gate. Wired into
 /// [`SignaturePolicy`](super::SignaturePolicy) only when an observer is configured; absent, the
 /// policy is byte-identical shadow.
 pub struct ContinuityGate {

@@ -1,4 +1,4 @@
-//! JEF-320, end-to-end through the [`super::RuntimeAdapter`]: a raw `FileRead` of a
+//! end-to-end through the [`super::RuntimeAdapter`]: a raw `FileRead` of a
 //! well-known on-host credential path attaches to the workload as a `SecretRead` with
 //! [`crate::engine::graph::SecretReadSource::HostPath`], and the FP-scoping this ticket
 //! relies on (container/entry context only — no bare host process) holds through the
@@ -65,7 +65,7 @@ fn secret_reads_of(
 fn on_host_credential_read_attaches_as_secret_read_with_host_path_source() {
     // The host shadow file, read by a process inside app/web (attributed by cgroup UID —
     // the agent's real path) → a SecretRead with SecretReadSource::HostPath, corroborating
-    // CredentialAccess (JEF-320). This is the ticket's core end-to-end wire.
+    // CredentialAccess. This is the ticket's core end-to-end wire.
     let snap = Snapshot {
         pods: vec![web_pod_with_uid("uid-1")],
         runtime_events: vec![file_read_by_uid("uid-1", "/etc/shadow")],
@@ -124,7 +124,7 @@ fn a_benign_file_read_is_dropped_not_a_secret_read() {
 
 #[test]
 fn a_credential_read_with_no_resolvable_pod_attribution_never_attaches() {
-    // FP-scoping (JEF-320): a `FileRead` attributed by a pod UID the engine has never
+    // FP-scoping: a `FileRead` attributed by a pod UID the engine has never
     // observed — the shape a genuine host-system daemon's event would have, since it
     // isn't in any pod's cgroup — resolves to nothing and is dropped upstream, before the
     // host-credential classifier ever runs. No workload exists to attach it to either.

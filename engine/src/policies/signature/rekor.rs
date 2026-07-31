@@ -1,10 +1,10 @@
-//! The Rekor transparency-log lane (JEF-266, ADR-0020 §4 + the ADR-0015 Rekor amendment).
+//! The Rekor transparency-log lane (ADR-0020 §4 + the ADR-0015 Rekor amendment).
 //!
 //! This is the ONE outbound call protector adds beyond the registry pull. It is a **deliberate,
 //! operator-accepted carve-out of the zero-egress posture** and therefore **opt-in, OFF by
 //! default**: with `PROTECTOR_REKOR_ENABLE` unset the lane is never constructed, no query leaves
-//! the cluster, and the signature *inventory* (JEF-261/262) + baseline (JEF-263) + local drift
-//! (JEF-264) all keep working exactly as before (full zero-egress). Set `PROTECTOR_REKOR_URL` to a
+//! the cluster, and the signature *inventory* (262) + baseline + local drift
+//!  all keep working exactly as before (full zero-egress). Set `PROTECTOR_REKOR_URL` to a
 //! self-hosted Rekor mirror to enable the history/divergence checks while still egressing nothing
 //! to the public log.
 //!

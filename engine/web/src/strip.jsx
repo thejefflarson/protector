@@ -1,4 +1,4 @@
-// The persistent status strip (ADR-0025 / JEF-408) — a 1:1 Preact port of the retired maud
+// The persistent status strip (ADR-0025) — a 1:1 Preact port of the retired maud
 // `components/status_strip.rs`. It carries the three honesty axes — decided / judging / covered —
 // on EVERY view. Its load-bearing rule (invariant #1, ADR-0016/0019): a blind / warming / watching
 // state must NEVER read as a calm green all-clear.
@@ -50,7 +50,7 @@ export function StatusStrip({ strip }) {
 }
 
 /**
- * The strip-level coverage-stall banner (JEF-421): shown ONLY when the server decided a covering
+ * The strip-level coverage-stall banner: shown ONLY when the server decided a covering
  * feed STALLED (went dark past the debounce) — the client never synthesizes it. It is a POLITE live
  * region (`role="status" aria-live="polite"`, NOT assertive) so a stall is announced without hijacking
  * a screen reader mid-utterance. All text is server-decided copy, auto-escaped by Preact.
@@ -101,8 +101,8 @@ function ModePill({ armed }) {
 }
 
 /**
- * The app-level auth-mode pill (JEF-489 / ADR-0030), driven by the SERVER-derived `auth-mode` prop
- * (JEF-487 emits `oidc` / `edge-only`; the client derives nothing). `oidc` is the calm intended state
+ * The app-level auth-mode pill (ADR-0030), driven by the SERVER-derived `auth-mode` prop
+ * (the server emits `oidc` / `edge-only`; the client derives nothing). `oidc` is the calm intended state
  * (protector verifies every request itself). `edge-only` is a WARNING posture — app-level auth is OFF,
  * relying on edge trust only — so it rides the SAME warn register as the SHADOW pill (`pill … warn`
  * + ⚠). Meaning never by colour alone: word + glyph. A missing/unknown mode falls to the loud
@@ -194,7 +194,7 @@ function CoverageAxes({ coverage }) {
 
 /**
  * One coverage chip. stalled / present / degraded / absent are DISTINCT AND carry a glyph + feed
- * word (never colour alone). `stalled` (JEF-421) is the LOUD, server-decided was-covering → now-dark
+ * word (never colour alone). `stalled` is the LOUD, server-decided was-covering → now-dark
  * edge — rendered in the breach palette with a ⚠, checked FIRST so it never reads as a calm absence.
  */
 function CoverageChip({ chip }) {

@@ -24,7 +24,7 @@ pub(super) fn build_breach() -> DashboardState {
     let mut rows: Vec<Finding> = vec![
         // BREACH — internet-facing, proven multi-hop, KEV CVE, runtime alert, proposed cut.
         breach_finding(),
-        // NO-CUT — one secret reachable via two redundant backends (JEF-281 multi-path view).
+        // NO-CUT — one secret reachable via two redundant backends (multi-path view).
         redundant_finding(),
         // AWAITING — a breach-relevant entry the model has not yet reached (no verdict).
         simple_finding(
@@ -95,7 +95,7 @@ pub(super) fn build_breach() -> DashboardState {
     }
 
     // UNCERTAIN: a model-timeout verdict. Its posture is `Unknown`, never `Safe` — an
-    // inconclusive read is never green (JEF-302 honesty).
+    // inconclusive read is never green (honesty).
     let uncertain = "deployment/web/storefront";
     verdicts.set_display(
         uncertain,

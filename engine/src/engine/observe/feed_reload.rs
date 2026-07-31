@@ -1,11 +1,11 @@
 //! Hot-reloadable exploit-intel feeds: keep the KEV catalogue ([`super::exploit_intel`])
 //! and the EPSS store ([`super::epss`]) current with the files on disk **without a restart**.
 //!
-//! The feeds are FILE reads, refreshed out-of-band by a daily CronJob (JEF-273) that syncs
+//! The feeds are FILE reads, refreshed out-of-band by a daily CronJob that syncs
 //! CISA KEV + FIRST.org EPSS into a shared volume — the engine only ever *reads* them (no
 //! egress, ADR-0015). The engine used to read each feed exactly once at startup and then serve
 //! that boot-time snapshot forever, so the daily refreshes never took effect until the pod
-//! restarted (stale KEV = missed newly-known-exploited CVEs, JEF-384). This wraps a store in an
+//! restarted (stale KEV = missed newly-known-exploited CVEs). This wraps a store in an
 //! [`ArcSwap`] and a background task re-reads the file on an interval, hot-swapping the held
 //! snapshot so an in-flight sweep never sees a half-updated store — it reads one immutable
 //! [`Arc<T>`] for the whole pass.

@@ -1,5 +1,5 @@
-//! The DURABLE forensic/raw disclosure audit sink (JEF-490): the durable implementation of the
-//! JEF-488 [`AuditSink`](super::audit::AuditSink) seam, plus the read handle the operator "Access"
+//! The DURABLE forensic/raw disclosure audit sink: the durable implementation of the
+//!  [`AuditSink`](super::audit::AuditSink) seam, plus the read handle the operator "Access"
 //! dashboard tab renders from. Every MCP response ABOVE the safe-by-construction `redacted` tier is
 //! genuine cluster-data egress (ADR-0031 §4), so it appends ONE append-only record —
 //! **subject · entry · tool · tier · time** — bound to the VERIFIED token subject; a `redacted`

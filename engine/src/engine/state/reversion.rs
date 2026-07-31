@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-/// One lifted cut for the reversion log (JEF-141): the self-revert is the core safety story
+/// One lifted cut for the reversion log: the self-revert is the core safety story
 /// (ADR-0016 — a cut persists only while the breach condition holds, then self-reverts), made
 /// durable and visible here so a lifted cut is not invisible.
 #[derive(Clone, Serialize)]

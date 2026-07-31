@@ -17,7 +17,7 @@
 //! - **Deterministic by construction.** Every [`Edge`] is a deterministic
 //!   observation; no hypothesis-grade edges exist. "Only deterministic proof moves
 //!   privilege" (the VISION's rule) therefore holds structurally — the graph has
-//!   nothing else in it. (Grade removed with JEF-365; reintroducible per ADR-0001.)
+//!   nothing else in it. (Grade removed with ; reintroducible per ADR-0001.)
 //!
 //! The graph holds **observed** state (ADR-0002): it is built from watch streams
 //! and is always reconstructable from the live cluster, so it lives in memory and
@@ -205,7 +205,7 @@ pub struct Workload {
     /// information repository an attacker reaching it could mine (ATT&CK T1213).
     pub persistent: bool,
     /// FAILED configuration-audit checks from trivy-operator's `ConfigAuditReport`
-    /// (JEF-244) — misconfiguration evidence (a hostPath mount, a missing securityContext,
+    /// Misconfiguration evidence (a hostPath mount, a missing securityContext,
     /// …) for this workload. STRUCTURAL severity/context for the model, NOT exploitation
     /// evidence; surfaced as static-posture findings the same way CVE severity is. Each
     /// finding's free-text is UNTRUSTED third-party scanner output, fenced/capped before it
@@ -213,9 +213,9 @@ pub struct Workload {
     /// trivy-operator's config-audit reports are absent.
     pub misconfigs: Vec<ScanFinding>,
     /// FAILED role / cluster-role checks from trivy-operator's `RbacAssessmentReport`
-    /// (JEF-244) — structural RBAC-exposure evidence (a role granting `*` verbs, secret
+    /// Structural RBAC-exposure evidence (a role granting `*` verbs, secret
     /// access, …) attached to the workloads in the report's namespace. INFORMS the model's
-    /// authorization reasoning (JEF-79 already reasons about RBAC-authorized breadth); it
+    /// authorization reasoning (already reasons about RBAC-authorized breadth); it
     /// does not re-implement or double-count that logic. Untrusted scanner free-text, fenced
     /// like the others. Empty when the reports are absent.
     pub rbac_findings: Vec<ScanFinding>,
@@ -255,7 +255,7 @@ pub struct Image {
     /// Vulnerabilities present in this image (Vulnerability ∧ ExploitIntel ports).
     pub vulnerabilities: Vec<Vulnerability>,
     /// Exposed secrets baked into this image, from trivy-operator's `ExposedSecretReport`
-    /// (JEF-244) — a credential committed into the image layers (an AWS key, a private key,
+    /// A credential committed into the image layers (an AWS key, a private key,
     /// a token). EXPLOITATION-grade exposure: a usable secret sitting in the image is a real
     /// breach primitive, not mere posture. The finding carries only the rule id, category,
     /// severity, target path, and trivy's **redacted** match — the raw secret value is NEVER
@@ -263,7 +263,7 @@ pub struct Image {
     /// Lives on the Image (not the Workload) so it is shared by every workload running the
     /// same digest, exactly like [`Vulnerability`]. Empty when the reports are absent.
     pub exposed_secrets: Vec<ScanFinding>,
-    /// Whether this image's main binary is **statically linked** (JEF-404). `Some(true)` ⇒
+    /// Whether this image's main binary is **statically linked**. `Some(true)` ⇒
     /// a static ELF (Go, a CGO-disabled/musl-static build): everything is compiled into one
     /// executable, so the runtime library-load correlation can never fire and a `NotObserved`
     /// CVE on this image is really [`Reachability::PresentStaticBinary`] — indeterminate, not
@@ -335,7 +335,7 @@ pub enum Trust {
 /// A vulnerability fact on an [`Image`]. The fields are exactly the predicates the
 /// proof bar tests: presence (with corroborating `sources`), severity, and
 /// active exploitation in the wild — plus the package coordinates and a
-/// [`Reachability`] annotation (JEF-51) used as model evidence.
+/// [`Reachability`] annotation used as model evidence.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Vulnerability {
     /// CVE (or other advisory) identifier.
@@ -348,11 +348,11 @@ pub struct Vulnerability {
     /// Which Vulnerability adapters reported this; >1 distinct source is
     /// cross-scanner corroboration.
     pub sources: Vec<Provenance>,
-    /// Whether the vulnerable code is reachable at runtime (JEF-51) — evidence for
+    /// Whether the vulnerable code is reachable at runtime — evidence for
     /// the model, never a gate in v1.
     pub reachability: Reachability,
     /// The vulnerable package's name (e.g. `log4j-core`, `openssl`), if the scanner
-    /// reported it. Drives the runtime library-load correlation (JEF-51).
+    /// reported it. Drives the runtime library-load correlation.
     pub pkg_name: Option<String>,
     /// The installed (vulnerable) package version, if reported.
     pub installed_version: Option<String>,
@@ -360,19 +360,19 @@ pub struct Vulnerability {
     pub fixed_version: Option<String>,
     /// A short human title for the advisory (trivy's `title`), if reported. UNTRUSTED
     /// free-text from a third-party feed — must be fenced/sanitized before it reaches
-    /// the model prompt (JEF-66).
+    /// the model prompt.
     pub title: Option<String>,
     /// The advisory's primary reference URL (trivy's `primaryLink`), if reported. Also
-    /// untrusted third-party text — fenced before it reaches the prompt (JEF-66).
+    /// untrusted third-party text — fenced before it reaches the prompt.
     pub primary_link: Option<String>,
     /// The CVSS base score (`0.0`–`10.0`) trivy-operator emits per vulnerability, if
-    /// reported (JEF-242). A STRUCTURED, low-cardinality severity signal — a numeric
+    /// reported. A STRUCTURED, low-cardinality severity signal — a numeric
     /// field, never untrusted free-text — surfaced to the model as static-severity
     /// evidence alongside the categorical `severity`. `None` when the scanner omits it.
     pub score: Option<f64>,
 }
 
-/// Whether a vulnerability's code is reachable (JEF-51). v1 populates only the
+/// Whether a vulnerability's code is reachable. v1 populates only the
 /// *dynamic* variants by correlating CVEs against the agent's runtime
 /// [`Behavior::LibraryLoaded`] signal; `Unknown` is the default (no signal yet).
 ///
@@ -393,7 +393,7 @@ pub enum Reachability {
     /// The workload's main binary is **statically linked** (Go, a CGO-disabled/musl-static
     /// build, …), so the library-load correlation *cannot* fire — the vulnerable package is
     /// compiled INTO the one executable, never dlopen'd, so no per-`.so` `LibraryLoaded`
-    /// event will ever name it (JEF-404). Reachability is therefore **indeterminate**, NOT
+    /// event will ever name it. Reachability is therefore **indeterminate**, NOT
     /// observed-absent: the CVE is present in a running static binary and we simply can't
     /// observe it this way. It is CONTEXT (never exploitation evidence — only
     /// `LoadedAtRuntime` is that), but its absence-of-a-load must NOT be read as
@@ -413,7 +413,7 @@ impl Reachability {
     }
 }
 
-/// A non-CVE scanner finding from one of trivy-operator's other report kinds (JEF-244):
+/// A non-CVE scanner finding from one of trivy-operator's other report kinds:
 /// an exposed secret ([`Image::exposed_secrets`]), a failed config-audit check
 /// ([`Workload::misconfigs`]), or a failed RBAC-assessment check
 /// ([`Workload::rbac_findings`]). One small shared shape rather than three parallel
@@ -719,7 +719,7 @@ impl SecurityGraph {
     /// The evidence (ADR-0016 enrichment) attached to an `entry` node: the CVEs its
     /// image carries and the runtime [`Behavior`]s observed on it. This is the SINGLE
     /// source of truth for "what is the evidence on this entry" — the adjudicator's
-    /// prompt assembly and the per-finding evidence blocks of the findings snapshot (JEF-133)
+    /// prompt assembly and the per-finding evidence blocks of the findings snapshot
     /// both read it, so the model and the operator see the same facts and can't drift.
     ///
     /// CVE selection mirrors the deterministic foothold's compromise bar:
@@ -758,7 +758,7 @@ impl SecurityGraph {
         (cves, behaviors)
     }
 
-    /// The non-CVE scanner findings behind an `entry` node (JEF-244): the exposed secrets
+    /// The non-CVE scanner findings behind an `entry` node: the exposed secrets
     /// baked into its image(s), and the failed config-audit / RBAC-assessment checks on the
     /// workload itself. Companion to [`entry_evidence`](Self::entry_evidence) — kept separate
     /// so the established CVE/runtime evidence tuple (and its many callers) is untouched while

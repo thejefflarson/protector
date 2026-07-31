@@ -2,7 +2,7 @@
 //! that file under the repo's 1,000-line cap (CLAUDE.md). `super` is the `run_loop` module, so the
 //! tests drive its private builders unchanged.
 //!
-//! JEF-268: the Secret informer (reflector watch + initial list) must be metadata-only — protector
+//! the Secret informer (reflector watch + initial list) must be metadata-only — protector
 //! reasons about a Secret's *identity* (namespace + name), never its contents, so no credential
 //! bytes must ever cross the wire or sit in the in-memory store. These tests pin that guarantee to
 //! the exact type the informer reflects, `PartialObjectMeta<Secret>`; a regression to the full
@@ -12,7 +12,7 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::Resource;
 use kube::core::PartialObjectMeta;
 
-/// JEF-487: the dashboard's app-level OIDC gate must fail LOUD on a mistyped minimum-tier config
+/// the dashboard's app-level OIDC gate must fail LOUD on a mistyped minimum-tier config
 /// (dashboard NOT served), never silently degrade to allow-all — while a valid or absent value
 /// still serves the enforcing gate. Drives the real `build_dashboard_auth` over the env.
 #[test]
@@ -69,7 +69,7 @@ fn dashboard_oidc_min_tier_config_fails_loud_but_serves_on_valid_or_absent() {
     clear();
 }
 
-/// JEF-501: a malformed/unrecognized `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` must fail LOUD —
+/// a malformed/unrecognized `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` must fail LOUD —
 /// neither `build_dashboard_auth` nor `build_mcp_verifier` serve on a misconfigured grant table —
 /// exactly like a mistyped `MIN_TIER`; a valid grant table serves normally.
 #[test]
@@ -118,7 +118,7 @@ fn tier_grants_config_fails_loud_but_serves_on_valid_or_absent() {
     clear();
 }
 
-// JEF-560: an operational incident reported the protector container exiting cleanly
+// an operational incident reported the protector container exiting cleanly
 // (exit 0) and restart-looping, never reaching Ready — read from the tail of its logs as
 // "the engine is doing real work, then the process just stops" and hypothesized as a
 // run-to-completion bug (the driving loop returning after a single pass instead of
@@ -244,10 +244,10 @@ fn reflected_secret_drops_data_keeps_identity() {
     );
 }
 
-// JEF-366: the signing-posture and build-provenance sweeps must draw their cosign verifier
+// the signing-posture and build-provenance sweeps must draw their cosign verifier
 // and env-driven bounds from ONE shared source (`super::cosign_observer_parts`) so the two
 // builders can never silently drift — the hand-copied `registry_auth()` shape that caused the
-// JEF-339 outage. These tests own a clean process env (nextest runs each test in its own
+//  outage. These tests own a clean process env (nextest runs each test in its own
 // process, so the `unsafe { set_var }` blocks are isolated) and point the TUF cache at a
 // per-test temp dir so `CosignChecker::new` succeeds offline.
 use std::time::Duration;
@@ -273,7 +273,7 @@ fn clear_observer_env() {
     }
 }
 
-/// The shared source of truth returns the documented JEF-326 defaults (20s verify, 300s TTL,
+/// The shared source of truth returns the documented defaults (20s verify, 300s TTL,
 /// 32 images) when nothing is set — the exact bounds both builders inherit.
 #[test]
 fn cosign_observer_parts_uses_documented_defaults() {
@@ -309,7 +309,7 @@ fn cosign_observer_parts_honors_env_overrides() {
 /// through the shared parts, both inheriting the same bounds. If either builder stopped going
 /// through `cosign_observer_parts`, this pins the equivalence.
 ///
-/// JEF-410: provenance detection is default-ON (no `PROTECTOR_*_ENABLE` gate) — detection features
+/// provenance detection is default-ON (no `PROTECTOR_*_ENABLE` gate) — detection features
 /// are on by default, and only enforcement/egress are gated. This test previously asserted the
 /// scanner was off until an opt-in flag was set; it now asserts it builds unconditionally from a
 /// valid env, exactly like the signing observer.

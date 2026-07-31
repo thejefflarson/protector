@@ -1,4 +1,4 @@
-//! Per-pass signing-posture sweep (ADR-0020 Stage 1, JEF-261).
+//! Per-pass signing-posture sweep (ADR-0020 Stage 1).
 //!
 //! The webhook observes each *admitted* image; this sweep covers the other half — the pods
 //! **already running** when protector started, which no admission event will ever replay.
@@ -13,15 +13,15 @@
 //! downstream. State is the in-memory [`SigningObserver`] cache + the bounded [`PolicyDecisionLog`]
 //! ring — no durable schema.
 //!
-//! ## Drift findings (JEF-264, ADR-0020 §3)
+//! ## Drift findings (ADR-0020 §3)
 //!
 //! After recording each posture, the sweep classifies it against the repo's CURRENT baseline
-//! (JEF-263) via the pure [`signing_drift`](super::signing_drift) classifier and, on a regression
+//!  via the pure [`signing_drift`](super::signing_drift) classifier and, on a regression
 //! against prior signed history (signed→unsigned/invalid, or a new signer), records a
 //! signing-**regression** finding onto the SAME admission-decision log — keyed
 //! `SigningRegression/<repo>`, decision `allow`. This is **audit-only — still admitted** (the
-//! shadow invariant, ADR-0016): the finding is surfaced, never acted on. Enforcement (JEF-265) and
-//! Rekor history (JEF-266) are later stages and are NOT built here.
+//! shadow invariant, ADR-0016): the finding is surfaced, never acted on. Enforcement and
+//! Rekor history are later stages and are NOT built here.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -44,8 +44,8 @@ use crate::policies::signature::{
 /// not a webhook admission decision, and must not inflate the admitted/audited/denied tallies.
 pub const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
 
-/// The subject prefix an **"exception accepted"** finding is keyed under (`SigningException/<repo>`,
-/// JEF-265). A drift the operator has opted out of via a scoped, recorded exception is recorded
+/// The subject prefix an **"exception accepted"** finding is keyed under (`SigningException/<repo>`).
+/// A drift the operator has opted out of via a scoped, recorded exception is recorded
 /// HERE instead of the loud `SigningRegression/` channel: it stays visible in the inventory,
 /// renders calm + distinctly labelled "exception accepted", and is NOT counted toward breach (it
 /// isn't a regression row). Both the webhook block predicate and this render read the SAME
@@ -120,7 +120,7 @@ fn record_postures(log: &PolicyDecisionLog, map: &PostureMap) {
     for (image, posture) in map.entries() {
         // The subject is the image itself for a sweep row: the running-Pod sweep observes by
         // image, not per workload (a digest is shared across replicas/workloads), and a
-        // per-workload attribution is JEF-262's render concern, not Stage-1 recording.
+        // per-workload attribution is the view-model's render concern, not Stage-1 recording.
         let record = PolicyDecisionRecord::now(
             "image-signature",
             "allow",
@@ -135,7 +135,7 @@ fn record_postures(log: &PolicyDecisionLog, map: &PostureMap) {
     }
 }
 
-/// Encode a signing-regression finding as an admission-decision-log row (JEF-264, ADR-0020 §3).
+/// Encode a signing-regression finding as an admission-decision-log row (ADR-0020 §3).
 ///
 /// Routing: the regression rides the SAME admission-decision log as the posture observation rows
 /// (the admission-finding path), NOT the reachability breach/LLM pipeline. It is keyed
@@ -171,7 +171,7 @@ fn regression_record(
             Some(issuer) => format!("signed by {new_identity} via {issuer}"),
             None => format!("signed by {new_identity}"),
         },
-        // A signing downgrade (JEF-280): name the lesser posture it dropped to, against the keyless
+        // A signing downgrade: name the lesser posture it dropped to, against the keyless
         // baseline it regressed from. No untrusted identity is carried (these postures have none).
         RegressionKind::Downgrade { to } => match to {
             PostureRank::KeyBased => {
@@ -204,7 +204,7 @@ fn regression_record(
     )
 }
 
-/// Encode an **"exception accepted"** finding (JEF-265) — a signing regression the operator has
+/// Encode an **"exception accepted"** finding — a signing regression the operator has
 /// opted out of via a scoped, recorded exception. Keyed `SigningException/<repo>` (its OWN channel,
 /// distinct from the loud `SigningRegression/`), so the view renders it calm + labelled "exception
 /// accepted", keeps it visible, and never counts it toward breach. Self-describing exactly like a
@@ -233,13 +233,13 @@ fn exception_record(
     )
 }
 
-/// Classify each observed posture against the repo's CURRENT baseline (JEF-264) and record a
+/// Classify each observed posture against the repo's CURRENT baseline and record a
 /// signing-regression finding for any drift against prior signed history. Runs BEFORE
 /// [`learn_baselines`] so a new signer is still visible as not-yet-in the identity set (learning
 /// would fold it in and hide the change). Pure classification + append-only recording — never a
 /// gate; the store is read, not mutated.
 ///
-/// A regression covered by a scoped, recorded [`SigningExceptions`] entry (JEF-265) is recorded on
+/// A regression covered by a scoped, recorded [`SigningExceptions`] entry is recorded on
 /// the calm `SigningException/<repo>` channel instead of the loud regression channel — the same
 /// scoped/fingerprinted decision the webhook block predicate makes, so the inventory and the gate
 /// never disagree. Every OTHER repo still records its regression loudly (an exception never silences
@@ -269,7 +269,7 @@ fn detect_regressions(
     }
 }
 
-/// Fold this pass's observed postures into the durable per-repo signing baseline (JEF-263),
+/// Fold this pass's observed postures into the durable per-repo signing baseline,
 /// then compact the whole store back to the journal so a live repo's baseline stays inside
 /// the rotation window (never aged out). Only `Signed` postures learn a baseline; the store
 /// itself ignores the rest. Every step is a no-op on a disabled journal / cold store, so this
@@ -289,7 +289,7 @@ fn learn_baselines(store: &mut SigningBaselineStore, journal: &DecisionJournal, 
     store.compact(journal);
 }
 
-/// Record each observed repo's baseline **strength** (JEF-266) as a `SigningStrength/<repo>` row —
+/// Record each observed repo's baseline **strength** as a `SigningStrength/<repo>` row —
 /// log-corroborated vs local-only. Written every pass regardless of the Rekor lane, so the
 /// inventory shows the honest local-only default when the lane is off; the Rekor reconcile pass
 /// refreshes a repo it corroborates. Only repos with a learned baseline (a `Signed` sight) get a
@@ -309,13 +309,13 @@ fn record_strengths(store: &SigningBaselineStore, log: &PolicyDecisionLog, map: 
 /// `max_images` cap + TTL cache, so a steady cluster re-sweeps for free and a churny one
 /// can't amplify outbound verification.
 ///
-/// The observed postures also feed the durable per-repo signing baseline (JEF-263) when a
+/// The observed postures also feed the durable per-repo signing baseline when a
 /// `baseline` store + `journal` are wired: a signed image teaches the repo's TOFU baseline,
 /// which is persisted to (and, on boot, replayed from) the SAME decision journal. This is
 /// pure learning — never a gate (ADR-0016); drift/enforcement are later stages.
 ///
 /// Returns the [`PostureMap`] observed this pass so the caller can run the opt-in Rekor
-/// reconciliation pass (JEF-266) over the same observations without re-sweeping. An empty map when
+/// reconciliation pass over the same observations without re-sweeping. An empty map when
 /// no observer is configured or there are no running images.
 pub async fn sweep(
     observer: Option<&SigningObserver>,
@@ -339,7 +339,7 @@ pub async fn sweep(
         // a regression / new signer is detected before the observation folds into the baseline.
         detect_regressions(store, log, &map, exceptions);
         learn_baselines(store, journal, &map);
-        // Surface each repo's baseline strength (JEF-266) — log-corroborated vs local-only. Written
+        // Surface each repo's baseline strength — log-corroborated vs local-only. Written
         // after learning so the row reflects the freshly-updated baseline.
         record_strengths(store, log, &map);
     }
@@ -557,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_teaches_the_repo_baseline_from_a_signed_image() {
-        // The JEF-263 wiring: a signed image observed by the sweep learns a per-repo baseline,
+        // The wiring: a signed image observed by the sweep learns a per-repo baseline,
         // keyed by registry/repo. Pure learning — the log still records `allow`.
         let (obs, _calls) = observer(vec![(
             "ghcr.io/org/app:1",
@@ -594,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_does_not_learn_a_baseline_for_an_unsigned_image() {
-        // A not-signed posture must never create a baseline (that's JEF-264 drift territory).
+        // A not-signed posture must never create a baseline (that's drift territory).
         let (obs, _calls) = observer(vec![]); // unknown image ⇒ FakeObserver returns NotSigned
         let snapshot = Snapshot {
             pods: vec![pod(&["docker.io/library/postgres:16"], &[])],
@@ -614,18 +614,18 @@ mod tests {
         assert!(baseline.is_empty(), "an unsigned image learns no baseline");
     }
 
-    // ---- JEF-264 signing-regression detection over the sweep -------------------------------
+    // ---- signing-regression detection over the sweep -------------------------------
 
     const DAY_MS: u64 = 24 * 60 * 60 * 1000;
     const CI: &str = "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/v1";
-    /// The tag-agnostic continuity identity the baseline STORES for [`CI`] (JEF-325): the release-tag
+    /// The tag-agnostic continuity identity the baseline STORES for [`CI`]: the release-tag
     /// value is collapsed to `*`, so the "before:" prose names this canonical form, not the raw tag.
     const CI_CANON: &str = "https://github.com/org/app/.github/workflows/release.yaml@refs/tags/*";
     const ATTACKER: &str = "https://github.com/evil/app/.github/workflows/pwn.yaml@refs/heads/main";
 
     /// A store carrying an ESTABLISHED signed baseline for `ghcr.io/org/app` (signer `CI`). Seeded
     /// by observing at t=0 (first_seen), then again well past the 24h grace window so the baseline
-    /// matures — exactly the JEF-263 establishment path, without a real clock.
+    /// matures — exactly the establishment path, without a real clock.
     fn established_store() -> SigningBaselineStore {
         let mut store = SigningBaselineStore::new();
         let signed = SigningPosture::Signed(Signer {
@@ -679,7 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_exception_records_the_calm_channel_not_the_loud_regression() {
-        // JEF-265 render: a regression covered by a scoped exception is recorded on the calm
+        //  render: a regression covered by a scoped exception is recorded on the calm
         // `SigningException/` channel (not the loud `SigningRegression/`), so the inventory renders
         // "exception accepted" and it never counts toward breach — while a DIFFERENT repo still
         // records its regression loudly.
@@ -790,8 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn key_based_downgrade_on_an_established_keyless_repo_records_a_regression() {
-        // JEF-280 end-to-end: an established keyless-signed repo that now serves a key-based
-        // signature records the calm `signed-key-based` STATUS on the image row (JEF-276 posture
+        //  end-to-end: an established keyless-signed repo that now serves a key-based
+        // signature records the calm `signed-key-based` STATUS on the image row (posture
         // unchanged), learns NO new baseline (no signer to teach) — but the sweep now surfaces a
         // `SigningDowngrade` regression (the registry-substitution signal). Audit-only (allow).
         let (obs, _c) = observer(vec![("ghcr.io/org/app:2", SigningPosture::SignedKeyBased)]);
@@ -804,7 +804,7 @@ mod tests {
             .expect("the posture is recorded");
         assert_eq!(
             posture_row.signature, "signed-key-based",
-            "the per-image posture is unchanged (JEF-276)"
+            "the per-image posture is unchanged"
         );
         let row = regression_row(&log, "ghcr.io/org/app")
             .expect("a downgrade against a keyless baseline is a regression");
@@ -824,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn unverifiable_downgrade_on_an_established_keyless_repo_records_a_regression() {
-        // JEF-280: an established keyless repo now serving a signature unverifiable against our
+        // an established keyless repo now serving a signature unverifiable against our
         // trust root (the rogue-Rekor / trust-root-drift substitution) is a downgrade regression.
         let (obs, _c) = observer(vec![(
             "ghcr.io/org/app:2",
@@ -842,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn always_key_based_repo_with_no_keyless_baseline_stays_continuous() {
-        // JEF-276 win preserved (JEF-280 acceptance): a cert-manager-style repo that has NEVER had
+        //  win preserved (acceptance): a cert-manager-style repo that has NEVER had
         // a keyless baseline (key-based teaches nothing) serving key-based surfaces NO regression.
         let (obs, _c) = observer(vec![(
             "ghcr.io/certmanager/controller:1",
@@ -858,7 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn downgrade_against_a_cold_keyless_baseline_is_reduced_not_silent() {
-        // JEF-280 acceptance: a downgrade against a freshly-learned (cold) keyless baseline still
+        //  acceptance: a downgrade against a freshly-learned (cold) keyless baseline still
         // fires, flagged weak (`cold` ⇒ uncertain / non-green), never silent.
         let mut store = SigningBaselineStore::new();
         store.observe("ghcr.io/org/app@sha256:seed", &signed(CI), 0); // cold (not established)

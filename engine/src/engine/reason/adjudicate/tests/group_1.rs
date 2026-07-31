@@ -37,7 +37,7 @@ fn sanitize_strips_prompt_injection_characters() {
     assert_eq!(sanitize("workload/app/Pod/web"), "workload/app/Pod/web");
 }
 
-/// JEF-145: `entry_coverage` re-derives the structured enrichment-coverage from the
+/// `entry_coverage` re-derives the structured enrichment-coverage from the
 /// SAME evidence the model is given (`entry_evidence`) — the matched CVE ids (sorted)
 /// and whether a behavioral signal was present. This is what the journal-append site
 /// persists so the would-have-acted report aggregation classifies a coverage gap from fact,
@@ -98,7 +98,7 @@ fn entry_coverage_reflects_the_model_evidence() {
     assert!(cov.behavioral, "a runtime signal is behavioral backing");
 }
 
-/// JEF-242: with the advisory feed retired, a CVE carrying no title and no CVSS score
+/// with the advisory feed retired, a CVE carrying no title and no CVSS score
 /// renders the legacy line shape — id/severity/reachability/fix, no suffix. This is the
 /// baseline the ticket pins: the no-advisory path was already byte-identical to
 /// pre-advisory, and that output is now the permanent baseline.
@@ -113,7 +113,7 @@ fn bare_cve_renders_legacy_line_shape() {
     assert!(bare.title.is_none());
 }
 
-/// JEF-242: the CVSS score trivy reports surfaces as a STRUCTURED `[cvss: X.X]` token on
+/// the CVSS score trivy reports surfaces as a STRUCTURED `[cvss: X.X]` token on
 /// the CVE line — a numeric severity signal, never untrusted free-text. It rides into the
 /// fenced prompt as plain structured data, formatted to one decimal for determinism.
 #[test]
@@ -131,9 +131,9 @@ fn cvss_score_surfaces_as_structured_token() {
     assert!(prompt.contains("[cvss: 9.8]"));
 }
 
-/// JEF-243: the EPSS exploit-prediction probability surfaces as a STRUCTURED `[epss: X.XX]`
-/// token on the CVE line — the predictive exploitation axis the prompt reserved for `epss`
-/// (JEF-66), now that the FIRST.org feed populates it. Like the CVSS token it is a numeric
+/// the EPSS exploit-prediction probability surfaces as a STRUCTURED `[epss: X.XX]`
+/// token on the CVE line — the predictive exploitation axis the prompt reserved for `epss`,
+/// now that the FIRST.org feed populates it. Like the CVSS token it is a numeric
 /// (never untrusted free-text), formatted to two decimals for determinism, and rides into
 /// the fenced prompt unchanged.
 #[test]
@@ -152,7 +152,7 @@ fn epss_score_surfaces_as_structured_token() {
     );
 }
 
-/// JEF-243: an unscored CVE (no EPSS in the feed) omits the token entirely, so its line is
+/// an unscored CVE (no EPSS in the feed) omits the token entirely, so its line is
 /// byte-identical to the pre-EPSS baseline — the feed only ever adds a token, never reshapes
 /// the line.
 #[test]
@@ -162,7 +162,7 @@ fn absent_epss_omits_the_token() {
     assert!(!cve_evidence(&bare).contains("epss"));
 }
 
-/// JEF-66/JEF-242: trivy's `title` is the only untrusted free-text that still reaches the
+/// trivy's `title` is the only untrusted free-text that still reaches the
 /// prompt. A title laden with fence/prompt-injection characters cannot close the fence or
 /// inject structure — `fence_list` sanitizes the joined CVE list, so the dangerous chars
 /// are gone from the rendered prompt.
@@ -197,10 +197,10 @@ fn untrusted_title_cannot_inject_prompt_structure() {
     assert!(!inner.contains(">>>"));
 }
 
-/// JEF-242 + JEF-350: a newly-reported CVSS score enriches a CVE line, so it changes the
+///  + a newly-reported CVSS score enriches a CVE line, so it changes the
 /// prompt and the prompt-hash verdict-cache key busts ONCE — but the same score renders the
 /// same prompt and so the same hash across passes (the score is a stable field, no
-/// timestamps), so it does not thrash the cache per pass (the JEF-63 budget).
+/// timestamps), so it does not thrash the cache per pass (the budget).
 #[test]
 fn prompt_hash_busts_on_new_score_then_is_stable() {
     let objectives: &[(NodeKey, AttackRef)] = &[];
@@ -228,7 +228,7 @@ fn prompt_hash_busts_on_new_score_then_is_stable() {
     );
 }
 
-/// JEF-350 (the core regression guard, in the spirit of the retired
+///  (the core regression guard, in the spirit of the retired
 /// `fingerprint_key_collapses_connection_churn`): the prompt — and so its hash, the
 /// verdict-cache key — is DETERMINISTIC. The same evidence, built repeatedly, produces a
 /// byte-identical prompt and hash; and reordering the runtime behaviors (a volatile,
@@ -317,7 +317,7 @@ fn parses_verdicts_and_defaults_to_uncertain() {
     assert!(!parse_verdict(r#"{"verdict":"confirmed"}"#).promotes());
 }
 
-/// JEF-79 hallucination guard: a small model that promotes citing a CVE absent from
+///  hallucination guard: a small model that promotes citing a CVE absent from
 /// the entry's evidence (parroting a prompt example) must be downgraded so it can
 /// never auto-promote; a CVE that IS in evidence, and non-CVE exploitable reasons,
 /// pass through.
@@ -442,7 +442,7 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
     // Other benign behaviors (file read, library load, secret read, a benign own-data write)
     // are likewise no anchor. A benign write (an app's own log — NOT a sensitive path) must not
     // anchor the verdict any more than the notable-exec/alert anchors would falsely trip
-    // (JEF-309 conservatism, ADR-0011).
+    // (conservatism, ADR-0011).
     let benign_misc = vec![
         Behavior::FileRead {
             path: "/etc/config".into(),
@@ -471,7 +471,7 @@ fn unsupported_exploitable_guard_downgrades_when_no_anchor_present() {
 
 /// The guard is conservative: ANY single anchor — a CVE in the list (even
 /// reachability:not-observed), an exposed-secret finding, or a corroborating runtime
-/// behavior (an `Alert`, or a notable shell/package-manager exec, JEF-117) —
+/// behavior (an `Alert`, or a notable shell/package-manager exec) —
 /// leaves the model's `Exploitable` call untouched. Those are the model's (debatable)
 /// calls, not this guard's to override.
 #[test]
@@ -514,7 +514,7 @@ fn unsupported_exploitable_guard_preserves_each_anchored_case() {
         Verdict::Exploitable(_)
     ));
 
-    // Anchor 3b — a corroborating runtime behavior: a notable exec (notable_exec(), JEF-117).
+    // Anchor 3b — a corroborating runtime behavior: a notable exec (notable_exec()).
     let notable = vec![Behavior::ProcessExec {
         path: "/bin/bash".into(),
         exe_anon_inode: false,
@@ -530,7 +530,7 @@ fn unsupported_exploitable_guard_preserves_each_anchored_case() {
     ));
 
     // Anchor 3c — a corroborating runtime behavior: an alarming file write (a sensitive-path
-    // drop-and-execute, JEF-309). The guard must see the SAME alarm the corroboration/quarantine
+    // drop-and-execute). The guard must see the SAME alarm the corroboration/quarantine
     // paths do, so a drop-and-execute anchors the model's Exploitable call.
     let alarming_write = vec![Behavior::FileWrite {
         path: "/usr/bin/dropper".into(),
@@ -600,7 +600,7 @@ fn prompt_includes_the_chain_evidence() {
                 installed_version: Some("2.14.0".into()),
                 fixed_version: Some("2.17.0".into()),
                 title: Some("Remote code execution via JNDI lookup".into()),
-                // Observed loading at runtime — the JEF-453 filter only shows reachable CVEs to
+                // Observed loading at runtime — the filter only shows reachable CVEs to
                 // the judge, so a chain-evidence prompt must carry a loaded-at-runtime CVE.
                 reachability: crate::engine::graph::Reachability::LoadedAtRuntime,
                 sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
@@ -637,13 +637,13 @@ fn prompt_includes_the_chain_evidence() {
         "offers the skeptic no_attack assessment (ADR-0034 D2: the 4-value verdict collapsed \
          to a 3-value assessment)"
     );
-    // JEF-51: the CVE is tagged with its reachability (here loaded-at-runtime — the only
-    // reachability the JEF-453 filter shows the judge).
+    // the CVE is tagged with its reachability (here loaded-at-runtime — the only
+    // reachability the filter shows the judge).
     assert!(
         prompt.contains("reachability: loaded-at-runtime"),
         "tags each CVE with its reachability"
     );
-    // JEF-66: the CVE evidence carries severity, fix-availability, and the (fenced)
+    // the CVE evidence carries severity, fix-availability, and the (fenced)
     // trivy title so the model can weigh exploitability.
     assert!(prompt.contains("severity: critical"), "tags CVE severity");
     assert!(
@@ -654,7 +654,7 @@ fn prompt_includes_the_chain_evidence() {
         prompt.contains("Remote code execution via JNDI lookup"),
         "includes the trivy title"
     );
-    // JEF-79: the objective is the workload's OWN secret, reached via an envFrom
+    // the objective is the workload's OWN secret, reached via an envFrom
     // MOUNT (CanRead) — so it is tagged [MOUNTED], the authorization FACT the model
     // weighs. The reach-tag legend is present.
     assert!(
@@ -663,9 +663,9 @@ fn prompt_includes_the_chain_evidence() {
     );
     assert!(
         prompt.contains("[RBAC-GRANTED]") && prompt.contains("[MOUNTED]"),
-        "carries the JEF-79 reach-tag legend as facts the model weighs"
+        "carries the reach-tag legend as facts the model weighs"
     );
-    // JEF-134: the prompt now frames a holistic breach decision, not a rigid numbered
+    // the prompt now frames a holistic breach decision, not a rigid numbered
     // procedure — so the old "DECISION PROCEDURE" / "WORKED EXAMPLES" scaffolding (the
     // parrotable few-shot block, incl. Ex4 that argo copied) is GONE.
     assert!(
@@ -698,7 +698,7 @@ fn prompt_includes_the_chain_evidence() {
     );
 }
 
-/// JEF-133 dedup: trivy reports the same CVE once per affected package, so an image can
+///  dedup: trivy reports the same CVE once per affected package, so an image can
 /// carry the same id several times with different CVSS / fix ranges. `entry_evidence` must
 /// collapse them to exactly ONE rendered line per id BEFORE rendering (the string-level
 /// dedup in `build_judgment_prompt_with` can't, since the trailing metadata differs), and
@@ -746,7 +746,7 @@ fn entry_evidence_dedups_cves_by_id_keeping_the_worst() {
     assert!(ids.contains(id));
 }
 
-/// JEF-133 dedup, tie-break: when two instances of one id share the WORST severity and
+///  dedup, tie-break: when two instances of one id share the WORST severity and
 /// CVSS, the survivor is the one carrying the most exploitability signal (a fix-availability
 /// indication and/or EPSS), so deduping never silently drops a fix range the judge needs.
 #[test]
@@ -767,7 +767,7 @@ fn entry_evidence_dedup_prefers_the_instance_with_fix_signal() {
     );
 }
 
-/// JEF-79: `objective_reach` classifies an objective by its incoming proof edge —
+/// `objective_reach` classifies an objective by its incoming proof edge —
 /// the authorization signal the procedure judges on. An RBAC grant (`CanDo`) and a
 /// pod-spec mount (`CanRead`) are authorized-by-design; a bare network reach is not.
 /// This is the distinction that refutes ArgoCD's broad-but-RBAC-granted access while
@@ -839,7 +839,7 @@ fn objective_reach_classifies_by_incoming_edge() {
     );
 }
 
-/// JEF-79 ownership marker: same-namespace objectives are `same-ns` (the entry's own
+///  ownership marker: same-namespace objectives are `same-ns` (the entry's own
 /// tenant), everything else `cross-ns`. This is the explicit signal that fixed the
 /// granite4:1b-h false positive where it misread a same-namespace DB as cross-tenant.
 #[test]
@@ -862,7 +862,7 @@ fn ns_marker_flags_cross_namespace_only() {
     assert_eq!(k("host/node").namespace(), None);
 }
 
-/// JEF-51 + JEF-350: reachability is rendered into the prompt, so a flip to
+///  + reachability is rendered into the prompt, so a flip to
 /// `LoadedAtRuntime` changes the prompt — and so its hash, the verdict-cache key — forcing
 /// a re-judge. Two graphs that differ ONLY in a CVE's reachability MUST produce different
 /// prompt hashes.

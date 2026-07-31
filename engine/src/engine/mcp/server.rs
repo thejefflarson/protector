@@ -1,4 +1,4 @@
-//! The rmcp [`ServerHandler`] adapter (ADR-0031 §6, JEF-488). rmcp is transport BELOW the trust
+//! The rmcp [`ServerHandler`] adapter (ADR-0031 §6). rmcp is transport BELOW the trust
 //! boundary: this shell only (1) advertises the four tool descriptors, (2) reads the VERIFIED
 //! [`Identity`] the OIDC auth layer inserted into the request extensions — which rmcp propagates
 //! into the tool [`RequestContext`] as `http::request::Parts` — and (3) hands the ceiling + subject
@@ -35,7 +35,7 @@ pub struct ProtectorMcp {
 }
 
 impl ProtectorMcp {
-    /// Build the handler over the engine state + the audit sink JEF-490 will make durable.
+    /// Build the handler over the engine state + the audit sink will make durable.
     pub fn new(state: McpState, audit: Arc<dyn AuditSink>) -> Self {
         Self { state, audit }
     }

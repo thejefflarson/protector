@@ -1,9 +1,9 @@
-// One judgement in the Action tab's judgement-audit section (ADR-0025 / JEF-400 / JEF-411) — a 1:1
+// One judgement in the Action tab's judgement-audit section (ADR-0025) — a 1:1
 // Preact port of maud `judgement_entry`: a native `<details>` disclosure whose summary is the entry
 // + objectives, opening to the verbatim prompt and reply. Honest when the prompt (the pre-filter
 // decided) or reply (the model timed out) is absent.
 //
-// The disclosure is NATIVE and UNCONTROLLED (JEF-411): the DOM owns its open state, so an operator
+// The disclosure is NATIVE and UNCONTROLLED: the DOM owns its open state, so an operator
 // reading a long prompt keeps it open across a poll (Preact's keyed diff never disturbs it) with no
 // client bookkeeping. The prompt / reply / verdict are UNTRUSTED third-party text, rendered as JSX
 // text (Preact auto-escapes).

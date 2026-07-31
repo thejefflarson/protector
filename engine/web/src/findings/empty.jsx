@@ -1,4 +1,4 @@
-// The honest Findings empty-state (ADR-0025 / JEF-397) — a 1:1 Preact port of maud
+// The honest Findings empty-state (ADR-0025) — a 1:1 Preact port of maud
 // `findings_view::empty_state`. This is the load-bearing honesty case (invariant #1): an empty
 // findings list must NEVER read as a generic "no findings" / false all-clear. It reads GREEN only
 // when the SERVER says `all-clear`; otherwise it renders the matching non-green register —

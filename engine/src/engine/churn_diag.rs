@@ -1,4 +1,4 @@
-//! ADJ-MISS-DIAG — the per-re-judge churn-attribution diagnostic (JEF-387).
+//! ADJ-MISS-DIAG — the per-re-judge churn-attribution diagnostic.
 //!
 //! Every cache MISS (an entry the engine is about to re-judge) emits ONE compact, structured
 //! log line here. Over a 24h `kubectl logs` window `scripts/churn_analysis.py` ingests these
@@ -12,14 +12,14 @@
 //!   sec_runtime=<h> sec_cves=<h> sec_secrets=<h> sec_posture=<h> sec_objectives=<h> sec_entry=<h>
 //! ```
 //!
-//! Emitted at DEBUG (the churn is fixed — JEF-390/JEF-391 — so it's silent by default); raise the
+//! Emitted at DEBUG (the churn attribution is fixed — so it's silent by default); raise the
 //! engine to `debug` to collect a fresh window.
 //!
 //! Field meanings the collector relies on:
 //! - `entry`  — the entry key: the per-entry timeline key.
 //! - `fp`     — the FULL-STATE prompt hash (the verdict-cache key; excludes the delta-only
-//!   "Changes since…" section, JEF-391). UNCHANGED from the entry's prior line ⇒ an
-//!   Uncertain-retry (JEF-234: model verdict churn, not prompt). CHANGED ⇒ state churn,
+//!   "Changes since…" section). UNCHANGED from the entry's prior line ⇒ an
+//!   Uncertain-retry (model verdict churn, not prompt). CHANGED ⇒ state churn,
 //!   attributed to whichever `sec_*` field moved.
 //! - `chain`  — the objective/technique-SET shape hash: entries with the same shape group.
 //! - `sec_*`  — the six per-section fingerprints; the one that changed between two consecutive
@@ -34,7 +34,7 @@ use super::PendingEntry;
 /// full-prompt dump when `PROTECTOR_ADJ_DIAG_FULL` is set. See the module docs for the format.
 pub(super) fn log_rejudge(pending: &PendingEntry) {
     let sections = &pending.sections;
-    // DEBUG level: the churn is understood + fixed (JEF-390/JEF-391), so this stays silent in
+    // DEBUG level: the churn is understood + fixed, so this stays silent in
     // normal operation. Raise the engine to `debug` to collect a fresh window for
     // `scripts/churn_analysis.py`.
     tracing::debug!(
@@ -89,7 +89,7 @@ mod tests {
         }
     }
 
-    /// JEF-387: the compact ADJ-MISS-DIAG line the collector depends on carries every field
+    /// the compact ADJ-MISS-DIAG line the collector depends on carries every field
     /// as space-free `key=value`. This LOCKS that contract — if the field set or a value's
     /// rendering changes, `scripts/churn_analysis.py` breaks, and this fails first.
     #[test]

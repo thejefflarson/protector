@@ -105,7 +105,7 @@ fn entry_with_no_additive_live_mechanism_is_uncontainable() {
 }
 
 /// ADR-0022 entry-exclusion: even when the entry ALSO qualifies as a `quarantine_targets`
-/// member (an `ActivelyExploited` entry, JEF-284 condition 2 fires on any pod, entry
+/// member (an `ActivelyExploited` entry condition 2 fires on any pod, entry
 /// included), the menu must list it exactly ONCE — via the entry ladder line, never a
 /// second time as a "downstream" QuarantineWorkload line.
 #[test]

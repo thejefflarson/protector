@@ -27,9 +27,9 @@ rules:
     verbs: ["get", "list", "watch"]
   # trivy-operator reports — the in-cluster, zero-egress scanner signal (ADR-0003).
   # Read-only; all harmless if the CRDs are absent — the engine degrades to no data for
-  # whichever report kind is missing. vulnerabilityreports is the CVE source (JEF-242);
+  # whichever report kind is missing. vulnerabilityreports is the CVE source;
   # exposedsecretreports / configauditreports / rbacassessmentreports are the
-  # breach/exposure/misconfiguration signals (JEF-244).
+  # breach/exposure/misconfiguration signals.
   - apiGroups: ["aquasecurity.github.io"]
     resources:
       - "vulnerabilityreports"
@@ -53,7 +53,7 @@ rules:
   # `enforceScope` (ActuationScope::in_scope). When the scope is purely NAMESPACE-based
   # (no pod labels) the create/delete/patch grant is rendered instead as a per-namespace
   # Role + RoleBinding in each enforced namespace (see role.yaml) — least privilege, RBAC
-  # matching the actuation reach — and is NOT granted cluster-wide here (JEF-277).
+  # matching the actuation reach — and is NOT granted cluster-wide here.
   #
   # The cluster-wide NetworkPolicy write grant below is kept ONLY when the scope includes
   # POD LABELS. A label-matched Pod can live in ANY namespace

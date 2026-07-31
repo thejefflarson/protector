@@ -1,4 +1,4 @@
-//! Map the engine's live runtime signals into the Alerts view's "alarming-now" props (JEF-323).
+//! Map the engine's live runtime signals into the Alerts view's "alarming-now" props.
 //! This is the data layer: it touches `state::`/`graph::`/`behavior::` domain types; the
 //! components never do. It shares ONE derived seam with the critical-path annotation
 //! ([`alarming_signals_of`]) so the Alerts tab and the findings-view "alarming activity observed"
@@ -10,7 +10,7 @@
 //! SET here is deliberately broader (it is the operator's "what is alarming now" view), so it is
 //! phrased purely in "alarming" language and never asserts a corroboration the engine didn't reach.
 //!
-//! SCOPE (fixed, JEF-323): runtime signals are TRANSIENT — they live for one observe pass then
+//! SCOPE (fixed): runtime signals are TRANSIENT — they live for one observe pass then
 //! clear. So this is a CURRENT-WINDOW view of what is alarming THIS pass, NOT a persisted audit
 //! log. No new store is introduced; the alerts are derived from the same per-pass findings
 //! snapshot the Findings view already reads.
@@ -23,7 +23,7 @@ use super::findings::blind_nodes_of;
 use super::posture::human_age;
 use super::props::{AlertProps, AlertsViewProps, StatusStripProps};
 
-/// The human, presentation label + kind token for an "alarming-now" behavior (JEF-323), or `None`
+/// The human, presentation label + kind token for an "alarming-now" behavior, or `None`
 /// for a non-alarming one. This is the ONE definition of "what shows on the Alerts tab", shared by
 /// the tab and the per-finding annotation so they can never drift.
 ///
@@ -97,7 +97,7 @@ fn on_chain_of(f: &Finding) -> Option<String> {
     ))
 }
 
-/// The alarming-now signals observed on ONE finding's entry this pass (JEF-323) — the shared seam
+/// The alarming-now signals observed on ONE finding's entry this pass — the shared seam
 /// the Alerts tab and the per-finding "alarming activity observed" annotation both project from. Each
 /// is attributed to the entry's workload (informer-resolved short label) with the chain's recency and
 /// the proven chain it is alarming on.
@@ -119,7 +119,7 @@ pub(super) fn alarming_signals_of(f: &Finding) -> Vec<AlertProps> {
         .collect()
 }
 
-/// The calm blind-node caveat for the Alerts empty/quiet state (JEF-308) — set when at least one
+/// The calm blind-node caveat for the Alerts empty/quiet state — set when at least one
 /// expected node has NO live runtime sensor, so a quiet view must not read "all clear": absence of a
 /// signal there is not evidence of safety. `None` when every expected node is sensored.
 fn blind_caveat_of(readiness: &Readiness) -> Option<String> {
@@ -134,7 +134,7 @@ fn blind_caveat_of(readiness: &Readiness) -> Option<String> {
     ))
 }
 
-/// Build the whole Alerts view's props from the engine's read-only per-pass state (JEF-323). The
+/// Build the whole Alerts view's props from the engine's read-only per-pass state. The
 /// alerts are the alarming-now signals across every finding's entry this pass, most-recent-first
 /// (by the alarming chain's age); the blind caveat rides the empty/quiet state. Pure given its
 /// inputs — driveable in tests with no engine.

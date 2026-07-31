@@ -18,7 +18,7 @@ the last time we judged this entry**. The per-entry verdict cache (`VerdictStore
 decisive verdict on the SHA-256 of that whole prompt and re-judges whenever the hash
 changes.
 
-A 77-minute production capture (JEF-387 harness, 70 re-judges across 5 entries) showed:
+A 77-minute production capture (the churn-attribution harness, 70 re-judges across 5 entries) showed:
 
 - **100% of re-judges are prompt-churn**, 0% Uncertain-retry.
 - **~85% are genuinely-new fingerprints** the cache has never seen — dominated by the
@@ -26,7 +26,7 @@ A 77-minute production capture (JEF-387 harness, 70 re-judges across 5 entries) 
   churns per-pod registration secrets every few seconds; each new replica adds a new
   reachable `secret/…` objective).
 - Only ~15% is exact-state ping-pong (a known peer aging in/out of the runtime window),
-  recoverable by a multi-slot cache (JEF-390).
+  recoverable by a multi-slot cache.
 
 The key realization: **the churn is correct.** A newly-reachable object *is* new attack
 surface and *should* be evaluated. The waste is not the re-judge — it is that on every
@@ -35,7 +35,7 @@ the only thing different is one new object of a kind it has already judged fifty
 
 Meanwhile the engine **already computes the delta** it would need: `graph::delta` emits
 added/removed edges each pass, `first_seen` stamps when each node first appeared, and
-`prev_posture` (JEF-201) diffs posture pass-over-pass. All of it feeds the dashboard's Δ
+`prev_posture` diffs posture pass-over-pass. All of it feeds the dashboard's Δ
 column — **none of it reaches the adjudication prompt.**
 
 ## Decision
@@ -69,9 +69,9 @@ the *change* as the explicit *question*.
 
 4. **Verdict/cache semantics.** A decisive verdict is now "valid for entry `E` as of
    baseline `B`", and stays valid until an additive delta arrives. This supersedes the
-   whole-prompt-fingerprint gate for the re-judge decision (the fingerprint LRU of JEF-390
+   whole-prompt-fingerprint gate for the re-judge decision (the fingerprint LRU of
    remains as a second-level guard for exact-state returns and as the cache key within a
-   baseline). Uncertain verdicts are still never cached; JEF-234 backoff still gates the
+   baseline). Uncertain verdicts are still never cached; backoff still gates the
    retry of failed decisions.
 
 ## Correctness guard (non-negotiable)
@@ -99,11 +99,11 @@ the delta is a rejection of this ADR.
   blast radius — worst case the model sees the new object in the full set but without the
   "NEW" flag, i.e. today's behavior.
 - **Interacts with:** ADR-0013 (adjudication — this refines *what* the model is asked),
-  ADR-0001 (deterministic proof is the source of the delta), JEF-390 (LRU cache, second
-  level), JEF-234 (Uncertain backoff, unchanged). The de-escalation of a verdict whose
-  surface vanished is the reversion path (ADR-0009/JEF-141), not a re-judge.
+  ADR-0001 (deterministic proof is the source of the delta) (LRU cache, second
+  level) (Uncertain backoff, unchanged). The de-escalation of a verdict whose
+  surface vanished is the reversion path (ADR-0009), not a re-judge.
 
-## Open questions (to resolve before implementation, JEF-391)
+## Open questions (to resolve before implementation)
 
 - Exact projection of the graph delta into prompt lines (which node/edge kinds count as an
   "addition" worth flagging; how to summarize a burst of same-kind additions without hiding

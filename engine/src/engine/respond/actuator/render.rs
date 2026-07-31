@@ -84,7 +84,7 @@ pub fn render_deny(mitigation: &Mitigation) -> Option<serde_json::Value> {
 /// - [`QuarantineEntry`](ProposedAction::QuarantineEntry): the *default* containment,
 ///   whose `cut.from` is the internet-facing breach **entry** by construction — so the
 ///   same `cut.from` selector isolates the entry, never a deeper/objective workload; and
-/// - [`QuarantineWorkload`](ProposedAction::QuarantineWorkload): the JEF-284 quarantine of
+/// - [`QuarantineWorkload`](ProposedAction::QuarantineWorkload): the quarantine of
 ///   a compromised pod on the chain (remotely-exploitable or actively-exploited), whose
 ///   `cut.from` is that qualifying pod (a self-reference carrying its labels) — so the
 ///   same selector isolates exactly that pod, never a merely-reached objective.

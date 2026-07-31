@@ -1,4 +1,4 @@
-//! The breach notifier (JEF-144): the **one** sanctioned outbound path (ADR-0018).
+//! The breach notifier: the **one** sanctioned outbound path (ADR-0018).
 //!
 //! Surfacing is otherwise pull-only — a breach decision lands in the findings snapshot and the
 //! durable journal ([`super::journal`]), but a solo operator never *learns* of it
@@ -19,9 +19,9 @@
 //!   Richer detail (the per-objective ATT&CK list) is gated behind an explicit opt-in
 //!   (`PROTECTOR_ENGINE_NOTIFY_VERBOSE`) and still excludes secrets/peers/CVEs.
 //! - **Verdict prose is sanitized before egress.** The verdict text can carry untrusted
-//!   third-party text (trivy's CVE title, JEF-66); it is run through
+//!   third-party text (trivy's CVE title); it is run through
 //!   [`super::reason::adjudicate::sanitize`] before it leaves the cluster.
-//! - **Deduped on the decision identity** (the journal's, JEF-141): the caller fires
+//! - **Deduped on the decision identity** (the journal's): the caller fires
 //!   this only when it appends a *new* breach line, so one decision is one notification.
 //! - **Shadow vs armed is explicit:** "would isolate" (shadow) vs "isolated" (armed).
 //! - **Bounded + fail-safe.** Reuses the timeout-only client from [`super::model`] (never
@@ -97,19 +97,19 @@ pub struct BreachNotice<'a> {
     pub enforcement: Enforcement,
 }
 
-/// Which runtime-coverage transition to notify on (JEF-427). The counts-only operator push that
+/// Which runtime-coverage transition to notify on. The counts-only operator push that
 /// fires when protector's OWN runtime sensors collapse (a was-covering fleet goes fully dark past
 /// the debounce) or recover — the gap the breach notifier can't cover (it fires only on breach
 /// *decisions*, and a blind engine makes none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageEvent {
-    /// A was-covering runtime fleet has gone fully blind past the stall debounce (JEF-421). One push.
+    /// A was-covering runtime fleet has gone fully blind past the stall debounce. One push.
     Degraded,
     /// A previously stalled runtime fleet is reporting again. One push.
     Restored,
 }
 
-/// One runtime-coverage transition to notify on (JEF-427) — the inputs to the counts-only redacted
+/// One runtime-coverage transition to notify on — the inputs to the counts-only redacted
 /// push. UNLIKE [`BreachNotice`], this carries NO cluster-derived strings at all: the feed label is
 /// our own `'static` constant and everything else is a COUNT, so there is no topology, secret, peer,
 /// or CVE surface to redact — the ADR-0018 posture is upheld by construction.
@@ -125,7 +125,7 @@ pub struct CoverageNotice {
 }
 
 impl From<super::state::CoverageEdge> for CoverageNotice {
-    /// Map the cross-pass coverage transition (JEF-421 edge) onto the redaction inputs: a collapse
+    /// Map the cross-pass coverage transition (edge) onto the redaction inputs: a collapse
     /// → `Degraded` (carrying the last-observed time), a recovery → `Restored`.
     fn from(edge: super::state::CoverageEdge) -> Self {
         use super::state::CoverageEdge;
@@ -150,7 +150,7 @@ impl From<super::state::CoverageEdge> for CoverageNotice {
     }
 }
 
-/// Build the **redacted** JSON payload for a runtime-coverage transition (JEF-427). Counts only —
+/// Build the **redacted** JSON payload for a runtime-coverage transition. Counts only —
 /// no node names, no topology, no secrets, no CVEs — so it is redacted by construction (there is no
 /// untrusted cluster string in it to sanitize). Pure and unit-tested for a stable wire shape.
 pub fn redacted_coverage_payload(notice: &CoverageNotice) -> Value {
@@ -200,7 +200,7 @@ pub fn redacted_coverage_payload(notice: &CoverageNotice) -> Value {
 /// per-objective ATT&CK list (still no secrets/peers/CVEs); the default is the summary.
 ///
 /// The verdict text is sanitized ([`sanitize`]) before it lands in the payload, so
-/// untrusted third-party prose (trivy's CVE title, JEF-66) can't smuggle structure into the
+/// untrusted third-party prose (trivy's CVE title) can't smuggle structure into the
 /// sink.
 pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
     // Distinct ATT&CK references reached — the "outcome" as low-cardinality IDs, never the
@@ -210,7 +210,7 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
         ATTACK_CAP,
     );
 
-    // The verdict text can carry untrusted third-party prose (trivy's CVE title, JEF-66) —
+    // The verdict text can carry untrusted third-party prose (trivy's CVE title) —
     // sanitize it before egress so it's inert data in the operator's sink. `sanitize` strips
     // STRUCTURE (fences/braces) but not SEMANTICS: the model can echo a secret/peer name
     // or a CVE id it was shown into its free-text reason, which would then egress around
@@ -371,7 +371,7 @@ impl BreachNotifier {
     }
 
     /// POST a redacted breach notification, best-effort. A no-op when disabled (zero
-    /// outbound calls). The caller dedupes on the decision identity (the journal's, JEF-141),
+    /// outbound calls). The caller dedupes on the decision identity (the journal's),
     /// so this is invoked once per *new* decision, not per pass. Failures are logged once
     /// and dropped — notification never affects a verdict, an actuation, or the journal.
     pub async fn notify(&self, notice: &BreachNotice<'_>) {
@@ -398,7 +398,7 @@ impl BreachNotifier {
         }
     }
 
-    /// POST a redacted runtime-coverage transition (JEF-427), best-effort. A no-op when disabled
+    /// POST a redacted runtime-coverage transition, best-effort. A no-op when disabled
     /// (zero outbound calls — byte-identical to today). The caller fires this ONCE per edge (a
     /// was-covering fleet going dark past the debounce, or recovering), never per pass — the same
     /// edge-dedup discipline as the breach notice. Shares the same bounded client and the same
@@ -549,7 +549,7 @@ mod tests {
         );
     }
 
-    /// BYTE-IDENTICAL guarantee (JEF-486): lifting the scrubbers into the shared
+    /// BYTE-IDENTICAL guarantee: lifting the scrubbers into the shared
     /// `engine::redact` module must not change a single byte of what the notifier emits.
     /// These are the exact serialized payloads captured from the pre-refactor code for a
     /// fixture that exercises every scrubber (structure chars, a CVE token, a full node-key
@@ -681,7 +681,7 @@ mod tests {
     }
 
     /// The verdict prose is sanitized before egress: fence/structure characters that
-    /// untrusted third-party text (trivy's CVE title, JEF-66) might carry are stripped from
+    /// untrusted third-party text (trivy's CVE title) might carry are stripped from
     /// the payload.
     #[test]
     fn verdict_text_is_sanitized_before_egress() {
@@ -760,7 +760,7 @@ mod tests {
         }
     }
 
-    /// The coverage-degradation payload (JEF-427) is COUNTS-ONLY: the event tag, the feed, N of M,
+    /// The coverage-degradation payload is COUNTS-ONLY: the event tag, the feed, N of M,
     /// the last-observed time, and a human message — and nothing else. No node names, no topology,
     /// no secrets, no CVEs (the ADR-0018 posture, upheld by construction).
     #[test]
@@ -817,7 +817,7 @@ mod tests {
         assert!(msg.contains("3 of 4"), "3 of 4 reporting again: {msg}");
     }
 
-    /// The JEF-421 stall edge maps onto the notice: a collapse → `Degraded` (carrying the
+    /// The stall edge maps onto the notice: a collapse → `Degraded` (carrying the
     /// last-observed time), a recovery → `Restored` (no last-observed).
     #[test]
     fn coverage_edge_maps_to_notice() {
@@ -843,7 +843,7 @@ mod tests {
     }
 
     /// A disabled notifier makes ZERO outbound calls for a coverage push too — the "no URL =
-    /// byte-identical to today" guarantee extends to JEF-427. With no client it cannot call out.
+    /// byte-identical to today" guarantee extends to . With no client it cannot call out.
     #[tokio::test]
     async fn disabled_notifier_makes_no_coverage_call() {
         let notifier = BreachNotifier::disabled();

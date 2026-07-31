@@ -72,7 +72,7 @@ impl Adapter for WorkloadAdapter {
                         trust: Trust::Unknown,
                         vulnerabilities: vec![],
                         exposed_secrets: vec![],
-                        // Linkage is unknown at structural-build time (JEF-404): the engine
+                        // Linkage is unknown at structural-build time: the engine
                         // holds no in-cluster access to the image's entrypoint bytes here, so
                         // it stays `None` and reachability behaves as before. An ELF-classified
                         // signal (see `engine::observe::elf`) would populate it once the bytes

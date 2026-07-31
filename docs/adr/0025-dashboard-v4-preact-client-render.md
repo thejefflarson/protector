@@ -1,7 +1,7 @@
 # 0025. Dashboard v4: a bundled Preact client reconciling from same-origin JSON, superseding maud server-render
 
-- Status: Accepted — **cutover COMPLETE** (JEF-398): rolled out per-tab behind a flag (JEF-397 /
-  JEF-400), then the maud render half + the flag were deleted; the engine is Preact-only.
+- Status: Accepted — **cutover COMPLETE**: rolled out per-tab behind a flag,
+  then the maud render half + the flag were deleted; the engine is Preact-only.
 - Date: 2026-07-11
 - Supersedes (in part): [0019](0019-dashboard-v3-presentation-architecture.md) — its
   presentation-*mechanism* decisions (§1 server-rendered maud, §2 `page.rs`/`/fragment`
@@ -96,7 +96,7 @@ ADR-0019's **presentation-mechanism** decisions are **Superseded by ADR-0025**:
 ADR-0019's **§3 information architecture** (primary Findings + secondary tabs + one
 persistent status strip; urgency-not-severity sort) and **§4 honesty axes** (breach-vs-safe,
 decided-vs-awaiting, covered-vs-blind; green honest only while `model_judging`) **SURVIVE
-unchanged** — they are the product this rewrite preserves. The JEF-281 amendment
+unchanged** — they are the product this rewrite preserves. The amendment
 (finding detail shows *all* proven paths, not one) survives as a data/IA requirement: the
 JSON carries every proven path and the client renders them as keyed, collapsible staircases.
 
@@ -154,13 +154,13 @@ Harder / accepted:
   tokens) plus the `dangerouslySetInnerHTML` ban and the JSON-props honesty tests — the same
   discipline ADR-0019 §4 enforced, relocated to the props boundary.
 
-## Cutover status (JEF-398 — COMPLETE)
+## Cutover status (— COMPLETE)
 
-The migration ran in five parts. JEF-395 stood up the read-only `/api/*.json` snapshots from the
-serde view-model and relocated the honesty guards to the JSON-props boundary; JEF-396 built the
-bundle from source (gitignored) and added the source/bundle guards; JEF-397 and JEF-400 ported all
+The migration ran in five parts. stood up the read-only `/api/*.json` snapshots from the
+serde view-model and relocated the honesty guards to the JSON-props boundary; built the
+bundle from source (gitignored) and added the source/bundle guards; and ported all
 five views to Preact behind a per-tab flag (`PROTECTOR_DASHBOARD_PREACT_TABS`), rolling out live in
-prod. **JEF-398 completed the cutover:** with the honesty invariants proven on the new stack, it
+prod. ** completed the cutover:** with the honesty invariants proven on the new stack, it
 **deleted the maud render half** (the `components/*_view.rs` / `finding_*` / `evidence.rs` body
 renderers, the `/fragment` route, and the fragment composition in `page.rs`/`mod.rs`) and
 **removed the per-tab flag** (`preact_flags.rs`, the `PROTECTOR_DASHBOARD_PREACT_TABS` env read, and

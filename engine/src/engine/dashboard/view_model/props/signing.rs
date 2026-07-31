@@ -1,5 +1,5 @@
-//! Signing-inventory presentation props (JEF-262 / ADR-0020 Stage 1 render) + the
-//! signing-regression banner (JEF-264): the observed signing posture of EVERY image, as a
+//! Signing-inventory presentation props (ADR-0020 Stage 1 render) + the
+//! signing-regression banner: the observed signing posture of EVERY image, as a
 //! dedicated inventory section, and — when a repo's signed history drifts — the loud regression
 //! banner over its rows.
 //!
@@ -7,7 +7,7 @@
 //! states — keyless-verified / signed-key-based / unverifiable-here / invalid / not-signed (or the
 //! transient checking) — never n/a; and the "if enforced" column is ALWAYS a definite
 //! continuity verdict — would-admit / would-block / uncertain — never n/a. That verdict is
-//! baseline-relative continuity (JEF-297, ADR-0020), NOT the raw posture: a calm, consistent
+//! baseline-relative continuity (ADR-0020), NOT the raw posture: a calm, consistent
 //! posture admits, only a genuine REGRESSION against the repo's established baseline blocks, and a
 //! regression against a cold/freshly-learned baseline reads UNCERTAIN (non-green, never a hard
 //! block). See [`SigningEnforcement`]. Every string here is UNTRUSTED at render (a Fulcio SAN /
@@ -27,10 +27,10 @@ pub enum SigningPosture {
     /// Keyless-verified: a signature is present and verifies against Fulcio + Rekor (the signer
     /// rides [`SigningRowProps::signer`]). The one trusted-identity posture. Calm.
     Signed,
-    /// Signed with a key-based cosign signature (JEF-276): a verified transparency-log bundle but no
+    /// Signed with a key-based cosign signature: a verified transparency-log bundle but no
     /// Fulcio identity — real and log-included, signer opaque. CALM, never the loud channel.
     SignedKeyBased,
-    /// A signature is present but could not be verified against our trust root (JEF-276): a
+    /// A signature is present but could not be verified against our trust root: a
     /// Rekor/TUF variance, honestly "couldn't verify here" — NOT "forged". Calm-ish, distinct from
     /// the loud [`Invalid`](Self::Invalid).
     Unverifiable,
@@ -107,10 +107,10 @@ impl SigningPosture {
     }
 }
 
-/// The baseline-relative "if enforced" verdict for an image's signing posture (JEF-297, ADR-0020) —
-/// the counterfactual a signature-continuity gate (JEF-265) would apply. It is deliberately NOT the
+/// The baseline-relative "if enforced" verdict for an image's signing posture (ADR-0020) —
+/// the counterfactual a signature-continuity gate would apply. It is deliberately NOT the
 /// raw posture: the pre-ADR-0020 single-identity gate (would-admit ⇔ keyless-Fulcio) showed the
-/// entire key-based-signed fleet as would-block, contradicting JEF-276 (key-based is calm) and
+/// entire key-based-signed fleet as would-block, contradicting (key-based is calm) and
 /// ADR-0020 (block on REGRESSION from baseline, not on keyless-ness). The verdict here is the
 /// negation of a REGRESSION: a calm, consistent posture with no drift vs its baseline admits; only a
 /// genuine drift blocks.
@@ -123,7 +123,7 @@ impl SigningPosture {
 ///     (signing downgrade / identity change / signed→unsigned / signed→invalid), OR a genuinely
 ///     invalid signature (the loud channel, inadmissible independent of baseline).
 ///   * [`Uncertain`](Self::Uncertain) — a regression against a COLD/freshly-learned baseline: a weak
-///     lead (JEF-280 cold=uncertain). Non-green, but NOT a hard block — honours the cold-baseline
+///     lead (cold=uncertain). Non-green, but NOT a hard block — honours the cold-baseline
 ///     honesty invariant (a fresh baseline is the weakest evidence, never enforced as breach).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -136,7 +136,7 @@ pub enum SigningEnforcement {
     /// A regression against a cold/freshly-learned baseline — a weak lead: non-green, not a block.
     Uncertain,
     /// A regression the operator has explicitly opted out of via a scoped, recorded "exception
-    /// accepted" (JEF-265): the continuity gate ADMITS this image (only this repo/image, only this
+    /// accepted": the continuity gate ADMITS this image (only this repo/image, only this
     /// drift), so it is calm — but DISTINCTLY labelled (never "signed"/cleared-green), stays visible,
     /// and does not count toward breach. A DIFFERENT subsequent change re-flags as a loud block.
     ExceptionAccepted,
@@ -147,9 +147,9 @@ impl SigningEnforcement {
     /// stands for that image (and, when it does, whether the regressed baseline was `established`).
     ///
     /// The drift verdict is the SINGLE source of truth: it is the SAME recorded
-    /// [`SigningDrift::Regression`](crate::engine::supply_chain::signing_drift::SigningDrift) the sweep (JEF-264 /
-    /// JEF-280) classified via [`classify`](crate::engine::supply_chain::signing_drift::classify) and a continuity
-    /// gate (JEF-265) would enforce — the view never re-derives it, so the "if enforced" column can
+    /// [`SigningDrift::Regression`](crate::engine::supply_chain::signing_drift::SigningDrift) the sweep
+    /// classified via [`classify`](crate::engine::supply_chain::signing_drift::classify) and a continuity
+    /// gate would enforce — the view never re-derives it, so the "if enforced" column can
     /// never disagree with what enforcement actually blocks (`block == regression`).
     ///
     /// `regression`: `Some(established)` when a signing-regression stands for the image (`true` ⇒ an
@@ -202,7 +202,7 @@ impl SigningEnforcement {
     }
 }
 
-/// An image's observed build-provenance posture (JEF-275 / ADR-0020 §5) — the presentation mirror of
+/// An image's observed build-provenance posture (ADR-0020 §5) — the presentation mirror of
 /// the domain `signature::provenance::ProvenancePosture` (mapped at the view_model boundary so
 /// components never import the domain type). NEVER n/a: observation always reaches a posture, and a
 /// registry blip is the explicit transient [`Checking`](Self::Checking), not a fabricated clean.
@@ -314,7 +314,7 @@ pub struct SignerProps {
     pub issuer_full: Option<String>,
 }
 
-/// One image row in the signing inventory (JEF-262). Plain presentation data only — mapped from the
+/// One image row in the signing inventory. Plain presentation data only — mapped from the
 /// engine `PolicyDecisionRecord` at the view_model boundary. Every string is UNTRUSTED at render.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -334,7 +334,7 @@ pub struct SigningRowProps {
     pub posture: SigningPosture,
     /// The signer, present only when [`posture`](Self::posture) is [`SigningPosture::Signed`].
     pub signer: Option<SignerProps>,
-    /// The observed build-provenance posture (JEF-275) — the second continuity axis, rendered as its
+    /// The observed build-provenance posture — the second continuity axis, rendered as its
     /// own column. [`ProvenancePosture::Absent`] (the common case today) renders calm, never n/a.
     pub provenance: ProvenancePosture,
     /// The verified build provenance (source + builder), present only when
@@ -343,7 +343,7 @@ pub struct SigningRowProps {
     /// The human-facing posture prose for the expand panel (why invalid / still checking); empty
     /// for a plain not-signed, which needs no prose. Untrusted.
     pub detail: String,
-    /// The baseline-relative "if enforced" continuity verdict for this image (JEF-297) — would-admit
+    /// The baseline-relative "if enforced" continuity verdict for this image — would-admit
     /// / would-block / uncertain, derived from whether a signing-regression stands for this image,
     /// NOT from the raw posture. See [`SigningEnforcement`].
     pub enforcement: SigningEnforcement,
@@ -351,7 +351,7 @@ pub struct SigningRowProps {
     pub count: u64,
 }
 
-/// The strength of a repo's learned signing baseline (JEF-266, ADR-0020 §4): whether the public
+/// The strength of a repo's learned signing baseline (ADR-0020 §4): whether the public
 /// Rekor transparency log corroborates its history (real provenance) or it rests on local
 /// trust-on-first-sight alone. Surfaced as a small header badge so the operator can weigh a
 /// baseline's evidence honestly.
@@ -414,8 +414,8 @@ impl RepoStrength {
 }
 
 /// A repo group in the signing inventory: one registry/repo header with the images observed under
-/// it (JEF-262 — the inventory unit is the image, grouped under its repo), plus an optional loud
-/// signing-regression banner (JEF-264) when the repo's signed history has drifted.
+/// it (— the inventory unit is the image, grouped under its repo), plus an optional loud
+/// signing-regression banner when the repo's signed history has drifted.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SigningRepoProps {
@@ -423,24 +423,24 @@ pub struct SigningRepoProps {
     pub repo: String,
     /// The images observed under this repo.
     pub images: Vec<SigningRowProps>,
-    /// A standing signing regression against this repo's baseline (JEF-264), rendered as the LOUD
+    /// A standing signing regression against this repo's baseline, rendered as the LOUD
     /// channel above the image rows; `None` when the repo is continuous.
     pub regression: Option<SigningRegressionProps>,
-    /// A standing "exception accepted" (JEF-265): a regression the operator has opted out of via a
+    /// A standing "exception accepted": a regression the operator has opted out of via a
     /// scoped, recorded exception. Rendered CALM + distinctly labelled "exception accepted" (never
     /// the loud regression channel, never green-cleared), kept visible, and NOT counted toward
     /// breach. `None` when no accepted exception stands for this repo.
     pub exception: Option<ExceptionAcceptedProps>,
-    /// A standing build-provenance change against this repo's provenance baseline (JEF-275), rendered
+    /// A standing build-provenance change against this repo's provenance baseline, rendered
     /// as the LOUD channel above the image rows (distinct from a signing regression — a repo can have
     /// both); `None` when the repo's provenance is continuous.
     pub provenance_change: Option<ProvenanceChangeProps>,
-    /// The strength of this repo's baseline (JEF-266): log-corroborated vs local-only, rendered as
+    /// The strength of this repo's baseline: log-corroborated vs local-only, rendered as
     /// a small header badge. [`RepoStrength::Unknown`] when no baseline strength was observed.
     pub strength: RepoStrength,
 }
 
-/// A standing build-provenance change banner for a repo group (JEF-275, ADR-0020 §5): the repo's
+/// A standing build-provenance change banner for a repo group (ADR-0020 §5): the repo's
 /// established provenance identity drifted — an image was built by an unexpected builder or from an
 /// unexpected source. Audit-only (the image is still admitted); rendered as the LOUD channel with the
 /// FULL before→after builder identities.
@@ -466,7 +466,7 @@ pub struct ProvenanceChangeProps {
     pub image: String,
 }
 
-/// A standing "exception accepted" banner for a repo group (JEF-265, ADR-0020 Stage 3): a signing
+/// A standing "exception accepted" banner for a repo group (ADR-0020 Stage 3): a signing
 /// regression the operator has explicitly opted out of via a scoped, recorded exception. It is
 /// deliberately CALM (not the loud breach-rail regression channel) yet DISTINCTLY labelled
 /// "exception accepted" — never "signed"/cleared-green — and stays VISIBLE so the opt-out is never
@@ -496,7 +496,7 @@ pub struct ExceptionAcceptedProps {
     pub image: String,
 }
 
-/// Which kind of signing regression a repo drifted into (JEF-264) — the presentation mirror of the
+/// Which kind of signing regression a repo drifted into — the presentation mirror of the
 /// engine `signing_drift::RegressionKind`. The LOUD channel: visually + lexically distinct from the
 /// calm [`SigningPosture::NotSigned`]. Carried as glyph + word so meaning never rides on colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -508,17 +508,17 @@ pub enum RegressionKind {
     Invalid,
     /// A repo is now signed by an identity never before seen under it (a new signer).
     IdentityChange,
-    /// Registry↔log divergence (JEF-266): the registry serves a signature the public transparency
+    /// Registry↔log divergence: the registry serves a signature the public transparency
     /// log has NO entry for (a signature that never reached the append-only log).
     DivergenceRegistrySigned,
-    /// Registry↔log divergence (JEF-266): the transparency log records a signature the registry now
+    /// Registry↔log divergence: the transparency log records a signature the registry now
     /// serves UNSIGNED (a signature stripped at the registry while the log remembers it).
     DivergenceLogSigned,
-    /// Signing downgrade (JEF-280): a repo whose established baseline was keyless-verified now
+    /// Signing downgrade: a repo whose established baseline was keyless-verified now
     /// serves a key-based signature (Rekor bundle, no Fulcio identity) — a lesser posture that,
     /// against a keyless baseline, is the registry-substitution signal.
     DowngradeKeyBased,
-    /// Signing downgrade (JEF-280): a repo whose established baseline was keyless-verified now
+    /// Signing downgrade: a repo whose established baseline was keyless-verified now
     /// serves a signature unverifiable against our trust root — a lesser posture that, against a
     /// keyless baseline, is the registry-substitution / trust-root-drift signal.
     DowngradeUnverifiable,
@@ -592,7 +592,7 @@ impl RegressionKind {
     }
 }
 
-/// A standing signing-regression banner for a repo group (JEF-264, ADR-0020 §3): the repo's signed
+/// A standing signing-regression banner for a repo group (ADR-0020 §3): the repo's signed
 /// history drifted — now unsigned/invalid, or signed by a new identity. Audit-only (the image is
 /// still admitted); rendered as the LOUD breach-rail channel with the FULL before→after identities.
 ///

@@ -1,4 +1,4 @@
-//! Stable peer rendering across a transient informer miss (JEF-375).
+//! Stable peer rendering across a transient informer miss.
 //!
 //! [`IpIndex`] is rebuilt fresh from every pass's [`Snapshot`](crate::engine::observe::Snapshot),
 //! so when the informer cache transiently MISSES a pod this pass — it isn't in the
@@ -28,7 +28,7 @@ use super::{IpIndex, ResolvedPeer, split_ip_port};
 /// cluster name while the informer index misses it. Long enough to bridge a transient
 /// cache gap across several passes, short enough that a genuinely departed peer reverts
 /// to raw within one verdict's lifetime (the verdict fingerprint runs on a comparable
-/// window). A miss shorter than this is exactly the churn JEF-375 removes; a miss longer
+/// window). A miss shorter than this is exactly the churn this grace window removes; a miss longer
 /// than this is treated as a real change and re-rendered raw.
 const GRACE_TTL: Duration = Duration::from_secs(300);
 

@@ -1,4 +1,4 @@
-// App-shell tab-swap refetch test (JEF-408 / JEF-411): a client tab-swap must trigger an IMMEDIATE
+// App-shell tab-swap refetch test: a client tab-swap must trigger an IMMEDIATE
 // refetch of the new tab, not wait up to POLL_MS for the next interval (which left the swapped-to
 // view blank). The App restarts the poll when `activeTab` changes; startPolling fetches once
 // synchronously on start, so a restart == an immediate refetch. This would FAIL if the effect did
@@ -29,7 +29,7 @@ beforeEach(() => {
   lastOpts = null;
 });
 
-describe("tab-swap immediate refetch (JEF-408)", () => {
+describe("tab-swap immediate refetch", () => {
   it("restarts the poll (repointed to the new tab) on a client swap", () => {
     const { container } = render(<App initialTab="findings" liveRegion={() => null} />);
 

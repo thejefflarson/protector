@@ -182,8 +182,8 @@ pub(crate) fn sample_policy_log() -> Arc<PolicyDecisionLog> {
     Arc::new(log)
 }
 
-/// Seed the signing sweep's per-image observation rows (JEF-261 shape) so the Admission tab's
-/// signing inventory (JEF-262) renders every posture: a GitHub Actions keyless signature, a
+/// Seed the signing sweep's per-image observation rows (shape) so the Admission tab's
+/// signing inventory renders every posture: a GitHub Actions keyless signature, a
 /// human/Google-issued signature, an invalid signature (loud), a plain not-signed (calm), and a
 /// transient checking. Keyed `Image/<ref>` with the posture in the `signature` word + `reason`
 /// prose, exactly as `engine::signing_sweep` records them.
@@ -222,7 +222,7 @@ fn record_signing_inventory(log: &PolicyDecisionLog) {
         "checking",
         "signing posture not yet known (registry/log unreachable)",
     );
-    // A signing-regression finding (JEF-264): the api-gateway repo — with an established signed
+    // A signing-regression finding: the api-gateway repo — with an established signed
     // history — is now signed by a NEW identity (the push-access-compromise signal). Audit-only:
     // the image is still admitted; the loud banner surfaces before→after in full.
     log.record(PolicyDecisionRecord::now(
@@ -237,7 +237,7 @@ fn record_signing_inventory(log: &PolicyDecisionLog) {
          via https://token.actions.githubusercontent.com | before: \
          https://github.com/acme/api-gateway/.github/workflows/release.yaml@refs/tags/v1.8.2",
     ));
-    // An "exception accepted" (JEF-265): the export repo legitimately rotated its signer, and the
+    // An "exception accepted": the export repo legitimately rotated its signer, and the
     // operator opted THAT drift out via a scoped, recorded exception. Rendered CALM + distinctly
     // labelled "exception accepted" (never green-cleared), kept visible, never counted as breach.
     sweep(

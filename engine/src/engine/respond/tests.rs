@@ -98,7 +98,7 @@ fn proposes_a_mitigation_for_a_cuttable_chain() {
 
 /// Auto-action requires an internet-facing entry: a corroborated, adjudicated
 /// chain whose entry is internal-only is NOT live-actionable — the engine acts
-/// on remote exploitation, not normal internal activity. JEF-566: this gate is now
+/// on remote exploitation, not normal internal activity. this gate is now
 /// identical for every action, `QuarantineWorkload` included — no special case, so
 /// an internal-only actively-exploited pod (`breach_relevant == false`) is
 /// propose-only just like an internal-only edge-cut.
@@ -137,7 +137,7 @@ fn auto_action_requires_a_breach_relevant_entry() {
         !mitigation(ProposedAction::DenyNetworkPath, false).is_live_corroborated(),
         "internal-only corroborated ⇒ NOT auto-actionable (context, not a breach)"
     );
-    // The JEF-566 gate: QuarantineWorkload clears/fails on the SAME breach_relevant
+    // The gate: QuarantineWorkload clears/fails on the SAME breach_relevant
     // condition — it no longer bypasses it via a special case.
     assert!(
         mitigation(ProposedAction::QuarantineWorkload, true).is_live_corroborated(),
@@ -146,7 +146,7 @@ fn auto_action_requires_a_breach_relevant_entry() {
     );
     assert!(
         !mitigation(ProposedAction::QuarantineWorkload, false).is_live_corroborated(),
-        "JEF-566: an internal-only actively-exploited pod (breach_relevant == false) is \
+        "an internal-only actively-exploited pod (breach_relevant == false) is \
          propose-only, never auto-cut — no more QuarantineWorkload special case"
     );
 }
@@ -441,7 +441,7 @@ fn quarantine_entry_self_reverts_when_its_chain_is_gone() {
     assert_eq!(ledger.active().count(), 0);
 }
 
-// --- JEF-284: quarantine any pod that is remotely exploitable / actively exploited ---
+// --- quarantine any pod that is remotely exploitable / actively exploited ---
 
 use crate::engine::graph::{Provenance, Severity, Vulnerability};
 use crate::engine::respond::actuator::{
@@ -471,8 +471,8 @@ fn crit_vuln(id: &str, kev: bool) -> Vulnerability {
 /// A multi-hop breach: internet `web` -reaches-> `app1` (critical CVE) -reaches->
 /// `app2` (KEV) which mounts the secret. Both `app1` and `app2` are compromisable and
 /// network-reachable from the internet foothold — so both are *remotely exploitable*
-/// (JEF-284 condition 1), a popped app one and two hops in. No runtime evidence, so the
-/// justifying chain is NOT live-corroborated (JEF-566: target *identification* here is
+/// (condition 1), a popped app one and two hops in. No runtime evidence, so the
+/// justifying chain is NOT live-corroborated (target *identification* here is
 /// unaffected — only auto-*action* now requires corroboration).
 fn multi_hop_breach_snapshot() -> Snapshot {
     multi_hop_breach_snapshot_with_runtime(Vec::new())
@@ -537,7 +537,7 @@ fn multi_hop_breach_snapshot_with_runtime(
     }
 }
 
-/// ADR-0034 (JEF-570) NEGATIVE control: without ANY model decision, the deterministic
+/// ADR-0034 NEGATIVE control: without ANY model decision, the deterministic
 /// `quarantine_targets` desired-set insertion is GONE for a breach-relevant chain — the popped
 /// pods one and two hops in are IDENTIFIED as candidates (proof layer, unchanged, see
 /// `pivot_quarantine_tests`) but are no longer PROPOSED at all absent a decisive `Attack`
@@ -568,7 +568,7 @@ fn remotely_exploitable_pods_two_hops_in_are_not_quarantined_without_a_decision(
 
 /// The positive contrast: a decisive `Attack` decision naming BOTH popped pods produces
 /// exactly the mitigations the pre-ADR-0034 deterministic pass used to propose unconditionally
-/// — independent compromises on the same chain (JEF-284 condition 1) are each isolated, and the
+/// — independent compromises on the same chain (condition 1) are each isolated, and the
 /// entry (governed by the ADR-0022 `containment_for` precedence, a surgical edge-cut here) is
 /// never workload-quarantined.
 #[test]
@@ -617,7 +617,7 @@ fn remotely_exploitable_pods_two_hops_in_are_quarantined_when_the_model_names_th
 }
 
 /// An INTERNAL pod (no internet path) that mounts a secret and has a live on-pod alert
-/// — actively exploited *now* (JEF-284 condition 2). It is quarantined regardless of
+/// — actively exploited *now* (condition 2). It is quarantined regardless of
 /// network position, even though its chain is not breach-relevant.
 fn internal_active_snapshot(with_alert: bool) -> Snapshot {
     use crate::engine::observe::{Attribution, RuntimeObservation};
@@ -672,7 +672,7 @@ fn internal_actively_exploited_pod_is_quarantined() {
         chains.iter().all(|c| !c.is_breach_relevant()),
         "the internal chain is deliberately not breach-relevant"
     );
-    // JEF-566: quarantining it as a PROPOSAL is fine (it still surfaces to a human), but
+    // quarantining it as a PROPOSAL is fine (it still surfaces to a human), but
     // it must never clear the auto-action gate — an internal-only pod is not a breach,
     // live alert or not.
     let mitigation = workload_quarantines(&delta)
@@ -740,7 +740,7 @@ fn reachable_but_clean_pod_is_not_quarantined() {
 
     let graph = build_graph(&snap, &default_adapters());
     let chains = prove(&graph);
-    // ADR-0034 (JEF-570): a decisive Attack decision naming ONLY `popped` — never `cleandb`,
+    // ADR-0034: a decisive Attack decision naming ONLY `popped` — never `cleandb`,
     // which carries no exploitation evidence of its own and so isn't even offered as
     // selectable on the menu.
     let popped_chain = chains
@@ -785,7 +785,7 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
     use crate::engine::observe::{Attribution, RuntimeObservation};
     use protector_behavior::Behavior;
 
-    // This test isolates the enable/scope gate (not the JEF-566 corroboration gate), so
+    // This test isolates the enable/scope gate (not the corroboration gate), so
     // give the entry a live alert — any "attack happening now" signal — corroborating the
     // justifying chain, so `is_live_corroborated()` clears independently of what's asserted
     // here.
@@ -802,7 +802,7 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
         &default_adapters(),
     );
     let chains = prove(&graph);
-    // ADR-0034 (JEF-570): this test isolates the `decide()` enable/scope gate, which needs a
+    // ADR-0034: this test isolates the `decide()` enable/scope gate, which needs a
     // PROPOSED mitigation to run against — supply the decisive Attack decision naming app2.
     let decisions = decisive_attack(
         chains.first().expect("one chain"),
@@ -820,7 +820,7 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
         .clone();
     assert!(
         mitigation.is_live_corroborated(),
-        "the entry alert corroborates the justifying chain, clearing the JEF-566 gate"
+        "the entry alert corroborates the justifying chain, clearing the live-corroboration gate"
     );
 
     // No alive collateral in this snapshot's health view; keep the blast radius empty so

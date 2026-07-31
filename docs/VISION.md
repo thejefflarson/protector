@@ -59,12 +59,12 @@ internet-facing entry's. The two things it adjudicates:
 2. **On-box behavior suggesting compromise** of the critical path — on an internet-facing
    pod *or* a downstream pod.
 
-**Honest current state (JEF-547 fact-check, `origin/main`):** the code does not yet meet
+**Honest current state (fact-check, `origin/main`):** the code does not yet meet
 this. The model governs only the *entry*; every downstream/pivot decision is made
 deterministically (reachability + CVE presence, or a live on-box signal) with the model out
 of the loop, the model is never shown downstream evidence, and it chooses no containment
 scope (all quarantine is pod-level; no node-level option). Closing that gap is a deliberate
-refactor tracked from JEF-547 — this section is the target it refactors toward.
+refactor tracked from — this section is the target it refactors toward.
 
 ## The superpower, and the discipline that earns it
 

@@ -1,4 +1,4 @@
-//! Per-finding recency / Δ data (JEF-201): the small, pure types the verdict store tracks
+//! Per-finding recency / Δ data: the small, pure types the verdict store tracks
 //! per entry to answer "what changed since the last pass?" — the [`StoredPosture`] the
 //! engine diffs pass-to-pass, the resulting [`Delta`] verdict, and the [`RecencyInfo`] the
 //! findings snapshot carries per row.
@@ -14,9 +14,9 @@ use serde::Serialize;
 
 use crate::engine::reason::adjudicate::Verdict;
 
-/// The model's POSTURE for an entry as the recency tracker stores it (JEF-201). Kept here so the
+/// The model's POSTURE for an entry as the recency tracker stores it. Kept here so the
 /// engine can diff this pass's posture against the previous one without pulling in any
-/// presentation. Derived from the TYPED [`Verdict`] by [`StoredPosture::of_verdict`] (JEF-255) —
+/// presentation. Derived from the TYPED [`Verdict`] by [`StoredPosture::of_verdict`] —
 /// the single source of truth, so the recency diff and any rendered posture can never disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoredPosture {
@@ -25,7 +25,7 @@ pub enum StoredPosture {
     /// The model reached this entry but its call was INCONCLUSIVE (an `Uncertain`
     /// verdict — timed out, unparseable, or genuinely undecided). Distinct from `Safe`:
     /// an inconclusive read is NEVER green (ADR-0016: honesty — Uncertain/Awaiting is
-    /// never safe). It must never map to `Safe` anywhere in the Δ path (JEF-302).
+    /// never safe). It must never map to `Safe` anywhere in the Δ path.
     Unknown,
     /// The model judged this NOT a breach (a decisive `Refuted` call).
     Safe,
@@ -34,16 +34,16 @@ pub enum StoredPosture {
 }
 
 impl StoredPosture {
-    /// The posture a TYPED verdict carries (JEF-255) — `Confirmed`/`Exploitable`
+    /// The posture a TYPED verdict carries — `Confirmed`/`Exploitable`
     /// ([`Verdict::is_confirmed`]) is a BREACH, an inconclusive `Uncertain` is `Unknown`
-    /// (never green — ADR-0016 honesty; JEF-302), a decisive `Refuted` is `Safe`, and `None`
+    /// (never green — ADR-0016 honesty;), a decisive `Refuted` is `Safe`, and `None`
     /// (no verdict yet) is `Awaiting`. This is the one place posture is derived from a verdict,
     /// so the recency diff and any downstream posture can never drift. (v1 string-matched the
-    /// "exploitable" prefix here, and missed `Confirmed`; JEF-255 fixes that.)
+    /// "exploitable" prefix here, and missed `Confirmed`; this fixes that.)
     ///
     /// `Uncertain` MUST NOT map to `Safe`: an inconclusive read is a latent honesty foot-gun —
     /// if the posture ever feeds a status color or a gate, an undecided entry must never read
-    /// green (JEF-302).
+    /// green.
     pub fn of_verdict(verdict: Option<&Verdict>) -> Self {
         match verdict {
             None => StoredPosture::Awaiting,
@@ -57,7 +57,7 @@ impl StoredPosture {
     /// rise in rank is an escalation (`↑`), a fall a de-escalation (`↓`). Awaiting ranks lowest
     /// so a NEW entry's first real verdict reads via [`Delta::New`], not a spurious arrow.
     /// `Unknown` (an inconclusive `Uncertain`) ranks ABOVE `Safe` and below `Breach`: an
-    /// undecided read is a mild concern, never as calm as a decisive clear (JEF-302).
+    /// undecided read is a mild concern, never as calm as a decisive clear.
     pub fn rank(self) -> u8 {
         match self {
             StoredPosture::Awaiting => 0,
@@ -80,7 +80,7 @@ impl StoredPosture {
     }
 }
 
-/// The per-entry recency verdict for the Δ a finding carries (JEF-201) — "what changed since the
+/// The per-entry recency verdict for the Δ a finding carries — "what changed since the
 /// last pass". Computed by the store from the diff of this pass's [`StoredPosture`] against the
 /// previous one (NOT from render time), so it is stable across repeated reads and a
 /// journal-restore. Pure presentation metadata (ADR-0016: recency is a view).
@@ -95,13 +95,13 @@ pub enum Delta {
     DeEscalated,
     /// Posture unchanged since the previous pass — steady state.
     Unchanged,
-    /// Restored from the durable journal on boot (JEF-141) — present before this run began,
+    /// Restored from the durable journal on boot — present before this run began,
     /// so it must NOT be mislabeled `New`. Carries the quiet "seen before" reading.
     Restored,
 }
 
 impl Delta {
-    /// Whether this Δ counts toward the "N new this pass" tally (JEF-201).
+    /// Whether this Δ counts toward the "N new this pass" tally.
     #[allow(dead_code)]
     pub fn is_new(self) -> bool {
         matches!(self, Delta::New)
@@ -115,7 +115,7 @@ impl Delta {
     }
 }
 
-/// The resolved recency facts for one entry (JEF-201), the data a finding carries in its Δ
+/// The resolved recency facts for one entry, the data a finding carries in its Δ
 /// glyph + age cell. Pulled from the verdict store at `Findings::snapshot` time, like the
 /// verdict itself, so the Δ tracks the stored first-seen / posture history rather than the
 /// render clock.
@@ -140,7 +140,7 @@ mod tests {
             StoredPosture::of_verdict(Some(&Verdict::Exploitable("CVE-2021-44228".into()))),
             StoredPosture::Breach
         );
-        // A `Confirmed` verdict is ALSO a breach — v1's string-match missed it (JEF-255).
+        // A `Confirmed` verdict is ALSO a breach — v1's string-match missed it.
         assert_eq!(
             StoredPosture::of_verdict(Some(&Verdict::Confirmed)),
             StoredPosture::Breach
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn uncertain_never_maps_to_safe() {
-        // JEF-302: an inconclusive verdict is a latent honesty foot-gun — it must map to a
+        // an inconclusive verdict is a latent honesty foot-gun — it must map to a
         // non-green `Unknown`, NEVER to `Safe`, so an undecided entry can never read green if
         // the posture ever feeds a status color or a gate (ADR-0016 honesty).
         let posture =

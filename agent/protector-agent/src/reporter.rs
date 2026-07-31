@@ -1,10 +1,10 @@
 //! The reporter: batches a window's observations and (when this node has one) its per-node
 //! liveness beacon into ONE [`RuntimeReport`] envelope and POSTs it to the engine's unified
-//! behavioral ingest (`/behavior`, ADR-0014 / JEF-336). In-cluster, mesh-protected hop; the agent
+//! behavioral ingest (`/behavior`, ADR-0014). In-cluster, mesh-protected hop; the agent
 //! never sends behavioral data anywhere else (the data is a map of the cluster — it stays
 //! in-cluster, per VISION's local-first conviction).
 //!
-//! One endpoint, one envelope (JEF-336): liveness always travels with the report, so a quiet node
+//! One endpoint, one envelope: liveness always travels with the report, so a quiet node
 //! still POSTs (empty observations, liveness present) and the engine reads it HEALTHY-quiet rather
 //! than blind. This replaced a separate `/agent-liveness` beacon POST that shipped a single
 //! `AgentReport` the engine's array-typed handler 422-rejected — the "no agents connected" bug.
@@ -14,7 +14,7 @@
 //! is the shared secret the engine also reads; authentication (this header) is
 //! complementary to the cluster's Linkerd mesh authorization.
 //!
-//! ## Self-healing token rotation (JEF-240)
+//! ## Self-healing token rotation
 //!
 //! The token is read once at startup, but the kubelet updates the mounted secret file
 //! in place when the Secret rolls. If the engine and agent read `protector-ingest-auth`
@@ -40,13 +40,13 @@ const RERESOLVE_AFTER_401S: u32 = 3;
 /// wedged ingest is loud once (and on a slow cadence) rather than a WARN every 30s.
 const ERROR_EVERY_N_REJECTIONS: u64 = 20;
 
-/// Resolves the ingest bearer from the environment — the seam JEF-240 re-invokes to pick
+/// Resolves the ingest bearer from the environment — the seam re-invokes to pick
 /// up a rotated secret file. Boxed so tests can inject a deterministic, mutating source
 /// (a stale-then-fresh token) without touching the filesystem or sleeping.
 type TokenSource = Box<dyn FnMut() -> Option<String> + Send>;
 
 /// POSTs per-window [`RuntimeReport`] envelopes (observations + optional per-node liveness beacon,
-/// JEF-336) to `{base}/behavior`.
+/// ) to `{base}/behavior`.
 pub struct Reporter {
     client: reqwest::Client,
     url: String,
@@ -54,7 +54,7 @@ pub struct Reporter {
     /// `Authorization` header (the engine then runs the ingest unauthenticated, which
     /// it warns about); set it once the Secret has rolled out.
     token: Option<String>,
-    /// Re-resolves the token on sustained 401s (JEF-240). Defaults to reading
+    /// Re-resolves the token on sustained 401s. Defaults to reading
     /// `PROTECTOR_INGEST_TOKEN_FILE` / `PROTECTOR_INGEST_TOKEN`.
     token_source: TokenSource,
     /// Consecutive 401s since the last accepted (2xx) batch. Drives both re-resolution
@@ -102,7 +102,7 @@ impl Reporter {
     /// `base` is the engine's runtime-ingest URL (e.g.
     /// `http://protector.protector.svc.cluster.local:9999`). The ingest token is read
     /// once from the environment (file before env); on sustained 401s it is re-read from
-    /// the same source (JEF-240).
+    /// the same source.
     pub fn new(base: &str) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -110,7 +110,7 @@ impl Reporter {
         Ok(Self::with_source(client, base, Box::new(ingest_token)))
     }
 
-    /// Construct over an explicit token source — the JEF-240 seam. `source` is resolved
+    /// Construct over an explicit token source — the seam. `source` is resolved
     /// once now (the startup read) and re-invoked on sustained 401s. Used by the crate's
     /// tests to inject a stale-then-fresh token deterministically.
     fn with_source(client: reqwest::Client, base: &str, mut source: TokenSource) -> Self {
@@ -144,7 +144,7 @@ impl Reporter {
         req
     }
 
-    /// Cumulative (delivered, rejected) tallies for the periodic heartbeat (JEF-240).
+    /// Cumulative (delivered, rejected) tallies for the periodic heartbeat.
     /// `delivered` counts accepted observations; `rejected` counts rejected batches.
     pub fn counters(&self) -> (u64, u64) {
         (self.delivered_total, self.rejected_total)
@@ -167,7 +167,7 @@ impl Reporter {
                 tracing::info!(
                     consecutive_401s = self.consecutive_401s,
                     "ingest token re-resolved after sustained 401s — retrying with the \
-                     current secret (JEF-240 self-heal)"
+                     current secret (self-heal)"
                 );
                 self.token = fresh;
             } else {
@@ -193,7 +193,7 @@ impl Reporter {
         }
     }
 
-    /// Send one per-window [`RuntimeReport`] envelope (observations + optional liveness, JEF-336);
+    /// Send one per-window [`RuntimeReport`] envelope (observations + optional liveness);
     /// returns how many observations were accepted (0 on failure, or when the envelope carries
     /// neither observations nor liveness). An envelope with empty observations but a liveness beacon
     /// IS sent — that is the quiet-node path that keeps a silent node reading HEALTHY-quiet, not
@@ -201,7 +201,7 @@ impl Reporter {
     /// a lost report costs a little freshness, never correctness, and must never wedge the agent.
     /// The caller rolls the count into an interval heartbeat; per-send detail stays at debug.
     ///
-    /// On a run of 401s the token is re-resolved (JEF-240) so a secret rotation self-heals
+    /// On a run of 401s the token is re-resolved so a secret rotation self-heals
     /// without a pod restart; the run-length resets on the first 2xx.
     pub async fn send(&mut self, report: &RuntimeReport) -> usize {
         if report.observations.is_empty() && report.liveness.is_none() {
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(auth, "Bearer s3cr3t");
     }
 
-    /// JEF-336: the unified envelope — including a quiet-node liveness-only report — POSTs to the
+    /// the unified envelope — including a quiet-node liveness-only report — POSTs to the
     /// single `{base}/behavior` route carrying the same bearer (no separate `/agent-liveness`).
     #[test]
     fn liveness_rides_the_behavior_envelope_with_bearer() {
@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(req.url().as_str(), "http://engine.svc:9999/behavior");
     }
 
-    /// JEF-240: a token source backed by a shared cell the test flips, so the re-resolve
+    /// a token source backed by a shared cell the test flips, so the re-resolve
     /// seam is exercised deterministically with no real sleeps or filesystem.
     fn rotating_source(cell: std::sync::Arc<std::sync::Mutex<Option<String>>>) -> TokenSource {
         Box::new(move || cell.lock().unwrap().clone())
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(reporter.consecutive_401s, 1);
     }
 
-    /// Counters track delivered vs rejected for the heartbeat (JEF-240 surfacing).
+    /// Counters track delivered vs rejected for the heartbeat (surfacing).
     #[test]
     fn counters_tally_rejections() {
         let mut reporter = reporter_with(Some("t"));

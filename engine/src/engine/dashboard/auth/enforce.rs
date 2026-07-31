@@ -1,4 +1,4 @@
-//! Content-negotiating enforcement (JEF-487, ADR-0030 §6): mounts the JEF-485 [`Verifier`] as the
+//! Content-negotiating enforcement (ADR-0030 §6): mounts the [`Verifier`] as the
 //! LIVE dashboard access gate and shapes every fail-closed denial by **route class**, so the client
 //! contract holds:
 //!
@@ -15,7 +15,7 @@
 //!   serve; this matches the [`AuthError::status`](super::AuthError::status) mapping the verifier
 //!   already defines. Never a bypass.
 //!
-//! Every denial carries `Cache-Control: no-store` (JEF-283: a cached `302`→login is exactly the
+//! Every denial carries `Cache-Control: no-store` (a cached `302`→login is exactly the
 //! Cloudflare-edge bug), and — because this layer is mounted UNDER the CSP layer — the strict CSP
 //! rides every rejection too. The gate is the ONLY thing that can turn a request into a `next.run`;
 //! there is no path that serves the graph on a verification error (the fail-*open* trap ADR-0030 §6
@@ -50,7 +50,7 @@ const ENV_LOGIN_URL: &str = "PROTECTOR_DASHBOARD_OIDC_LOGIN_URL";
 /// verified identity passes), so configuring an issuer never, by itself, forbids a valid token.
 const ENV_MIN_TIER: &str = "PROTECTOR_DASHBOARD_OIDC_MIN_TIER";
 
-/// The live dashboard access gate: the JEF-485 [`Verifier`] plus the content-negotiation policy
+/// The live dashboard access gate: the [`Verifier`] plus the content-negotiation policy
 /// (where to send an unauthenticated browser, and the minimum authorization tier). Built ONLY when
 /// an issuer is configured — its absence is the loud edge-only bypass (ADR-0030 §6), which the
 /// caller handles by simply not mounting this layer.
@@ -210,7 +210,7 @@ fn redirect(location: &str) -> Response {
 }
 
 /// Stamp `Cache-Control: no-store` on a denial so a shared edge (Cloudflare) never caches a
-/// `302`→login (or any rejection) against the URL and serves it to the next caller (JEF-283).
+/// `302`→login (or any rejection) against the URL and serves it to the next caller.
 fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()

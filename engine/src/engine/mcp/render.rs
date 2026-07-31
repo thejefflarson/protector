@@ -1,5 +1,5 @@
-//! Per-entry tiered redaction + the withheld-not-omitted response contract (ADR-0031 §2/§4,
-//! JEF-488). Redaction is applied PER ENTRY as it is serialized — never a bulk dump filtered
+//! Per-entry tiered redaction + the withheld-not-omitted response contract (ADR-0031 §2/§4).
+//! Redaction is applied PER ENTRY as it is serialized — never a bulk dump filtered
 //! afterward (§2). Every field is present at every tier: below its unlock tier it is a typed
 //! SENTINEL string, at/above it is the real value — so a redacted answer is never an empty shape.
 //! Each response carries a top-level [`manifest`] `{tier, withheld:[{kind,count,unlock}]}`.
@@ -25,7 +25,7 @@ use super::tiering::EffectiveTier;
 const ATTACK_CAP: usize = 8;
 
 /// The sentinel for a withheld entry/workload identity (a path/topology fact — forensic). `pub` so
-/// the "Access" audit screen (JEF-490) redacts a pull's target-class with the SAME vocabulary the
+/// the "Access" audit screen redacts a pull's target-class with the SAME vocabulary the
 /// tool uses — one sentinel string across tool + screen, never a second wording that could diverge.
 pub const S_ENTRY: &str = "[redacted — workload identity; forensic tier required]";
 /// The sentinel for withheld proven paths (topology — forensic).

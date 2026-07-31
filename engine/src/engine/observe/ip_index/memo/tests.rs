@@ -106,7 +106,7 @@ fn ipv6_bracketed_peer_resolves() {
     );
 }
 
-// --- JEF-375: stable rendering across a transient informer miss ------------------------
+// --- stable rendering across a transient informer miss ------------------------
 
 #[test]
 fn transient_index_miss_reuses_last_known_resolution() {

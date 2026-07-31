@@ -1,10 +1,10 @@
 // The dashboard v4 app shell (ADR-0025 / ADR-0027 / ADR-0028): the mounted Preact tree. `App` owns
 // the ONLY shared client state — the active tab, the last-good snapshot, the persistent status
-// strip, the connection status, and the freshness clock — each a plain `useState` (JEF-411: no
+// strip, the connection status, and the freshness clock — each a plain `useState` (no
 // store, no reducer, no Context). Everything else (which rows are expanded, which disclosures are
 // open) is LOCAL component state, ephemeral by design.
 //
-// The strip is its OWN useState, decoupled from the per-tab `data` (JEF-410): it persists global
+// The strip is its OWN useState, decoupled from the per-tab `data`: it persists global
 // posture across a tab swap so the header never tears down. Honesty stays server-derived (ADR-0027):
 // the client only displays the strip's tokens; it never recomputes "is this green?".
 //
@@ -12,7 +12,7 @@
 // table): first-load says "connecting to the engine…", stale says the load-bearing two-sentence
 // "Not updating … This is a connection problem, not an all-clear." Live says nothing (no chrome).
 //
-// Auth states (JEF-489): once OIDC is configured (JEF-487), `/api/*.json` can answer 401/403. The
+// Auth states: once OIDC is configured, `/api/*.json` can answer 401/403. The
 // poll's `onAuthError` flips the status machine to `unauthenticated | forbidden` UNCONDITIONALLY
 // (even during first-load — a 401 on the very first tick must not hang on "connecting…"), and the
 // <AuthGate> interstitial REPLACES the privileged view. The auth interstitial is mutually exclusive
@@ -46,11 +46,11 @@ const TABS = [
  *   (defaults to this app's root once mounted).
  */
 export function App({ initialTab = "findings", liveRegion }) {
-  // The five shared fields, each a plain useState (JEF-411).
+  // The five shared fields, each a plain useState.
   const [activeTab, setActiveTab] = useState(initialTab);
   const [data, setData] = useState(null);
   // The persistent status strip (global cluster posture), its OWN useState decoupled from the
-  // per-tab `data` so a tab swap (which nulls `data`) never tears the header down (JEF-410). Null
+  // per-tab `data` so a tab swap (which nulls `data`) never tears the header down. Null
   // before the first snapshot (blank is honest — absent is never a green all-clear).
   const [strip, setStrip] = useState(null);
   const [status, setStatus] = useState("first-load");
@@ -58,7 +58,7 @@ export function App({ initialTab = "findings", liveRegion }) {
 
   // A successful snapshot: go LIVE and reset the freshness clock. Persist the global posture from
   // this snapshot's `strip` (present in every tab's payload); keep the last strip if a snapshot
-  // omits it, so the header never blanks (JEF-410).
+  // omits it, so the header never blanks.
   const applySnapshot = useCallback((snap) => {
     setData(snap);
     setStrip((prev) => (snap && snap.strip ? snap.strip : prev));
@@ -72,7 +72,7 @@ export function App({ initialTab = "findings", liveRegion }) {
     setStatus((s) => (s === "first-load" ? s : "stale"));
   }, []);
 
-  // An auth failure on the snapshot route (JEF-489): flip to the interstitial state UNCONDITIONALLY —
+  // An auth failure on the snapshot route: flip to the interstitial state UNCONDITIONALLY —
   // unlike `markStale`, there is NO first-load guard, because a 401 on the very first tick must
   // surface (a signed-out operator hanging forever on "connecting…" is the silent-hang bug this
   // fixes). 403 (signed in, not allowed) is a distinct state from 401 (signed out / expired).
@@ -81,7 +81,7 @@ export function App({ initialTab = "findings", liveRegion }) {
   }, []);
 
   // Poll the ACTIVE tab; a client tab-swap RESTARTS the poll (keyed on [activeTab]) so the new tab
-  // refetches IMMEDIATELY (fixing the up-to-5s blank after a swap — JEF-408) rather than waiting for
+  // refetches IMMEDIATELY (fixing the up-to-5s blank after a swap —) rather than waiting for
   // the next interval. `() => activeTab` is correct: the effect restarts per swap, re-closing over
   // the fresh value. The selection guard checks this app's own subtree.
   useEffect(
@@ -98,14 +98,14 @@ export function App({ initialTab = "findings", liveRegion }) {
 
   // Swap the active tab (client-side view swap). Drop the previous tab's snapshot — each tab has its
   // own JSON shape, so rendering the old snapshot under the new view would be wrong — but do NOT
-  // touch `strip`: it is global posture that persists across the swap (JEF-410).
+  // touch `strip`: it is global posture that persists across the swap.
   const swapTab = useCallback((tab) => {
     setActiveTab(tab);
     setData(null);
   }, []);
 
   // In an auth state the privileged view is REPLACED by the interstitial, and the polite connection
-  // banner is suppressed — the two are mutually exclusive (JEF-489). The persistent strip stays: the
+  // banner is suppressed — the two are mutually exclusive. The persistent strip stays: the
   // interstitial copy explicitly covers that the last-seen posture may be out of date, so a held
   // strip never reads as a live all-clear.
   const authState = status === "unauthenticated" || status === "forbidden";
@@ -144,7 +144,7 @@ function ConnectionBanner({ status, lastGoodAt }) {
 }
 
 /**
- * The auth interstitial (JEF-489) — shown IN PLACE OF the privileged view when the snapshot route
+ * The auth interstitial — shown IN PLACE OF the privileged view when the snapshot route
  * answered an auth failure, so the last-good view is REPLACED (never left on screen reading stale).
  * Mutually exclusive with {@link ConnectionBanner} (the caller suppresses the polite banner in an
  * auth state). Two registers, chosen by the server's HTTP status:
@@ -218,7 +218,7 @@ function TabNav({ activeTab, onSwap }) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
       return; // let the browser handle a modified click (new tab, etc.)
     }
-    // Every tab is Preact-rendered (JEF-398), so every swap is a local client-side view swap — no
+    // Every tab is Preact-rendered, so every swap is a local client-side view swap — no
     // full navigation, no maud fallback.
     e.preventDefault();
     history.pushState({ tab: tab.id }, "", tab.href);
@@ -265,10 +265,10 @@ export function tabFromLocation() {
 }
 
 /**
- * Render the active view (all five tabs are ported — JEF-400). Before the active tab's first
+ * Render the active view (all five tabs are ported —). Before the active tab's first
  * snapshot lands (initial mount, or right after a client tab-swap that cleared the previous tab's
  * data) the body is a quiet placeholder — never a flashed empty table, and never the wrong tab's
- * stale snapshot. Each view is a pure `view`-only render (JEF-411 — no store prop).
+ * stale snapshot. Each view is a pure `view`-only render (— no store prop).
  */
 function ActiveView({ activeTab, data }) {
   if (!data) {

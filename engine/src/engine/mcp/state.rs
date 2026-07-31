@@ -1,4 +1,4 @@
-//! [`McpState`] — the read-only engine handles the four MCP tools read from (JEF-488). It is the
+//! [`McpState`] — the read-only engine handles the four MCP tools read from. It is the
 //! SAME `state::` handles the dashboard renders (findings, the judgement ring, the admission-decision
 //! log), never a new data path (ADR-0031 §1: "back them with the existing view-model builders /
 //! `state::` handles"). Cheaply cloneable (all `Arc`), and it mutates nothing — the MCP server is

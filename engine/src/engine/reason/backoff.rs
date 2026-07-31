@@ -1,5 +1,4 @@
-//! Exponential backoff + a global circuit-breaker for inconclusive adjudication
-//! (JEF-234).
+//! Exponential backoff + a global circuit-breaker for inconclusive adjudication.
 //!
 //! The judging loop caches a DECISIVE verdict so it is not re-judged while its evidence
 //! fingerprint is unchanged. An `Uncertain` verdict — what a model timeout / Ollama-down
@@ -115,7 +114,7 @@ impl EntryBackoff {
     }
 }
 
-/// Global circuit-breaker over ALL entries' adjudications (JEF-234). It bounds total model
+/// Global circuit-breaker over ALL entries' adjudications. It bounds total model
 /// calls when Ollama is fully down: per-entry backoff alone still lets N entries each fire
 /// one call on the first degraded pass (N calls); this caps the whole fleet to ~one probe
 /// per cooldown until the model recovers.

@@ -1,15 +1,15 @@
 //! Shared client for an OpenAI-compatible chat endpoint (a local Ollama by
 //! default). The adjudicator (judge) is the sole `chat` consumer — the model-backed
-//! hypothesis stage was removed (JEF-363), so nothing else judges through here.
+//! hypothesis stage was removed, so nothing else judges through here.
 //! `keep_warm` is a bypass: a one-token keep-alive ping that never touches a verdict.
 //! Local-first: point it at an in-cluster model so the graph never leaves the cluster.
 //!
 //! This is glue — the one network call the model layer makes. The prompt-building
 //! and reply-parsing that wrap it are pure and tested in their own modules. Completion
-//! reuse lives one layer up in the adjudicator's verdict cache (JEF-350), keyed on the
-//! deterministic prompt hash; there is deliberately no cache here (JEF-364 removed the
-//! JEF-362 completion LRU — it was redundant with the verdict cache and pinned transient
-//! `Uncertain` replies, blocking the JEF-234 retry/backoff).
+//! reuse lives one layer up in the adjudicator's verdict cache, keyed on the
+//! deterministic prompt hash; there is deliberately no cache here (removed the
+//!  completion LRU — it was redundant with the verdict cache and pinned transient
+//! `Uncertain` replies, blocking the retry/backoff).
 
 use std::time::Duration;
 
@@ -17,13 +17,13 @@ use serde_json::{Value, json};
 
 /// Default cap on the model calls protector keeps IN FLIGHT at once during an adjudication
 /// pass. Deliberately generous (never 1): this is a connection/timeout fan-out safety bound,
-/// not the old serialization gate (JEF-337 removed that). See [`model_concurrency`].
+/// not the old serialization gate (removed that). See [`model_concurrency`].
 pub const DEFAULT_MODEL_CONCURRENCY: usize = 8;
 
 /// Max model calls protector dispatches concurrently within a single adjudication pass,
 /// from `PROTECTOR_MODEL_CONCURRENCY` (default [`DEFAULT_MODEL_CONCURRENCY`]).
 ///
-/// JEF-337: protector no longer serializes model calls behind a process-wide 1-permit gate.
+/// protector no longer serializes model calls behind a process-wide 1-permit gate.
 /// Ollama owns concurrency now — `OLLAMA_NUM_PARALLEL` decides how many requests it runs at
 /// once and `OLLAMA_MAX_QUEUE` bounds the rest — and it is sized for the node it runs on. That
 /// is the REAL throttle; protector reinventing it (one in-flight request) only capped
@@ -142,19 +142,19 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// with a [`MAX_RESPONSE_BYTES`] cap so a server that ignores `max_tokens` still
 /// can't make us buffer an unbounded reply.
 ///
-/// There is no completion cache here (JEF-364): every call hits the endpoint. Reuse
-/// lives in the adjudicator's verdict cache (JEF-350), which keys on the deterministic
+/// There is no completion cache here: every call hits the endpoint. Reuse
+/// lives in the adjudicator's verdict cache, which keys on the deterministic
 /// prompt hash — a hit there means `chat` is never called, and a miss means the prompt
 /// changed so a completion cache would miss too. A completion cache would only add a
 /// live hazard: it would pin a transient `Uncertain` reply (which the verdict store
-/// deliberately never caches, so JEF-234 backoff can retry) until the evidence changed.
+/// deliberately never caches, so backoff can retry) until the evidence changed.
 pub async fn chat(
     client: &reqwest::Client,
     endpoint: &str,
     model: &str,
     prompt: &str,
 ) -> Option<String> {
-    // JEF-337: no serialization gate — the call just fires. Concurrency is owned by ollama
+    // no serialization gate — the call just fires. Concurrency is owned by ollama
     // (`OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_QUEUE`) and fan-out is bounded per pass by
     // `model_concurrency`. Each call is still bounded by the reqwest timeout (see `client`).
     let body = json!({
@@ -164,10 +164,10 @@ pub async fn chat(
         "messages": [{ "role": "user", "content": prompt }]
     });
     let response = client.post(endpoint).json(&body).send().await.ok()?;
-    // JEF-301: a non-success HTTP status (the 500 Ollama returns when it OOM-crashes ingesting
+    // a non-success HTTP status (the 500 Ollama returns when it OOM-crashes ingesting
     // a heavy prompt, a 502/503 while it restarts, etc.) is a FAILURE, not an answer. Return
     // `None` explicitly so the caller records it as `Uncertain` ("model unavailable") — feeding
-    // the per-entry backoff and the global breaker (JEF-234) — rather than trying to parse an
+    // the per-entry backoff and the global breaker — rather than trying to parse an
     // error body as a verdict. This makes "a 500 counts as a failure" structural instead of
     // relying on the error body happening not to parse into a verdict shape.
     if !response.status().is_success() {
@@ -328,7 +328,7 @@ fn host_is_in_cluster(host: &str) -> bool {
 /// Default keep-warm interval (seconds). Ollama unloads an idle model after
 /// `OLLAMA_KEEP_ALIVE` (5 minutes by default), so a ping every 4 minutes keeps the
 /// model resident with margin to spare — that's what stops the first judging pass
-/// after an engine restart from being glacial (JEF-63). Override with
+/// after an engine restart from being glacial. Override with
 /// `PROTECTOR_ENGINE_KEEPWARM_SECS`; `0` disables keep-warm entirely.
 pub const DEFAULT_KEEPWARM_SECS: u64 = 240;
 
@@ -368,7 +368,7 @@ fn parse_keepwarm_interval(raw: Option<&str>) -> Option<Duration> {
 /// model is warm), `false` on any transport/status error — callers treat this as
 /// best-effort and never block on it. Does NOT touch verdicts or actuation.
 pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) -> bool {
-    // JEF-337: keep-warm's one-token ping fires without any gate — ollama owns concurrency,
+    // keep-warm's one-token ping fires without any gate — ollama owns concurrency,
     // so a background ping overlapping a judging/propose request is fine. Best-effort and
     // bounded by the reqwest timeout.
     let body = json!({
@@ -385,7 +385,7 @@ pub async fn keep_warm(client: &reqwest::Client, endpoint: &str, model: &str) ->
 }
 
 /// Keep the configured model warm so the first judging pass after an engine restart
-/// isn't glacial (the "no verdicts for ~20 min after restart" pain, JEF-63). A CPU-only
+/// isn't glacial (the "no verdicts for ~20 min after restart" pain). A CPU-only
 /// local model takes minutes to load its weights; once Ollama unloads an idle model
 /// (default 5 min) the next adjudication eats that cold-load before any verdict lands.
 ///
@@ -553,7 +553,7 @@ mod tests {
         );
     }
 
-    /// Keep-warm (JEF-107) is gated on BOTH a configured model and a non-zero interval.
+    /// Keep-warm is gated on BOTH a configured model and a non-zero interval.
     /// With no model configured it must be a no-op regardless of the interval — that's
     /// the `PROTECTOR_ENGINE_MODEL` empty case the issue requires.
     #[test]
@@ -652,7 +652,7 @@ mod tests {
         let _ = server.await;
     }
 
-    /// JEF-301: a server 500 (the status Ollama returns when it OOM-crashes ingesting a heavy
+    /// a server 500 (the status Ollama returns when it OOM-crashes ingesting a heavy
     /// prompt) must be treated as a FAILURE — `chat` returns `None` so the caller records an
     /// `Uncertain` that feeds the backoff/breaker — NOT parsed as a verdict. Served from a
     /// localhost server so no real model is needed.
@@ -690,7 +690,7 @@ mod tests {
         let _ = server.await;
     }
 
-    /// JEF-337: with the serialization gate removed, concurrent `chat` calls run in PARALLEL —
+    /// with the serialization gate removed, concurrent `chat` calls run in PARALLEL —
     /// protector no longer caps itself to one in-flight model request; ollama owns concurrency.
     /// A localhost server records the max number of requests open at once; each lingers briefly
     /// so overlap is observable. We fire 5 `chat` calls with a `JoinSet` and assert the server
@@ -772,7 +772,7 @@ mod tests {
         );
     }
 
-    /// JEF-337: the concurrency knob defaults to a generous [`DEFAULT_MODEL_CONCURRENCY`]
+    /// the concurrency knob defaults to a generous [`DEFAULT_MODEL_CONCURRENCY`]
     /// (never 1), falls back to it for an unset / unparseable / `0` value (a `0` would
     /// deadlock `buffer_unordered`), and honours any positive value verbatim.
     #[test]
@@ -850,10 +850,10 @@ mod tests {
         );
     }
 
-    /// JEF-364: there is no completion cache, so an identical prompt is re-sent to the
+    /// there is no completion cache, so an identical prompt is re-sent to the
     /// endpoint on every pass — a transient `Uncertain` reply must NOT stick. This is the
-    /// exact hazard the JEF-362 LRU introduced: it cached any 200 (including a reply that
-    /// parses to `Uncertain`, which the verdict store deliberately never caches so JEF-234
+    /// exact hazard the LRU introduced: it cached any 200 (including a reply that
+    /// parses to `Uncertain`, which the verdict store deliberately never caches so
     /// backoff can retry), pinning the entry to that stale completion. A counting localhost
     /// server proves the second call re-hits the wire (two connections) rather than being
     /// served a cached completion, and the caller could get a *fresh* answer the next pass.

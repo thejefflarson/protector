@@ -1,4 +1,4 @@
-//! Tests for the layered adjudication re-judge gate (ADR-0023 / JEF-391, over JEF-390 / JEF-234).
+//! Tests for the layered adjudication re-judge gate (ADR-0023, over).
 //! `classify_adjudication` reads only the verdict store, so these drive it directly with a real
 //! [`state::VerdictStore`] and a hand-built [`PendingEntry`] — no full engine. Extracted to a
 //! sibling file to keep `adj_gate.rs` under the file-size cap (CLAUDE.md).
@@ -103,7 +103,7 @@ fn subtractive_delta_holds_prior_verdict() {
     );
 }
 
-/// JEF-445: a cached `Exploitable` is NEVER replayed from the LRU — it is re-judged against the
+/// a cached `Exploitable` is NEVER replayed from the LRU — it is re-judged against the
 /// live model every pass, so a one-time temp-0 tail-flip can't freeze into a permanent false
 /// breach. (Contrast [`exact_fingerprint_hit_serves_unheld`], where a cached `Refuted` DOES serve.)
 #[test]
@@ -124,7 +124,7 @@ fn cached_exploitable_is_rejudged_not_replayed() {
     );
 }
 
-/// JEF-445: the subtractive-hold path also does not replay a positive — an `Exploitable` baseline
+/// the subtractive-hold path also does not replay a positive — an `Exploitable` baseline
 /// on a purely-subtractive delta is re-judged, not held.
 #[test]
 fn subtractive_hold_does_not_replay_exploitable() {
@@ -142,7 +142,7 @@ fn subtractive_hold_does_not_replay_exploitable() {
     assert_eq!(store.cached_for("entry", "fp-shrunk"), None);
 }
 
-/// JEF-445 scope guard: a corroborated `Confirmed` (backed by live evidence, not the model's own
+///  scope guard: a corroborated `Confirmed` (backed by live evidence, not the model's own
 /// positive) STILL serves from the cache — only `Exploitable` is force-re-verified, so re-judging
 /// can never let a model `Refuted` veto a live attack.
 #[test]
@@ -172,7 +172,7 @@ fn not_additive_without_baseline_still_rejudges() {
     ));
 }
 
-/// An exact-fingerprint LRU hit (JEF-390) serves the cached verdict as a plain hit (`held =
+/// An exact-fingerprint LRU hit serves the cached verdict as a plain hit (`held =
 /// false`), taking precedence over the delta gate.
 #[test]
 fn exact_fingerprint_hit_serves_unheld() {
@@ -190,7 +190,7 @@ fn exact_fingerprint_hit_serves_unheld() {
     }
 }
 
-// ---- JEF-565 LOAD-BEARING regression: a downstream-only change must re-judge -------------
+// ---- LOAD-BEARING regression: a downstream-only change must re-judge -------------
 
 /// A downstream workload `workload/app/downstream-pod`, optionally carrying a critical CVE
 /// (loaded-at-runtime — exploitation evidence) on its image. The SAME identity either way, so
@@ -238,7 +238,7 @@ fn graph_with_downstream(with_cve: bool) -> (SecurityGraph, NodeKey) {
     (g, key)
 }
 
-/// THE trap this ticket closes (JEF-565): downstream evidence must land in the PROMPT *and* the
+/// THE trap this ticket closes: downstream evidence must land in the PROMPT *and* the
 /// SURFACE, or a downstream-only change busts the exact-fingerprint LRU (layer 1, a genuine
 /// prompt-text miss) but the layer-2 subtractive-delta hold silently serves the prior decisive
 /// verdict forever — since a fingerprint miss alone isn't enough; the gate's second layer only
