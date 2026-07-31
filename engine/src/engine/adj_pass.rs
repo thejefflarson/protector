@@ -36,8 +36,8 @@ use futures::StreamExt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
-    Engine, PendingEntry, adj_gate, churn_diag, graph, journal, model, notify, observe, reason,
-    state,
+    Engine, PendingEntry, RestoredDecision, adj_gate, churn_diag, graph, journal, model, notify,
+    observe, reason, state,
 };
 use reason::adjudicate::incident;
 
@@ -145,6 +145,10 @@ impl Engine {
             let (pending, additive, baseline) = self.prepare_pending(
                 entry_key, entry, objectives, downstream, idxs, graph, &asn, menu,
             );
+            // ADR-0034 D8 (JEF-639): attempt the double replay-lock BEFORE the re-judge gate —
+            // a no-op once this run already has a LIVE decision for the entry, or when nothing
+            // was journal-restored for it. See `try_rearm_decision`/`rearm_restored_decision`.
+            self.try_rearm_decision(&pending);
             // The layered re-judge gate (JEF-390 LRU / JEF-391 delta hold / JEF-234 breaker +
             // backoff / re-judge), decided WITHOUT a model call — see [`adj_gate`].
             match adj_gate::classify_adjudication(
@@ -242,6 +246,31 @@ impl Engine {
                 }
                 decisive => {
                     tracing::info!(entry = %pending.entry.0, objectives = pending.objectives.len(), verdict = ?decisive, "adjudicated entry");
+                    // ADR-0034 D8 (JEF-639): durably record THIS pass's decisive cut-choice
+                    // decision — the double replay-lock's source material on a future restart
+                    // (see `rearm_restored_decision`). Only when it actually CHANGED from the
+                    // decision already standing for this entry: `Exploitable`/`Attack` is
+                    // re-verified every pass (JEF-445), so an unchanged standing incident would
+                    // otherwise write an identical line every pass — the exact per-pass spam the
+                    // journal's rotation-window design (several restarts' worth of history)
+                    // depends on NOT happening. A no-op when the journal is disabled.
+                    if self.decisions.get(&pending.entry_key) != Some(&decision) {
+                        self.journal.record(journal::Decision::Incident {
+                            entry: pending.entry_key.clone(),
+                            objectives: pending.objectives.len(),
+                            assessment: decision.assessment,
+                            reason: decision.reason.clone(),
+                            cuts: decision
+                                .cuts
+                                .iter()
+                                .map(|c| journal::JournaledCut {
+                                    node: c.node.0.clone(),
+                                    cut_signature: c.cut_signature.clone(),
+                                })
+                                .collect(),
+                            fingerprint: pending.fingerprint.clone(),
+                        });
+                    }
                     // ADR-0034 D6/D7: record THIS pass's decisive cut-choice decision — the
                     // ledger reconcile reads it back below. Overwrites any prior decision for
                     // this entry, so a fresh decisive decision that DROPS a cut is exactly what
@@ -432,8 +461,81 @@ impl Engine {
         // (skipped/backoff) never clears it.
         self.decisions
             .retain(|k, _| current_entries.contains(k.as_str()));
+        // ADR-0034 D8 (JEF-639): a journal-restored decision that never got the chance to be
+        // checked this run (its entry wasn't breach-relevant this pass, or vanished before
+        // `try_rearm_decision` ran) can't outlive the entry either — same prune as above.
+        self.restored_decisions
+            .retain(|k, _| current_entries.contains(k.as_str()));
         self.decisions.clone()
     }
+
+    /// ADR-0034 D8 (JEF-639): attempt to re-arm a journal-restored decision for this entry
+    /// against THIS pass's freshly-rebuilt fingerprint + menu — the double replay-lock (see
+    /// [`rearm_restored_decision`]). A no-op once a LIVE decision already governs the entry
+    /// this run (a fresh Phase 3 judgment always wins over a restored one) or when nothing
+    /// was journal-restored for it. Consumes the restored entry either way — armed into
+    /// [`Engine::decisions`] on a lock hold, discarded on a miss — so it is never re-checked
+    /// or retried blind on a later pass.
+    fn try_rearm_decision(&mut self, pending: &PendingEntry) {
+        if self.decisions.contains_key(&pending.entry_key) {
+            return; // a live decision (this run) already governs this entry
+        }
+        let Some(restored) = self.restored_decisions.remove(&pending.entry_key) else {
+            return; // nothing was journal-restored for this entry
+        };
+        match rearm_restored_decision(&restored, &pending.fingerprint, &pending.menu) {
+            Some(decision) => {
+                tracing::info!(
+                    entry = %pending.entry_key,
+                    cuts = decision.cuts.len(),
+                    "re-armed a journal-restored decision (double replay-lock held, ADR-0034 D8)"
+                );
+                self.decisions.insert(pending.entry_key.clone(), decision);
+            }
+            None => {
+                tracing::info!(
+                    entry = %pending.entry_key,
+                    "journal-restored decision failed the replay-lock — cold re-judging for cuts (ADR-0034 D8)"
+                );
+            }
+        }
+    }
+}
+
+/// The ADR-0034 D8 double replay-lock, pure: re-arm `restored` ONLY when BOTH (1) its
+/// fingerprint matches `current_fingerprint` byte-identically, and (2) EVERY one of its cuts
+/// re-resolves, byte-identically, to the SAME `cut_signature` against `current_menu` — the
+/// exact menu this pass would show the model if it re-judged now. Either lock failing returns
+/// `None` — re-arm NOTHING for this entry (a cold re-judge), never a partial or best-guess
+/// repoint.
+///
+/// SECURITY-SENSITIVE: this is the replay/re-arm path for a possibly-armed cut. A mis-keyed or
+/// over-eager re-arm here would auto-apply a cut the current state doesn't justify, so both
+/// locks fail closed — lock 1 catches evidence/menu drift (the fingerprint covers the full
+/// prompt, including the rendered menu, ADR-0034 D4/D9); lock 2 additionally catches a
+/// mechanism-RESOLVER version drift that an unchanged fingerprint alone can't (the prompt hash
+/// covers the rendered menu TEXT, not the resolver code that produced it).
+pub(super) fn rearm_restored_decision(
+    restored: &RestoredDecision,
+    current_fingerprint: &str,
+    current_menu: &incident::Menu,
+) -> Option<incident::IncidentDecision> {
+    if restored.fingerprint != current_fingerprint {
+        return None;
+    }
+    let mut cuts = Vec::with_capacity(restored.cuts.len());
+    for cut in &restored.cuts {
+        let resolved = current_menu.resolve(&graph::NodeKey(cut.node.clone()))?;
+        if resolved.cut_signature != cut.cut_signature {
+            return None;
+        }
+        cuts.push(resolved);
+    }
+    Some(incident::IncidentDecision {
+        assessment: restored.assessment,
+        reason: restored.reason.clone(),
+        cuts,
+    })
 }
 
 /// The deduped, sorted workload [`graph::NodeKey`]s on this entry's PROVEN paths (JEF-565),
@@ -486,3 +588,7 @@ fn entry_menu(
         uncontainable,
     }
 }
+
+#[cfg(test)]
+#[path = "adj_pass_tests.rs"]
+mod tests;
