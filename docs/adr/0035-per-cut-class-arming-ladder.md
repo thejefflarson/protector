@@ -1,6 +1,6 @@
 # 0035. Per-cut-class arming granularity: an ordered ladder under `enforce`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 
 ## Context

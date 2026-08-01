@@ -23,7 +23,7 @@ reads or transmits any cluster data, and the **engine itself stays zero-egress**
 
 | Property            | Default                                | Why                                                              |
 | ------------------- | -------------------------------------- | --------------------------------------------------------------- |
-| Operating posture   | **`mode: audit`** (`enforceScope` empty) | Everything observes & proposes; nothing blocks or acts (ADR-0021). Signature + mesh audit-only, engine shadow. Flip `mode: enforce` + `enforceScope` to arm all three surfaces at once. |
+| Operating posture   | **`mode: audit`** (`enforceScope` empty, `enforceRung: edge-cut`) | Everything observes & proposes; nothing blocks or acts (ADR-0021). Signature + mesh audit-only, engine shadow. Flip `mode: enforce` + `enforceScope` to arm the webhooks and the engine's cut up to `enforceRung` (ADR-0035, default `edge-cut` — the surgical cut alone). |
 | Webhook scope       | **audit every namespace** (`webhook.excludeNamespaces: []`) | The fail-open audit webhook observes Pod creates cluster-wide, including kube-system / cert-manager / linkerd / argocd / protector. List names in `excludeNamespaces` to opt some out. |
 | Webhook failure     | audit `failurePolicy: Ignore`; enforcing webhook `Fail` but **scoped to nothing** | The audit webhook never blocks API writes (so auditing every namespace is safe even for kube-system); the fail-closed enforcing webhook matches no namespace until `mode: enforce` + `enforceScope` opt one in. |
 | Ingest auth         | **on** (`ingestAuth.enabled: true`)    | The :9999 runtime ingest requires a bearer token (mounted file only); engine + agent share a chart-provisioned Secret. |
@@ -73,11 +73,11 @@ Nothing below that **acts on or blocks** your workloads is enabled by default (t
 default-on item is the read-only **feed-fetcher** egress, covered below). Arm in this order
 and review the decision journal / audit log at each step.
 
-### Enforce: one scope arms all three surfaces (ADR-0021)
+### Enforce: one scope arms the webhooks + the engine's cut up to one rung (ADR-0021/0035)
 
-Enforcement is **two settings**: `mode` + `enforceScope`. Flipping `mode: enforce`
-arms all three enforcement surfaces together — signature-webhook deny, mesh-webhook
-deny, and the engine's reversible network cut — each confined to *exactly*
+Enforcement is `mode` + `enforceScope` + `enforceRung`. Flipping `mode: enforce`
+arms the signature-webhook deny and the mesh-webhook deny together, and arms the
+engine's reversible network cut **up to `enforceRung`** — each confined to *exactly*
 `enforceScope`:
 
 ```sh
@@ -97,6 +97,19 @@ enforced in any namespace):
 
 There is **no enforce-everywhere wildcard**: `mode: enforce` with an empty
 `enforceScope` is refused (by both helm and the engine at startup).
+
+**The engine's cut arms on an ORDERED LADDER, not all at once (ADR-0035).** The default
+`enforceRung: edge-cut` arms *only* the surgical, most-reversible `DenyNetworkPath`
+edge-cut — the broader entry/workload quarantines stay propose-only. Escalate to the
+quarantines only as an explicit second opt-in, after baking confidence on the edge-cut
+rung:
+
+```sh
+--set enforceRung=quarantine
+```
+
+A rung implies its narrower predecessor — `quarantine` still arms the edge-cut too —
+so this is one ordered position to reason about, not independent per-cut toggles.
 
 **The fail-closed webhook and the actuation RBAC are derived from the same
 `enforceScope`** — they can no longer drift from what the gates enforce. By default the
@@ -212,13 +225,17 @@ your own `kev.json` / `epss.csv` into the engine container at `/var/lib/protecto
 (e.g. via a ConfigMap/Secret/PVC you manage) and set `PROTECTOR_KEV_FILE` /
 `PROTECTOR_EPSS_FILE` accordingly.
 
-### The engine's live cut is armed by `mode: enforce`
+### The engine's live cut is armed by `mode: enforce` + `enforceRung`
 
-The engine's reversible network cut is one of the three surfaces `mode: enforce` arms
-(above) — there is no separate engine arming switch. In `mode: audit` the engine is
-always dry-run; under `mode: enforce` it applies its cut on a corroborated attack path
+The engine's reversible network cut is armed together with the webhook surfaces by
+`mode: enforce` (above) — there is no separate engine arming switch — but *how much* of
+it is armed is its own ORDERED ladder, `enforceRung` (ADR-0035): `edge-cut` (the
+default) arms only the surgical edge-cut; `quarantine` also arms the broader
+quarantines. In `mode: audit` the engine is always dry-run, regardless of `enforceRung`;
+under `mode: enforce` it applies the rung's armed cut(s) on a corroborated attack path
 whose endpoints are within `enforceScope`, and the NetworkPolicy write grant is derived
-from the same `mode` (they arm together). Choose the CNI mechanism the cut renders with:
+from `mode` (they arm together, independent of the rung — the RBAC grant covers the same
+object kind at either rung). Choose the CNI mechanism the cut renders with:
 
 ```sh
 --set engine.actuator=networkpolicy      # default — any NetworkPolicy-enforcing CNI (ADR-0010)
@@ -255,9 +272,10 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 
 | Key                          | Default                              | Notes                                              |
 | ---------------------------- | ------------------------------------ | -------------------------------------------------- |
-| `mode`                       | `audit`                              | **The posture switch** (ADR-0021). `enforce` arms all three surfaces in `enforceScope`. |
+| `mode`                       | `audit`                              | **The posture switch** (ADR-0021). `enforce` arms the webhooks + the engine's cut up to `enforceRung`, all in `enforceScope`. |
 | `enforceScope.namespaces`    | `[]`                                 | Namespace names to enforce (used only under `mode: enforce`). No wildcard. |
 | `enforceScope.labels`        | `{}`                                 | Pod labels (`key: value`) to enforce anywhere; labels behave like namespaces. |
+| `enforceRung`                | `edge-cut`                           | **The engine's cut-severity ladder** (ADR-0035, used only under `mode: enforce`). `edge-cut` arms only the surgical `DenyNetworkPath` cut; `quarantine` also arms the broader entry/workload quarantines. Ordered — `quarantine` implies `edge-cut`. |
 | `image.tag`                  | `""` → chart `appVersion`            | Pin a cosign-signed semver tag.                    |
 | `imagePullSecrets`           | `[]`                                 | protector publishes to a public ghcr repo.         |
 | `engine.enabled`             | `true`                               | The mitigation engine (the product).               |

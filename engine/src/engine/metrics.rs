@@ -21,6 +21,15 @@ pub(super) struct EngineMetrics {
     pub(super) breach_paths: opentelemetry::metrics::Gauge<u64>,
     /// Active mitigations currently in the ledger.
     pub(super) active_mitigations: opentelemetry::metrics::Gauge<u64>,
+    /// Whether the model adjudicator looks degraded RIGHT NOW (`1`) or healthy (`0`) — the
+    /// GLOBAL breaker's state (JEF-234), mirrored each pass. This is the actuation-trust
+    /// signal `gate_on_judge_freshness` reads: while it is `1`, no NEW cut auto-applies (it
+    /// holds as a proposal — see `protector.engine.mitigations{action="held_degraded"}` for
+    /// the concrete held events), though a still-justified standing cut is unaffected and a
+    /// self-revert still runs (the fail-safe asymmetry, ADR-0021 spirit). Distinct from the
+    /// per-pass `skipped` counter: that counts individual re-judge skips, this is the
+    /// at-a-glance current state to alert on.
+    pub(super) judge_degraded: opentelemetry::metrics::Gauge<u64>,
     /// Breach-path count by model `verdict` (the current judgement distribution).
     pub(super) verdicts: opentelemetry::metrics::Gauge<u64>,
     /// Behavioral signals ingested this pass, by `behavior` variant (alert/connection/
@@ -125,6 +134,13 @@ impl EngineMetrics {
             active_mitigations: m
                 .u64_gauge("protector.engine.active_mitigations")
                 .with_description("Active mitigations in the ledger.")
+                .build(),
+            judge_degraded: m
+                .u64_gauge("protector.engine.judge_degraded")
+                .with_description(
+                    "Whether the model adjudicator's global breaker is open this pass (1) or \
+                     closed (0) — the actuation-trust signal for new auto-applied cuts.",
+                )
                 .build(),
             verdicts: m
                 .u64_gauge("protector.engine.verdicts")
