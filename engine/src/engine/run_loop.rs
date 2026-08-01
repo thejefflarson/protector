@@ -508,6 +508,10 @@ pub async fn run_watch(
                         // The shadow-bake divergence log (ADR-0035's bake step) — the SAME `Arc`
                         // the engine appends a classification to each pass.
                         divergence: engine.divergence(),
+                        // This pass's standing-cut snapshot (ADR-0021, ADR-0016) — the scope-
+                        // preview panel reads it read-only against a caller-supplied candidate
+                        // scope.
+                        scope_preview: engine.scope_preview(),
                     };
                     tokio::spawn(dashboard::serve_dashboard(addr, state, auth));
                 }

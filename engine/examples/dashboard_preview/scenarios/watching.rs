@@ -6,7 +6,9 @@ use std::time::{Instant, SystemTime};
 
 use protector::engine::dashboard::DashboardState;
 use protector::engine::reason::adjudicate::Verdict;
-use protector::engine::state::{Finding, ModelHealth, ReadinessConfig, StoredPosture};
+use protector::engine::state::{
+    Finding, ModelHealth, ReadinessConfig, ScopePreviewStore, StoredPosture,
+};
 
 use crate::fixtures::simple_finding;
 use crate::sample_data::{covered_bake, fresh_handles, sample_journal, sample_policy_log};
@@ -87,5 +89,7 @@ pub(super) fn build_watching() -> DashboardState {
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
         mcp_audit: Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
         divergence: Arc::new(protector::engine::state::DivergenceLog::new()),
+        // No standing cuts in the preview scenarios — the panel's own empty state.
+        scope_preview: Arc::new(ScopePreviewStore::new()),
     }
 }
