@@ -932,3 +932,54 @@ fn reachable_cve_lines_decides_from_the_typed_field_not_the_forgeable_rendered_l
         "the forged CVE's title must never reach the reachable-CVE evidence at all: {cves:?}"
     );
 }
+
+/// CORRECTNESS REGRESSION: trivy reports the same CVE id once PER AFFECTED PACKAGE, so one id
+/// can carry several `Vulnerability` instances with different reachability. `worse_vuln`'s
+/// dedup tie-break weighs only severity/CVSS/fix/EPSS — never reachability — so at equal
+/// severity/CVSS (the common case for a shared id, since both instances usually carry the same
+/// advisory's CVSS) a not-observed instance can tie a genuinely loaded-at-runtime one. Deduping
+/// BEFORE filtering to loaded-at-runtime would let that tie be won by whichever instance came
+/// first in the id-sorted order — here the not-observed one — and then filter the survivor
+/// away, dropping the id ENTIRELY and hiding a REAL running vulnerability from the judge.
+/// [`reachable_cve_lines`] must filter to loaded-at-runtime FIRST, so the loaded instance can
+/// never be discarded in favor of a not-observed sibling of the same id. The not-observed
+/// instance is ordered FIRST here — the position the old dedup-then-filter order would have
+/// kept — to prove the fix, not just the happy-path order.
+#[test]
+fn reachable_cve_lines_never_drops_a_loaded_instance_to_a_tied_not_observed_sibling() {
+    use crate::engine::graph::Reachability;
+    let id = "CVE-2025-30001";
+    let not_observed = Vulnerability {
+        id: id.into(),
+        severity: Severity::Critical,
+        score: Some(9.8),
+        reachability: Reachability::NotObserved,
+        ..Default::default()
+    };
+    let loaded = Vulnerability {
+        id: id.into(),
+        severity: Severity::Critical,
+        score: Some(9.8),
+        reachability: Reachability::LoadedAtRuntime,
+        ..Default::default()
+    };
+    // not_observed FIRST: the position the old dedup-first order would have kept on a tie.
+    let (g, e) = graph_with_vulns(vec![not_observed, loaded]);
+    let (cves, _behaviors) = reachable_cve_lines(&g, &e);
+
+    let ids = cve_ids_of(&cves);
+    assert!(
+        ids.contains(id),
+        "a genuinely loaded-at-runtime CVE must survive even when trivy also reports the SAME \
+         id as not-observed against another package, tied on severity/CVSS: {cves:?}"
+    );
+    let line = cves
+        .iter()
+        .find(|l| l.contains(id))
+        .expect("the surviving line for this id");
+    assert!(
+        line.contains("[reachability: loaded-at-runtime]"),
+        "the surviving line must be the loaded-at-runtime instance, not the not-observed one \
+         it tied with: {line}"
+    );
+}

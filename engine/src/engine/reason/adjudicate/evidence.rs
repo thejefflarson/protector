@@ -305,31 +305,30 @@ pub(crate) fn entry_evidence_budgeted(
     (cves, behaviors)
 }
 
-/// Fetch an entry's typed CVE evidence in the STABLE, deduped order every renderer needs
-/// (shared by [`entry_evidence_budgeted`] — the full CVE list — and
-/// [`reachable_cve_lines_budgeted`] — the loaded-at-runtime subset — so both dedup from
-/// exactly the same survivor per id rather than re-deriving it independently).
+/// Fetch an entry's typed CVE evidence in the STABLE, deduped order [`entry_evidence_budgeted`]
+/// (the full CVE list) needs. [`reachable_cve_lines_budgeted`] does NOT share this: it dedups
+/// its own, separately-filtered subset (see that function's doc for why the order matters).
 fn sorted_deduped_vulns(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
 ) -> (Vec<Vulnerability>, Vec<Behavior>) {
-    let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
-    // Render in a STABLE order so the per-entry free-text budget is deterministic: the same
-    // evidence must always produce the same budgeted lines, both for the prompt and for the
-    // verdict fingerprint that keys on them. Sort by CVE id (the budget only affects WHICH
-    // lines keep their free prose once it is exhausted, so the order it spends in must not
-    // depend on graph-traversal order). The prompt re-sorts the rendered lines anyway;
-    // sorting here just fixes the order the budget is consumed in.
+    let (vulns, behaviors) = graph.entry_evidence(entry_key);
+    (dedup_worst_per_id(vulns), behaviors)
+}
+
+/// Sort by id (STABLE order — the per-entry free-text budget is deterministic: the same
+/// evidence must always produce the same budgeted lines, both for the prompt and for the
+/// verdict fingerprint that keys on them; the budget only affects WHICH lines keep their free
+/// prose once it is exhausted, so the order it spends in must not depend on graph-traversal
+/// order), then collapse duplicate CVE ids to one representative (JEF-133 source of truth, so
+/// both the prompt and the dashboard's per-finding evidence agree). Trivy reports the same CVE
+/// once PER affected package, so the same id can arrive several times with different CVSS / fix
+/// ranges; the prior string-level `cves.dedup()` in `build_judgment_prompt_with` can't collapse
+/// them (the trailing metadata differs), so the judge saw a noisy triplicate list. Keep the
+/// WORST instance per id so no signal is lost — see `worse_vuln`. Sorting first makes equal ids
+/// adjacent, so deduping keeps id order and is therefore deterministic.
+fn dedup_worst_per_id(mut vulns: Vec<Vulnerability>) -> Vec<Vulnerability> {
     vulns.sort_by(|a, b| a.id.cmp(&b.id));
-    // Collapse duplicate CVE ids to one representative BEFORE rendering (JEF-133 source of
-    // truth, so both the prompt and the dashboard's per-finding evidence agree). Trivy
-    // reports the same CVE once PER affected package, so the same id can arrive several
-    // times with different CVSS / fix ranges; the prior string-level `cves.dedup()` in
-    // `build_judgment_prompt_with` can't collapse them (the trailing metadata differs), so
-    // the judge saw a noisy triplicate list. Keep the WORST instance per id so no signal is
-    // lost — see `worse_vuln`. `vulns` is already sorted by id, so equal ids are adjacent;
-    // deduping keeps id order and is therefore deterministic (the prompt re-sorts the
-    // rendered lines anyway, but the budget below must spend in a stable order).
     vulns.dedup_by(|a, b| {
         if a.id != b.id {
             return false;
@@ -342,7 +341,7 @@ fn sorted_deduped_vulns(
         }
         true
     });
-    (vulns, behaviors)
+    vulns
 }
 
 /// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
@@ -389,15 +388,27 @@ pub(crate) fn reachable_cve_lines(
 /// `budget` (JEF-565) — the loaded-at-runtime-only counterpart of [`entry_evidence_budgeted`],
 /// used wherever the full CVE list must be narrowed to just the exploitation-evidence subset
 /// before it reaches the judge.
+///
+/// Filters to [`is_loaded_at_runtime`] BEFORE deduping by id — NOT [`sorted_deduped_vulns`]'s
+/// dedup-then-filter order. `worse_vuln`'s tie-break weighs only severity/CVSS/fix/EPSS, never
+/// reachability, so when trivy reports the SAME id against two packages — one genuinely
+/// loaded-at-runtime, one not-observed, at equal severity/CVSS (the common case for a shared
+/// id, since both instances usually carry the same advisory's CVSS) — a dedup-first order could
+/// let the not-observed instance win the tie and survive, after which filtering would drop the
+/// id ENTIRELY: a genuinely running vulnerable package hidden from the judge. Filtering first
+/// means a loaded-at-runtime instance can never be discarded in favor of a not-observed sibling
+/// of the same id.
 pub(crate) fn reachable_cve_lines_budgeted(
     graph: &SecurityGraph,
     entry_key: &NodeKey,
     budget: &mut usize,
 ) -> (Vec<String>, Vec<Behavior>) {
-    let (mut vulns, behaviors) = sorted_deduped_vulns(graph, entry_key);
-    // Filter on the TYPED field BEFORE rendering — see `is_loaded_at_runtime`'s doc for why
-    // this must not be a substring match over the rendered (title-bearing) line.
+    let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
+    // Filter on the TYPED field BEFORE rendering (see `is_loaded_at_runtime`'s doc for why this
+    // must not be a substring match over the rendered, title-bearing line) AND before dedup
+    // (see this function's own doc for why the order matters there too).
     vulns.retain(is_loaded_at_runtime);
+    let vulns = dedup_worst_per_id(vulns);
     let cves = vulns
         .iter()
         .map(|v| cve_evidence_budgeted(v, budget))
