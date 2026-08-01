@@ -13,8 +13,8 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::downstream::{self, DownstreamRendered};
 use super::evidence::{
-    BENIGN_OWN_ACTIVITY_TAG, entry_evidence, entry_findings, objective_outcome,
-    render_behavior_lines, retain_reachable_cves,
+    BENIGN_OWN_ACTIVITY_TAG, entry_findings, objective_outcome, reachable_cve_lines,
+    render_behavior_lines,
 };
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
 use super::incident::Menu;
@@ -104,15 +104,17 @@ pub fn build_judgment_prompt_with_sections_asn(
     graph: &SecurityGraph,
     asn: &AsnDb,
 ) -> (String, PromptSections) {
-    let (cves, behaviors) = entry_evidence(graph, entry);
+    let (cves, behaviors) = reachable_cve_lines(graph, entry);
     build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors, asn)
 }
 
 /// As [`build_judgment_prompt`], but with the entry's evidence already fetched — so
-/// `ModelAdjudicator::judge` runs `entry_evidence` once and shares it with the two
-/// backstops. Returns the rendered prompt (identical to `build_judgment_prompt`'s) AND the
-/// per-section fingerprints ([`PromptSections`]) — callers that only need the prompt string
-/// take `.0`.
+/// `ModelAdjudicator::judge` runs [`super::evidence::reachable_cve_lines`] once and shares it
+/// with the two backstops. Returns the rendered prompt (identical to `build_judgment_prompt`'s)
+/// AND the per-section fingerprints ([`PromptSections`]) — callers that only need the prompt
+/// string take `.0`. `cves` is always the caller's [`super::evidence::reachable_cve_lines`]
+/// output — decided from the typed reachability field, never a value a caller could pass
+/// unfiltered.
 pub(super) fn build_judgment_prompt_with(
     entry: &NodeKey,
     objectives: &[(NodeKey, AttackRef)],
@@ -208,7 +210,7 @@ fn build_delta_prompt_inner(
     downstream: &[NodeKey],
     menu: &str,
 ) -> DeltaBuild {
-    let (cves, behaviors) = entry_evidence(graph, entry);
+    let (cves, behaviors) = reachable_cve_lines(graph, entry);
     let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn, downstream);
     // Project the surface from the SAME rendered lines the prompt carries — no second source of
     // truth (ADR-0023): a change the model would see is exactly a change the surface records.
@@ -307,18 +309,19 @@ fn render_evidence(
     // is collapsed to a deduped provider set via the offline ASN dataset (JEF-380). See
     // [`render_behavior_lines`].
     let behavior_lines = render_behavior_lines(behaviors, asn);
-    // No LINE cap: the model sees every observed behavior and every CVE on the entry. The
-    // untrusted third-party text WITHIN each line is fenced + sanitized AND hard length-capped
-    // — both per-field and against a per-entry aggregate budget (JEF-106, in `entry_evidence`)
-    // — so the prompt is bounded without hiding a whole CVE from the judge. The `cves` passed
-    // in are the already-budgeted lines; sort+dedup is just for stable ordering.
+    // No LINE cap: the model sees every observed behavior and every reachable CVE on the entry.
+    // The untrusted third-party text WITHIN each line is fenced + sanitized AND hard
+    // length-capped — both per-field and against a per-entry aggregate budget (JEF-106, in
+    // [`super::evidence::reachable_cve_lines`]) — so the prompt is bounded without hiding a
+    // whole CVE from the judge. The `cves` passed in are already the loaded-at-runtime subset,
+    // decided from the TYPED `Vulnerability::reachability` field — never a substring match over
+    // a rendered line, whose untrusted trivy title (appended after the structured fields) could
+    // otherwise be crafted to carry the marker text and forge a `not-observed` CVE into this
+    // evidence (the anti-fabrication guards read the FULL, unfiltered list separately in
+    // `model_call`, so their behaviour is unchanged). `reachable_cve_lines` already dedups by
+    // id; sort+dedup here is just for stable ordering.
     cves.sort();
     cves.dedup();
-    // JEF-453 (skip non-reachable CVEs, see `evidence::retain_reachable_cves`): the judge
-    // decides breach from EXPLOITATION EVIDENCE, and the ONLY CVE category that is exploitation
-    // evidence is `[reachability: loaded-at-runtime]`. The anti-fabrication guards read the FULL
-    // list separately (`model_call`), so their behaviour is unchanged.
-    retain_reachable_cves(&mut cves);
     // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
     // high-severity-outcome branches.
