@@ -300,9 +300,11 @@ fn build_adjudicator(
 }
 
 /// Block until the driving loop has something to do, then drain any already-queued burst so
-/// it coalesces into one pass. Wakes on either a cluster change or a behavioral/audit report
-/// — the behavioral/audit channels only fire when the ingest actually changed the evidence
-/// store (a new observation, not a repeat), so mundane churn never reaches here.
+/// it coalesces into one pass. Wakes on a cluster change, a behavioral/audit report — the
+/// behavioral/audit channels only fire when the ingest actually changed the evidence store (a
+/// new observation, not a repeat), so mundane churn never reaches here — or a break-glass
+/// engage/clear edge, so an otherwise-quiet cluster still reacts to the kill switch within one
+/// poll interval rather than waiting for unrelated cluster activity.
 ///
 /// Returns `true` to keep looping, `false` only once `change_rx` has PERMANENTLY closed —
 /// i.e. every clone of its `Sender` (each reflector task's, and the loop's own retained one)
@@ -314,15 +316,18 @@ async fn wait_for_wake(
     change_rx: &mut tokio::sync::mpsc::Receiver<()>,
     runtime_rx: &mut tokio::sync::mpsc::Receiver<()>,
     audit_rx: &mut tokio::sync::mpsc::Receiver<()>,
+    breakglass_rx: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> bool {
     tokio::select! {
         next = change_rx.recv() => if next.is_none() { return false },
         _ = runtime_rx.recv() => {},
         _ = audit_rx.recv() => {},
+        _ = breakglass_rx.recv() => {},
     }
     while change_rx.try_recv().is_ok() {}
     while runtime_rx.try_recv().is_ok() {}
     while audit_rx.try_recv().is_ok() {}
+    while breakglass_rx.try_recv().is_ok() {}
     true
 }
 
@@ -390,6 +395,13 @@ pub async fn run_watch(
     let agent_liveness = std::sync::Arc::new(state::AgentLivenessStore::new(
         std::time::Duration::from_secs(300),
     ));
+    // The break-glass kill switch (ADR-0021's enforcement gate, fast path): always
+    // watching (a fixed mount path, escape-hatch-overridable — the same pattern as the
+    // KEV/EPSS/ASN feeds), so enabling it later is a `kubectl`-only operation with no
+    // chart change and no restart. Built once so the engine's own per-pass copy and the
+    // poller task's copy below read the same path independently.
+    let break_glass = super::break_glass::BreakGlass::from_env();
+
     // The durable decision journal (JEF-141): reload pre-restart decisions onto the
     // in-memory state so the output state isn't blank while the caches + CPU model warm.
     // Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no
@@ -410,7 +422,8 @@ pub async fn run_watch(
     .with_agent_liveness(agent_liveness.clone())
     // The offline IP→ASN dataset (JEF-380): read each pass to group INTERNET egress by
     // provider in the prompt. Shares the same swap cell we spawn the reloader on below.
-    .with_asn(asn.clone());
+    .with_asn(asn.clone())
+    .with_break_glass(break_glass.clone());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
     // (JEF-237), so the admission-decision log isn't blank after a restart — parallel to how
@@ -492,6 +505,13 @@ pub async fn run_watch(
                         // The SAME durable audit sink the MCP server appends to (JEF-490) — the
                         // "Access" tab reads its records, redacted to the caller's own tier.
                         mcp_audit: mcp_audit.clone(),
+                        // The shadow-bake divergence log (ADR-0035's bake step) — the SAME `Arc`
+                        // the engine appends a classification to each pass.
+                        divergence: engine.divergence(),
+                        // This pass's standing-cut snapshot (ADR-0021, ADR-0016) — the scope-
+                        // preview panel reads it read-only against a caller-supplied candidate
+                        // scope.
+                        scope_preview: engine.scope_preview(),
                     };
                     tokio::spawn(dashboard::serve_dashboard(addr, state, auth));
                 }
@@ -554,6 +574,13 @@ pub async fn run_watch(
     // The ASN dataset reloads on the same cadence (JEF-380); the engine holds a clone of the
     // same swap cell, so a refreshed provider table lands without a restart.
     let asn_reloader = asn.spawn_reloader(reload_interval);
+
+    // The break-glass poller: wakes the driving loop on an engage/clear EDGE (not every
+    // poll), so a cluster with no other activity still reacts to the kill switch within one
+    // poll interval instead of waiting for unrelated cluster churn. Aborted on loop exit.
+    let (breakglass_tx, mut breakglass_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let break_glass_poller =
+        break_glass.spawn_poller(breakglass_tx, super::break_glass::DEFAULT_POLL_INTERVAL);
 
     // The signing-posture observer (ADR-0020 Stage 1, JEF-261): built ONCE so its TTL + image
     // cache persists across passes — a steady cluster re-sweeps for free. Each pass runs every
@@ -718,7 +745,14 @@ pub async fn run_watch(
 
     tracing::info!("engine: watching cluster (event-driven)");
     loop {
-        if !wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await {
+        if !wait_for_wake(
+            &mut change_rx,
+            &mut runtime_rx,
+            &mut audit_rx,
+            &mut breakglass_rx,
+        )
+        .await
+        {
             break;
         }
 
@@ -806,6 +840,7 @@ pub async fn run_watch(
     kev_reloader.abort();
     epss_reloader.abort();
     asn_reloader.abort();
+    break_glass_poller.abort();
     Ok(())
 }
 #[cfg(test)]

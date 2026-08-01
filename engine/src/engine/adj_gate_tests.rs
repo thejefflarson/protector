@@ -38,6 +38,7 @@ fn pending(entry: &str, fingerprint: &str) -> PendingEntry {
         chain: "ch".into(),
         surface: JudgedSurface::default(),
         idxs: vec![0],
+        menu: reason::adjudicate::incident::Menu::default(),
     }
 }
 
@@ -315,6 +316,7 @@ fn downstream_only_cve_appearing_is_additive_and_forces_a_rejudge() {
         chain: "ch".into(),
         surface: current_build.surface,
         idxs: vec![0],
+        menu: reason::adjudicate::incident::Menu::default(),
     };
     assert!(
         matches!(

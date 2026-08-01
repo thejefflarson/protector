@@ -8,7 +8,8 @@ must follow.
 responder** — along internet-facing attack paths it decides what is an attack and what to
 cut, at the minimum scope; determinism proves + enriches + *feeds* the model, it never
 decides the cut. See [`docs/VISION.md`](docs/VISION.md). Work should point toward it (the
-downstream/pivot lane is not there yet — tracked from JEF-547).
+downstream/pivot lane is not there yet — see VISION.md's "Honest current state" note, a
+deliberate refactor still in flight).
 
 ## File size — hard limit
 
@@ -58,3 +59,18 @@ knob with a sane default — not an operator toggle. Prefer a good default over 
 - Rust edition 2024: use `cargo add` for dependencies (don't hand-edit `Cargo.toml`);
   run `cargo fmt`; treat `clippy` warnings as errors; run the full test suite before
   declaring work complete.
+
+## Committed content is self-contained — no external ticket IDs
+
+Committed repo content (ADRs, source comments/docstrings, `CLAUDE.md`, `VISION.md`, scripts,
+chart templates) must be readable by someone with **no access to the issue tracker**. Cite
+in-repo material — an ADR (`ADR-0034`, a path under `docs/adr/`), a file/module path,
+`VISION.md`, or inline reasoning — never a Linear ticket ID (`JEF-nnn`) or a `linear.app` URL.
+If a ticket recorded a decision, that decision belongs in an ADR; cite the ADR, not the
+ticket. If nothing in-repo captures the *why*, write the reasoning inline instead of pointing
+at a ticket.
+
+This does **not** apply to integration mechanics, which stay as-is: branch names
+(`thejefflarson/jef-nnn-…`), PR bodies (the `Closes JEF-nnn` keyword drives the
+Linear↔GitHub auto-close), the Linear tickets themselves, and existing git history/commit
+messages.

@@ -18,8 +18,13 @@ use crate::engine::reason::proof::{ProvenChain, prove};
 use serde_json::json;
 use std::time::SystemTime;
 
+/// ADR-0034 (JEF-570): absent a model there is no cut-choosing analyst to consult, so
+/// `NullAdjudicator` is now `Uncertain` (no decisive decision) rather than the old unconditional
+/// `Confirmed` — every breach-relevant entry it covers falls through to the D6 human-proposal
+/// fallback, never an auto-applied cut (retires the pre-ADR-0034 "deterministic action bar
+/// alone governs" behavior).
 #[tokio::test]
-async fn null_adjudicator_confirms() {
+async fn null_adjudicator_is_uncertain() {
     let graph = build_graph(&Snapshot::default(), &default_adapters());
     let chain = ProvenChain {
         entry: NodeKey("workload/app/Pod/x".into()),
@@ -37,13 +42,19 @@ async fn null_adjudicator_confirms() {
         single_edge_cuts: vec![],
         quarantine_targets: vec![],
     };
-    assert_eq!(
-        NullAdjudicator
-            // NullAdjudicator ignores the prompt (it confirms unconditionally).
-            .judge(&chain.entry, &objectives_of(&chain), &graph, "", &[])
-            .await,
-        Verdict::Confirmed
-    );
+    let decision = NullAdjudicator
+        // NullAdjudicator ignores the prompt/menu (it never has a decisive decision).
+        .judge(
+            &chain.entry,
+            &objectives_of(&chain),
+            &graph,
+            "",
+            &[],
+            &incident::Menu::default(),
+        )
+        .await;
+    assert_eq!(decision.assessment, incident::Assessment::Uncertain);
+    assert!(decision.cuts.is_empty());
 }
 
 /// JEF-134: the deterministic pre-decision is GONE. An entry that under the old
@@ -71,9 +82,11 @@ async fn every_breach_relevant_entry_is_handed_to_the_model() {
     // `Uncertain("model unavailable")` instead, proving the model IS consulted.
     let adjudicator = ModelAdjudicator::new("http://127.0.0.1:1/v1/chat/completions", "none");
     let prompt = build_judgment_prompt(&entry, &objs, &g);
-    let verdict = adjudicator.judge(&entry, &objs, &g, &prompt, &[]).await;
+    let decision = adjudicator
+        .judge(&entry, &objs, &g, &prompt, &[], &incident::Menu::default())
+        .await;
     assert_eq!(
-        verdict,
+        decision.to_verdict(),
         Verdict::Uncertain("model unavailable".to_string()),
         "the engine no longer pre-decides — every breach-relevant entry reaches the model"
     );
@@ -95,13 +108,24 @@ async fn judgements_are_journaled_with_prompt_and_verdict() {
     // engine builds the prompt (JEF-350) and hands it to `judge`; mirror that here.
     let (g, entry, objs) = entry_reaching_db("app", "app", "postgres-0", DATA_FROM_REPOSITORY);
     let prompt = build_judgment_prompt(&entry, &objs, &g);
-    adjudicator.judge(&entry, &objs, &g, &prompt, &[]).await;
+    adjudicator
+        .judge(&entry, &objs, &g, &prompt, &[], &incident::Menu::default())
+        .await;
 
     // A cross-ns entry — also judged.
     let (g2, entry2, objs2) =
         entry_reaching_db("app", "billing", "ledger-db", DATA_FROM_REPOSITORY);
     let prompt2 = build_judgment_prompt(&entry2, &objs2, &g2);
-    adjudicator.judge(&entry2, &objs2, &g2, &prompt2, &[]).await;
+    adjudicator
+        .judge(
+            &entry2,
+            &objs2,
+            &g2,
+            &prompt2,
+            &[],
+            &incident::Menu::default(),
+        )
+        .await;
 
     let recorded = journal.snapshot(); // newest-first
     assert_eq!(recorded.len(), 2, "both judgements captured");
@@ -195,17 +219,43 @@ async fn real_model_judges_toxic_vs_unevidenced() {
     let (g_toxic, toxic) = exposed_chain(true);
     let toxic_objs = objectives_of(&toxic);
     let toxic_prompt = build_judgment_prompt(&toxic.entry, &toxic_objs, &g_toxic);
-    let toxic_verdict = adjudicator
-        .judge(&toxic.entry, &toxic_objs, &g_toxic, &toxic_prompt, &[])
+    let toxic_menu = incident::build_menu(
+        &toxic,
+        &g_toxic,
+        &crate::engine::observe::health::HealthReport::default(),
+    );
+    let toxic_decision = adjudicator
+        .judge(
+            &toxic.entry,
+            &toxic_objs,
+            &g_toxic,
+            &toxic_prompt,
+            &[],
+            &toxic_menu,
+        )
         .await;
+    let toxic_verdict = toxic_decision.to_verdict();
     eprintln!("[{model}] exposed + critical KEV CVE -> secret : {toxic_verdict:?}");
 
     let (g_bare, bare) = exposed_chain(false);
     let bare_objs = objectives_of(&bare);
     let bare_prompt = build_judgment_prompt(&bare.entry, &bare_objs, &g_bare);
-    let bare_verdict = adjudicator
-        .judge(&bare.entry, &bare_objs, &g_bare, &bare_prompt, &[])
+    let bare_menu = incident::build_menu(
+        &bare,
+        &g_bare,
+        &crate::engine::observe::health::HealthReport::default(),
+    );
+    let bare_decision = adjudicator
+        .judge(
+            &bare.entry,
+            &bare_objs,
+            &g_bare,
+            &bare_prompt,
+            &[],
+            &bare_menu,
+        )
         .await;
+    let bare_verdict = bare_decision.to_verdict();
     eprintln!("[{model}] exposed, NO cve / NO runtime -> secret: {bare_verdict:?}");
 
     // A competence probe for "can this model be the analyst" — the speculative
@@ -324,8 +374,16 @@ async fn real_model_judges_toxic_vs_unevidenced() {
         }
         let prompt = build_judgment_prompt(&entry_key, &objectives, &g);
         adjudicator
-            .judge(&entry_key, &objectives, &g, &prompt, &[])
+            .judge(
+                &entry_key,
+                &objectives,
+                &g,
+                &prompt,
+                &[],
+                &incident::Menu::default(),
+            )
             .await
+            .to_verdict()
     };
     eprintln!("[{model}] argo: broad RBAC-granted secrets, NO cve/behavior: {argo_verdict:?}");
     assert!(
@@ -338,27 +396,25 @@ async fn real_model_judges_toxic_vs_unevidenced() {
 
 /// JEF-451 (G1): the model cites a REAL CVE id but fabricates its `[reachability: loaded-at-runtime]`
 /// TAG — the exact protector flip. `guard_fabricated_cve` passes (the id is real); the tag guard
-/// downgrades the promotion to the skeptic `Uncertain` because no evidence line carries that tag.
+/// downgrades the promotion to the skeptic `Uncertain` because the caller-supplied typed
+/// grounding signal says no evidence carries that tag.
 #[test]
 fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
-    // Evidence with all CVEs `not-observed` — the protector shape. The guard reads the rendered
-    // CVE strings (which carry the tag), exactly as the model_call site passes them.
-    let not_observed = vec![
-        "CVE-2023-45853 [severity: critical] [reachability: not-observed] [cvss: 9.8]".to_string(),
-        "CVE-2026-13221 [severity: critical] [reachability: not-observed] [cvss: 9.1]".to_string(),
-    ];
-    let has_loaded =
-        vec!["CVE-2021-44228 [severity: critical] [reachability: loaded-at-runtime]".to_string()];
-    let none: Vec<String> = vec![];
+    // The guard takes the caller's TYPED grounding bool directly — no rendered CVE lines, so
+    // a forged trivy title can never reach this test (or the guard itself). Callers derive
+    // the bool from `Vulnerability::reachability`, never from a substring test.
+    let evidence_has_loaded = false;
+    let evidence_has_no_cves = false;
 
-    // The live flip: Exploitable claiming loaded-at-runtime over all-not-observed evidence → skeptic.
+    // The live flip: Exploitable claiming loaded-at-runtime with no genuinely-loaded CVE in
+    // the typed evidence → skeptic.
     let v = guard_fabricated_reachability_tag(
         Verdict::Exploitable(
             "Critical CVEs with [reachability: loaded-at-runtime] tags (CVE-2023-45853) indicate \
              exploitation evidence despite not being observed running."
                 .into(),
         ),
-        &not_observed,
+        evidence_has_loaded,
     );
     assert!(matches!(v, Verdict::Uncertain(_)) && !v.promotes());
 
@@ -366,7 +422,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("the vulnerable code is loaded at runtime".into()),
-            &not_observed,
+            evidence_has_loaded,
         ),
         Verdict::Uncertain(_)
     ));
@@ -375,7 +431,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("CVE-2021-44228 [reachability: loaded-at-runtime] runs".into()),
-            &has_loaded,
+            true,
         ),
         Verdict::Exploitable(_)
     ));
@@ -385,7 +441,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("AWS key baked into the image is an immediate primitive".into()),
-            &none,
+            evidence_has_no_cves,
         ),
         Verdict::Exploitable(_)
     ));
@@ -394,7 +450,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Refuted("no loaded-at-runtime CVE, so not a breach".into()),
-            &not_observed,
+            evidence_has_loaded,
         ),
         Verdict::Refuted(_)
     ));

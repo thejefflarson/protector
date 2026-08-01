@@ -40,6 +40,14 @@ use crate::engine::graph::{Node, Relation, SecurityGraph};
 use crate::engine::observe::health::{Health, HealthReport};
 use render::workload_namespace;
 
+pub mod arming_ladder;
+// The read-only pre-arm scope-simulation projection (ADR-0021/ADR-0016): "what fires and
+// what it severs if `enforceScope` were this scope, right now" — a pure view over the SAME
+// per-mitigation blast data this module's own `decide`/`predict_blast_radius` compute.
+// Standalone module so it stays reviewable on its own and can never entangle with the live
+// decision path it only reads from.
+pub mod scope_preview;
+
 /// Map an operator-facing enable name to the action class(es) it arms. Only `network`
 /// is accepted, because only a network deny is **live-actuatable**: an additive,
 /// engine-owned `NetworkPolicy`/`AuthorizationPolicy` the engine can apply and
@@ -52,6 +60,12 @@ use render::workload_namespace;
 /// forbids live actuation of them regardless; and `escape` is irreversible. Accepting
 /// those names here would be a lie: the engine still *proposes* those cuts (routed to a
 /// human / durable-fix PR), you just can't "enable" them.
+///
+/// This is a generic name→class(es) grouping, kept for [`EnabledActions::from_names`]
+/// (test convenience). It is **not** what derives production arming from `enforce`:
+/// that is [`arming_ladder`]'s ordered [`ArmingRung`](arming_ladder::ArmingRung)
+/// (ADR-0035), which arms the two network classes one rung at a time instead of both
+/// at once.
 ///
 /// [`DenyNetworkPath`]: ProposedAction::DenyNetworkPath
 /// [`QuarantineEntry`]: ProposedAction::QuarantineEntry
@@ -191,6 +205,19 @@ impl ActuationScope {
         if self.namespaces.is_empty() && self.labels.is_empty() {
             return true;
         }
+        self.endpoints_within(mitigation)
+    }
+
+    /// The endpoint-level scope match `in_scope` runs once the "empty scope is unscoped"
+    /// shortcut is ruled out — **no such shortcut here**: an empty (both axes) scope
+    /// matches no endpoint. `in_scope` applies this behind its unscoped short-circuit (the
+    /// real actuation posture, where an empty scope means "no `enforceScope` configured, so
+    /// don't restrict"). The read-only scope-simulation projection ([`scope_preview`]) calls
+    /// this directly instead, because a *candidate* scope an operator is trying out has no
+    /// such standing meaning — reading its empty case as "matches everything" would be
+    /// exactly the enforce-everywhere wildcard ADR-0021 refuses to start with, so the
+    /// preview must report an empty candidate as zero armed cuts, honestly, never as unscoped.
+    pub fn endpoints_within(&self, mitigation: &Mitigation) -> bool {
         let endpoints = [
             (&mitigation.cut.from, &mitigation.cut.from_labels),
             (&mitigation.cut.to, &mitigation.cut.to_labels),

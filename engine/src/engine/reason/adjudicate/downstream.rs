@@ -4,9 +4,8 @@
 //! outcome). A popped pod two hops in was invisible. This module renders one evidence block
 //! PER WORKLOAD on the entry's proven paths (`ProvenChain::paths`), reusing the exact same
 //! evidence functions, JEF-453 reachable-CVE filter, fencing, and per-field caps the entry's own
-//! block uses (`evidence::{entry_evidence_budgeted, entry_findings_budgeted,
-//! retain_reachable_cves, render_behavior_lines_budgeted}`) — no second rendering path to drift
-//! from.
+//! block uses (`evidence::{reachable_cve_lines_budgeted, entry_findings_budgeted,
+//! render_behavior_lines_budgeted}`) — no second rendering path to drift from.
 //!
 //! Split out of `prompt.rs` purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 //!
@@ -20,8 +19,7 @@ use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::observe::asn::AsnDb;
 
 use super::evidence::{
-    entry_evidence_budgeted, entry_findings_budgeted, render_behavior_lines_budgeted,
-    retain_reachable_cves,
+    entry_findings_budgeted, reachable_cve_lines_budgeted, render_behavior_lines_budgeted,
 };
 use super::guards::{fence, fence_list};
 
@@ -80,8 +78,7 @@ pub(crate) fn render_downstream(
     let mut surface_lines = Vec::new();
 
     for node in &sorted {
-        let (mut cves, behaviors) = entry_evidence_budgeted(graph, node, &mut cve_budget);
-        retain_reachable_cves(&mut cves);
+        let (mut cves, behaviors) = reachable_cve_lines_budgeted(graph, node, &mut cve_budget);
         cves.sort();
         cves.dedup();
         let behavior_lines = render_behavior_lines_budgeted(&behaviors, asn, &mut behavior_budget);

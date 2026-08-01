@@ -13,11 +13,23 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::downstream::{self, DownstreamRendered};
 use super::evidence::{
-    entry_evidence, entry_findings, objective_outcome, render_behavior_lines, retain_reachable_cves,
+    BENIGN_OWN_ACTIVITY_TAG, entry_findings, objective_outcome, reachable_cve_lines,
+    render_behavior_lines,
 };
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
+use super::incident::Menu;
 use super::surface::{ChangesSince, JudgedSurface};
 use crate::engine::observe::asn::AsnDb;
+
+/// The empty containment-options section ("(none)") that every non-live-path prompt builder
+/// below renders (JEF-570): [`build_judgment_prompt`] and its siblings are kept for tests and
+/// callers that only want the entry-scoped evidence prompt (mirrors the existing "no
+/// downstream nodes" precedent those same builders already document for JEF-565) — only the
+/// live engine's [`build_delta_prompt_with_menu_asn`] renders a REAL menu, built from the
+/// entry's actual proven chains.
+fn no_menu() -> String {
+    Menu::default().render()
+}
 
 /// Build the adjudication prompt — framed as the on-call security analyst whose job
 /// this model replaces (ADR-0011/0013): make the call a human would, don't hedge. The
@@ -92,15 +104,17 @@ pub fn build_judgment_prompt_with_sections_asn(
     graph: &SecurityGraph,
     asn: &AsnDb,
 ) -> (String, PromptSections) {
-    let (cves, behaviors) = entry_evidence(graph, entry);
+    let (cves, behaviors) = reachable_cve_lines(graph, entry);
     build_judgment_prompt_with(entry, objectives, graph, &cves, &behaviors, asn)
 }
 
 /// As [`build_judgment_prompt`], but with the entry's evidence already fetched — so
-/// `ModelAdjudicator::judge` runs `entry_evidence` once and shares it with the two
-/// backstops. Returns the rendered prompt (identical to `build_judgment_prompt`'s) AND the
-/// per-section fingerprints ([`PromptSections`]) — callers that only need the prompt string
-/// take `.0`.
+/// `ModelAdjudicator::judge` runs [`super::evidence::reachable_cve_lines`] once and shares it
+/// with the two backstops. Returns the rendered prompt (identical to `build_judgment_prompt`'s)
+/// AND the per-section fingerprints ([`PromptSections`]) — callers that only need the prompt
+/// string take `.0`. `cves` is always the caller's [`super::evidence::reachable_cve_lines`]
+/// output — decided from the typed reachability field, never a value a caller could pass
+/// unfiltered.
 pub(super) fn build_judgment_prompt_with(
     entry: &NodeKey,
     objectives: &[(NodeKey, AttackRef)],
@@ -116,7 +130,9 @@ pub(super) fn build_judgment_prompt_with(
     let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn, &[]);
     // Empty `changes_block` ⇒ byte-identical to the pre-ADR-0023 full-state prompt (the
     // non-delta callers/tests). The delta path passes the rendered "Changes since…" section.
-    assemble(entry, &ev, "")
+    // No real menu (JEF-570, see `no_menu`): these callers don't have a proven chain to build
+    // one from.
+    assemble(entry, &ev, "", &no_menu())
 }
 
 /// The delta-aware prompt build (ADR-0023, JEF-391): the FULL-state prompt PLUS the "Changes
@@ -142,7 +158,59 @@ pub fn build_delta_prompt_asn(
     baseline: Option<&JudgedSurface>,
     downstream: &[NodeKey],
 ) -> DeltaBuild {
-    let (cves, behaviors) = entry_evidence(graph, entry);
+    // No real menu (JEF-570, see `no_menu`): kept for tests/callers that don't have a proven
+    // chain (and so no containment options) to build one from. The live engine calls
+    // [`build_delta_prompt_with_menu_asn`] instead.
+    build_delta_prompt_inner(
+        entry,
+        objectives,
+        graph,
+        asn,
+        baseline,
+        downstream,
+        &no_menu(),
+    )
+}
+
+/// As [`build_delta_prompt_asn`], but with the deterministic cut-choice menu (ADR-0034 D4)
+/// spliced into the prompt (JEF-570) — the live engine's ONLY delta-prompt entry point.
+/// `menu` is built ONCE by the caller (from this entry's proven chains) and rendered via
+/// [`Menu::render`] into the SAME containment-options section [`incident::parse_incident_decision`]
+/// resolves `contain` against — the render is deterministic (sorted, deduped, same snapshot),
+/// so it is part of the full-state prompt exactly like every other section: a mapping change is
+/// a prompt change is a re-judge (the ADR-0023 `prompt_cache_key`/delta gate covers it
+/// unchanged, since it hashes the assembled prompt bytes, menu included).
+pub fn build_delta_prompt_with_menu_asn(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+    baseline: Option<&JudgedSurface>,
+    downstream: &[NodeKey],
+    menu: &Menu,
+) -> DeltaBuild {
+    build_delta_prompt_inner(
+        entry,
+        objectives,
+        graph,
+        asn,
+        baseline,
+        downstream,
+        &menu.render(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_delta_prompt_inner(
+    entry: &NodeKey,
+    objectives: &[(NodeKey, AttackRef)],
+    graph: &SecurityGraph,
+    asn: &AsnDb,
+    baseline: Option<&JudgedSurface>,
+    downstream: &[NodeKey],
+    menu: &str,
+) -> DeltaBuild {
+    let (cves, behaviors) = reachable_cve_lines(graph, entry);
     let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn, downstream);
     // Project the surface from the SAME rendered lines the prompt carries — no second source of
     // truth (ADR-0023): a change the model would see is exactly a change the surface records.
@@ -171,10 +239,10 @@ pub fn build_delta_prompt_asn(
     // true EXACT-STATE guard (an identical full state always HITS, restart-safe with JEF-301) and
     // leaves the surface-delta gate as the sole ADDITIVE re-judge driver. `sections` (JEF-387) are
     // likewise full-state only, so they never depend on `changes`.
-    let (state_prompt, sections) = assemble(entry, &ev, "");
+    let (state_prompt, sections) = assemble(entry, &ev, "", menu);
     let cache_key = prompt_cache_key(&state_prompt);
     // The prompt SENT to the model carries the full state PLUS the delta section (attention).
-    let prompt = assemble(entry, &ev, &render_changes_block(&changes)).0;
+    let prompt = assemble(entry, &ev, &render_changes_block(&changes), menu).0;
     DeltaBuild {
         prompt,
         cache_key,
@@ -241,18 +309,19 @@ fn render_evidence(
     // is collapsed to a deduped provider set via the offline ASN dataset (JEF-380). See
     // [`render_behavior_lines`].
     let behavior_lines = render_behavior_lines(behaviors, asn);
-    // No LINE cap: the model sees every observed behavior and every CVE on the entry. The
-    // untrusted third-party text WITHIN each line is fenced + sanitized AND hard length-capped
-    // — both per-field and against a per-entry aggregate budget (JEF-106, in `entry_evidence`)
-    // — so the prompt is bounded without hiding a whole CVE from the judge. The `cves` passed
-    // in are the already-budgeted lines; sort+dedup is just for stable ordering.
+    // No LINE cap: the model sees every observed behavior and every reachable CVE on the entry.
+    // The untrusted third-party text WITHIN each line is fenced + sanitized AND hard
+    // length-capped — both per-field and against a per-entry aggregate budget (JEF-106, in
+    // [`super::evidence::reachable_cve_lines`]) — so the prompt is bounded without hiding a
+    // whole CVE from the judge. The `cves` passed in are already the loaded-at-runtime subset,
+    // decided from the TYPED `Vulnerability::reachability` field — never a substring match over
+    // a rendered line, whose untrusted trivy title (appended after the structured fields) could
+    // otherwise be crafted to carry the marker text and forge a `not-observed` CVE into this
+    // evidence (the anti-fabrication guards read the FULL, unfiltered list separately in
+    // `model_call`, so their behaviour is unchanged). `reachable_cve_lines` already dedups by
+    // id; sort+dedup here is just for stable ordering.
     cves.sort();
     cves.dedup();
-    // JEF-453 (skip non-reachable CVEs, see `evidence::retain_reachable_cves`): the judge
-    // decides breach from EXPLOITATION EVIDENCE, and the ONLY CVE category that is exploitation
-    // evidence is `[reachability: loaded-at-runtime]`. The anti-fabrication guards read the FULL
-    // list separately (`model_call`), so their behaviour is unchanged.
-    retain_reachable_cves(&mut cves);
     // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
     // high-severity-outcome branches.
@@ -306,11 +375,15 @@ fn render_evidence(
 /// Assemble the final prompt + per-section fingerprints from rendered `ev`. `changes_block` is
 /// spliced in after the reachable-objectives list: empty (`""`) for the full-state prompt (the
 /// non-delta callers — byte-identical to the pre-ADR-0023 prompt), or the rendered "Changes
-/// since…" section for the delta build.
+/// since…" section for the delta build. `menu` is the deterministic cut-choice containment-
+/// options section (ADR-0034 D4/D9, JEF-570) — ALWAYS rendered, immediately before the output
+/// instruction (recency maximizes copy fidelity); `"  (none)"` (see `no_menu`) for a caller with
+/// no proven chain to build one from.
 fn assemble(
     entry: &NodeKey,
     ev: &RenderedEvidence,
     changes_block: &str,
+    menu: &str,
 ) -> (String, PromptSections) {
     // No cap on objectives: the model judges every reachable objective. Truncating to a
     // summary ("+N more") hid the full reach from the judge; a broad front door (argo: ~110
@@ -374,7 +447,8 @@ Two of these three extend to a DOWNSTREAM workload the entry's proven path reach
 Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)". The same filter applies to every downstream node's CVE block.
 
 Traps that are NOT evidence, no matter how they are labeled:
-  - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
+  - the workload's OWN normal activity — outbound connections, file reads, library loads, reading its own mounted secrets, and WRITING its own data/config/key files (including an atomic write-then-rename through a `.tmp` file, e.g. a key rotation) — is NOT a live signal — only an ALERT or hands-on-keyboard action counts. A line tagged "{benign_tag}" is exactly this: the deterministic layer already classified it as ordinary telemetry, never evidence, regardless of what word appears in its path or filename.
+  - a filename or path containing "key" or "secret" (e.g. writing its own `service.key.<rand>.tmp`) is NOT an exposed secret and proves nothing about credential compromise on its own — it is the workload's own data. Exposed-secret evidence exists ONLY when the "Exposed secrets baked into this image" field below is NON-EMPTY.
   - reaching a `secret/…` objective in the reachable-objectives list is NEVER an exposed secret — it is a target an attacker could READ only after first exploiting the workload. Exposed-secret evidence exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY; if that field is "(none)", there is no exposed-secret evidence.
 
 Each objective is tagged with HOW it is reached — CONTEXT for how severe a finding would be, NOT a breach signal on its own:
@@ -395,13 +469,18 @@ Reachable objectives (each states the OUTCOME an attacker achieves by reaching i
 Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
 {downstream}
 
-Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the ENTRY's "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal (entry OR downstream), a credential listed in the (non-empty) "Exposed secrets baked into this image" field (entry OR downstream). A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only.
-  "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
-  "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
-  "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
+You are ALSO the incident responder (ADR-0032/0034): if this is a breach, decide which workloads on this proven path must be CONTAINED, at minimum scope. A workload is compromised only with EXPLOITATION EVIDENCE ON THAT WORKLOAD (the same three-anchor bar above, entry or downstream) — reaching it, however broadly, is never by itself a reason to contain it. A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only, never a reason to contain it alone.
+Absence of evidence anywhere on the path is a confident "no_attack", not "uncertain" — reserve "uncertain" for self-contradictory or unintelligible evidence only.
 
-Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above or in a downstream workload's block below — never invent, recall, or copy a CVE id from anywhere else; if both are "(none)", do not name any CVE."#,
+Containment options — each line is a reversible cut you MAY choose; name its node key in "contain" to apply it. Choose the FEWEST that stop the breach; [] to leave everything running:
+{menu}
+
+Output ONLY a JSON object with exactly three keys: "assessment" (one of "attack", "no_attack", "uncertain"), "reason" (one sentence on what makes it a breach or not), and "contain" (a JSON array of workload node keys copied EXACTLY from the Containment options above — never invent, recall, or copy a node key from anywhere else).
+Fill "contain" with EXACTLY the compromised workloads — every workload whose OWN evidence shows exploitation, and no others:
+  - a compromised workload IS: the entry with a loaded-at-runtime CVE, a live alert/hands-on-keyboard signal, or an exposed secret; OR a downstream workload with a live alert/hands-on-keyboard signal or an exposed secret.
+  - do NOT add an uncompromised workload — in particular a CLEAN entry that is merely the path to a compromised downstream stays running (name the downstream, not the entry).
+  - do NOT omit a compromised one.
+If "assessment" is "attack", "contain" MUST name at least the workload that carries the evidence — an "attack" with an empty "contain" is contradictory and wrong. If "assessment" is "no_attack" or "uncertain", "contain" MUST be []."#,
         entry = fence(&entry.0),
         cves = fence_list(&ev.cves),
         secrets = fence_list(&ev.secret_lines),
@@ -414,6 +493,8 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
         } else {
             ev.downstream.blocks.join("\n")
         },
+        menu = menu,
+        benign_tag = BENIGN_OWN_ACTIVITY_TAG,
     );
     (prompt, sections)
 }
@@ -424,10 +505,17 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
 /// section only DIRECTS attention to what is NEW; it never replaces the state. Always rendered on
 /// the delta path (with `(none)` when empty), so the model sees a consistent shape. The leading
 /// blank line keeps it visually separated from the objectives list.
+///
+/// A "newly-observed runtime behavior" line here is rendered from the SAME tagged string the
+/// entry/downstream evidence fields carry ([`super::evidence::render_behavior_lines_budgeted`]):
+/// a behavior the deterministic layer already classified as benign own-activity keeps its
+/// `[benign observed — not a signal]` tag, so newness alone never spotlights ordinary telemetry
+/// (a self-write, a routine connection) as if it were suspicious just for being new.
 fn render_changes_block(changes: &ChangesSince) -> String {
     format!(
-        "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list). A NEW element is normally new reachable SURFACE (more breadth), NOT new exploitation evidence: a newly-reachable objective — including a newly-reachable `secret/…` objective — is more surface to reach, never evidence in itself. It is exploitation evidence ONLY if it is a [reachability: loaded-at-runtime] CVE, a live alert/hands-on-keyboard signal, or a credential listed in the (non-empty) exposed-secrets field. Judge these NEW elements by that same bar: {}",
-        fence_list(&changes.rendered_lines()),
+        "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list). A NEW element is normally new reachable SURFACE (more breadth), NOT new exploitation evidence: a newly-reachable objective — including a newly-reachable `secret/…` objective — is more surface to reach, never evidence in itself. A \"newly-observed runtime behavior\" tagged \"{benign_tag}\" is the workload's own ordinary activity, new only in the sense that this is the first time it was observed — never evidence just for being new. It is exploitation evidence ONLY if it is a [reachability: loaded-at-runtime] CVE, a live alert/hands-on-keyboard signal, or a credential listed in the (non-empty) exposed-secrets field. Judge these NEW elements by that same bar: {changes}",
+        benign_tag = BENIGN_OWN_ACTIVITY_TAG,
+        changes = fence_list(&changes.rendered_lines()),
     )
 }
 

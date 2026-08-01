@@ -7,10 +7,13 @@
 #                               The signature + mesh webhooks audit everywhere (log +
 #                               meter, never deny) and the engine runs in shadow
 #                               (proposes cuts, applies none). This is the whole default.
-#   * mode: enforce             + enforceScope {namespaces/labels}: arms ALL THREE
-#                               enforcement surfaces together, confined to EXACTLY that
+#   * mode: enforce             + enforceScope {namespaces/labels}: arms the signature +
+#                               mesh webhook denies together, confined to EXACTLY that
 #                               scope — unsigned/regressed images denied, unmeshed Pods
-#                               denied, and the engine applies its reversible network cut.
+#                               denied. The engine's network cut arms up to enforceRung
+#                               below (ADR-0035): edge-cut (DEFAULT) arms ONLY the
+#                               surgical DenyNetworkPath cut; quarantine is a SECOND
+#                               explicit opt-in that also arms the broader quarantines.
 #                               The fail-closed enforcing webhook + the actuation RBAC are
 #                               DERIVED from `enforceScope` (they can't drift). There is no
 #                               per-surface toggle and NO enforce-everywhere wildcard.
@@ -39,12 +42,13 @@
 
 replicaCount: 1
 
-# === OPERATING POSTURE (ADR-0021) — the two settings that govern enforcement ===
+# === OPERATING POSTURE (ADR-0021 + ADR-0035) — mode + enforceScope + enforceRung ===
 #
 # mode: audit | enforce
 #   audit   (DEFAULT) — observe & propose everywhere; nothing blocks or acts (shadow).
-#   enforce — arm all three enforcement surfaces (signature webhook deny, mesh webhook
-#             deny, engine live network-cut) confined to EXACTLY enforceScope below.
+#   enforce — arm the signature webhook deny, the mesh webhook deny, and — up to
+#             enforceRung below (ADR-0035) — the engine's live network-cut, confined
+#             to EXACTLY enforceScope below.
 mode: audit
 # The ONE enforced scope, honoured identically by all three surfaces and by the derived
 # fail-closed webhook selector + actuation RBAC. Used only when mode: enforce.
@@ -61,6 +65,17 @@ mode: audit
 enforceScope:
   namespaces: []
   labels: {}
+
+# The ORDERED network-cut arming ladder (ADR-0035) — how far `mode: enforce` is armed.
+# One position, not independent per-cut toggles: a higher rung always implies its
+# narrower predecessor. Used only when mode: enforce; ignored under mode: audit.
+#   edge-cut   (DEFAULT) — arms ONLY the surgical DenyNetworkPath edge-cut, the
+#              narrowest, most-reversible cut. The quarantines stay propose-only.
+#   quarantine — an explicit SECOND opt-in beyond edge-cut: also arms the default-deny
+#              entry quarantine and the compromised-workload quarantine (both still the
+#              same additive/reversible network-deny mechanism, ADR-0010). Escalate here
+#              only after baking confidence on edge-cut.
+enforceRung: edge-cut
 
 image:
   repository: ghcr.io/thejefflarson/protector

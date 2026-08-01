@@ -1,8 +1,45 @@
 use super::*;
 use crate::engine::observe::Snapshot;
 use crate::engine::observe::adapter::{build_graph, default_adapters};
+use crate::engine::observe::health::HealthReport;
+use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, build_menu};
 use crate::engine::reason::proof::prove;
 use serde_json::json;
+
+/// No decision for any entry (ADR-0034 D6): every breach-relevant entry falls through to the
+/// `containment_for` human-proposal fallback, exactly what most of this file's tests exercise —
+/// they predate the cut-choice contract and never depended on a model.
+fn no_decisions() -> BTreeMap<String, IncidentDecision> {
+    BTreeMap::new()
+}
+
+/// A decisive `Attack` decision for `chain.entry`, naming exactly the menu-resolved cuts for
+/// `nodes` — built through the REAL menu resolver (never hand-rolled), so a test decision is
+/// exactly what the model would have produced.
+fn decisive_attack(
+    chain: &ProvenChain,
+    graph: &crate::engine::graph::SecurityGraph,
+    nodes: &[crate::engine::graph::NodeKey],
+) -> BTreeMap<String, IncidentDecision> {
+    let menu = build_menu(chain, graph, &HealthReport::default());
+    let cuts = nodes
+        .iter()
+        .map(|n| {
+            menu.resolve(n)
+                .unwrap_or_else(|| panic!("{} is selectable on the menu", n.0))
+        })
+        .collect();
+    let mut decisions = BTreeMap::new();
+    decisions.insert(
+        chain.entry.0.clone(),
+        IncidentDecision {
+            assessment: Assessment::Attack,
+            reason: "test-supplied decision".to_string(),
+            cuts,
+        },
+    );
+    decisions
+}
 
 /// A lateral chain web →reaches→ db →can-read→ secret, whose first cut is the
 /// `reaches` edge → a DenyNetworkPath proposal.
@@ -43,7 +80,7 @@ fn lateral_chain_snapshot() -> Snapshot {
 fn proposes_a_mitigation_for_a_cuttable_chain() {
     let chains = prove(&build_graph(&lateral_chain_snapshot(), &default_adapters()));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     assert!(
         !delta.proposed.is_empty(),
@@ -119,18 +156,18 @@ fn reconcile_is_idempotent_then_retires_when_chains_vanish() {
     let chains = prove(&build_graph(&lateral_chain_snapshot(), &default_adapters()));
     let mut ledger = MitigationLedger::new();
 
-    let first = ledger.reconcile(&chains);
+    let first = ledger.reconcile(&chains, &no_decisions());
     assert!(!first.proposed.is_empty());
     let active_after_first = ledger.active().count();
 
     // Same chains again: nothing new proposed, nothing retired.
-    let second = ledger.reconcile(&chains);
+    let second = ledger.reconcile(&chains, &no_decisions());
     assert!(second.proposed.is_empty());
     assert!(second.retired.is_empty());
     assert_eq!(ledger.active().count(), active_after_first);
 
     // Posture improves — all chains gone. Every mitigation retires (Q5).
-    let third = ledger.reconcile(&[]);
+    let third = ledger.reconcile(&[], &no_decisions());
     assert!(third.proposed.is_empty());
     assert_eq!(third.retired.len(), active_after_first);
     assert_eq!(ledger.active().count(), 0);
@@ -191,7 +228,7 @@ fn direct_mount_chain_quarantines_the_entry_not_the_objective() {
         &default_adapters(),
     ));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     let q = only_quarantine(&delta);
     // Targets ONLY the internet-facing entry (from == to == entry), never the secret.
@@ -249,7 +286,7 @@ fn direct_rbac_chain_quarantines_the_entry() {
     };
     let chains = prove(&build_graph(&snap, &default_adapters()));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     let q = only_quarantine(&delta);
     // The entry pod is quarantined — never the RBAC identity or the secret.
@@ -321,7 +358,7 @@ fn lateral_chain_with_reversible_reaches_stays_surgical() {
 
     let chains = prove(&build_graph(&snap, &default_adapters()));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     // The internet-facing web→db→secret chain is contained by the surgical reaches cut.
     assert!(
@@ -355,7 +392,7 @@ fn internal_direct_mount_is_not_quarantined() {
 
     let chains = prove(&build_graph(&snap, &default_adapters()));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     assert!(
         delta
@@ -383,7 +420,7 @@ fn quarantine_entry_self_reverts_when_its_chain_is_gone() {
     ));
     let mut ledger = MitigationLedger::new();
 
-    let first = ledger.reconcile(&chains);
+    let first = ledger.reconcile(&chains, &no_decisions());
     let q = only_quarantine(&first);
     assert!(
         ledger
@@ -392,7 +429,7 @@ fn quarantine_entry_self_reverts_when_its_chain_is_gone() {
     );
 
     // Posture improves — the chain is gone. The quarantine retires (Q5).
-    let retired = ledger.reconcile(&[]);
+    let retired = ledger.reconcile(&[], &no_decisions());
     assert!(
         retired
             .retired
@@ -500,21 +537,62 @@ fn multi_hop_breach_snapshot_with_runtime(
     }
 }
 
+/// ADR-0034 (JEF-570) NEGATIVE control: without ANY model decision, the deterministic
+/// `quarantine_targets` desired-set insertion is GONE for a breach-relevant chain — the popped
+/// pods one and two hops in are IDENTIFIED as candidates (proof layer, unchanged, see
+/// `pivot_quarantine_tests`) but are no longer PROPOSED at all absent a decisive `Attack`
+/// decision naming them. Only the entry's own `containment_for` fallback line proposes.
 #[test]
-fn remotely_exploitable_pods_two_hops_in_are_quarantined() {
+fn remotely_exploitable_pods_two_hops_in_are_not_quarantined_without_a_decision() {
     let chains = prove(&build_graph(
         &multi_hop_breach_snapshot(),
         &default_adapters(),
     ));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
+
+    assert!(
+        workload_quarantines(&delta).is_empty(),
+        "no model decision named a downstream node ⇒ no workload quarantine is proposed \
+         (the quarantine_targets desired-set insertion is deleted), got {:?}",
+        workload_quarantines(&delta)
+    );
+    assert!(
+        delta
+            .proposed
+            .iter()
+            .all(|m| !m.cut.from.0.starts_with("secret/")),
+        "no mitigation targets the objective secret"
+    );
+}
+
+/// The positive contrast: a decisive `Attack` decision naming BOTH popped pods produces
+/// exactly the mitigations the pre-ADR-0034 deterministic pass used to propose unconditionally
+/// — independent compromises on the same chain (JEF-284 condition 1) are each isolated, and the
+/// entry (governed by the ADR-0022 `containment_for` precedence, a surgical edge-cut here) is
+/// never workload-quarantined.
+#[test]
+fn remotely_exploitable_pods_two_hops_in_are_quarantined_when_the_model_names_them() {
+    let graph = build_graph(&multi_hop_breach_snapshot(), &default_adapters());
+    let chains = prove(&graph);
+    let chain = chains
+        .first()
+        .expect("one chain: web -> app1 -> app2 -> secret");
+    let decisions = decisive_attack(
+        chain,
+        &graph,
+        &[
+            crate::engine::graph::NodeKey("workload/app/Pod/app1".into()),
+            crate::engine::graph::NodeKey("workload/app/Pod/app2".into()),
+        ],
+    );
+    let mut ledger = MitigationLedger::new();
+    let delta = ledger.reconcile(&chains, &decisions);
 
     let quarantined: Vec<String> = workload_quarantines(&delta)
         .iter()
         .map(|m| m.cut.from.0.clone())
         .collect();
-    // The popped app one hop in AND the popped app two hops in are both quarantined —
-    // independent compromises on the same chain (JEF-284 condition 1).
     assert!(
         quarantined.contains(&"workload/app/Pod/app2".to_string()),
         "the KEV pod two hops in is quarantined, got {quarantined:?}"
@@ -579,7 +657,7 @@ fn internal_actively_exploited_pod_is_quarantined() {
         &default_adapters(),
     ));
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &no_decisions());
 
     let quarantined: Vec<String> = workload_quarantines(&delta)
         .iter()
@@ -660,9 +738,24 @@ fn reachable_but_clean_pod_is_not_quarantined() {
         ..Default::default()
     };
 
-    let chains = prove(&build_graph(&snap, &default_adapters()));
+    let graph = build_graph(&snap, &default_adapters());
+    let chains = prove(&graph);
+    // ADR-0034 (JEF-570): a decisive Attack decision naming ONLY `popped` — never `cleandb`,
+    // which carries no exploitation evidence of its own and so isn't even offered as
+    // selectable on the menu.
+    let popped_chain = chains
+        .iter()
+        .find(|c| c.objective.0 == "secret/app/creds")
+        .expect("web -> popped -> creds chain");
+    let decisions = decisive_attack(
+        popped_chain,
+        &graph,
+        &[crate::engine::graph::NodeKey(
+            "workload/app/Pod/popped".into(),
+        )],
+    );
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &decisions);
 
     let quarantined: Vec<String> = workload_quarantines(&delta)
         .iter()
@@ -696,7 +789,7 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
     // give the entry a live alert — any "attack happening now" signal — corroborating the
     // justifying chain, so `is_live_corroborated()` clears independently of what's asserted
     // here.
-    let chains = prove(&build_graph(
+    let graph = build_graph(
         &multi_hop_breach_snapshot_with_runtime(vec![RuntimeObservation {
             attribution: Attribution::by_namespaced_name("app", "web"),
             source: Some("alert".into()),
@@ -707,9 +800,19 @@ fn workload_quarantine_is_proposed_in_audit_actuated_only_under_enforce() {
             },
         }]),
         &default_adapters(),
-    ));
+    );
+    let chains = prove(&graph);
+    // ADR-0034 (JEF-570): this test isolates the `decide()` enable/scope gate, which needs a
+    // PROPOSED mitigation to run against — supply the decisive Attack decision naming app2.
+    let decisions = decisive_attack(
+        chains.first().expect("one chain"),
+        &graph,
+        &[crate::engine::graph::NodeKey(
+            "workload/app/Pod/app2".into(),
+        )],
+    );
     let mut ledger = MitigationLedger::new();
-    let delta = ledger.reconcile(&chains);
+    let delta = ledger.reconcile(&chains, &decisions);
     let mitigation = workload_quarantines(&delta)
         .into_iter()
         .find(|m| m.cut.from.0 == "workload/app/Pod/app2")
@@ -755,7 +858,7 @@ fn workload_quarantine_self_reverts_when_evidence_clears() {
         &internal_active_snapshot(true),
         &default_adapters(),
     ));
-    let first = ledger.reconcile(&chains);
+    let first = ledger.reconcile(&chains, &no_decisions());
     let q = workload_quarantines(&first)
         .into_iter()
         .find(|m| m.cut.from.0 == "workload/app/Pod/watcher")
@@ -773,7 +876,7 @@ fn workload_quarantine_self_reverts_when_evidence_clears() {
         &internal_active_snapshot(false),
         &default_adapters(),
     ));
-    let delta = ledger.reconcile(&cleared);
+    let delta = ledger.reconcile(&cleared, &no_decisions());
     assert!(
         delta
             .retired
