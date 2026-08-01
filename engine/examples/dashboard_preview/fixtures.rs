@@ -1,6 +1,9 @@
 //! Finding skeletons shared across preview scenarios.
 
-use protector::engine::state::{CveEvidence, EntryEvidence, Finding, PathStep};
+use protector::engine::reason::adjudicate::incident::Assessment;
+use protector::engine::state::{
+    CutRow, CveEvidence, EntryEvidence, Finding, IncidentSummary, PathStep,
+};
 use protector_behavior::Behavior;
 
 /// A single proven-chain hop, terse to build.
@@ -75,6 +78,25 @@ pub(crate) fn breach_finding() -> Finding {
         evidence,
         recency: None,
         node: None,
+        // A model-chosen cut-set (ADR-0034 / JEF-674): the entry front door plus the downstream
+        // workload it pivots through — demonstrates the finding detail's cut-set list.
+        incident: Some(IncidentSummary {
+            assessment: Assessment::Attack,
+            cuts: vec![
+                CutRow {
+                    node: "deployment/edge/api-gateway".into(),
+                    mechanism: "add a scoped deny NetworkPolicy/AuthorizationPolicy",
+                    is_entry: true,
+                    blast_note: "blast radius: no alive collateral".into(),
+                },
+                CutRow {
+                    node: "statefulset/payments/ledger-db".into(),
+                    mechanism: "quarantine the compromised workload with a default-deny NetworkPolicy",
+                    is_entry: false,
+                    blast_note: "blast radius: 1 alive workload(s) affected".into(),
+                },
+            ],
+        }),
     }
 }
 
@@ -97,6 +119,7 @@ pub(crate) fn simple_finding(entry: &str, objective: &str) -> Finding {
         evidence: EntryEvidence::default(),
         recency: None,
         node: None,
+        incident: None,
     }
 }
 
@@ -131,5 +154,6 @@ pub(crate) fn redundant_finding() -> Finding {
         evidence: EntryEvidence::default(),
         recency: None,
         node: None,
+        incident: None,
     }
 }

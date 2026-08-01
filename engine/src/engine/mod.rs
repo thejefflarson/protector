@@ -540,7 +540,11 @@ impl Engine {
         // fresh verdict into the store it is resolved IMMEDIATELY — no end-of-pass
         // re-publish is needed to surface it. `publish_chains` also stamps each finding's entry
         // node (JEF-308) so a latent finding on a blind node can carry its "no live sensor" caveat.
-        self.findings.publish_chains(&chains, &graph, snapshot);
+        // `self.decisions` here is the CARRIED-FORWARD prior pass's cut-choice map (JEF-674) —
+        // this pass's adjudication hasn't run yet, so the finding detail shows the last-known
+        // cut-set immediately, refreshed by the re-publish below once fresh decisions land.
+        self.findings
+            .publish_chains(&chains, &graph, snapshot, &self.decisions, &health);
 
         // Snapshot gauges for this pass.
         self.metrics.chains.record(chains.len() as u64, &[]);
@@ -604,8 +608,10 @@ impl Engine {
         // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
         // what this re-publish is for (it was already written to the shared store the
         // instant each entry was judged, and the findings snapshot resolves it from there) —
-        // this only refreshes the structural enrichment of the rows (+ re-stamps entry nodes).
-        self.findings.publish_chains(&chains, &graph, snapshot);
+        // this only refreshes the structural enrichment of the rows (+ re-stamps entry nodes) —
+        // and, with THIS pass's fresh `decisions` (JEF-674), the finding detail's cut-set list.
+        self.findings
+            .publish_chains(&chains, &graph, snapshot, &decisions, &health);
 
         if structurally_changed && !chains.is_empty() {
             tracing::info!(count = chains.len(), "proven chains");

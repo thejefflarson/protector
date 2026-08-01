@@ -37,6 +37,7 @@ fn finding(entry: &str, objective: &str, verdict: Option<Verdict>) -> Finding {
         evidence: EntryEvidence::default(),
         recency: None,
         node: None,
+        incident: None,
     }
 }
 

@@ -31,14 +31,14 @@ pub use agent_liveness::{
 };
 pub use divergence::{DivergenceCounts, DivergenceLog, DivergenceRow};
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
-pub use findings::{CoverageEdge, Finding, Findings, PathStep};
+pub use findings::{CoverageEdge, CutRow, Finding, Findings, IncidentSummary, PathStep};
 pub use judgement::{Judgement, JudgementLog};
 pub use readiness::{InputState, NodeCoverageRow, NodeCoverageState, Readiness, ReadinessRow};
 // The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's
 // config + per-pass health, the same pure aggregation the OTLP mirror reads.
 pub(crate) use readiness::derive_readiness;
 pub use recency::{Delta, RecencyInfo, StoredPosture};
-pub use report::{LeftAloneEntry, Report, WouldActEntry, default_window_report};
+pub use report::{AttackNoCutEntry, LeftAloneEntry, Report, WouldActEntry, default_window_report};
 pub use reversion::{ReversionLog, ReversionRecord};
 pub use scope_preview::ScopePreviewStore;
 pub use signing_baseline::{

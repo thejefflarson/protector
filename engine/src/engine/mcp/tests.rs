@@ -68,6 +68,7 @@ fn secret_finding() -> Finding {
         },
         recency: None,
         node: None,
+        incident: None,
     }
 }
 

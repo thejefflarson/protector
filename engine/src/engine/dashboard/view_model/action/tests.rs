@@ -15,6 +15,9 @@ fn would_act(entry: &str, open: bool, short_lived: bool, coverage_gap: bool) -> 
         short_lived,
         coverage_gap,
         last_verdict: "exploitable — RCE reachable".into(),
+        // One distinct node per entry — keeps `Report::would_act_count()`'s node-union headline
+        // (JEF-674) numerically equal to the row count in these fixtures.
+        contained_nodes: vec![format!("workload/app/Pod/{entry}")],
     }
 }
 
@@ -56,6 +59,7 @@ fn maps_proposed_cuts_left_alone_counts_and_formats_window_and_lifetime() {
             entry: "marketing".into(),
             verdict: "not exploitable — internal only".into(),
         }],
+        attack_no_cut: vec![],
     };
     let v = build_at(strip(), &report, &[], &[], 0);
     assert_eq!(v.window_human, "7d");
@@ -83,6 +87,7 @@ fn journal_empty_is_preserved_distinct_from_none_in_window() {
         journal_empty: true,
         would_act: vec![],
         left_alone: vec![],
+        attack_no_cut: vec![],
     };
     let v = build_at(strip(), &empty, &[], &[], 0);
     assert!(v.journal_empty);
@@ -108,6 +113,7 @@ fn report_with_history() -> Report {
         journal_empty: false,
         would_act: vec![],
         left_alone: vec![],
+        attack_no_cut: vec![],
     }
 }
 
