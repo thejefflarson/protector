@@ -22,6 +22,12 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch"]
+  # Declared L7 routes (ADR-0038): the IngressExposureAdapter walks Ingress/IngressClass
+  # objects to make internet-exposure follow declared routing, so a route-forwarded
+  # backend of a live internet-exposed controller becomes an entry. Read-only.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
     verbs: ["get", "list", "watch"]

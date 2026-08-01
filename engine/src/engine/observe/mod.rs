@@ -31,7 +31,7 @@ pub mod trivy_rbac;
 pub mod trivy_secret;
 
 use k8s_openapi::api::core::v1::{Pod, Secret, Service};
-use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::networking::v1::{Ingress, IngressClass, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
 use kube::Api;
 use kube::api::ListParams;
@@ -239,6 +239,14 @@ pub struct Snapshot {
     pub role_bindings: Vec<RoleBinding>,
     pub cluster_roles: Vec<ClusterRole>,
     pub cluster_role_bindings: Vec<ClusterRoleBinding>,
+    /// L7 routes (ADR-0038): the declared host/path→backend-Service rules the
+    /// [`adapter::IngressExposureAdapter`] walks to make internet-exposure follow
+    /// declared routing rather than stopping at the controller.
+    pub ingresses: Vec<Ingress>,
+    /// The `IngressClass` objects `ingresses` reference by `spec.ingressClassName`
+    /// (ADR-0038) — resolving the class is how the adapter confirms a route names a
+    /// real, live controller rather than an orphaned/typo'd class.
+    pub ingress_classes: Vec<IngressClass>,
     /// Vulnerability findings per image (Vulnerability port). Populated from a
     /// scanner; see `observe`'s note on the live source.
     pub image_vulns: Vec<ImageVulnerabilities>,
@@ -286,6 +294,8 @@ impl Snapshot {
             role_bindings,
             cluster_roles,
             cluster_role_bindings,
+            ingresses,
+            ingress_classes,
             image_vulns,
             trivy_findings,
             linkerd,
@@ -346,6 +356,17 @@ impl Snapshot {
                         .items,
                 )
             },
+            // ADR-0038: the declared L7 routes and the classes they name, the
+            // IngressExposureAdapter's raw material.
+            async { anyhow::Ok(Api::<Ingress>::all(client.clone()).list(&lp).await?.items) },
+            async {
+                anyhow::Ok(
+                    Api::<IngressClass>::all(client.clone())
+                        .list(&lp)
+                        .await?
+                        .items,
+                )
+            },
             async {
                 anyhow::Ok(
                     list_parsed(
@@ -386,6 +407,8 @@ impl Snapshot {
             role_bindings,
             cluster_roles,
             cluster_role_bindings,
+            ingresses,
+            ingress_classes,
             image_vulns,
             image_secrets,
             config_audits,

@@ -1,6 +1,6 @@
 # 0038. Transitive internet exposure through declared L7 routes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 
 ## Context
@@ -65,4 +65,28 @@ target cluster actually has the CRDs; otherwise it is not built.
   arming ladder ([ADR-0035](0035-per-cut-class-arming-ladder.md)) and the blast gate apply
   untouched.
 - Retires ADR-0012's "Ingress/Gateway-API exposure is unmodeled" caveat for the Ingress case.
-- The implementing change flips this ADR to Accepted.
+
+## Addendum — implementation decisions (Ingress observer)
+
+Two decisions the Decision section above left to the implementation, recorded here now that
+`IngressExposureAdapter` (`engine/src/engine/observe/adapter/ingress_exposure.rs`) exists:
+
+- **D1 — controller-anchoring.** Kubernetes has no object linking an `IngressClass` to the
+  workload that implements its `spec.controller` string; that string is an opaque identifier,
+  not an object reference. Rather than guess via a naming/label convention (which reopens
+  exactly the over-promotion hazard this ADR closes), the adapter uses the one piece of the
+  API that is both deterministic and controller-agnostic: a live controller stamps
+  `Ingress.status.loadBalancer` with the address it serves that Ingress from, and stamps the
+  *identical* address on its own fronting Service's `status.loadBalancer`. Matching those two
+  addresses finds the exact controller workload with no convention and no fabrication risk. An
+  Ingress whose controller has never (or not yet) claimed it with a live address simply never
+  matches — the under-promote fail direction.
+- **D2 — bounded fixpoint.** "Chains compose" requires re-deriving controller-liveness against
+  the graph's *current* exposure facts, not just the facts `ExposureAdapter` computed before
+  this adapter ran (a backend promoted in one pass can itself be the live, address-matched
+  controller for a further route). `contribute` re-scans every Ingress until a full pass makes
+  no new promotion, bounded by `graph.node_count()` — the worst case for how many distinct
+  workloads could ever still be pending promotion, so a cycle can never spin the engine loop.
+  Converges in one pass per hop of chaining in practice (rare beyond 1-2).
+
+The implementing change flips this ADR to Accepted.

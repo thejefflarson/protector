@@ -378,7 +378,7 @@ pub async fn run_watch(
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
     use k8s_openapi::api::core::v1::{Pod, Secret, Service};
-    use k8s_openapi::api::networking::v1::NetworkPolicy;
+    use k8s_openapi::api::networking::v1::{Ingress, IngressClass, NetworkPolicy};
     use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
     use kube::Api;
     use kube::core::PartialObjectMeta;
@@ -703,6 +703,10 @@ pub async fn run_watch(
     let (rolebindings, rolebindings_w) = reflector::store::<RoleBinding>();
     let (clusterroles, clusterroles_w) = reflector::store::<ClusterRole>();
     let (clusterrolebindings, clusterrolebindings_w) = reflector::store::<ClusterRoleBinding>();
+    // The declared L7 routes and the classes they name (ADR-0038) — the
+    // IngressExposureAdapter's raw material.
+    let (ingresses, ingresses_w) = reflector::store::<Ingress>();
+    let (ingress_classes, ingress_classes_w) = reflector::store::<IngressClass>();
 
     let cfg = watcher::Config::default();
     // CRITICAL: each reflector runs in its OWN task so its Store stays current no
@@ -742,6 +746,8 @@ pub async fn run_watch(
     spawn_reflector!(rolebindings_w, RoleBinding);
     spawn_reflector!(clusterroles_w, ClusterRole);
     spawn_reflector!(clusterrolebindings_w, ClusterRoleBinding);
+    spawn_reflector!(ingresses_w, Ingress);
+    spawn_reflector!(ingress_classes_w, IngressClass);
 
     tracing::info!("engine: watching cluster (event-driven)");
     loop {
@@ -783,6 +789,13 @@ pub async fn run_watch(
                 .state()
                 .iter()
                 .map(|r| (**r).clone())
+                .collect(),
+            // The declared L7 routes and the classes they name (ADR-0038).
+            ingresses: ingresses.state().iter().map(|i| (**i).clone()).collect(),
+            ingress_classes: ingress_classes
+                .state()
+                .iter()
+                .map(|c| (**c).clone())
                 .collect(),
             // Vulnerabilities are listed best-effort on each pass (cheap, only when
             // something changed), then enriched with KEV exploit intel and EPSS
