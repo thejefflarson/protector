@@ -1,18 +1,18 @@
 //! trivy-operator `RbacAssessmentReport` → RBAC-exposure [`ScanFinding`]s (a
-//! Vulnerability-port-adjacent adapter, ADR-0003; JEF-244).
+//! Vulnerability-port-adjacent adapter, ADR-0003;).
 //!
 //! Same trust boundary and pure-mapping discipline as the other trivy adapters. The report
 //! assesses a Role / ClusterRole's `checks[]` (a role granting `*` verbs, wildcard secret
 //! access, escalate/bind/impersonate). Only FAILED checks (`success: false`) are kept.
 //!
-//! These findings INFORM the model's existing authorization reasoning — JEF-79 already
+//! These findings INFORM the model's existing authorization reasoning — already
 //! reasons about RBAC-authorized breadth from the privilege graph — so they are surfaced as
 //! structural EVIDENCE (severity/context), NOT re-implemented as a parallel authorization
 //! computation and NOT counted as exploitation evidence. The report names the assessed Role
 //! by the `trivy-operator.resource.*` labels; the finding is attributed to the workloads in
 //! that role's namespace (a cluster-scoped ClusterRole report has no namespace, so it is
 //! skipped — it has no single workload to attach to, and double-counting cluster RBAC is
-//! exactly what JEF-79 already owns).
+//! exactly what already owns).
 
 use kube::core::DynamicObject;
 use serde_json::Value;
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn cluster_scoped_report_with_no_namespace_is_skipped() {
-        // A ClusterRole assessment has no namespace; JEF-79 already owns cluster RBAC, so the
+        // A ClusterRole assessment has no namespace; already owns cluster RBAC, so the
         // adapter skips it rather than double-counting (report_resource returns None).
         assert!(parse_report(&object(None)).is_none());
     }

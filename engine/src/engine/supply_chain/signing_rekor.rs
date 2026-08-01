@@ -1,7 +1,7 @@
-//! The opt-in Rekor transparency-log reconciliation pass (JEF-266, ADR-0020 §4).
+//! The opt-in Rekor transparency-log reconciliation pass (ADR-0020 §4).
 //!
-//! Runs AFTER the signing sweep (JEF-261) has observed each running image's posture and learned the
-//! local per-repo TOFU baseline (JEF-263). For each observed image it consults the public
+//! Runs AFTER the signing sweep has observed each running image's posture and learned the
+//! local per-repo TOFU baseline. For each observed image it consults the public
 //! transparency log (via the bounded, cached [`RekorLane`]) and does two things the local model
 //! cannot:
 //!
@@ -12,7 +12,7 @@
 //!   2. **Registry↔log divergence.** A signature the registry serves but the log has no entry for
 //!      (`RegistrySignedNotInLog`) — or the reverse, the log holds a signing entry for an image the
 //!      registry serves unsigned (`LogSignedRegistryUnsigned`) — is tampering neither source
-//!      reveals alone. It is surfaced as a **divergence finding through JEF-264's regression
+//!      reveals alone. It is surfaced as a **divergence finding through 's regression
 //!      channel** (a `SigningRegression/<repo>` row, distinct reason "registry↔log divergence"),
 //!      audit-only (still admitted — the shadow invariant, ADR-0016).
 //!
@@ -35,7 +35,7 @@ use crate::engine::policy_log::{PolicyDecisionLog, PolicyDecisionRecord};
 use crate::engine::state::{SigningBaseline, SigningBaselineStore};
 use crate::policies::signature::PostureMap;
 
-/// A registry↔log disagreement about an image's signature (JEF-266). The two directions are both
+/// A registry↔log disagreement about an image's signature. The two directions are both
 /// tampering signals; each is recorded with a distinct drift token so the render can name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Divergence {
@@ -103,7 +103,7 @@ pub fn divergence(
     }
 }
 
-/// Encode a divergence finding as a `SigningRegression/<repo>` row so it rides JEF-264's regression
+/// Encode a divergence finding as a `SigningRegression/<repo>` row so it rides 's regression
 /// channel (the inventory partitions it out of the decision tallies and renders the loud banner).
 /// The signature token is `regression-divergence-<dir>-<strength>` (dir ∈ registry/log, strength ∈
 /// established/cold) — the render parses it back. Decision stays `allow`: audit-only, still
@@ -135,7 +135,7 @@ fn divergence_record(
     )
 }
 
-/// Reconcile this pass's observed postures against the public transparency log (JEF-266). A no-op
+/// Reconcile this pass's observed postures against the public transparency log. A no-op
 /// (zero egress) when `lane` is `None`. Marks corroborated baselines stronger, persists that change,
 /// records the (refreshed) strength row, and surfaces divergence findings. A per-image log error
 /// degrades that image to local-only (skipped) — never a false clean.

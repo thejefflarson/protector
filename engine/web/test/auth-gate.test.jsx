@@ -1,4 +1,4 @@
-// AuthGate + auth status-machine tests (JEF-489). Once OIDC is configured (JEF-487) the snapshot
+// AuthGate + auth status-machine tests. Once OIDC is configured the snapshot
 // route can answer 401/403; the poll's `onAuthError` flips `App` into an auth state that REPLACES the
 // privileged view with the interstitial. These drive `onAuthError` exactly as the real poll would
 // (the poll is stubbed) and assert via the DOM — no internal state peeking.

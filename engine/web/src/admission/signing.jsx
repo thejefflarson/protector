@@ -1,4 +1,4 @@
-// The per-image signing inventory (ADR-0025 / JEF-262 / ADR-0020 / JEF-400) — a 1:1 Preact port of
+// The per-image signing inventory (ADR-0025 / ADR-0020) — a 1:1 Preact port of
 // maud `signing_inventory`: ONE aligned `<table>` for the whole inventory (columns line up across
 // every repo), grouped under repo group-header rows, with the loud regression / calm exception /
 // loud provenance-change rows above each group's image rows. Two hard operator rules preserved: the
@@ -7,7 +7,7 @@
 //
 // Reconcile keying: image + regression/exception/provenance-change rows key on their server-supplied
 // `dom-id`, and each row's expand-in-place detail is a button-driven expander backed by LOCAL
-// component state (a plain `useState` per row — JEF-411), ephemeral by design. Preact's keyed diff
+// component state (a plain `useState` per row —), ephemeral by design. Preact's keyed diff
 // keeps the open row open across a poll (the boring default). Every untrusted string (image ref /
 // signer identity / issuer / builder / source) renders via JSX text (Preact auto-escapes; the
 // raw-HTML escape hatch is banned by the guard). The `data-*` tokens are fixed `[a-z0-9-]`, never
@@ -107,7 +107,7 @@ function SigningGroup({ g }) {
 }
 
 /** A row expander button + the paired detail row's open state, backed by LOCAL component state (a
- *  plain `useState` — JEF-411, ephemeral by design). Returns `{ detailId, open, expander }`. */
+ *  plain `useState` — ephemeral by design). Returns `{ detailId, open, expander }`. */
 function useRowDisclosure(domId, label) {
   const detailId = `detail-${domId}`;
   const [open, setOpen] = useState(false);
@@ -232,7 +232,7 @@ function SigningRow({ r, strength: repoStrength }) {
             <span
               class="signing-strength t-micro muted"
               data-strength={s.token}
-              title="whether the public transparency log corroborates this repo's signing history (JEF-266)"
+              title="whether the public transparency log corroborates this repo's signing history"
             >
               {s.word}
             </span>

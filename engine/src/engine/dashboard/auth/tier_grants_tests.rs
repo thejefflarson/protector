@@ -1,4 +1,4 @@
-//! Unit tests for `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` (JEF-501): identity→tier grants that
+//! Unit tests for `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS`: identity→tier grants that
 //! resolve the ceiling from a VERIFIED `sub`/`email` when the IdP mints no `tier` claim at all —
 //! the Cloudflare-Access-over-GitHub case, verified live, that motivated this ticket. Split out of
 //! `tests.rs` to keep both files well under the repo's 1,000-line cap (CLAUDE.md).
@@ -240,7 +240,7 @@ fn missing_or_empty_email_still_resolves_a_sub_based_grant() {
 
 #[tokio::test]
 async fn verifier_end_to_end_resolves_raw_and_forensic_grants_from_a_signed_token() {
-    // Mints real signed tokens (no `tier` claim) through the JEF-485 scaffolding and drives the
+    // Mints real signed tokens (no `tier` claim) through the scaffolding and drives the
     // FULL verify() path — proving the grant wiring works end to end, not just at the claims layer.
     let fetcher = Arc::new(TestFetcher::new(jwk_set(&[(KID_A, KEY_A_N)])));
     let config = OidcConfig {

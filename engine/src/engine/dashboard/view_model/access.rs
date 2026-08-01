@@ -1,4 +1,4 @@
-//! Map the read-only MCP disclosure audit (JEF-490) into the [`AccessViewProps`] the "Access" tab
+//! Map the read-only MCP disclosure audit into the [`AccessViewProps`] the "Access" tab
 //! renders. This is the ONE place the audit rows are REDACTED to the CALLER's own tier: a row that
 //! recorded a `raw` pull of a crown-jewel entry shows its target-class ONLY to a viewer whose own
 //! verified tier unlocks it (forensic+); a lower-tier viewer sees the SAME withheld-workload

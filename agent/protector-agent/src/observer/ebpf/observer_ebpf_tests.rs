@@ -15,7 +15,7 @@ fn attr(pid: u32, cgroup_id: u64) -> EventAttr {
 
 #[test]
 fn resolve_uses_the_table_and_never_reads_proc_on_a_cgroup_id_hit() {
-    // JEF-158 hot path: a cgroup_id table hit resolves with NO `/proc` read and NO
+    // hot path: a cgroup_id table hit resolves with NO `/proc` read and NO
     // fallback-cache entry — which is what lets an already-exited process attribute.
     let table = crate::pod::build_cgroup_table([(100u64, POD_SLICE.to_string())]);
     let mut cache = HashMap::new();
@@ -138,7 +138,7 @@ fn decode_priv_change_parses_uids() {
 }
 
 /// Build an [`ExecEvent`] with a NUL-terminated `path` and the given `exe_anon_inode` byte
-/// (JEF-317, Route A).
+/// (Route A).
 fn exec_event(kind_pid_cgroup: (u32, u32, u64), bin: &[u8], exe_anon_inode: u8) -> ExecEvent {
     let (kind, pid, cgroup_id) = kind_pid_cgroup;
     let mut path = [0u8; PATH_CAP];
@@ -159,7 +159,7 @@ fn exec_event(kind_pid_cgroup: (u32, u32, u64), bin: &[u8], exe_anon_inode: u8) 
 fn decode_exec_parses_path_and_maps_to_process_exec() {
     // A KIND_EXEC ExecEvent carrying a NUL-terminated exec path must decode to a
     // RawEvent::Exec, and into_behavior must map it to Behavior::ProcessExec whose
-    // fingerprint coarsens to the basename (JEF-53). exe_anon_inode == 0 here — the
+    // fingerprint coarsens to the basename. exe_anon_inode == 0 here — the
     // ordinary, non-anonymous case.
     let ev = exec_event((KIND_EXEC, 4321, 999), b"/usr/bin/bash\0", 0);
     let bytes = unsafe {
@@ -205,7 +205,7 @@ fn decode_exec_parses_path_and_maps_to_process_exec() {
 
 #[test]
 fn decode_exec_carries_the_anon_inode_flag_through() {
-    // A KIND_EXEC ExecEvent with exe_anon_inode == 1 (JEF-317, Route A: the kernel's own
+    // A KIND_EXEC ExecEvent with exe_anon_inode == 1 (Route A: the kernel's own
     // f_inode read, not a path-shape guess) must decode and map the flag through verbatim
     // — never inferred from the path, which here looks like an ordinary on-disk binary.
     let ev = exec_event((KIND_EXEC, 1, 2), b"/bin/bash\0", 1);
@@ -230,7 +230,7 @@ fn decode_exec_carries_the_anon_inode_flag_through() {
 fn decode_file_write_parses_path_and_maps_to_file_write() {
     // A KIND_FILE_WRITE FileEvent carrying a NUL-terminated path must decode to a
     // RawEvent::FileWrite with attribution, and into_behavior must map it to
-    // Behavior::FileWrite whose fingerprint coarsens to the dirname (JEF-306).
+    // Behavior::FileWrite whose fingerprint coarsens to the dirname.
     let mut path = [0u8; PATH_CAP];
     let file = b"/etc/cron.d/dropper\0";
     path[..file.len()].copy_from_slice(file);
@@ -273,7 +273,7 @@ fn decode_file_write_parses_path_and_maps_to_file_write() {
 
 #[test]
 fn decode_ptrace_attach_parses_with_no_body_beyond_the_header() {
-    // JEF-318: a KIND_PTRACE_ATTACH event IS an EventHeader — no extra bytes, unlike every
+    // a KIND_PTRACE_ATTACH event IS an EventHeader — no extra bytes, unlike every
     // other kind's body. Decode must still succeed on exactly `size_of::<EventHeader>()`
     // bytes and attribute + map it to Behavior::PtraceAttach.
     let header = EventHeader {
@@ -301,7 +301,7 @@ fn decode_ptrace_attach_parses_with_no_body_beyond_the_header() {
 
 #[test]
 fn decode_module_load_parses_with_no_body_beyond_the_header() {
-    // JEF-318: same header-only shape as KIND_PTRACE_ATTACH, distinct kind + behavior.
+    // same header-only shape as KIND_PTRACE_ATTACH, distinct kind + behavior.
     let header = EventHeader {
         kind: KIND_MODULE_LOAD,
         pid: 555,

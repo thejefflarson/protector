@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-07-22
-- Relates to: [0014](0014-behavioral-telemetry-ebpf.md)/[0015](0015-advisory-evidence-egress.md) (the in-cluster, zero-egress posture this carves a second, bounded exception to), [0018](0018-operator-configured-redacted-breach-notifier.md) (the direct lineage — operator-owned, redacted-by-default, one sanctioned egress; this ADR generalizes that carve-out from *push* to *pull*), [0016](0016-severity-vs-urgency.md) (presentation is a **view, never a gate**, and the engine is **shadow-first** — a read surface cannot become an actuation surface), [0020](0020-signature-continuity.md) (the signing inventory the `signing_inventory` tool exposes), [0025](0025-dashboard-v4-preact-client-render.md) (the read-only, same-origin JSON snapshot this reuses as the tools' data source). **Depends on ADR-0030** (the OIDC token verifier), referenced by number — its file lands on the sibling branch (JEF-483).
+- Relates to: [0014](0014-behavioral-telemetry-ebpf.md)/[0015](0015-advisory-evidence-egress.md) (the in-cluster, zero-egress posture this carves a second, bounded exception to), [0018](0018-operator-configured-redacted-breach-notifier.md) (the direct lineage — operator-owned, redacted-by-default, one sanctioned egress; this ADR generalizes that carve-out from *push* to *pull*), [0016](0016-severity-vs-urgency.md) (presentation is a **view, never a gate**, and the engine is **shadow-first** — a read surface cannot become an actuation surface), [0020](0020-signature-continuity.md) (the signing inventory the `signing_inventory` tool exposes), [0025](0025-dashboard-v4-preact-client-render.md) (the read-only, same-origin JSON snapshot this reuses as the tools' data source). **Depends on ADR-0030** (the OIDC token verifier), referenced by number — its file lands on the sibling branch.
 
 ## Context
 
@@ -55,7 +55,7 @@ already computes:
 - **`explain_verdict`** — the *why* behind one entry's verdict (the adjudication
   reasoning, at the depth the tier permits).
 - **`get_coverage`** — runtime-coverage / freshness: is protector blind on a node, and
-  how stale is what it last saw (the [JEF-421](0018-operator-configured-redacted-breach-notifier.md)/JEF-427 signal, read-side).
+  how stale is what it last saw (the signal, read-side).
 - **`signing_inventory`** — the [ADR-0020](0020-signature-continuity.md) signing
   posture: which images are signed, by whom, and where continuity regressed.
 
@@ -127,7 +127,7 @@ The tiers split cleanly along the egress boundary:
   cluster-specific remains** — no name, no CVE, no path, no topology, only verdicts,
   counts, technique IDs, and coverage/freshness. It is the same "no untrusted cluster
   string to leak" property [ADR-0018](0018-operator-configured-redacted-breach-notifier.md)'s
-  redacted default and its JEF-427 counts-only extension rely on. This tier is **on by
+  redacted default and its counts-only extension rely on. This tier is **on by
   default** and needs no per-tier opt-in.
 - **`forensic` and `raw` are genuine cluster-data egress.** A CVE id, a path, a
   judgement prompt, a secret name — these are cluster facts. Emitting them is exactly

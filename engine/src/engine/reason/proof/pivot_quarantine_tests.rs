@@ -1,18 +1,18 @@
-//! JEF-322 (thesis-check on JEF-284), resolved by JEF-566: does `quarantine_targets_on_path`'s
+//! A thesis-check on the entry-foothold gate: does `quarantine_targets_on_path`'s
 //! `RemotelyExploitable` trigger require on-pod exploitation *evidence* — a live
 //! runtime signal, per the "presence ≠ exploitability, the model decides" thesis
 //! (ADR-0011/0013/0016) — or does it fire on mere reachability + static CVE
 //! *presence*, the exact pattern ADR-0013 forbids for the entry-foothold lane
 //! ("CVE presence no longer auto-cuts")?
 //!
-//! **JEF-322 finding:** [`quarantine_targets_on_path`]'s `RemotelyExploitable` arm is
+//! **Finding:** [`quarantine_targets_on_path`]'s `RemotelyExploitable` arm is
 //! `node != entry && net_reachable(node) && compromisable(node)` — [`compromisable`] is the
 //! *static* CVE/KEV predicate, not [`actively_exploited`]'s live-signal one. No runtime
 //! evidence, no corroboration, and no model verdict is required to become a *candidate*
 //! quarantine target — that stays true, deliberately: the proof layer still proposes on
 //! presence alone (a human always sees the finding).
 //!
-//! **JEF-566 fix:** the actuator's `Mitigation::is_live_corroborated` previously
+//! **Fix:** the actuator's `Mitigation::is_live_corroborated` previously
 //! special-cased every `QuarantineWorkload` mitigation — including a `RemotelyExploitable`
 //! one — as unconditionally auto-actionable, bypassing the `corroborated || promoted`
 //! gate ADR-0013 requires for the entry lane. It now runs the SAME gate as every other
@@ -61,7 +61,7 @@ fn critical_image(image: &str) -> crate::engine::observe::ImageVulnerabilities {
     }
 }
 
-/// The e2e's pivot shape (JEF-300/#175): an internet-exposed `web` (a LoadBalancer
+/// The e2e's pivot shape (#175): an internet-exposed `web` (a LoadBalancer
 /// Service, itself carrying no CVE — the entry doesn't need one to seed
 /// reachability) reaches a `store` pivot pod over an allowed NetworkPolicy hop.
 /// `store` mounts a secret (the objective) and runs a critical-CVE image; `runtime`
@@ -125,12 +125,12 @@ fn web_to_store_chain(chains: &[ProvenChain]) -> &ProvenChain {
         .expect("web → store → secret chain")
 }
 
-/// ADR-0034 (JEF-570): a breach-relevant chain's `QuarantineWorkload` mitigation is now
+/// ADR-0034: a breach-relevant chain's `QuarantineWorkload` mitigation is now
 /// PROPOSED only when a decisive `Attack` decision named the node in `contain` — the
 /// deterministic `quarantine_targets` desired-set insertion this file's tests used to rely on
 /// is gone for breach-relevant chains (it stays, unchanged, for a non-breach-relevant one). So
 /// these tests supply the decision the model WOULD have made naming `store`, built through the
-/// real menu resolver (never hand-rolled), to isolate what they actually test: the JEF-566
+/// real menu resolver (never hand-rolled), to isolate what they actually test: the
 /// `is_live_corroborated` gate on the resulting mitigation, independent of how it got proposed.
 fn decisions_naming_store(
     chain: &ProvenChain,
@@ -160,7 +160,7 @@ fn decisions_naming_store(
 /// A pivot pod that is network-reachable from an exposed entry and carries a critical
 /// CVE — but whose justifying chain has ZERO runtime/live evidence (a clean, unpromoted
 /// edge) — is still IDENTIFIED as a `RemotelyExploitable` quarantine candidate at the
-/// proof layer (unchanged), but JEF-566 makes it **propose-only**: the actuator no
+/// proof layer (unchanged), but makes it **propose-only**: the actuator no
 /// longer auto-acts on reachability + CVE presence alone, matching the entry-foothold
 /// lane's ADR-0013 bar ("CVE presence no longer auto-cuts").
 #[test]
@@ -181,7 +181,7 @@ fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
         .find(|t| t.node == store_node)
         .expect(
             "reachable + critical-CVE alone still identifies the pivot pod as a quarantine \
-             CANDIDATE — the proof layer's target selection is unchanged by JEF-566",
+             CANDIDATE — the proof layer's target selection is unchanged",
         );
     assert_eq!(
         target.reason,
@@ -191,7 +191,7 @@ fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
 
     // Build the mitigation the way the response layer actually does — through the
     // ledger, so the justification carries this chain's real corroborated/adjudicated/
-    // breach_relevant state, not a hand-rolled empty vec. ADR-0034 (JEF-570): a
+    // breach_relevant state, not a hand-rolled empty vec. ADR-0034: a
     // breach-relevant chain's workload quarantine is proposed only when a decisive
     // Attack decision named it — supply the decision the model would have made.
     let decisions = decisions_naming_store(chain, &graph);
@@ -207,7 +207,7 @@ fn pivot_reachable_plus_cve_alone_behind_a_clean_edge_is_propose_only() {
         .expect("the pivot's QuarantineWorkload mitigation is proposed");
     assert!(
         !mitigation.is_live_corroborated(),
-        "JEF-566: a downstream RemotelyExploitable pod behind a clean/unpromoted edge is \
+        "a downstream RemotelyExploitable pod behind a clean/unpromoted edge is \
          propose-only — it must NOT clear the auto-action gate on CVE presence alone"
     );
 }
@@ -238,7 +238,7 @@ fn pivot_behind_a_corroborated_breach_relevant_edge_is_auto_actionable() {
     assert!(chain.is_breach_relevant(), "the entry is internet-facing");
 
     let store_node = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
-    // ADR-0034 (JEF-570): supply the decisive Attack decision the model would have made
+    // ADR-0034: supply the decisive Attack decision the model would have made
     // naming `store` — see `decisions_naming_store`.
     let decisions = decisions_naming_store(chain, &graph);
     let mut ledger = crate::engine::respond::MitigationLedger::new();
@@ -274,7 +274,7 @@ fn entry_foothold_alone_does_not_meet_the_stricter_action_bar() {
 }
 
 /// A live signal on the pivot upgrades its reason from `RemotelyExploitable` to
-/// `ActivelyExploited` (precedence, JEF-284/JEF-309) — the one shape that DOES carry
+/// `ActivelyExploited` (precedence) — the one shape that DOES carry
 /// genuine on-pod evidence, contrasted against the CVE-alone case above.
 #[test]
 fn pivot_with_live_signal_is_actively_exploited_not_remotely_exploitable() {

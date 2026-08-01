@@ -2,13 +2,13 @@
 # the rust:1-bookworm builder is built on bookworm so the two stay in sync and the
 # dynamically-linked binary loads on the slim runtime.
 # Pulled via mirror.gcr.io (Google's Docker Hub pull-through cache) — the homelab
-# buildkit's shared IP exhausts Docker Hub's anonymous quota → 429 (JEF-78).
+# buildkit's shared IP exhausts Docker Hub's anonymous quota → 429.
 # Node stage (ADR-0025): build the Preact dashboard bundle from source. The Rust builder
 # `include_str!`s engine/web/dist/dashboard.js, which is gitignored (built, never
 # committed) — so it must be produced here and COPYed in before `cargo build`. This
 # fetches preact+esbuild-wasm from npm exactly as the cargo stages fetch crates from
 # crates.io; zero-egress is scoped to the RUNNING engine, not the build (ADR-0025). Pulled
-# via mirror.gcr.io for the same Docker Hub quota reason as the cargo base (JEF-78).
+# via mirror.gcr.io for the same Docker Hub quota reason as the cargo base.
 # `npm ci --ignore-scripts` kills install hooks; the build uses esbuild-WASM (arch-neutral,
 # so the same command works on the amd64 and arm64 native builders — no per-arch esbuild
 # binary to resolve).
@@ -34,11 +34,11 @@ RUN apt-get update \
 # glibc. (Changing CFLAGS also reruns aws-lc-sys' build script, rebuilding a stale,
 # toolchain-mismatched object left in the build cache.)
 ENV CFLAGS=-std=gnu17
-# sccache (JEF-84) is the dep-caching layer now — it shares the rustc object cache with the
+# sccache is the dep-caching layer now — it shares the rustc object cache with the
 # in-cluster Redis (cluster repo charts/sccache), reached via the meshed BuildKit's own identity,
 # so a workspace dep compiled by ANY repo's image build (or the CI test build) is reused here.
 # cargo-chef was REMOVED: sccache + cargo-chef's `cook` fight over the shared /app/target dir and
-# abort with "Failed to open file for hashing: …/lib*.rmeta" (JEF-389) — a conflict that is
+# abort with "Failed to open file for hashing: …/lib*.rmeta" — a conflict that is
 # backend-independent (it fails on the local fallback too). A single plain `cargo build` compiles
 # deps then workspace crates in dependency order, so every `--extern` .rmeta exists when sccache
 # hashes it. sccache is a HARD GATE here — if it can't start against Redis the build FAILS (no
@@ -54,7 +54,7 @@ RUN set -eux; ver=0.16.0; \
       | tar -xz -C /usr/local/bin --strip-components=1 "sccache-v${ver}-${a}-unknown-linux-musl/sccache"
 ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0
 # sccache backend = the shared Cloudflare R2 bucket (cluster repo: charts/sccache,
-# ADR-0020, JEF-584), replacing the in-cluster Redis this used to hardcode. Config +
+# ADR-0020), replacing the in-cluster Redis this used to hardcode. Config +
 # bucket-scoped token arrive as BuildKit build SECRETS below — never ENV or a build-arg,
 # both of which persist in `docker history` on every image we push to ghcr.
 #

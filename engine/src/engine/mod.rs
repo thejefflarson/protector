@@ -43,8 +43,8 @@ pub mod journal;
 pub mod model;
 pub mod notify;
 pub mod observe;
-// JEF-226: the bounded admission-decision ring (written by the webhook engine, read by
-// the admission decision log). Standalone module to stay clear of the JEF-218
+// the bounded admission-decision ring (written by the webhook engine, read by
+// the admission decision log). Standalone module to stay clear of the
 // file-split refactor of this orchestrator.
 pub mod policy_log;
 pub mod reason;
@@ -52,7 +52,7 @@ pub mod reason;
 // breach notifier (`notify`, ADR-0018) so the notifier and the read-only MCP server share
 // ONE implementation of "what is safe to emit off-cluster."
 pub mod redact;
-// The read-only, token-claim-bound tiered-redaction MCP server (ADR-0031 / JEF-488): a second
+// The read-only, token-claim-bound tiered-redaction MCP server (ADR-0031): a second
 // sanctioned egress carve-out, served on its own bind (`PROTECTOR_MCP_ADDR`) behind the SAME
 // OIDC verifier as the dashboard, exposing exactly four READ-ONLY tools. No actuation tool
 // exists by construction.
@@ -74,17 +74,17 @@ use metrics::EngineMetrics;
 // and the dashboard's read-only view can share its record/class types.
 pub mod cut_divergence;
 
-// The ADJ-MISS-DIAG re-judge diagnostic (JEF-387), extracted to keep this orchestrator under
+// The ADJ-MISS-DIAG re-judge diagnostic, extracted to keep this orchestrator under
 // the file-size cap (CLAUDE.md). Emits the compact, per-section-fingerprinted line the churn
 // harness ingests.
 mod churn_diag;
 
-// The layered per-entry adjudication re-judge gate (JEF-390 / JEF-391 / JEF-234), extracted to
+// The layered per-entry adjudication re-judge gate, extracted to
 // keep this orchestrator under the file-size cap.
 mod adj_gate;
 
 // The four-phase adjudication pass (classify → dispatch → fold → publish), extracted from
-// `Engine::process` (JEF-370) to keep this orchestrator under the file-size cap and make the
+// `Engine::process` to keep this orchestrator under the file-size cap and make the
 // pass independently testable. Behavior-neutral code move.
 mod adj_pass;
 
@@ -116,45 +116,45 @@ const JUDGE_FRESHNESS_BOUND: std::time::Duration = std::time::Duration::from_sec
 
 /// One breach-relevant ENTRY queued for adjudication this pass: its identity, the
 /// (objective, technique) set the model judges it over, the DETERMINISTIC prompt the model
-/// will see, the verdict-cache key (a hash of that prompt, JEF-350), and the chain indices
+/// will see, the verdict-cache key (a hash of that prompt), and the chain indices
 /// its verdict stamps. Built once in the classification phase so the concurrent model
-/// dispatch (JEF-337) reuses the exact prompt bytes the cache key was derived from — the
+/// dispatch reuses the exact prompt bytes the cache key was derived from — the
 /// cached-on input and the sent input can never drift.
 struct PendingEntry {
     entry_key: String,
     entry: graph::NodeKey,
     objectives: Vec<(graph::NodeKey, graph::attack::AttackRef)>,
     /// The deduped, sorted workload [`graph::NodeKey`]s on this entry's PROVEN paths
-    /// (`ProvenChain::paths`), EXCLUDING the entry itself (JEF-565) — every workload the model's
+    /// (`ProvenChain::paths`), EXCLUDING the entry itself — every workload the model's
     /// prompt renders its own evidence block for, threaded through to `Adjudicator::judge` so an
     /// implementation's own backstops can weigh downstream evidence exactly as the prompt does.
     downstream: Vec<graph::NodeKey>,
     /// The model's complete, deterministic input (built by `build_judgment_prompt`).
     prompt: String,
     /// The verdict-cache key: `prompt_cache_key(&prompt)` — the freshness key persisted in
-    /// the journal (JEF-301) and matched by `cached_for`. Named `fingerprint` because the
+    /// the journal and matched by `cached_for`. Named `fingerprint` because the
     /// cache/journal seam is generic over "the freshness key string"; its value is now the
     /// prompt hash, not the old predicted-input fingerprint.
     fingerprint: String,
-    /// The per-section fingerprints of `prompt` (JEF-387): a hash of each labeled section
+    /// The per-section fingerprints of `prompt`: a hash of each labeled section
     /// (runtime / cves / secrets / posture / objectives / entry), logged in the compact
     /// `ADJ-MISS-DIAG` line so the churn harness attributes each re-judge to the EXACT section.
     sections: reason::adjudicate::PromptSections,
-    /// A stable hash of this entry's objective/technique SET — the "chain shape" (JEF-387).
+    /// A stable hash of this entry's objective/technique SET — the "chain shape".
     /// Entries with the same shape share this value so the harness can group them.
     chain: String,
-    /// This pass's delta-aware surface (ADR-0023, JEF-391): snapshotted as the entry's next
+    /// This pass's delta-aware surface (ADR-0023): snapshotted as the entry's next
     /// baseline when this pass judges it decisively, so the next pass measures additions against it.
     surface: reason::adjudicate::JudgedSurface,
     idxs: Vec<usize>,
-    /// The deterministic cut-choice menu (ADR-0034 D4, JEF-570) `prompt`'s containment-options
+    /// The deterministic cut-choice menu (ADR-0034 D4) `prompt`'s containment-options
     /// section rendered — carried alongside the prompt so [`reason::adjudicate::Adjudicator::judge`]
     /// parses/resolves the model's `contain` reply against the EXACT menu the entry's prompt
     /// showed (never rebuilt, so the two can never drift).
     menu: reason::adjudicate::incident::Menu,
 }
 
-/// A journal-restored per-entry cut-choice decision (ADR-0034 D8, JEF-639), held until the
+/// A journal-restored per-entry cut-choice decision (ADR-0034 D8), held until the
 /// DOUBLE replay-lock verifies it against THIS RUN's own freshly-rebuilt state (see
 /// [`adj_pass::rearm_restored_decision`]). Deliberately NOT an
 /// [`incident::IncidentDecision`](reason::adjudicate::incident::IncidentDecision) — its cuts
@@ -182,12 +182,12 @@ pub struct Engine {
     active: EnabledActions,
     /// Where a cut may be auto-applied (the namespace allowlist). Separate from
     /// [`EnabledActions`] (what classes are armed): one says "is this class enabled",
-    /// the other "is this cut in scope" (JEF-104 follow-up).
+    /// the other "is this cut in scope" (follow-up).
     scope: ActuationScope,
     actuator: Box<dyn Actuator>,
     adjudicator: Box<dyn reason::adjudicate::Adjudicator>,
     findings: std::sync::Arc<state::Findings>,
-    /// The reversion log (JEF-141): recent lifted cuts + why. Seeded from the journal on boot
+    /// The reversion log: recent lifted cuts + why. Seeded from the journal on boot
     /// so a self-revert survives a restart.
     reversions: std::sync::Arc<state::ReversionLog>,
     /// The shadow-bake divergence log (ADR-0035's bake step): the bounded ring of recent
@@ -196,13 +196,13 @@ pub struct Engine {
     /// journal's own `CutDivergence` lines; never read back by the engine itself (a view, never
     /// a gate, ADR-0016).
     divergence: std::sync::Arc<state::DivergenceLog>,
-    /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
+    /// The durable decision journal: each pass's breach decisions and ledger
     /// apply/revert deltas are appended here so a restart replays them. Disabled (a
     /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
     /// then runs exactly as it did before, in-memory only. Replayed read-only by the
-    /// would-have-acted report aggregation (JEF-143) the per-pass OTLP mirror reads.
+    /// would-have-acted report aggregation the per-pass OTLP mirror reads.
     journal: std::sync::Arc<journal::DecisionJournal>,
-    /// The breach notifier (JEF-144, ADR-0018): the one sanctioned outbound path. POSTs a
+    /// The breach notifier (ADR-0018): the one sanctioned outbound path. POSTs a
     /// redacted breach-decision summary to an operator-configured sink, fired on the SAME
     /// decision identity as the journal write below — so one new decision is one
     /// notification, never per-pass spam. Disabled (a no-op, zero outbound calls) when no
@@ -212,7 +212,7 @@ pub struct Engine {
     previous: GraphSnapshot,
     ledger: MitigationLedger,
     actions: ActionLog,
-    /// The SINGLE per-entry verdict store (JEF-157), shared (`Arc`) with the
+    /// The SINGLE per-entry verdict store, shared (`Arc`) with the
     /// [`state::Findings`] handle. One record per internet-facing ENTRY collapses what used
     /// to be four parallel maps:
     /// - the cross-pass verdict CACHE (evidence fingerprint → decisive verdict): the
@@ -222,7 +222,7 @@ pub struct Engine {
     ///   set — a misconfig that newly exposes something re-triggers it);
     /// - the DISPLAY memory (the last verdict shown, decisive or inconclusive): carried
     ///   forward so the resolved posture never blanks while the slow model re-judges;
-    /// - the journal-RESTORED summary (JEF-141): the model's prior words shown on boot
+    /// - the journal-RESTORED summary: the model's prior words shown on boot
     ///   until a live verdict supersedes them;
     /// - the JOURNALED-summary dedup key: a decisive verdict is journaled + notified only
     ///   when it changed for the entry.
@@ -233,18 +233,18 @@ pub struct Engine {
     /// end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral workloads,
     /// removed exposure).
     verdicts: std::sync::Arc<state::VerdictStore>,
-    /// This pass's per-entry cut-choice decision (ADR-0034, JEF-570/JEF-639): the model's last
+    /// This pass's per-entry cut-choice decision (ADR-0034): the model's last
     /// DECISIVE [`reason::adjudicate::incident::IncidentDecision`], keyed by entry key. Engine-
     /// local (no `Arc`, no reader shares it — only [`respond::MitigationLedger::reconcile`]
     /// consumes it, via [`adj_pass::run_adjudication_pass`]'s return value). Retained across a
     /// cache-hit/backoff pass exactly like [`Self::verdicts`]'s cache (D7's retirement
     /// asymmetry: a this-pass `Uncertain` never clears it); pruned to present entries each pass.
-    /// Seeded ACROSS a restart from the durable journal (ADR-0034 D8, JEF-639) — see
+    /// Seeded ACROSS a restart from the durable journal (ADR-0034 D8) — see
     /// [`Self::restored_decisions`] and [`adj_pass::rearm_restored_decision`] — so a standing
     /// model-chosen cut survives the model's cold-start window rather than dropping to the
     /// `containment_for` human-proposal fallback until re-judged.
     decisions: std::collections::BTreeMap<String, reason::adjudicate::incident::IncidentDecision>,
-    /// Journal-restored decisions (ADR-0034 D8, JEF-639), pending the double replay-lock
+    /// Journal-restored decisions (ADR-0034 D8), pending the double replay-lock
     /// verification against THIS RUN's own freshly-rebuilt state — see
     /// [`adj_pass::rearm_restored_decision`]. Seeded once at boot from the journal's `Incident`
     /// lines ([`Self::replay_journal`], chronological replay ⇒ last-write-wins per entry);
@@ -252,10 +252,10 @@ pub struct Engine {
     /// not — a hold arms it into [`Self::decisions`], a miss discards it (cold re-judge, never
     /// repointed or retried blind on a later pass). Nothing else ever reads this map directly.
     restored_decisions: std::collections::BTreeMap<String, RestoredDecision>,
-    /// Per-node agent-liveness (JEF-308), shared with the ingest; classified each pass into the
+    /// Per-node agent-liveness, shared with the ingest; classified each pass into the
     /// runtime-corroboration coverage the readiness row reads. `None` when no ingest is wired.
     agent_liveness: Option<std::sync::Arc<state::AgentLivenessStore>>,
-    /// The offline IP→ASN dataset (JEF-380), hot-reloadable like KEV/EPSS. Read each pass when
+    /// The offline IP→ASN dataset, hot-reloadable like KEV/EPSS. Read each pass when
     /// building an entry's adjudication prompt so INTERNET egress renders grouped by provider
     /// (`GitHub [AS36459]`) — the salient provider signal AND the CDN-rotation churn fix.
     /// Defaults to an empty dataset (every internet peer falls back to its raw `IP:port`,
@@ -304,7 +304,7 @@ impl Engine {
         let findings = std::sync::Arc::new(state::Findings::new());
         // The arm state is reported via `ReadinessConfig.armed` (set in run_loop) in the
         // readiness aggregation's coverage row.
-        // The verdict store (JEF-157) is OWNED by the findings handle and SHARED with the
+        // The verdict store is OWNED by the findings handle and SHARED with the
         // engine: both write/read the same `Arc`, so a verdict the judging loop writes is
         // resolved into the findings snapshot immediately.
         let verdicts = findings.verdicts();
@@ -330,7 +330,7 @@ impl Engine {
             decisions: std::collections::BTreeMap::new(),
             restored_decisions: std::collections::BTreeMap::new(),
             agent_liveness: None,
-            // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
+            // Empty until the watch loop attaches the file-backed feed: internet
             // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
             asn: observe::feed_reload::ReloadableFeed::from_store(observe::asn::AsnDb::empty()),
             break_glass: break_glass::BreakGlass::disabled(),
@@ -340,13 +340,13 @@ impl Engine {
         }
     }
 
-    /// Attach the per-node agent-liveness store (JEF-308), read each pass to stamp coverage.
+    /// Attach the per-node agent-liveness store, read each pass to stamp coverage.
     pub fn with_agent_liveness(mut self, l: std::sync::Arc<state::AgentLivenessStore>) -> Self {
         self.agent_liveness = Some(l);
         self
     }
 
-    /// Attach the offline IP→ASN dataset (JEF-380), read each pass to group INTERNET egress
+    /// Attach the offline IP→ASN dataset, read each pass to group INTERNET egress
     /// peers by provider in the adjudication prompt. Shares the same `ArcSwap` cell as the
     /// handle the watch loop spawns the reloader on, so a daily CronJob refresh is visible to
     /// the engine without a restart. Builder-style; called once on boot.
@@ -358,7 +358,7 @@ impl Engine {
         self
     }
 
-    /// Attach a durable decision journal (JEF-141) and replay it onto the in-memory
+    /// Attach a durable decision journal and replay it onto the in-memory
     /// state, so the findings snapshot, the resolved verdicts, and the reversion log populate
     /// IMMEDIATELY after a restart — before a fresh (slow CPU) model pass lands. A disabled
     /// journal
@@ -370,7 +370,7 @@ impl Engine {
         self
     }
 
-    /// A handle to the durable decision journal (JEF-143), for the would-have-acted report
+    /// A handle to the durable decision journal, for the would-have-acted report
     /// aggregation to replay read-only. Shares the same `Arc` the engine writes through, so the
     /// aggregation reflects every decision the live engine has journaled this run plus the
     /// pre-restart history on disk.
@@ -378,7 +378,7 @@ impl Engine {
         self.journal.clone()
     }
 
-    /// Attach the operator-configured breach notifier (JEF-144, ADR-0018). The one
+    /// Attach the operator-configured breach notifier (ADR-0018). The one
     /// sanctioned outbound path: a redacted breach-decision summary POSTed to an in-cluster
     /// sink, deduped on the journal's decision identity. A disabled notifier (no
     /// `PROTECTOR_ENGINE_NOTIFY_URL`) makes zero outbound calls — today's behaviour exactly.
@@ -402,7 +402,7 @@ impl Engine {
         self.findings.clone()
     }
 
-    /// A handle to the reversion log (JEF-141): the recent lifted-cuts ring.
+    /// A handle to the reversion log: the recent lifted-cuts ring.
     pub fn reversions(&self) -> std::sync::Arc<state::ReversionLog> {
         self.reversions.clone()
     }
@@ -462,7 +462,7 @@ impl Engine {
     #[tracing::instrument(name = "engine.process", skip_all)]
     pub async fn process(&mut self, snapshot: &Snapshot) {
         self.metrics.passes.add(1, &[]);
-        // Behavioral-port instrumentation (JEF-100, pure observe): count what the
+        // Behavioral-port instrumentation (pure observe): count what the
         // behavioral port saw this pass, by variant and attribution outcome, plus the
         // live store cardinality. Labels are low-cardinality (variant names, resolved/
         // unresolved) — never per-pod. `runtime_events` is the TTL'd store's snapshot
@@ -470,7 +470,7 @@ impl Engine {
         self.metrics
             .runtime_store
             .record(snapshot.runtime_events.len() as u64, &[]);
-        // Accumulate this pass's bake snapshot (JEF-48) alongside the OTLP counters: the
+        // Accumulate this pass's bake snapshot alongside the OTLP counters: the
         // same figures, surfaced in the output state so the shadow-bake exit criteria are
         // readable without an OTLP collector. Filled out (corroborations) after the chains
         // are proven below, then published to the findings handle.
@@ -533,14 +533,14 @@ impl Engine {
         // Publish the proven chains NOW, before the (CPU-bound, possibly slow or
         // unreachable) adjudication. The findings snapshot must always reflect the current
         // graph even while the model is judging or down — model latency must never blank the
-        // findings state. JEF-157: the rows carry NO per-chain verdict; each finding's
+        // findings state. the rows carry NO per-chain verdict; each finding's
         // verdict is resolved from the shared verdict store at snapshot time (the last-
         // known live verdict, or a journal-restored one). So this single publish already
         // shows the carried-forward verdict, and when the judging loop below writes a
         // fresh verdict into the store it is resolved IMMEDIATELY — no end-of-pass
         // re-publish is needed to surface it. `publish_chains` also stamps each finding's entry
-        // node (JEF-308) so a latent finding on a blind node can carry its "no live sensor" caveat.
-        // `self.decisions` here is the CARRIED-FORWARD prior pass's cut-choice map (JEF-674) —
+        // node so a latent finding on a blind node can carry its "no live sensor" caveat.
+        // `self.decisions` here is the CARRIED-FORWARD prior pass's cut-choice map —
         // this pass's adjudication hasn't run yet, so the finding detail shows the last-known
         // cut-set immediately, refreshed by the re-publish below once fresh decisions land.
         self.findings
@@ -549,7 +549,7 @@ impl Engine {
         // Snapshot gauges for this pass.
         self.metrics.chains.record(chains.len() as u64, &[]);
         // One pass over the chains for both breach-relevant counts: the breach-path gauge
-        // and the corroborations metric (JEF-100) — the latter the subset also marked
+        // and the corroborations metric — the latter the subset also marked
         // `corroborated` (a live runtime signal completing the action bar, ADR-0009). In
         // shadow this counts "would this have promoted?" without changing any behavior —
         // promotion still stays gated behind `judgement_enabled()` below.
@@ -563,14 +563,14 @@ impl Engine {
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
         }
-        // Publish this pass's behavioral-bake snapshot into the output state (JEF-48). Done
+        // Publish this pass's behavioral-bake snapshot into the output state. Done
         // here, before the slow adjudication loop, for the same reason the findings are:
         // the bake snapshot must reflect the current pass even while the model is judging.
         bake.corroborations = corroborations;
         self.findings.set_bake(bake);
 
-        // Runtime-corroboration coverage per node (JEF-308) for the readiness row, and its
-        // OTLP mirror (JEF-422). Reading the coverage back after stamping means the gauges are
+        // Runtime-corroboration coverage per node for the readiness row, and its
+        // OTLP mirror. Reading the coverage back after stamping means the gauges are
         // sourced from the SAME `derive_runtime_coverage` the dashboard reads — they can never
         // disagree. Counts only, no per-node label dimension: node names are attacker-
         // influenceable, so a per-node series would be a cardinality/DoS vector.
@@ -580,10 +580,10 @@ impl Engine {
                 .stamp_runtime_coverage(liveness, &snapshot.pods);
             self.metrics
                 .record_coverage(&self.findings.runtime_coverage());
-            // JEF-427: push the operator ONCE on a coverage collapse/recovery EDGE — the gap the
+            // push the operator ONCE on a coverage collapse/recovery EDGE — the gap the
             // breach notifier can't cover (a blind engine makes no breach decisions, so it stays
             // silent exactly when its own sensors have gone dark). Edge-triggered (not per pass),
-            // reusing JEF-421's stall hysteresis; best-effort, bounded, redacted counts-only; a
+            // reusing 's stall hysteresis; best-effort, bounded, redacted counts-only; a
             // no-op when the notifier is disabled (zero outbound calls).
             if let Some(edge) = edge {
                 self.notifier.notify_coverage(&edge.into()).await;
@@ -591,25 +591,25 @@ impl Engine {
         }
 
         // One `now` for the whole pass so every backoff/breaker decision shares a single clock
-        // read — the timing seam the JEF-234 tests drive deterministically (store methods all
+        // read — the timing seam the tests drive deterministically (store methods all
         // take `now`, never reach for `Instant::now()`).
         let pass_now = std::time::Instant::now();
 
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant path — group
         // the breach-relevant chains by their internet-facing entry, judge each entry once, and
         // fold the verdicts back into the store / journal / notifier, stamping each chain in
-        // place. Extracted whole (JEF-370); see [`adj_pass`] for the four-phase detail. Returns
-        // this pass's per-entry cut-choice decisions (ADR-0034, JEF-570), consumed by the ledger
+        // place. Extracted whole; see [`adj_pass`] for the four-phase detail. Returns
+        // this pass's per-entry cut-choice decisions (ADR-0034), consumed by the ledger
         // reconcile below.
         let decisions = self
             .run_adjudication_pass(&mut chains, &graph, &health, pass_now)
             .await;
         // Re-publish the enriched chains — promotions move into remediations, vetoes flip
-        // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
+        // `adjudicated`, so the disposition is current. the VERDICT is no longer
         // what this re-publish is for (it was already written to the shared store the
         // instant each entry was judged, and the findings snapshot resolves it from there) —
         // this only refreshes the structural enrichment of the rows (+ re-stamps entry nodes) —
-        // and, with THIS pass's fresh `decisions` (JEF-674), the finding detail's cut-set list.
+        // and, with THIS pass's fresh `decisions`, the finding detail's cut-set list.
         self.findings
             .publish_chains(&chains, &graph, snapshot, &decisions, &health);
 
@@ -697,7 +697,7 @@ impl Engine {
                         self.metrics
                             .mitigations
                             .add(1, &[opentelemetry::KeyValue::new("action", "applied")]);
-                        // Durable record of the cut going live (JEF-141) — one line, only
+                        // Durable record of the cut going live — one line, only
                         // when newly applied (the `is_active` guard), so re-applies don't
                         // re-log. No-op when the journal is disabled.
                         self.journal.record(journal::Decision::Apply {
@@ -736,7 +736,7 @@ impl Engine {
             self.metrics
                 .mitigations
                 .add(1, &[opentelemetry::KeyValue::new("action", "reverted")]);
-            // Make the lifted cut VISIBLE and DURABLE (JEF-141): the self-revert is the
+            // Make the lifted cut VISIBLE and DURABLE: the self-revert is the
             // core safety story (ADR-0016), but it was previously invisible. Push it onto
             // the in-memory reversion log and append it to the journal so it survives a
             // restart.
@@ -757,7 +757,7 @@ impl Engine {
         }
 
         // Mark the pass complete for the output state's "last pass NNs ago" freshness line
-        // (JEF-141), so a quiet/loading reader sees fresh state rather than a broken one.
+        // so a quiet/loading reader sees fresh state rather than a broken one.
         self.findings.mark_pass(std::time::SystemTime::now());
 
         self.previous = current;
@@ -771,7 +771,7 @@ impl Engine {
     /// ([`state::VerdictStore::verdict_fresh`]).
     ///
     /// This closes the one gap `decide()`'s own checks (`is_live_corroborated`) don't: the
-    /// JEF-390 verdict-cache hit and the JEF-391 subtractive-delta hold both resolve BEFORE
+    /// verdict-cache hit and the subtractive-delta hold both resolve BEFORE
     /// the breaker check (`adj_gate`), by design — an unchanged evidence fingerprint is
     /// exactly as valid to DISPLAY as when it was judged (ADR-0023) — so a fingerprint that
     /// happens to replay while the judge is CURRENTLY down can otherwise still read as
@@ -826,7 +826,7 @@ pub use run_loop::run_watch;
 
 // The supply-chain trust sweeps (ADR-0020): the per-pass signature / Rekor / provenance /
 // trust-root observation the engine runs over the already-running fleet, gathered into one module
-// behind the `run_sweeps` facade `run_watch` drives (JEF-369). The submodules
+// behind the `run_sweeps` facade `run_watch` drives. The submodules
 // (`signing_sweep`, `signing_drift`, `signing_rekor`, `signing_trust`, `signing_baseline_strength`,
 // `provenance_sweep`, `provenance_drift`) keep their public surface, so external paths resolve as
 // `engine::supply_chain::<module>`.
@@ -835,7 +835,7 @@ pub mod supply_chain;
 #[cfg(test)]
 mod tests;
 
-// JEF-368: the journal / notifier / persistence tests, split out of `tests.rs` to keep every
+// the journal / notifier / persistence tests, split out of `tests.rs` to keep every
 // file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod journal_tests;

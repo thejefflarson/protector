@@ -1,5 +1,5 @@
 //! trivy-operator `ConfigAuditReport` → misconfiguration [`ScanFinding`]s on a workload
-//! (a Vulnerability-port-adjacent adapter, ADR-0003; JEF-244).
+//! (a Vulnerability-port-adjacent adapter, ADR-0003;).
 //!
 //! Same trust boundary as the `VulnerabilityReport` adapter ([`super::trivy`]): a pure
 //! mapping from a `DynamicObject`'s `report` field into the graph's vocabulary, unit-tested

@@ -45,7 +45,7 @@ module declaring only the structs the probes read, each field placed at its runn
 byte offset. It is NOT the full `aya-tool` dump (that exceeded the 1,000-line file cap and
 silently rotted across kernel upgrades). Critically there is **no CO-RE field relocation**
 here — the bpf object bakes each field access as a constant offset — so the offsets in that
-file MUST match the fleet kernel or `bpf_d_path` is verifier-rejected (JEF-324). Re-verify
+file MUST match the fleet kernel or `bpf_d_path` is verifier-rejected. Re-verify
 on any kernel struct change by dumping BTF from a node (`kubectl` a hostPath-`/sys/kernel/
 btf` pod, then `bpftool btf dump … format c`, or parse the raw BTF) on **every** fleet arch
 and confirming the read fields share one offset. As of 2026-07-05 the fleet is `7.0.0`

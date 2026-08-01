@@ -188,7 +188,7 @@ fn all_clear_strip_serializes_the_green_honesty_token() {
 
 #[test]
 fn auth_mode_serializes_as_a_stable_server_derived_token() {
-    // The client renders the pill (JEF-489) verbatim from this SERVER-derived token — it derives
+    // The client renders the pill verbatim from this SERVER-derived token — it derives
     // nothing. The wire vocabulary is `edge-only` (unconfigured, the conservative default) / `oidc`.
     let v = serde_json::to_value(all_clear_strip()).unwrap();
     assert_eq!(
@@ -238,7 +238,7 @@ fn blind_strip_never_ships_green_or_watching() {
 
 #[test]
 fn standing_signing_regression_forbids_the_green_token() {
-    // Case X = a standing established-baseline signing regression (JEF-264): never green.
+    // Case X = a standing established-baseline signing regression: never green.
     let strip = all_clear_strip().with_signing_regressions(1, 0);
     let v = serde_json::to_value(strip).unwrap();
     assert_eq!(v["all-clear"], json!(false));
@@ -251,7 +251,7 @@ fn standing_signing_regression_forbids_the_green_token() {
 }
 
 // ---------------------------------------------------------------------------
-// The coverage-stall register (JEF-421): the loud, server-derived was-covering
+// The coverage-stall register: the loud, server-derived was-covering
 // → now-silent edge. `stalled` is DISTINCT from `absent`/`degraded`, forbids the
 // green all-clear, and ships a `coverage-alert` banner ONLY when a feed stalled.
 // ---------------------------------------------------------------------------
@@ -385,7 +385,7 @@ fn a_wholly_blind_expected_feed_forbids_the_green_token() {
 }
 
 // ---------------------------------------------------------------------------
-// The single judging-axis token `judging-state` (JEF-408): the ONE string the
+// The single judging-axis token `judging-state`: the ONE string the
 // client strip switches on to pick the whole axis. It is server-derived from
 // the SAME branch logic as `all-clear`/`watching`, so it can never disagree.
 // ---------------------------------------------------------------------------

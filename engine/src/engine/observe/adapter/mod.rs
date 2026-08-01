@@ -94,13 +94,13 @@ pub trait Adapter: Send + Sync {
 ///
 /// SOLE edge-construction path for the observe layer: every edge is a deterministic
 /// observation minted here from trusted cluster topology/RBAC (the adapters above).
-/// The removed `Grade` gate (JEF-365) used to enforce "only deterministic proof moves
+/// The removed `Grade` gate used to enforce "only deterministic proof moves
 /// privilege" at the type level; with it gone that invariant now rests on this
 /// chokepoint. Any new adapter that maps runtime, LLM, or feed data into a *movement*
 /// edge (`reaches` / `can-do` / `escapes-to` — the proof-walk relations) would break
 /// "only deterministic proof moves privilege" (ADR-0001/0003). Runtime/LLM/feed
 /// evidence must attach node *facts*, never mint a movement edge, unless a `Grade`-style
-/// seam is reintroduced first (ADR-0001's JEF-365 amendment).
+/// seam is reintroduced first (ADR-0001's amendment).
 pub(super) fn observed(source: &str, relation: Relation) -> Edge {
     Edge {
         relation,
@@ -191,19 +191,19 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         // controller workload's exposure fact that adapter just computed.
         Box::new(IngressExposureAdapter),
         Box::new(VulnerabilityAdapter),
-        // The other trivy-operator report kinds (JEF-244): exposed secrets onto Images,
+        // The other trivy-operator report kinds: exposed secrets onto Images,
         // config-audit + RBAC-assessment findings onto Workloads. Enrich existing nodes,
         // so they run after the structural adapters alongside the vulnerability adapter.
         Box::new(ExposedSecretAdapter),
         Box::new(ConfigAuditAdapter),
         Box::new(RbacAssessmentAdapter),
         Box::new(RuntimeAdapter::new()),
-        // API secret-reads from the apiserver audit log (JEF-269): attaches a
+        // API secret-reads from the apiserver audit log: attaches a
         // SecretRead{Api} corroboration signal to the workloads whose ServiceAccount made
         // the read. Runs after WorkloadAdapter (needs the RunsAs edges) alongside the
         // other runtime enrichment.
         Box::new(AuditSecretReadAdapter),
-        // CVE↔runtime-load correlation (JEF-51): reads the CVEs the VulnerabilityAdapter
+        // CVE↔runtime-load correlation: reads the CVEs the VulnerabilityAdapter
         // put on Images and the loads the RuntimeAdapter put on Workloads, so it runs
         // after both.
         Box::new(CveReachabilityAdapter),

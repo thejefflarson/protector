@@ -1,5 +1,5 @@
 //! Map the signing-sweep rows on the admission-decision log into the per-image signing inventory
-//! the Admission view renders (JEF-262 / ADR-0020 Stage 1 render). The sweep (JEF-261) records
+//! the Admission view renders (ADR-0020 Stage 1 render). The sweep records
 //! each observed image as an `image-signature` row keyed `Image/<ref>`, with the posture in the
 //! record's `signature` status word (`signed` / `invalid-signature` / `not-signed` / `checking`)
 //! and, for a signed image, the signer prose in `reason` (`signed by <identity>[ via <issuer>]`).
@@ -7,14 +7,14 @@
 //! This layer partitions those observation rows out of the webhook's decision rows, derives a
 //! short scannable signer label + issuer badge from the (untrusted) Fulcio SAN, splits each image
 //! into its repo + digest/tag, and groups the images under their repo. It NEVER changes how the
-//! posture is produced (the producer is JEF-261's sweep); it only shapes it for rendering. Two hard
+//! posture is produced (the producer is 's sweep); it only shapes it for rendering. Two hard
 //! operator rules are encoded here: the posture is always one of the four states — never n/a — and
 //! the "if enforced" column is always a definite continuity verdict — would-admit / would-block /
-//! uncertain (JEF-297). That verdict is baseline-relative CONTINUITY (ADR-0020), not the raw
+//! uncertain. That verdict is baseline-relative CONTINUITY (ADR-0020), not the raw
 //! posture: a calm, consistent posture admits, only a genuine regression against the repo's
 //! established baseline blocks, and a cold-baseline regression reads uncertain. The regression is
-//! read from the SAME `SigningRegression/<repo>` rows the sweep recorded (JEF-264/280) — the single
-//! source of truth a continuity gate (JEF-265) enforces, so the column can never disagree with what
+//! read from the SAME `SigningRegression/<repo>` rows the sweep recorded — the single
+//! source of truth a continuity gate enforces, so the column can never disagree with what
 //! enforcement blocks. Data layer: touches `engine::`; the components never do.
 
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ const IMAGE_ID_PREFIX: &str = "si";
 /// prefix from images guarantees a bare image ref that equals its repo can never collide with the
 /// repo's regression row.
 const REGRESSION_ID_PREFIX: &str = "sr";
-/// The DOM-id prefix for a provenance-change summary/detail row (`pc-<slug>-<hash>`, JEF-275) — a
+/// The DOM-id prefix for a provenance-change summary/detail row (`pc-<slug>-<hash>`) — a
 /// distinct namespace from image + signing-regression rows so a repo carrying both a signing
 /// regression and a provenance change never shares an id.
 const PROVENANCE_CHANGE_ID_PREFIX: &str = "pc";
@@ -46,12 +46,12 @@ const PROVENANCE_CHANGE_ID_PREFIX: &str = "pc";
 const IMAGE_SUBJECT_PREFIX: &str = "Image/";
 
 /// The subject prefix the sweep keys a signing-**regression** finding under (`SigningRegression/
-/// <repo>`, JEF-264) — one row per repo. Also a signing row (not a webhook decision), so it is
+/// <repo>`) — one row per repo. Also a signing row (not a webhook decision), so it is
 /// partitioned out of the decision tallies and feeds the repo group's regression banner.
 const REGRESSION_SUBJECT_PREFIX: &str = "SigningRegression/";
 
 /// The subject prefix the sweep keys an **"exception accepted"** finding under
-/// (`SigningException/<repo>`, JEF-265) — a regression the operator has scoped-out via a recorded
+/// (`SigningException/<repo>`) — a regression the operator has scoped-out via a recorded
 /// exception. A signing row (not a webhook decision), partitioned out of the tallies; it feeds the
 /// repo group's CALM "exception accepted" banner and marks its image's enforcement chip, and it is
 /// NOT a regression row so it never counts toward breach.
@@ -66,17 +66,17 @@ const EXCEPTION_STATUS_PREFIX: &str = "exception-";
 const EXCEPTION_ID_PREFIX: &str = "ex";
 
 /// The subject prefix the sweep keys a per-repo baseline-**strength** row under (`SigningStrength/
-/// <repo>`, JEF-266) — one row per repo, log-corroborated vs local-only. A signing row (not a
+/// <repo>`) — one row per repo, log-corroborated vs local-only. A signing row (not a
 /// webhook decision), partitioned out of the tallies and feeding the repo group's strength badge.
 const STRENGTH_SUBJECT_PREFIX: &str = "SigningStrength/";
 
 /// The subject prefix the provenance sweep keys a per-image provenance observation under
-/// (`Provenance/<ref>`, JEF-275). A signing-inventory row (not a webhook decision), partitioned out
+/// (`Provenance/<ref>`). A signing-inventory row (not a webhook decision), partitioned out
 /// of the decision tallies and joined onto its image row as the provenance column.
 const PROVENANCE_SUBJECT_PREFIX: &str = "Provenance/";
 
 /// The subject prefix the provenance sweep keys a provenance-**change** finding under
-/// (`ProvenanceChange/<repo>`, JEF-275) — one row per repo, feeding the repo group's provenance-change
+/// (`ProvenanceChange/<repo>`) — one row per repo, feeding the repo group's provenance-change
 /// banner. A signing row, partitioned out of the tallies.
 const PROVENANCE_CHANGE_SUBJECT_PREFIX: &str = "ProvenanceChange/";
 
@@ -104,17 +104,17 @@ pub(super) fn is_inventory_row(r: &PolicyDecisionRecord) -> bool {
         || is_provenance_change_row(r)
 }
 
-/// Whether a record is an "exception accepted" finding row (`SigningException/<repo>`, JEF-265).
+/// Whether a record is an "exception accepted" finding row (`SigningException/<repo>`).
 fn is_exception_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(EXCEPTION_SUBJECT_PREFIX)
 }
 
-/// Whether a record is a per-image provenance observation row (`Provenance/<ref>`, JEF-275).
+/// Whether a record is a per-image provenance observation row (`Provenance/<ref>`).
 fn is_provenance_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(PROVENANCE_SUBJECT_PREFIX)
 }
 
-/// Whether a record is a provenance-change finding row (`ProvenanceChange/<repo>`, JEF-275).
+/// Whether a record is a provenance-change finding row (`ProvenanceChange/<repo>`).
 fn is_provenance_change_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(PROVENANCE_CHANGE_SUBJECT_PREFIX)
 }
@@ -124,12 +124,12 @@ fn is_observation_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(IMAGE_SUBJECT_PREFIX)
 }
 
-/// Whether a record is a signing-regression finding row (`SigningRegression/<repo>`, JEF-264).
+/// Whether a record is a signing-regression finding row (`SigningRegression/<repo>`).
 fn is_regression_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(REGRESSION_SUBJECT_PREFIX)
 }
 
-/// Whether a record is a per-repo baseline-strength row (`SigningStrength/<repo>`, JEF-266).
+/// Whether a record is a per-repo baseline-strength row (`SigningStrength/<repo>`).
 fn is_strength_row(r: &PolicyDecisionRecord) -> bool {
     r.subject.starts_with(STRENGTH_SUBJECT_PREFIX)
 }
@@ -234,7 +234,7 @@ fn short_source(source: &str) -> String {
     }
 }
 
-/// Build the per-image provenance lookup (JEF-275) from the `Provenance/<ref>` rows: image ref →
+/// Build the per-image provenance lookup from the `Provenance/<ref>` rows: image ref →
 /// (posture, verified source+builder). Reuses `short_identity` for the builder label (a GitHub
 /// Actions workflow URI → `org/repo`) so the provenance column reads like the signer column.
 fn provenance_by_image(
@@ -319,7 +319,7 @@ fn group_rank(g: &SigningRepoProps) -> u8 {
 
 /// Project one observation record into its inventory row. The posture always resolves to one of the
 /// four states (never n/a); the signer is attached only for a verifying signature; the "if enforced"
-/// continuity verdict is derived from `regressing` (JEF-297), not the raw posture.
+/// continuity verdict is derived from `regressing`, not the raw posture.
 fn signing_row(
     r: &PolicyDecisionRecord,
     provenance: &HashMap<String, (ProvenancePosture, Option<ProvenanceProps>)>,
@@ -333,16 +333,16 @@ fn signing_row(
     } else {
         None
     };
-    // Join the provenance axis (JEF-275) onto the image row. Absent when the provenance sweep is off
+    // Join the provenance axis onto the image row. Absent when the provenance sweep is off
     // or observed no provenance for this image — the honest calm default, never n/a.
     let (provenance_posture, provenance_info) = provenance
         .get(&r.image)
         .cloned()
         .unwrap_or((ProvenancePosture::Absent, None));
-    // The baseline-relative continuity verdict (JEF-297): a standing signing-regression for THIS
+    // The baseline-relative continuity verdict: a standing signing-regression for THIS
     // image (`Some(established)`) drives would-block (established) / uncertain (cold); no regression
     // is continuous (would-admit). A genuinely-invalid posture blocks outright (the loud channel).
-    // An image the operator has scoped-out via a recorded exception (JEF-265) overrides to the
+    // An image the operator has scoped-out via a recorded exception overrides to the
     // DISTINCT "exception accepted" chip — calm, but never a green would-admit.
     let enforcement = if excepted.contains(&r.image) {
         SigningEnforcement::ExceptionAccepted
@@ -367,9 +367,9 @@ fn signing_row(
     }
 }
 
-/// The per-IMAGE signing-regression lookup (JEF-297): image ref → whether the regressed baseline was
+/// The per-IMAGE signing-regression lookup: image ref → whether the regressed baseline was
 /// `established` (`true`) or cold (`false`). Read from the SAME `SigningRegression/<repo>` rows the
-/// sweep recorded (JEF-264/280) — the recorded drift verdict a continuity gate (JEF-265) enforces —
+/// sweep recorded — the recorded drift verdict a continuity gate enforces —
 /// so the "if enforced" column can never disagree with what enforcement blocks.
 ///
 /// Unlike [`regressions_by_repo`] (one banner per repo), this keys per image: the sweep records one
@@ -397,7 +397,7 @@ fn regressing_images(rows: &[PolicyDecisionRecord]) -> HashMap<String, bool> {
     out
 }
 
-/// Parse a provenance-change row (`ProvenanceChange/<repo>`, JEF-275) into `(repo, props)`, or `None`
+/// Parse a provenance-change row (`ProvenanceChange/<repo>`) into `(repo, props)`, or `None`
 /// when the row isn't well-formed. Self-describing (the sweep writes the drift token in `signature`
 /// and the before→after prose in `reason`); nothing here reaches the baseline store. Every
 /// builder/source that comes back is UNTRUSTED — escaped at render.
@@ -452,7 +452,7 @@ fn provenance_changes_by_repo(
     out
 }
 
-/// Parse a signing-regression row (`SigningRegression/<repo>`, JEF-264) into `(repo, props)`, or
+/// Parse a signing-regression row (`SigningRegression/<repo>`) into `(repo, props)`, or
 /// `None` when the row isn't a well-formed regression row. The row is self-describing (the sweep
 /// writes the drift token in `signature` and the before→after prose in `reason`); nothing here
 /// reaches the baseline store. Every identity that comes back is UNTRUSTED — escaped at render.
@@ -519,7 +519,7 @@ fn regressions_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, SigningReg
     out
 }
 
-/// Parse an "exception accepted" row (`SigningException/<repo>`, JEF-265) into `(repo, props)`, or
+/// Parse an "exception accepted" row (`SigningException/<repo>`) into `(repo, props)`, or
 /// `None` when malformed. Self-describing exactly like a regression row but with the
 /// `exception-<kind>-<strength>` token, so it reuses the same before→after parsing. Every identity
 /// is UNTRUSTED — escaped at render.
@@ -577,7 +577,7 @@ fn exceptions_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, ExceptionAc
     out
 }
 
-/// The set of image refs covered by a standing accepted exception (JEF-265), so [`signing_row`] can
+/// The set of image refs covered by a standing accepted exception, so [`signing_row`] can
 /// mark their enforcement chip as "exception accepted" rather than a would-block / would-admit.
 fn excepted_images(rows: &[PolicyDecisionRecord]) -> HashSet<String> {
     rows.iter()
@@ -586,7 +586,7 @@ fn excepted_images(rows: &[PolicyDecisionRecord]) -> HashSet<String> {
         .collect()
 }
 
-/// The standing signing-regression counts for the status strip (JEF-264): `(established, cold)` —
+/// The standing signing-regression counts for the status strip: `(established, cold)` —
 /// established-baseline regressions count toward breach, cold-baseline ones toward uncertain. Both
 /// forbid the green all-clear. Counted per repo (a repo is one standing regression regardless of how
 /// many bad digests it served).
@@ -603,7 +603,7 @@ pub(super) fn counts(rows: &[PolicyDecisionRecord]) -> (usize, usize) {
     (established, cold)
 }
 
-/// The standing baseline strength per repo (JEF-266), newest wins — `(repo, strength)`. Only
+/// The standing baseline strength per repo, newest wins — `(repo, strength)`. Only
 /// `log-corroborated` / `local-only` words map to a badge; anything else is skipped.
 fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength)> {
     let mut out: Vec<(String, RepoStrength)> = Vec::new();
@@ -620,9 +620,9 @@ fn strengths_by_repo(rows: &[PolicyDecisionRecord]) -> Vec<(String, RepoStrength
 }
 
 /// Build the signing inventory from the admission-decision log rows: the observation rows (`Image/
-/// <ref>`) grouped under their repo (JEF-262), each repo carrying its standing signing-regression
-/// banner (`SigningRegression/<repo>`, JEF-264) when one stands and its baseline-strength badge
-/// (`SigningStrength/<repo>`, JEF-266). Repo groups preserve first-seen order (the caller passes
+/// <ref>`) grouped under their repo, each repo carrying its standing signing-regression
+/// banner (`SigningRegression/<repo>`) when one stands and its baseline-strength badge
+/// (`SigningStrength/<repo>`). Repo groups preserve first-seen order (the caller passes
 /// newest-first rows), so a steady inventory renders stably. The webhook's workload decision rows
 /// are ignored — they drive the decision log, not the inventory.
 pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
@@ -660,7 +660,7 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
             }),
         }
     }
-    // Attach the standing "exception accepted" (JEF-265) to its repo group — calm + distinctly
+    // Attach the standing "exception accepted" to its repo group — calm + distinctly
     // labelled, kept visible, never counted toward breach — creating the group if the excepted
     // image has aged out of the observation window.
     for (repo, exception) in exceptions_by_repo(rows) {
@@ -676,7 +676,7 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
             }),
         }
     }
-    // Attach the standing provenance change (JEF-275) to its repo group, creating the group if the
+    // Attach the standing provenance change to its repo group, creating the group if the
     // drifted image has aged out of the observation window (the change must still surface loudly).
     for (repo, change) in provenance_changes_by_repo(rows) {
         match groups.iter_mut().find(|g| g.repo == repo) {
@@ -691,7 +691,7 @@ pub(super) fn build(rows: &[PolicyDecisionRecord]) -> Vec<SigningRepoProps> {
             }),
         }
     }
-    // Attach each repo's baseline strength badge (JEF-266) to its existing group.
+    // Attach each repo's baseline strength badge to its existing group.
     for (repo, strength) in strengths_by_repo(rows) {
         if let Some(group) = groups.iter_mut().find(|g| g.repo == repo) {
             group.strength = strength;

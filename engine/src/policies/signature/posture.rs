@@ -5,7 +5,7 @@
 //! `NotApplicable` about everything else, which reads as a green stamp. This module adds
 //! the missing half: observe **every** image's signing posture, with **no
 //! `gated_prefixes` and no trusted-identity config**, into one of five definitive
-//! resting states (never n/a; JEF-276 honest split):
+//! resting states (never n/a; honest split):
 //!
 //!   * [`Signed`](SigningPosture::Signed) — keyless-verified: a signature chains to the
 //!     public-good Fulcio root + its Rekor bundle, so the signer identity + OIDC issuer
@@ -26,8 +26,8 @@
 //!
 //! Trust anchor: the Fulcio/Rekor chain, NOT a caller identity. So we learn *who signed*
 //! for any image by observation, with nothing configured. This is Stage 1 only —
-//! observation + recording. The per-repo TOFU baseline (JEF-263), drift findings
-//! (JEF-264), enforcement (JEF-265), and Rekor history (JEF-266) consume the
+//! observation + recording. The per-repo TOFU baseline, drift findings
+//! enforcement, and Rekor history consume the
 //! [`SigningPosture`] this exposes; they are NOT built here. State is in-memory
 //! (a per-pass [`PostureMap`]); there is no durable schema yet.
 
@@ -39,14 +39,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-/// The trust-strength **rank** of a signing posture on the downgrade ladder (JEF-280).
+/// The trust-strength **rank** of a signing posture on the downgrade ladder.
 ///
 /// Ordered lowest→highest so the derived [`Ord`] ranks [`Keyless`](Self::Keyless) above every
 /// other posture: a keyless-verified identity is the strongest, an unsigned image the weakest. A
 /// *downgrade* is a fresh posture whose rank is strictly BELOW a repo's **established baseline**
 /// rank — the registry-substitution signal (an established keyless-signed repo suddenly serving
 /// key-based / unverifiable / unsigned). It is a DRIFT notion only: it never changes the per-image
-/// posture or the trust/admit semantics (JEF-276) — the calm postures still confer no trusted
+/// posture or the trust/admit semantics — the calm postures still confer no trusted
 /// identity and never admit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -64,7 +64,7 @@ pub enum PostureRank {
 }
 
 impl Default for PostureRank {
-    /// A baseline learned before JEF-280 (no persisted rank) was, by construction, ONLY ever
+    /// A baseline learned before (no persisted rank) was, by construction, ONLY ever
     /// taught by a keyless [`Signed`](SigningPosture::Signed) posture (the baseline store learns
     /// from nothing else) — so an absent rank replays as [`Keyless`](Self::Keyless), the honest
     /// historical value. Never a fabricated weaker rank that would silently miss a downgrade.
@@ -89,7 +89,7 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// This signer's tag-agnostic **continuity identity** (JEF-325): [`canonical_identity`] applied
+    /// This signer's tag-agnostic **continuity identity**: [`canonical_identity`] applied
     /// to the raw [`identity`](Self::identity) SAN. The signing baseline stores this and the drift
     /// classifier compares on it, so two releases of the SAME workflow under different version tags
     /// are the same signer (continuous, no regression). The raw SAN is retained on
@@ -103,7 +103,7 @@ impl Signer {
 /// build. ONLY a release-**tag** ref value is collapsed by [`canonical_identity`].
 const TAG_REF_MARKER: &str = "@refs/tags/";
 
-/// Canonicalize a signer SAN into its **tag-agnostic continuity identity** (JEF-325).
+/// Canonicalize a signer SAN into its **tag-agnostic continuity identity**.
 ///
 /// Keyless (Fulcio) signing embeds the exact triggering git ref in the cert SAN, so a build from
 /// release tag `v0.3.80` and one from `v0.3.81` produce SANs that differ ONLY in the tag value:
@@ -116,7 +116,7 @@ const TAG_REF_MARKER: &str = "@refs/tags/";
 /// The trusted signer for *continuity* is repo + workflow path + ref TYPE + issuer — NOT the
 /// specific version — so comparing raw SANs by exact string treats every release as a brand-new
 /// identity (an `IdentityChange` regression, and a baseline that accretes one identity per version:
-/// the JEF-325 bug). This collapses ONLY the tag VALUE to `*`, leaving every discriminating part
+/// the bug). This collapses ONLY the tag VALUE to `*`, leaving every discriminating part
 /// intact:
 ///
 /// ```text
@@ -139,11 +139,11 @@ pub fn canonical_identity(identity: &str) -> String {
     }
 }
 
-/// An image's observed signing posture (ADR-0020 Stage 1; JEF-276 honest split). Five definitive
+/// An image's observed signing posture (ADR-0020 Stage 1; honest split). Five definitive
 /// resting states plus one transient. Never `NotApplicable` — observation always reaches a posture,
 /// and a registry blip is the explicit [`Checking`](Self::Checking) rather than a fake clean.
 ///
-/// The load-bearing distinction (JEF-276): [`InvalidSignature`](Self::InvalidSignature) is the
+/// The load-bearing distinction: [`InvalidSignature`](Self::InvalidSignature) is the
 /// LOUD channel and means a signature *genuinely failed to verify* — NOT "we don't understand this
 /// signing scheme". A real, correctly-signed image that isn't keyless-Fulcio (a key-based cosign
 /// signature, or one we can't verify against our own trust root) is a CALM, honestly-labelled
@@ -180,7 +180,7 @@ pub enum SigningPosture {
 
 impl SigningPosture {
     /// A stable, low-cardinality word for the posture — for logs, metrics, and the
-    /// admission/inventory column (the render itself is JEF-262; this is just the vocabulary
+    /// admission/inventory column (the render itself is ; this is just the vocabulary
     /// those views read). The signer identity is NOT included here — it is untrusted text the
     /// caller escapes separately.
     pub fn status(&self) -> &'static str {
@@ -202,7 +202,7 @@ impl SigningPosture {
         }
     }
 
-    /// This posture's trust-strength [`PostureRank`] on the downgrade ladder (JEF-280), or `None`
+    /// This posture's trust-strength [`PostureRank`] on the downgrade ladder, or `None`
     /// for the postures that are not points on that ladder: the transient
     /// [`Checking`](Self::Checking) and the RESERVED-loud [`InvalidSignature`](Self::InvalidSignature)
     /// (a genuine verification failure, surfaced as its own regression, never a mere downgrade).
@@ -237,8 +237,9 @@ pub trait SignatureObserver: Send + Sync {
 
 /// The in-memory record of the latest observed posture per image (ADR-0020 Stage 1).
 /// Keyed by image ref, last-write-wins. This is the *per-pass* posture map the ticket calls
-/// for — deliberately ephemeral: the durable, repo-keyed signing baseline is JEF-263 and is
-/// NOT built here. Cheap to snapshot for the (future) inventory view.
+/// for — deliberately ephemeral: the durable, repo-keyed signing baseline lives in
+/// `state::signing_baseline` and is NOT built here. Cheap to snapshot for the (future)
+/// inventory view.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct PostureMap {
     images: HashMap<String, SigningPosture>,
@@ -275,7 +276,7 @@ impl PostureMap {
         self.images.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Tally this pass's postures into a low-cardinality [`PostureSummary`] (JEF-326) — the counts
+    /// Tally this pass's postures into a low-cardinality [`PostureSummary`] — the counts
     /// the sweep logs at INFO so an operator can see, at the default log level, how many images
     /// resolved vs how many are stuck "checking". Pure over the map, so it is unit-testable.
     pub fn summary(&self) -> PostureSummary {
@@ -294,7 +295,7 @@ impl PostureMap {
     }
 }
 
-/// A per-sweep count of observed signing postures (JEF-326), one field per [`SigningPosture`]
+/// A per-sweep count of observed signing postures, one field per [`SigningPosture`]
 /// variant. Logged at INFO by the sweep so perpetual "checking" is visible at the default log
 /// level instead of silent. `Display` renders the stable `signed=N key-based=… checking=M` line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -416,7 +417,7 @@ impl SigningObserver {
             let posture = self.observe(&image).await;
             map.record(image, posture);
         }
-        // The INFO sweep summary (JEF-326): at the default log level the sweep was previously
+        // The INFO sweep summary: at the default log level the sweep was previously
         // silent, so a fleet stuck in "checking" was invisible. One line per pass makes the
         // signing-coverage posture — and any stuck "checking" backlog — plainly visible; the
         // per-image reason for each `checking` is logged (WARN) by the observer itself.

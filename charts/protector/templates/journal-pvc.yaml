@@ -1,5 +1,5 @@
 {{- if and .Values.engine.enabled .Values.engine.journal.enabled }}
-# Persistent decision journal (JEF-141): survives engine restarts/reschedules so the
+# Persistent decision journal: survives engine restarts/reschedules so the
 # engine's output state repopulates immediately and the operator keeps a durable record of
 # what protector decided. ReadWriteOnce — the engine is a singleton (replicaCount 1), and the
 # Deployment uses the Recreate strategy so a rollout never contends for the volume.

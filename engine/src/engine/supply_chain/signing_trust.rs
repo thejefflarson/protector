@@ -1,9 +1,9 @@
-//! Trust-root freshness + fleet-wide unverifiable-spike signals (JEF-280, ADR-0020 §5).
+//! Trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5).
 //!
 //! An [`UnverifiableHere`](crate::policies::signature::SigningPosture::UnverifiableHere) posture
 //! is caused by a sigstore trust-root mismatch — so a **stale or starved** TUF root
 //! (`PROTECTOR_TUF_CACHE`) can mass-blind signing detection: signatures that WOULD verify against a
-//! fresh root instead read "unverifiable here", and downgrade detection (JEF-280) loses its keyless
+//! fresh root instead read "unverifiable here", and downgrade detection loses its keyless
 //! yardstick. This module exposes the two honest, side-effect-light signals the readiness
 //! aggregation surfaces so the operator can SEE that risk rather than infer it:
 //!
@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::time::SystemTime;
 
-/// How old the TUF trust-root cache may get before readiness warns it is **stale** (JEF-280).
+/// How old the TUF trust-root cache may get before readiness warns it is **stale**.
 ///
 /// The sigstore public-good TUF metadata (the `timestamp`/`snapshot` roles) is short-lived and is
 /// refreshed whenever a verification fetches it, so a cache that has not been touched in a week is a
@@ -30,12 +30,12 @@ use std::time::SystemTime;
 pub const TUF_STALE_AFTER_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// The floor of observed images below which an `UnverifiableHere` fraction is NOT called a
-/// fleet-wide spike (JEF-280): on a tiny fleet one or two unverifiable images is noise, not a
+/// fleet-wide spike: on a tiny fleet one or two unverifiable images is noise, not a
 /// trust-root signal. Kept low so a modest cluster still trips the honest warning.
 pub const SPIKE_MIN_IMAGES: usize = 4;
 
 /// Age (seconds) of the sigstore TUF trust-root cache at `cache_dir`, measured from its NEWEST file
-/// mtime relative to `now` (JEF-280). Returns `None` when the directory is absent, empty, or holds
+/// mtime relative to `now`. Returns `None` when the directory is absent, empty, or holds
 /// no readable-mtime file — the honest "no trust root fetched yet" state, distinct from a fresh one.
 ///
 /// Uses the newest mtime (not the oldest) because sigstore-rs rewrites the short-lived TUF metadata
@@ -64,7 +64,7 @@ pub fn tuf_cache_age_secs(cache_dir: &Path, now: SystemTime) -> Option<u64> {
 }
 
 /// Whether this pass's observed postures show a **fleet-wide spike** in `UnverifiableHere`
-/// (JEF-280): a large fraction of the images that reached a resting, signature-relevant posture
+/// : a large fraction of the images that reached a resting, signature-relevant posture
 /// fail to verify against our trust root — a hint the trust root drifted or is being starved.
 ///
 /// Honest by construction: it requires both a floor of observed images ([`SPIKE_MIN_IMAGES`], so a

@@ -7,7 +7,7 @@
 //!   (ADR-0001, narrowed).
 //! - [`adjudicate`] — the model *decides* exploitability of a proven chain.
 //! - [`backoff`] — exponential backoff + a global circuit-breaker so an inconclusive
-//!   (model-down) adjudication is not re-judged every pass (JEF-234).
+//!   (model-down) adjudication is not re-judged every pass.
 //!
 //! Proof winnows, the model decides (ADR-0013): only deterministic proof moves
 //! privilege; the model judges and promotes, never invents reach.

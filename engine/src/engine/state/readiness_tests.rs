@@ -1,5 +1,5 @@
-//! Tests for the readiness aggregation (JEF-160) and the collapsed runtime-corroboration row
-//! (JEF-308). Extracted to keep `readiness.rs` under the 1,000-line cap (CLAUDE.md).
+//! Tests for the readiness aggregation and the collapsed runtime-corroboration row
+//! . Extracted to keep `readiness.rs` under the 1,000-line cap (CLAUDE.md).
 
 use super::super::agent_liveness::{
     BlindReason, CoverageAlert, CoverageState, NodeCoverage, NodeState, RuntimeCoverage,
@@ -68,7 +68,7 @@ fn fully_covered_model_judging_has_no_unmet_inputs() {
 
 #[test]
 fn coverage_stall_escalates_the_runtime_row_to_stalled() {
-    // JEF-421: a covering fleet whose stall edge fired escalates the runtime row to `Stalled`
+    // a covering fleet whose stall edge fired escalates the runtime row to `Stalled`
     // (distinct from the per-pass Absent/Degraded), and the detail names the last-observed time.
     let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
     let stalled = CoverageState::Stalled(CoverageAlert {
@@ -100,7 +100,7 @@ fn coverage_stall_escalates_the_runtime_row_to_stalled() {
 
 #[test]
 fn coverage_absent_does_not_escalate_the_runtime_row() {
-    // JEF-421: the honest known-absence (Absent) never manufactures a stall — the row keeps its
+    // the honest known-absence (Absent) never manufactures a stall — the row keeps its
     // per-pass state, unchanged by the overlay.
     let cov = coverage(&[("node-a", NodeState::Healthy { signals: 2 })]);
     let before = derive_readiness(
@@ -206,7 +206,7 @@ fn a_fleet_wide_unverifiable_spike_is_surfaced_even_on_a_fresh_root() {
     assert!(readiness.has_unmet());
 }
 
-// --- JEF-326: the signature-verification reachability row (perpetual "checking") ---
+// --- the signature-verification reachability row (perpetual "checking") ---
 
 /// The signature-verification row from a readiness snapshot.
 fn verify(readiness: &Readiness) -> &ReadinessRow {
@@ -231,7 +231,7 @@ fn no_images_checking_reads_present() {
 
 #[test]
 fn images_stuck_checking_are_degraded_and_surfaced_non_green() {
-    // The JEF-326 bug made visible: a perpetual-checking backlog reads Degraded (non-green),
+    // The bug made visible: a perpetual-checking backlog reads Degraded (non-green),
     // names the count, and points at the timeout knob — never a silent green.
     let mut config = covered_config();
     config.checking_images = 5;
@@ -265,7 +265,7 @@ fn an_unconfigured_model_reads_absent_and_warming_before_first_pass() {
     assert!(readiness.warming_up);
 }
 
-// --- JEF-308: the collapsed runtime-corroboration row + honesty ladder ---
+// --- the collapsed runtime-corroboration row + honesty ladder ---
 
 /// There is exactly ONE runtime row — the collapsed agent-sourced runtime-corroboration row.
 #[test]

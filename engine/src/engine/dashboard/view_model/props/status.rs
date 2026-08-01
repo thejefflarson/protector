@@ -9,8 +9,8 @@
 //! performs ZERO honesty derivation. Every string is UNTRUSTED and ships raw (the render layer
 //! escapes; double-escaping is a bug).
 
-/// Whether the dashboard enforces app-level OIDC auth (ADR-0030 / JEF-487). SERVER-derived from
-/// whether an issuer is configured — the client renders the honest pill (JEF-489) and derives
+/// Whether the dashboard enforces app-level OIDC auth (ADR-0030). SERVER-derived from
+/// whether an issuer is configured — the client renders the honest pill and derives
 /// nothing. Serializes as the stable wire token `oidc` / `edge-only` under `auth-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -47,7 +47,7 @@ pub struct StatusStripProps {
     pub model_attached: bool,
     /// Coverage chips for the enrichment feeds (KEV/EPSS/runtime corroboration).
     pub coverage: Vec<CoverageChip>,
-    /// The strip-level **coverage-alert** (JEF-421) — `Some` ONLY when a covering runtime feed has
+    /// The strip-level **coverage-alert** — `Some` ONLY when a covering runtime feed has
     /// STALLED (was corroborating → now fully dark, past the debounce). Server-derived: the client
     /// renders it verbatim as the `.strip-coverage-alert` banner and NEVER synthesizes it. `None`
     /// (the common case) means no feed has stalled, so no banner is shown.
@@ -63,18 +63,18 @@ pub struct StatusStripProps {
     pub cleared_count: usize,
     /// Newly-escalated since last pass (the Δ headline).
     pub escalated_count: usize,
-    /// Standing signing regressions against an ESTABLISHED repo baseline (JEF-264) — a strong
+    /// Standing signing regressions against an ESTABLISHED repo baseline — a strong
     /// supply-chain signal. Counts toward BREACH for the honesty gate: blocks the green all-clear
     /// AND the calm "watching" reading. Audit-only (never denies); kept SEPARATE from the
     /// reachability [`breach_count`](Self::breach_count) — a signing regression is not a
     /// reachability breach the model can isolate.
     pub signing_regression_breach: usize,
-    /// Standing signing regressions against a COLD / freshly-learned baseline (JEF-264) — a weak
+    /// Standing signing regressions against a COLD / freshly-learned baseline — a weak
     /// lead (the baseline itself is weak evidence). Maps to UNCERTAIN: blocks the green all-clear
     /// but reads as the calmer "watching" register, not a breach.
     pub signing_regression_uncertain: usize,
-    /// Whether the dashboard enforces app-level OIDC auth (ADR-0030 / JEF-487). SERVER-derived from
-    /// the presence of a configured issuer; the client renders the pill (JEF-489) verbatim.
+    /// Whether the dashboard enforces app-level OIDC auth (ADR-0030). SERVER-derived from
+    /// the presence of a configured issuer; the client renders the pill verbatim.
     pub auth_mode: AuthMode,
 }
 
@@ -94,7 +94,7 @@ impl serde::Serialize for StatusStripProps {
         s.serialize_field("warming-up", &self.warming_up)?;
         s.serialize_field("model-attached", &self.model_attached)?;
         s.serialize_field("coverage", &self.coverage)?;
-        // The stall banner (JEF-421) — additive; `None` (no stall) still serializes as `null` so the
+        // The stall banner — additive; `None` (no stall) still serializes as `null` so the
         // client's `#[serde(default)]`-shaped read is uniform and never has to guess.
         s.serialize_field("coverage-alert", &self.coverage_alert)?;
         s.serialize_field("last-pass", &self.last_pass)?;
@@ -108,13 +108,13 @@ impl serde::Serialize for StatusStripProps {
             "signing-regression-uncertain",
             &self.signing_regression_uncertain,
         )?;
-        // The server-derived app-level auth mode (ADR-0030 / JEF-487) — `oidc` when the verifier is
+        // The server-derived app-level auth mode (ADR-0030) — `oidc` when the verifier is
         // configured/enforcing, `edge-only` when unconfigured. The client renders the pill verbatim.
         s.serialize_field("auth-mode", &self.auth_mode)?;
         // The server-derived honesty tokens — the cardinal ADR-0025 contract.
         s.serialize_field("all-clear", &self.all_clear())?;
         s.serialize_field("watching", &self.watching())?;
-        // The single judging-axis token (JEF-408): the client strip switches on this ONE string
+        // The single judging-axis token: the client strip switches on this ONE string
         // rather than re-deriving the axis from the raw booleans, keeping the honesty derivation
         // server-side. It never disagrees with `all-clear`/`watching` — it is the same branch logic.
         s.serialize_field("judging-state", self.judging_state())?;
@@ -123,7 +123,7 @@ impl serde::Serialize for StatusStripProps {
 }
 
 impl StatusStripProps {
-    /// Attach the standing signing-regression counts (JEF-264) — an established-baseline regression
+    /// Attach the standing signing-regression counts — an established-baseline regression
     /// (breach) and a cold-baseline one (uncertain). Builder-style so the strip builders keep their
     /// minimal signatures and the caller with the admission-decision log (`DashboardState`) wires
     /// the counts in. Both feed the honesty gate — a standing regression can never read as green.
@@ -135,7 +135,7 @@ impl StatusStripProps {
         self
     }
 
-    /// Overlay the coverage-stall register (JEF-421): mark the `Runtime` coverage chip STALLED (the
+    /// Overlay the coverage-stall register: mark the `Runtime` coverage chip STALLED (the
     /// loud, was-covering → now-dark edge) and attach the strip-level `coverage-alert` banner. The
     /// stall is SERVER-decided (`state::CoverageState::Stalled`); the caller (`DashboardState`) maps
     /// it to `(alert)` and folds it in here so the pure strip builders keep their minimal signatures.
@@ -160,7 +160,7 @@ impl StatusStripProps {
         self
     }
 
-    /// Stamp the SERVER-derived app-level auth mode (ADR-0030 / JEF-487). Builder-style so the pure
+    /// Stamp the SERVER-derived app-level auth mode (ADR-0030). Builder-style so the pure
     /// strip builders keep their minimal signatures and the caller (`DashboardState`) — which alone
     /// knows whether an OIDC issuer was configured — folds it in. Honest by construction: the
     /// caller sets `Oidc` only when the enforcing verifier is actually mounted.
@@ -170,7 +170,7 @@ impl StatusStripProps {
     }
 
     /// Whether any signing regression stands (established or cold) — the honesty side: a standing
-    /// regression forbids the green all-clear (JEF-264 acceptance criterion).
+    /// regression forbids the green all-clear (acceptance criterion).
     pub fn has_signing_regression(&self) -> bool {
         self.signing_regression_breach > 0 || self.signing_regression_uncertain > 0
     }
@@ -200,7 +200,7 @@ impl StatusStripProps {
     /// is the SINGLE derivation the maud render, the tests, AND the serialized `all-clear` token all
     /// read (ADR-0025) — the wire carries this decided answer, never the inputs to re-derive it.
     ///
-    /// A standing signing regression (JEF-264) — established OR cold — also forbids green: an
+    /// A standing signing regression — established OR cold — also forbids green: an
     /// un-accepted regression is an open supply-chain question the model has not cleared.
     pub fn all_clear(&self) -> bool {
         self.fully_covered()
@@ -216,7 +216,7 @@ impl StatusStripProps {
     /// (which is loud) and from blind/warming (model down). The single derivation the maud render,
     /// the tests, and the serialized `watching` token all read (ADR-0025).
     ///
-    /// An ESTABLISHED-baseline signing regression (JEF-264) is louder than watching — it counts
+    /// An ESTABLISHED-baseline signing regression is louder than watching — it counts
     /// toward breach — so it is excluded here (it falls through to the elevated/loud reading). A
     /// COLD-baseline regression is a weak lead and reads as this calm, non-green watching register.
     pub fn watching(&self) -> bool {
@@ -226,7 +226,7 @@ impl StatusStripProps {
             && !self.all_clear()
     }
 
-    /// The single judging-axis token (JEF-408) — the ONE string the Preact status strip switches on
+    /// The single judging-axis token — the ONE string the Preact status strip switches on
     /// to pick the axis' class + glyph + text, so the honesty DERIVATION stays server-side (ADR-0025)
     /// and the client never re-computes the axis from the raw booleans. Exactly one of:
     ///
@@ -272,7 +272,7 @@ pub struct CoverageChip {
     /// ([`fully_covered`](StatusStripProps::fully_covered)) — a wholly-dark expected fleet is not green.
     #[serde(default)]
     pub blind: bool,
-    /// `true` when a WAS-COVERING feed has STALLED (JEF-421) — went fully dark past the debounce.
+    /// `true` when a WAS-COVERING feed has STALLED — went fully dark past the debounce.
     /// Server-derived and DISTINCT from `degraded` (partial) and absent (never-enabled): the loud
     /// register. The client renders the chip in `--posture-breach` with a ⚠ glyph. Additive — an
     /// older client that doesn't read it still sees the chip non-present (honest).
@@ -280,7 +280,7 @@ pub struct CoverageChip {
     pub stalled: bool,
 }
 
-/// The strip-level **coverage-alert** banner payload (JEF-421), serialized under `coverage-alert`
+/// The strip-level **coverage-alert** banner payload, serialized under `coverage-alert`
 /// and present ONLY when a covering feed stalled. Untrusted strings ship raw (the client escapes).
 /// The props-layer mirror of `state::CoverageAlert`, so the wire shape lives with the wire type.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -305,14 +305,14 @@ pub struct StripCoverageAlert {
 #[serde(rename_all = "kebab-case")]
 pub enum Tab {
     Findings,
-    /// The live "alarming-now" activity view (JEF-323) — a CURRENT-WINDOW list of the runtime
+    /// The live "alarming-now" activity view — a CURRENT-WINDOW list of the runtime
     /// signals alarming THIS pass, not a persisted audit log. Sits second, next to Findings,
     /// because it is the same live security story from the runtime-activity angle.
     Alerts,
     Action,
     Readiness,
     Admission,
-    /// The forensic/raw MCP disclosure audit (JEF-490) — WHO pulled WHAT cluster fact at which tier,
+    /// The forensic/raw MCP disclosure audit — WHO pulled WHAT cluster fact at which tier,
     /// itself redacted to the viewer's own tier. The sixth tab, placed last (a distinct audit
     /// surface, not part of the live-posture story the first five tell).
     Access,
@@ -344,7 +344,7 @@ impl Tab {
     }
 
     /// The stable lowercase tab token (`findings`/`alerts`/…) — the `?tab=` vocabulary and the value
-    /// the Preact client keys its active-tab state on (ADR-0025 / JEF-400). Distinct from
+    /// the Preact client keys its active-tab state on (ADR-0025). Distinct from
     /// [`label`](Self::label) (the capitalised nav text).
     pub fn token(self) -> &'static str {
         match self {

@@ -1,4 +1,4 @@
-//! Unit tests for the k8s audit-log ingest (JEF-269): the pure parser and the TTL'd store.
+//! Unit tests for the k8s audit-log ingest: the pure parser and the TTL'd store.
 //! The HTTP glue is the cluster-facing half exercised against a real apiserver; these cover
 //! the parsing and windowing the corroboration depends on.
 

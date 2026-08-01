@@ -1,4 +1,4 @@
-//! JEF-386: mirror-served images verify by DIGEST, not by registry name.
+//! mirror-served images verify by DIGEST, not by registry name.
 //!
 //! A cosign signature is digest-bound: its payload pins `docker-manifest-digest`, and sigstore-rs
 //! verifies every layer against the digest of the manifest we actually pulled. The payload's
@@ -13,7 +13,7 @@
 //!      identity past the org gate, and a first-party signer is still admitted regardless of mirror.
 //!
 //! Built as real [`SignatureLayer`] values (not the decoupled `LayerFacts`) so they exercise the
-//! production `classify` path end to end. A live-network reproduction against the exact JEF-386
+//! production `classify` path end to end. A live-network reproduction against the exact
 //! fixture (`cr.l5d.io/linkerd/proxy`) is kept as an `#[ignore]` test below.
 
 use sigstore::cosign::SignatureLayer;
@@ -24,7 +24,7 @@ use sigstore::crypto::{CosignVerificationKey, SigningScheme};
 
 use super::*;
 
-/// The signer identity + issuer on the real linkerd keyless signature (JEF-386 fixture).
+/// The signer identity + issuer on the real linkerd keyless signature (fixture).
 const LINKERD_SAN: &str =
     "https://github.com/linkerd/linkerd2/.github/workflows/release.yml@refs/tags/edge-26.6.3";
 const GHA_ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -112,7 +112,7 @@ fn checker_gating(identity_regexp: &str) -> CosignChecker {
 
 #[test]
 fn mirror_referenced_layer_with_verified_signer_classifies_as_signed() {
-    // The JEF-386 core: pulled from the mirror `cr.l5d.io/linkerd/proxy`, but the signature payload
+    // The core: pulled from the mirror `cr.l5d.io/linkerd/proxy`, but the signature payload
     // names the signing registry `ghcr.io/linkerd/proxy` for the SAME digest. sigstore-rs verified
     // the cert-chain + Rekor + digest and left the signer on the layer; classify must read it as
     // `Signed` — the docker-reference divergence is irrelevant to posture.
@@ -185,7 +185,7 @@ fn gated_path_rejects_an_unverified_signature() {
     assert!(!gate.satisfies_org_identity(std::slice::from_ref(&layer)));
 }
 
-/// Live end-to-end reproduction of the exact JEF-386 fixture: the linkerd proxy served from the
+/// Live end-to-end reproduction of the exact fixture: the linkerd proxy served from the
 /// `cr.l5d.io` vanity mirror, whose signature payload names `ghcr.io/linkerd/proxy`. Reaches the
 /// registry + Rekor + the sigstore TUF root, so it is `#[ignore]`d out of the offline per-PR lane;
 /// run it deliberately with `cargo test -- --ignored jef_386_mirror_verifies_end_to_end`.

@@ -1,4 +1,4 @@
-// The expand-in-place "why" panel for a finding (ADR-0025 / JEF-397 / JEF-411) — a 1:1 Preact port
+// The expand-in-place "why" panel for a finding (ADR-0025) — a 1:1 Preact port
 // of the maud `finding_detail.rs`: the verbatim verdict (+ the LOUD blind-node caveat), the
 // alarming-now signals, the proven-path chain staircase(s), the evidence tables, the proposed cut,
 // and the "show model prompt" disclosure. All free text is auto-escaped (Preact); every disclosure
@@ -217,7 +217,7 @@ function ChainEdge({ hop, step }) {
   );
 }
 
-// The model's cut-choice decision (ADR-0034 / JEF-674): one line per contained node — the fenced
+// The model's cut-choice decision (ADR-0034): one line per contained node — the fenced
 // node key, its FIXED mechanism string, its entry-vs-downstream role, and an advisory
 // blast-radius note. `assessment` drives the honest empty states: "attack" with no rows reads as
 // "attack, no cut warranted" (a VALID decision, not a gap); "uncertain" NEVER reads as a green
@@ -277,7 +277,7 @@ function CutSetBody({ assessment, rows }) {
 function ModelPrompt({ judgement }) {
   const j = judgement || {};
   return (
-    // Native uncontrolled `<details>` (JEF-411): the DOM owns the open state, so it survives a poll
+    // Native uncontrolled `<details>`: the DOM owns the open state, so it survives a poll
     // for free (Preact's keyed diff never disturbs it) with no client bookkeeping.
     <details class="model-prompt">
       <summary class="why-toggle" role="button">

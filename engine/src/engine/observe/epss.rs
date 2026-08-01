@@ -3,7 +3,7 @@
 //!
 //! Where the KEV catalogue ([`super::exploit_intel`]) asserts a CVE is *exploited in the
 //! wild right now* (a binary fact) and trivy's CVSS score states *static severity*, EPSS
-//! supplies the third axis the adjudication prompt already reserves a slot for (JEF-66):
+//! supplies the third axis the adjudication prompt already reserves a slot for:
 //! a `[0, 1]` probability that a CVE will be exploited in the next 30 days. The model
 //! weighs "high severity but unlikely to be hit" differently from "moderate severity but
 //! a high exploit probability" — that is exactly what EPSS adds.

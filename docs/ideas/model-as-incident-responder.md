@@ -1,7 +1,7 @@
 # Idea — The model as incident responder
 
 **Status:** design brief (→ ADR-0032 Proposed; → `/plan-sprint`). Realizes the
-[VISION.md](../VISION.md) north star. Resolves JEF-547 (supersedes the JEF-322 pivot
+[VISION.md](../VISION.md) north star. Resolves (supersedes the pivot
 asymmetry).
 
 **Idea in one line:** make the local model the incident responder over the whole
@@ -55,7 +55,7 @@ and the model's decision is a *closed-vocabulary selection*, guardable by member
 - **What the model sees** (one incident document per internet-facing entry; the whole prompt
   is the cache key): the entry's calibrated content unchanged; **one evidence block per
   downstream workload on a proven path** (same `entry_evidence`/`entry_findings` accessors —
-  they already work for any node; same JEF-453 reachable-CVE filter, same fencing/budgets,
+  they already work for any node; same reachable-CVE filter, same fencing/budgets,
   now per-node with a per-incident aggregate cap); clean path nodes get a one-line "no
   evidence observed"; the objectives list unchanged; and **the action menu** — each legal
   cut as a line with a content-derived id, mechanism, target, and a deterministic
@@ -76,12 +76,12 @@ and the model's decision is a *closed-vocabulary selection*, guardable by member
   zero-egress; fenced/budgeted untrusted text; view-never-gates (ADR-0016). The model
   chooses *what*; the rails bound *how*.
 - **Internal-only actively-exploited pods (no internet path) → propose-only** — outside the
-  north star's two lanes; retires the JEF-322/JEF-284 auto-cut asymmetry.
+  north star's two lanes; retires the auto-cut asymmetry.
 
 ### Model capacity — the plain answer
 
 **Do not ship the responder contract on qwen3:1.7b, and do not assume it.** The 1.7B's
-documented failure modes — n-gram parroting (JEF-134), tag fabrication (JEF-451), and
+documented failure modes — n-gram parroting, tag fabrication, and
 tail-flips that *grow with prompt size* — are exactly what a bigger whole-path prompt plus a
 structured decision output will amplify. **Plan of record: qwen3:4b-class** (on the 32GB CPU
 minis RAM is a non-issue — 4B Q4 ≈ 2.6GB, even 14B fits; latency is the only cost, ~15–25s
@@ -96,7 +96,7 @@ validation) decides the final pick and is recorded in **ADR-0033**; the design a
    bounds and does not decide the cut; incident-scoped prompt; menu-choice decision contract;
    deletes the `QuarantineWorkload` unconditional auto-fire; demotes `containment_for` to a
    human-proposal fallback; internal-only live-alert → propose-only. Supersedes ADR-0022's
-   JEF-284 decision procedure (its containment vocabulary/shapes/ladder survive as the menu);
+    decision procedure (its containment vocabulary/shapes/ladder survive as the menu);
    evolves ADR-0009's adjudicator from veto → cut-selector.
 2. **Menu-choice, not free-form actions** — closed, engine-rendered cut vocabulary;
    membership guards are grounding-class under ADR-0029.

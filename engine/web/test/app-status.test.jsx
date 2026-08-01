@@ -1,9 +1,9 @@
-// App status + strip tests (ADR-0025 / ADR-0027 / ADR-0028 / JEF-411). These port the invariants the
+// App status + strip tests (ADR-0025 / ADR-0027 / ADR-0028). These port the invariants the
 // deleted store.test.js pinned, now that `App` owns the shared state as plain useState:
 //
 //  - the three connection-status transitions, incl. "never stale before the first snapshot"
 //    (first-load → connecting…, live → no chrome, stale → the load-bearing "not an all-clear");
-//  - the JEF-410 strip contract: the strip persists across a tab swap, and a snapshot that omits a
+//  - the strip contract: the strip persists across a tab swap, and a snapshot that omits a
 //    strip keeps the last one (the header never regresses to blank).
 //
 // The poll is stubbed so we drive `onSnapshot` / `onStale` directly (the same callbacks the real
@@ -69,7 +69,7 @@ describe("connection status transitions (ported from store.test.js)", () => {
   });
 });
 
-describe("persistent status strip (JEF-410)", () => {
+describe("persistent status strip", () => {
   it("renders the strip from a snapshot and holds it across a tab swap", () => {
     const container = mount();
     // No snapshot yet — the strip is blank (absent is honest, never green).

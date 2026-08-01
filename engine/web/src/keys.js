@@ -1,4 +1,4 @@
-// Per-view reconcile keys for the secondary dashboard views (ADR-0025 / JEF-400). The Findings
+// Per-view reconcile keys for the secondary dashboard views (ADR-0025). The Findings
 // table keys on a server-supplied stable `finding.id`; the four secondary views vary only in how
 // their row key is derived, and this module owns that single per-view variation so the components
 // stay declarative:
@@ -38,7 +38,7 @@ export function contentHash(str) {
 const SEP = " ";
 
 /**
- * The content key for one Alerts row (JEF-400): a hash of `(kind, signal, workload, on-chain)`.
+ * The content key for one Alerts row: a hash of `(kind, signal, workload, on-chain)`.
  * An identical alarm persisting across passes yields the same key (reconciles in place, no
  * flicker); a genuinely different alarm yields a new key (a new node). NOT a fabricated id.
  * @param {{ kind?: string, signal?: string, workload?: string, "on-chain"?: string|null }} a
@@ -50,7 +50,7 @@ export function alertKey(a) {
 }
 
 /**
- * The tuple key for one Admission decision row (JEF-400): the `(subject, image, decision)` tuple
+ * The tuple key for one Admission decision row: the `(subject, image, decision)` tuple
  * the server itself dedups on. Two passes of the same tuple reconcile to the same node, so the
  * `count` updates in place. Hashed so an untrusted subject/image can never break the key syntax.
  * @param {{ subject?: string, image?: string, decision?: string }} r

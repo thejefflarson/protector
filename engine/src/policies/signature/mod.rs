@@ -20,7 +20,7 @@ pub mod tuf_tmpdir;
 #[cfg(test)]
 mod tests;
 
-// JEF-368: the classify_facts posture + admission signing-continuity tests, split out of
+// the classify_facts posture + admission signing-continuity tests, split out of
 // `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod classify_continuity_tests;
@@ -87,10 +87,10 @@ pub struct SignaturePolicy {
     /// image ref → (verified, when-cached). Avoids re-hitting the registry/Rekor
     /// for an image we recently judged.
     cache: Mutex<HashMap<String, (bool, Instant)>>,
-    /// The ADR-0020 Stage-3 signing-CONTINUITY gate (JEF-265): denies (in enforced scope) on a
+    /// The ADR-0020 Stage-3 signing-CONTINUITY gate: denies (in enforced scope) on a
     /// signing regression against the engine-learned, read-only baseline, with a scoped
     /// "exception accepted" opt-out + back-compat pins. `None` ⇒ continuity is unwired, so the
-    /// policy behaves EXACTLY as the pre-JEF-265 gated gate (unconfigured = byte-identical shadow).
+    /// policy behaves EXACTLY as the gated-only gate (unconfigured = byte-identical shadow).
     continuity: Option<ContinuityGate>,
 }
 
@@ -113,8 +113,8 @@ impl SignaturePolicy {
         }
     }
 
-    /// Attach the ADR-0020 Stage-3 signing-continuity gate (JEF-265). Builder-style so `new` stays
-    /// the minimal constructor the existing tests + the pre-JEF-265 gated deploy use unchanged.
+    /// Attach the ADR-0020 Stage-3 signing-continuity gate. Builder-style so `new` stays
+    /// the minimal constructor the existing tests + the gated-only deploy use unchanged.
     /// Without this, `continuity` is `None` and the policy is byte-identical shadow.
     pub fn with_continuity(mut self, continuity: ContinuityGate) -> Self {
         self.continuity = Some(continuity);
@@ -148,7 +148,7 @@ impl SignaturePolicy {
         Ok(verified)
     }
 
-    /// The legacy gated single-identity gate's decision for `req` (the pre-JEF-265 behavior,
+    /// The legacy gated single-identity gate's decision for `req` (the gated-only behavior,
     /// unchanged): every distinct gated image must be signed by the trusted identity, else deny
     /// (in scope) / audit (out of scope). Extracted so [`evaluate`](Policy::evaluate) can combine
     /// it with the continuity gate without duplicating the gating logic.
@@ -244,7 +244,7 @@ impl Policy for SignaturePolicy {
             return gated;
         }
 
-        // The ADR-0020 Stage-3 continuity gate (JEF-265): deny (in enforced scope) on a signing
+        // The ADR-0020 Stage-3 continuity gate: deny (in enforced scope) on a signing
         // regression against the read-only, engine-learned baseline. Unwired ⇒ nothing added, so an
         // unconfigured deploy is byte-identical shadow. Consults ALL container images (continuity is
         // per-repo, not gated-prefix scoped), classified against the shared baseline.
@@ -260,7 +260,7 @@ impl Policy for SignaturePolicy {
     }
 
     async fn shadow_evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> ShadowVerdict {
-        // The counterfactual (JEF-246): what this gate WOULD do for `req` if it were in scope and
+        // The counterfactual: what this gate WOULD do for `req` if it were in scope and
         // enforced — computed for EVERY request, even out of scope. It shares enforcement's exact
         // verification mechanism: the SAME digest-bounded `is_signed_cached`, so a shadow eval of
         // an image already verified (this pass or a recent one — and so for every replica/pass)
@@ -277,7 +277,7 @@ impl Policy for SignaturePolicy {
                 gated.push(image);
             }
         }
-        // No gated images ⇒ the legacy gate has no opinion. The continuity gate (JEF-265) still
+        // No gated images ⇒ the legacy gate has no opinion. The continuity gate still
         // might — a would-block regression on ANY repo is an honest would-fail even out of gated
         // scope — so consult it before reporting NotApplicable. This escalates only (a continuity
         // block becomes would-fail); it never fabricates a green pass for an ungated Pod.
@@ -357,7 +357,7 @@ pub(crate) fn normalize_registry_host(image: &str) -> String {
     }
 }
 
-/// The canonical **repository** key for an image ref (JEF-263, ADR-0020): the registry
+/// The canonical **repository** key for an image ref (ADR-0020): the registry
 /// host canonicalized exactly as the gate does (via [`normalize_registry_host`]), then the
 /// mutable `:tag` and/or `@digest` stripped so every tag/digest under one source folds to a
 /// single key. This is the TOFU baseline key — signing history is learned per *repository*

@@ -1,4 +1,4 @@
-//! Scan-finding enrichment adapters for the other trivy-operator report kinds (JEF-244):
+//! Scan-finding enrichment adapters for the other trivy-operator report kinds:
 //! exposed secrets onto Images, config-audit misconfigurations and RBAC-assessment findings
 //! onto Workloads. Like the [`VulnerabilityAdapter`](super::VulnerabilityAdapter), these
 //! enrich nodes the structural adapters already built, so they run last. Each maps the
@@ -8,7 +8,7 @@
 use super::*;
 use crate::engine::graph::ScanFinding;
 
-/// Attaches exposed-secret findings to Image nodes (JEF-244). Secrets are baked into the
+/// Attaches exposed-secret findings to Image nodes. Secrets are baked into the
 /// IMAGE, so — exactly like [`VulnerabilityAdapter`](super::VulnerabilityAdapter) — the
 /// finding is canonicalized to the Image key the workload adapter built and lands there,
 /// shared by every workload running that digest.
@@ -31,12 +31,12 @@ impl Adapter for ExposedSecretAdapter {
     }
 }
 
-/// Attaches config-audit misconfiguration findings to Workload nodes (JEF-244). The report
+/// Attaches config-audit misconfiguration findings to Workload nodes. The report
 /// names its audited resource by `trivy-operator.resource.*`; the graph models workloads as
 /// Pods, so a report targeting a Pod attaches directly, and a report targeting a controller
 /// (Deployment/DaemonSet/…) attaches to every Pod in that namespace whose name the
 /// controller's name PREFIXES (a ReplicaSet/Pod is `<controller>-<hash>`). Best-effort
-/// owner correlation without an owner-reference walk (out of scope, JEF-244 notes); a Pod
+/// owner correlation without an owner-reference walk (out of scope notes); a Pod
 /// report is the exact case.
 pub struct ConfigAuditAdapter;
 
@@ -55,9 +55,9 @@ impl Adapter for ConfigAuditAdapter {
 }
 
 /// Attaches RBAC-assessment findings to the Workload nodes in the report's namespace
-/// (JEF-244). A namespaced `RbacAssessmentReport` assesses a Role used within one namespace;
+/// . A namespaced `RbacAssessmentReport` assesses a Role used within one namespace;
 /// the finding is surfaced on that namespace's workloads as structural RBAC-exposure
-/// EVIDENCE that informs the model's JEF-79 authorization reasoning — it does not
+/// EVIDENCE that informs the model's authorization reasoning — it does not
 /// re-implement or double-count it. (Cluster-scoped reports are dropped upstream.)
 pub struct RbacAssessmentAdapter;
 

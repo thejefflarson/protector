@@ -1,6 +1,6 @@
 //! The ASN dataset: attribute an internet IP to the network **provider** (autonomous
 //! system) that announces it — GitHub, Amazon, Cloudflare, OVH — from an OFFLINE dataset
-//! (JEF-380).
+//! .
 //!
 //! This is the network-egress analogue of the KEV/EPSS feeds ([`super::exploit_intel`],
 //! [`super::epss`]): a file synced into the cluster by a CronJob (ADR-0015 feed pattern),
@@ -9,12 +9,12 @@
 //! no-license `ip2asn-v4.tsv`: one row per contiguous IPv4 range,
 //! `range_start<TAB>range_end<TAB>AS_number<TAB>country<TAB>AS_description`.
 //!
-//! Two things this buys the adjudicator (JEF-380):
+//! Two things this buys the adjudicator:
 //!   1. **The salient signal** — egress to `OVH SAS [AS16276]` (cheap low-reputation
 //!      hosting) is a different risk from egress to `GitHub [AS36459]`; the raw rotating
 //!      CDN IP told the model nothing, the provider tells it a lot.
 //!   2. **The churn fix** — a CDN (ghcr / sigstore / google / AWS) rotates through dozens of
-//!      IPs, so a wide runtime window (JEF-378) saw a churning *set of IPs* that rebuilt the
+//!      IPs, so a wide runtime window saw a churning *set of IPs* that rebuilt the
 //!      prompt (and busted the verdict cache) every pass. Collapsing those IPs to their
 //!      STABLE provider set (rendered in [`super::peer_class`]) makes the prompt
 //!      fingerprint-stable across rotation.

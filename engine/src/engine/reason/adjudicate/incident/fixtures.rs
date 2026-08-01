@@ -25,7 +25,7 @@ pub(super) fn netpol(value: Value) -> k8s_openapi::api::networking::v1::NetworkP
     serde_json::from_value(value).expect("valid NetworkPolicy fixture")
 }
 
-/// One critical CVE on `image` — the `compromisable()` precondition (JEF-322: satisfied
+/// One critical CVE on `image` — the `compromisable()` precondition (satisfied
 /// by *presence* alone, no runtime signal attached, no reachability-tag guarantee).
 pub(super) fn critical_image(image: &str) -> ImageVulnerabilities {
     use crate::engine::graph::{Provenance, Severity, Vulnerability};
@@ -73,7 +73,7 @@ pub(super) fn forged_reachability_title_image(image: &str) -> ImageVulnerabiliti
 /// internet-exposed `web` entry reaches a `store` pivot pod over an allowed
 /// NetworkPolicy hop. `store` mounts a secret (the objective) and runs a critical-CVE
 /// image, so it qualifies as a `RemotelyExploitable` quarantine CANDIDATE
-/// (JEF-322's static-CVE-*presence* bar) even with zero runtime evidence — exactly the
+/// ('s static-CVE-*presence* bar) even with zero runtime evidence — exactly the
 /// grounding gap [`super::guards::guard_containment_grounding`] exists to catch (its CVE
 /// is real but never reachability-tagged `loaded-at-runtime`, so its own evidence block
 /// shows nothing to cite).
@@ -165,7 +165,7 @@ pub(super) fn empty_health() -> HealthReport {
 }
 
 /// A live alarming signal on `store` (upgrades it from `RemotelyExploitable` to
-/// `ActivelyExploited`, JEF-284/309) — genuinely GROUNDED evidence (a real behavior in
+/// `ActivelyExploited`) — genuinely GROUNDED evidence (a real behavior in
 /// its own block), the positive contrast to the CVE-presence-alone case.
 pub(super) fn store_live_signal() -> RuntimeObservation {
     RuntimeObservation {

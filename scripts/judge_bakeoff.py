@@ -8,13 +8,13 @@ Answers two SEPARATE questions per model:
        own_app            (its own namespace's secret/db)            -> MUST refute
        log4j_breach       (KEV CVE loaded-at-runtime + log4j)        -> MUST be exploitable
        argo_cluster_admin (reaches many tenants' secrets, all granted)-> MUST refute
-       argo_reachable_secret_no_evidence (JEF-402: reachable secret + not-observed CVEs +
+       argo_reachable_secret_no_evidence (reachable secret + not-observed CVEs +
                            no exposed secret — the hallucinated-exposed-secret false breach)
                                                                        -> MUST refute
        exposed_secret_in_field (a usable credential listed in the field) -> MUST be exploitable
 
-The prompt is the JEF-134 HOLISTIC breach prompt: the deterministic layer PROVES + ENRICHES
-(reachability + the JEF-79 reach tags + CVE/behavior evidence), and the model DECIDES breach
+The prompt is the HOLISTIC breach prompt: the deterministic layer PROVES + ENRICHES
+(reachability + the reach tags + CVE/behavior evidence), and the model DECIDES breach
 from the CONJUNCTION of reachability and evidence — neither alone is a breach. There is no
 numbered decision procedure and no worked examples: the old few-shot block let a small model
 parrot an example reason ("another tenant's database via [NETWORK][cross-ns]") onto a workload
@@ -95,7 +95,7 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
-Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence (a "no evidence observed" workload carries none; this is the SAME exploitation-evidence bar as the entry's own fields above):
+Downstream evidence on this entry's proven paths — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence (a "no evidence observed" workload carries none; this is the SAME exploitation-evidence bar as the entry's own fields above):
 {downstream}
 
 Decide:
@@ -108,10 +108,10 @@ Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncerta
 
 # (name, expected_verdict, entry, cves, secrets, runtime, objectives[, posture, changes,
 # downstream]) — one case per branch. `posture` (static misconfig/RBAC findings), `changes` (the
-# ADR-0023 "Changes since the last decisive verdict" delta block), and `downstream` (JEF-565's
+# ADR-0023 "Changes since the last decisive verdict" delta block), and `downstream` ('s
 # per-node downstream-evidence block) are OPTIONAL trailing fields; when omitted they default to
 # "(none)", "", and "(none)" so the existing cases stay 7-tuples. Objective lines are EXACTLY the
-# engine format. A [MOUNTED]/[RBAC-GRANTED] Credential-Access objective renders as the JEF-402
+# engine format. A [MOUNTED]/[RBAC-GRANTED] Credential-Access objective renders as the
 # OUTCOME phrasing ("could read a credential store if exploited (Credential Access, T1552)"), NOT
 # the bare "Unsecured Credentials" ATT&CK name — every line carries its tags, no prose hints, so
 # the bench matches build_judgment_prompt.
@@ -263,13 +263,13 @@ CASES = [
      f"  - secret/analytics/murmurify-postgres.credentials [RBAC-GRANTED] ({CRED})\n"
      f"  - secret/data/postgres.credentials [RBAC-GRANTED] ({CRED})\n"
      "  - (+109 more reachable objectives, all [RBAC-GRANTED] by its ClusterRole)"),
-    # JEF-402 — the live false-breach this ticket fixes (argocd-server, v0.3.100). An
+    # — the live false-breach this ticket fixes (argocd-server, v0.3.100). An
     # internet-facing controller RBAC-granted a reachable secret objective, TWO critical CVEs
     # both [reachability: not-observed] (present but not running), no live signal (only its own
     # :8080 traffic), and NO exposed secret (the field is "(none)"). The judge hallucinated an
     # exposed baked-in secret from the merely-reachable secret objective. MUST refute: no
     # loaded-at-runtime CVE, no live signal, no exposed secret in the field.
-    # JEF-453: both CVEs not-observed → filtered → the judge's CVE field is "(none)".
+    # both CVEs not-observed → filtered → the judge's CVE field is "(none)".
     ("argo_reachable_secret_no_evidence", "refuted",
      "workload/argocd/Pod/argocd-server-774f9cc6d7",
      "<<<(none)>>>", "(none)",
@@ -334,14 +334,14 @@ CASES = [
     # MUST refute: no loaded-at-runtime CVE, no live signal, no exposed secret. This is the FULL-SCALE
     # prompt (posture + delta + all ~120 objectives) that the trimmed fixtures missed. 9-tuple:
     # trailing posture="(none)" + the ADR-0023 delta block.
-    # JEF-453: the engine now filters the judge's CVE field to loaded-at-runtime CVEs only. All 4
+    # the engine now filters the judge's CVE field to loaded-at-runtime CVEs only. All 4
     # of this entry's CVEs are not-observed → the field the judge sees is "(none)" (the real CVEs
     # stay on the dashboard). So the fabrication target is gone; this must refute trivially.
     ("protector_notobserved_cves_broad_rbac", "refuted",
      "workload/protector/Pod/protector-7f5577cf4b-9wkwl",
      "<<<(none)>>>", "(none)", "(none)",
      _PROTECTOR_OBJS, "(none)", _PROTECTOR_DELTA),
-    # JEF-567 EDGE-VS-DOWNSTREAM CORRECTION (ground-truth fix; was wrongly "exploitable"):
+    # EDGE-VS-DOWNSTREAM CORRECTION (ground-truth fix; was wrongly "exploitable"):
     # the entry itself is CLEAN (no CVE, no live signal, no exposed secret) and a workload TWO
     # HOPS downstream on the proven path has a CVE loaded at runtime but NO behavioral evidence
     # of its own (no alert, no hands-on-keyboard). Proving a NON-edge CVE exploitable needs
@@ -351,7 +351,7 @@ CASES = [
     # internet-facing (edge) CVE is directly hittable that way; a downstream hop needs its OWN
     # on-box behavioral signal, never a reachability+CVE inference. This is now a keep-honest
     # REFUTE trap: the model must NOT over-promote on downstream reachability + a loaded CVE
-    # alone (the reachable-downstream-CVE-behind-a-clean-edge case is the deferred JEF-587
+    # alone (the reachable-downstream-CVE-behind-a-clean-edge case is the deferred
     # proxy/exposure problem, out of scope here). 10-tuple: trailing posture="(none)" +
     # changes="" + the downstream block.
     ("downstream_only_cve", "refuted",
@@ -390,7 +390,7 @@ CASES = [
 # a clean sweep on ALL cases (all three exploitation-evidence types + every refute case).
 DEFAULT_MODELS = [
     "qwen2.5:3b-instruct",                   # CURRENT DEPLOYED judge (cluster values.yaml) — the calibration target; misses exposed_secret_in_field (11/12)
-    "qwen3:1.7b",                            # JEF-406 LEAD CANDIDATE — 12/12 here (only model to sweep all three evidence types + every refute), standard transformer (KV cache works)
+    "qwen3:1.7b", # LEAD CANDIDATE — 12/12 here (only model to sweep all three evidence types + every refute), standard transformer (KV cache works)
     "ibm/granite4:3b-h",                     # RETIRED from prod: hybrid/recurrent, cache broken, 8–20 min/call on Pis
     "qwen3:4b-instruct",                     # research #1 (instruct-tuned; correct tag)
     "qwen2.5:3b",
@@ -478,7 +478,7 @@ def evict_all():
 
 
 def chat(model, prompt, temp=0.0, seed=None):
-    # temp>0 + a per-run seed is the FLIP-RATE boundary-mass mode (JEF-453): a rare temp-0 tail flip
+    # temp>0 + a per-run seed is the FLIP-RATE boundary-mass mode: a rare temp-0 tail flip
     # is invisible at N=20, but the exploitable probability MASS near the decision boundary is
     # measurable at elevated temperature — the A/B-sensitive metric for a prompt change.
     opts = {"temperature": temp, "num_ctx": NUM_CTX}
@@ -554,7 +554,7 @@ def bench(models):
             name, exp, entry, cves, secrets, runtime, objs = case[:7]
             posture = case[7] if len(case) > 7 else "(none)"  # optional trailing field
             changes = case[8] if len(case) > 8 else ""  # optional ADR-0023 delta block
-            downstream = case[9] if len(case) > 9 else "(none)"  # optional JEF-565 downstream block
+            downstream = case[9] if len(case) > 9 else "(none)" # optional downstream block
             res = chat(m, SYS.format(entry=entry, cves=cves, secrets=secrets, runtime=runtime,
                                      posture=posture, objectives=objs, changes=changes,
                                      downstream=downstream))

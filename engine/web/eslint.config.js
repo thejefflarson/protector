@@ -1,4 +1,4 @@
-// ESLint flat config (eslint 9) for the Preact dashboard client (JEF-499). The point of this config
+// ESLint flat config (eslint 9) for the Preact dashboard client. The point of this config
 // is an ACCESSIBILITY gate: eslint-plugin-jsx-a11y's recommended rules, mapped onto Preact JSX, so a
 // PR that introduces an a11y regression fails `npm run lint` (wired into CI). jsx-a11y works on JSX
 // generically — it inspects JSXElement/JSXAttribute nodes, so it lints our `.jsx` views without any

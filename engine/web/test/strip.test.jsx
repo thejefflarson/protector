@@ -1,4 +1,4 @@
-// Status-strip client tests (ADR-0025 / JEF-408): the strip is now rendered by the Preact client
+// Status-strip client tests (ADR-0025): the strip is now rendered by the Preact client
 // (the server emits a root-only shell). This pins the 1:1 port of the retired maud `status_strip.rs`:
 //
 //  - the judging axis renders BY the server-derived `judging-state` token — each token → its exact
@@ -147,7 +147,7 @@ describe("StatusStrip mode pill", () => {
   });
 });
 
-describe("StatusStrip auth-mode pill (JEF-489)", () => {
+describe("StatusStrip auth-mode pill", () => {
   it("oidc → a calm OIDC pill (word, no warn glyph)", () => {
     const container = mount({ "auth-mode": "oidc" });
     const pill = container.querySelector(".auth-oidc");
@@ -199,7 +199,7 @@ describe("StatusStrip coverage chips", () => {
     expect(chips[2].querySelector(".cov-glyph").textContent).toBe("—");
   });
 
-  it("renders a STALLED feed loud (breach chip + ⚠), distinct from present/degraded/absent (JEF-421)", () => {
+  it("renders a STALLED feed loud (breach chip + ⚠), distinct from present/degraded/absent", () => {
     const container = mount({
       coverage: [{ label: "Runtime", present: false, degraded: false, stalled: true }],
     });
@@ -213,7 +213,7 @@ describe("StatusStrip coverage chips", () => {
     expect(chip.querySelector(".cov-label").textContent).toBe("Runtime");
   });
 
-  it("an ABSENT feed stays muted (— glyph), never the loud stalled register (JEF-421)", () => {
+  it("an ABSENT feed stays muted (— glyph), never the loud stalled register", () => {
     const container = mount({
       coverage: [{ label: "Runtime", present: false, degraded: false, stalled: false }],
     });
@@ -224,7 +224,7 @@ describe("StatusStrip coverage chips", () => {
   });
 });
 
-describe("StatusStrip coverage-stall banner (JEF-421)", () => {
+describe("StatusStrip coverage-stall banner", () => {
   const alert = {
     "feed-label": "Runtime",
     "last-observation": "2m ago",

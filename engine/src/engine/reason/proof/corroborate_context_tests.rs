@@ -1,4 +1,4 @@
-//! Tests for the JEF-319 entry-scoped corroboration shape — cross-tenant lateral — kept in
+//! Tests for the entry-scoped corroboration shape — cross-tenant lateral — kept in
 //! its own `*_tests.rs` file (repo CLAUDE.md: tests count toward the 1,000-line cap).
 //! `super` resolves to the proof module, so these exercise the `pub(super)` `corroborate`
 //! seam directly.
@@ -11,8 +11,8 @@
 //! on the `cross_tenant_lateral` predicate directly — plus regression guards that ordinary
 //! egress / ordinary in-cluster traffic still corroborate only via the unchanged flat arms.
 //!
-//! (The reverse-shell shape considered in JEF-319 was dropped at integration: it was
-//! redundant-by-construction under the blanket notable-exec arm (JEF-117) — a notable exec
+//! (The reverse-shell shape considered in was dropped at integration: it was
+//! redundant-by-construction under the blanket notable-exec arm — a notable exec
 //! already corroborates ANY objective, so the narrower exec+egress-timing shape could not
 //! flip `corroborated_for` today. It lands load-bearing only WHEN that blanket exec arm is
 //! narrowed; a follow-up ticket tracks implementing it then, so it arrives with a test that

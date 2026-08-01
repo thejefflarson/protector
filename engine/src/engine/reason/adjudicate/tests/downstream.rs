@@ -1,4 +1,4 @@
-//! Per-node downstream-evidence tests (JEF-565, ADR-0032 violation #1): the fenced evidence
+//! Per-node downstream-evidence tests (ADR-0032 violation #1): the fenced evidence
 //! block on an evidence-bearing downstream node, the clean one-line marker, deterministic
 //! rendering (byte-identical prompts for identical evidence), and the per-incident aggregate
 //! free-text budget on a wide entry. Kept in its own submodule (like `delta`/`sections`) purely
@@ -51,7 +51,7 @@ fn proof() -> Edge {
 }
 
 /// A downstream workload carrying its own critical loaded-at-runtime CVE AND an exposed secret
-/// baked into the same image — the two evidence-bearing categories JEF-565 renders per node.
+/// baked into the same image — the two evidence-bearing categories renders per node.
 fn graph_with_evidence_bearing_downstream() -> (SecurityGraph, NodeKey, NodeKey) {
     let mut g = SecurityGraph::new();
     let entry = workload("entry-web");
@@ -86,7 +86,7 @@ fn graph_with_evidence_bearing_downstream() -> (SecurityGraph, NodeKey, NodeKey)
 }
 
 /// A downstream workload carrying ONLY a critical loaded-at-runtime CVE — no exposed secret, no
-/// behavior of any kind. The JEF-588 fixture: this is the case that must NOT read as a breach
+/// behavior of any kind. The fixture: this is the case that must NOT read as a breach
 /// driver — a downstream CVE with no on-box behavior corroborating it is severity/context only.
 fn graph_with_downstream_cve_only() -> (SecurityGraph, NodeKey, NodeKey) {
     let mut g = SecurityGraph::new();
@@ -232,13 +232,13 @@ fn identical_evidence_yields_byte_identical_prompt_regardless_of_input_order() {
 
 /// AC: "Per-incident free-text budget bounds total untrusted prose on a wide entry (the argo
 /// ~110-objective case is a required test); no CVE/finding is dropped, only prose beyond budget
-/// (structural-first, JEF-106 stance)."
+/// (structural-first stance)."
 #[test]
 fn wide_entry_downstream_budget_bounds_prose_without_dropping_any_cve() {
     const N: usize = 120; // argo-shaped: comfortably over the ~110-objective case
     const LONG_TITLE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     // A long (but under the PER-LINE `TITLE_CAP`), attacker-influenced exec path — the
-    // security-review follow-up to JEF-565: `Behavior::summary` free-text (file/exec paths,
+    // security-review follow-up to `Behavior::summary` free-text (file/exec paths,
     // peer strings) must be bounded by the AGGREGATE per-incident budget exactly like a
     // CVE/finding title, not just capped per-line and fenced. Under 120 chars so it survives
     // the per-line cap unaltered; it is the AGGREGATE budget across N=120 nodes this asserts.
@@ -284,7 +284,7 @@ fn wide_entry_downstream_budget_bounds_prose_without_dropping_any_cve() {
 
     let build = build_delta_prompt_asn(&entry_key, &[], &g, &AsnDb::empty(), None, &nodes);
 
-    // Structural-first (JEF-106): every CVE id survives, no matter how many nodes.
+    // Structural-first: every CVE id survives, no matter how many nodes.
     for id in &expected_ids {
         assert!(
             build.prompt.contains(id.as_str()),
@@ -355,7 +355,7 @@ fn non_workload_nodes_are_never_rendered_as_downstream() {
     assert!(build.prompt.contains("no evidence observed."));
 }
 
-/// JEF-588 AC: "for an incident with a downstream-only loaded-at-runtime CVE and NO downstream
+/// AC: "for an incident with a downstream-only loaded-at-runtime CVE and NO downstream
 /// behavior, the rendered prompt does NOT present that CVE as a breach/exploitation driver (it's
 /// context) — i.e. the framing a model would read as 'promote'." The CVE must still be GROUNDED
 /// (present, verbatim, so a citation of it passes anti-fabrication) — this is a framing test, not

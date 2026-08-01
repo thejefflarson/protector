@@ -1,4 +1,4 @@
-//! Tests for the baseline-relative "if enforced" continuity verdict (JEF-297, ADR-0020): the
+//! Tests for the baseline-relative "if enforced" continuity verdict (ADR-0020): the
 //! per-image would-admit / would-block / uncertain column is driven by whether a signing-regression
 //! stands for that image (the recorded drift verdict a continuity gate enforces), NOT by the raw
 //! posture. A calm, consistent posture admits; a genuine regression against an established baseline
@@ -42,7 +42,7 @@ fn regression(repo: &str, image: &str, signature: &str, reason: &str) -> PolicyD
 #[test]
 fn an_established_regression_makes_the_regressed_image_would_block() {
     // signed→unsigned on an ESTABLISHED baseline: the recorded regression drives the regressed
-    // image's continuity verdict to would-block (block == regression, matching JEF-265 enforce).
+    // image's continuity verdict to would-block (block == regression, matching enforce).
     let rows = vec![
         observed("ghcr.io/acme/app:2", "not-signed", ""),
         regression(
@@ -63,7 +63,7 @@ fn an_established_regression_makes_the_regressed_image_would_block() {
 
 #[test]
 fn a_downgrade_on_an_established_keyless_repo_would_block() {
-    // JEF-280 downgrade: an established-keyless repo now serving key-based is a regression — the
+    // downgrade: an established-keyless repo now serving key-based is a regression — the
     // downgraded image would block, even though the raw posture (key-based) is individually calm.
     let rows = vec![
         observed("ghcr.io/acme/app:2", "signed-key-based", "key-based cosign"),
@@ -108,8 +108,8 @@ fn an_identity_change_on_an_established_repo_would_block() {
 
 #[test]
 fn a_cold_baseline_regression_reads_uncertain_not_blocked() {
-    // JEF-297 honesty invariant: a regression against a COLD/freshly-learned baseline is a weak lead
-    // (JEF-280 cold=uncertain) — non-green, but never a hard block.
+    // honesty invariant: a regression against a COLD/freshly-learned baseline is a weak lead
+    // (cold=uncertain) — non-green, but never a hard block.
     let rows = vec![
         observed("ghcr.io/acme/app:2", "not-signed", ""),
         regression(
@@ -189,7 +189,7 @@ fn invalid_blocks_even_against_a_cold_baseline_no_evasion() {
 
 #[test]
 fn enforcement_verdict_covers_the_continuity_matrix() {
-    // The pure verdict function (JEF-297): invalid blocks outright; otherwise the recorded drift
+    // The pure verdict function: invalid blocks outright; otherwise the recorded drift
     // verdict drives it — established regression blocks, cold regression is uncertain, no regression
     // admits.
     use SigningEnforcement::*;
@@ -233,7 +233,7 @@ fn exception(repo: &str, image: &str, signature: &str, reason: &str) -> PolicyDe
 
 #[test]
 fn an_accepted_exception_renders_calm_distinct_and_uncounted() {
-    // JEF-265 render: a regression the operator opted out of shows the DISTINCT "exception accepted"
+    // render: a regression the operator opted out of shows the DISTINCT "exception accepted"
     // enforcement chip (never would-admit/would-block/green), carries a visible calm banner, and does
     // NOT count toward breach.
     let rows = vec![

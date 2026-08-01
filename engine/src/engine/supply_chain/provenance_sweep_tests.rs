@@ -1,4 +1,4 @@
-//! Integration-style tests for the build-provenance sweep (JEF-275): posture recording, TOFU
+//! Integration-style tests for the build-provenance sweep: posture recording, TOFU
 //! provenance learning (augment-only), and provenance-change detection.
 
 use std::collections::HashMap;

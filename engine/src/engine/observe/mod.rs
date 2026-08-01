@@ -63,7 +63,7 @@ pub struct ImageVulnerabilities {
     pub vulnerabilities: Vec<Vulnerability>,
 }
 
-/// Normalized exposed-secret findings for one image (JEF-244), keyed by the image
+/// Normalized exposed-secret findings for one image, keyed by the image
 /// reference as deployed — the [`trivy_secret`] adapter maps trivy-operator's
 /// `ExposedSecretReport` into this, and it lands on the same Image node as the CVEs.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,11 +73,11 @@ pub struct ImageScanFindings {
     pub findings: Vec<ScanFinding>,
 }
 
-/// The identity of the workload a config-audit report describes (JEF-244) — the
+/// The identity of the workload a config-audit report describes — the
 /// `trivy-operator.resource.*` coordinates the report is stamped with. The kind is carried
 /// for fidelity, but the misconfig adapter attaches by namespace + name to the matching
 /// Pod workload node(s), since the graph models workloads as Pods (owner-reference
-/// resolution to a Deployment/ReplicaSet is out of scope — see JEF-244 notes).
+/// resolution to a Deployment/ReplicaSet is out of scope — see notes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadRef {
     pub namespace: String,
@@ -85,7 +85,7 @@ pub struct WorkloadRef {
     pub name: String,
 }
 
-/// Misconfiguration findings for one audited resource (JEF-244) — the [`trivy_config`]
+/// Misconfiguration findings for one audited resource — the [`trivy_config`]
 /// adapter maps trivy-operator's `ConfigAuditReport` into this.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkloadFindings {
@@ -93,9 +93,9 @@ pub struct WorkloadFindings {
     pub findings: Vec<ScanFinding>,
 }
 
-/// RBAC-assessment findings scoped to a namespace (JEF-244) — the [`trivy_rbac`] adapter maps
+/// RBAC-assessment findings scoped to a namespace — the [`trivy_rbac`] adapter maps
 /// trivy-operator's namespaced `RbacAssessmentReport` into this. Attached to the workloads in
-/// that namespace as structural RBAC-exposure evidence (it INFORMS the model's JEF-79
+/// that namespace as structural RBAC-exposure evidence (it INFORMS the model's
 /// authorization reasoning, it does not re-implement it).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RbacFindings {
@@ -198,7 +198,7 @@ pub(crate) fn image_ref(report: &Value) -> Option<String> {
 
 /// Identify the resource a workload-scoped trivy report (`ConfigAuditReport` /
 /// `RbacAssessmentReport`) describes, from the `trivy-operator.resource.*` labels the
-/// operator stamps on every such CR (JEF-244). The namespace falls back to the CR's own
+/// operator stamps on every such CR. The namespace falls back to the CR's own
 /// metadata namespace when the label is absent (trivy stamps both). Returns `None` — so the
 /// report is skipped, never guessed — when the kind, name, or namespace can't be determined
 /// (e.g. a cluster-scoped report with no namespace).
@@ -224,7 +224,7 @@ pub(crate) fn report_resource(object: &DynamicObject) -> Option<WorkloadRef> {
 /// observation is attributed to a workload) is re-exported alongside it for the same reason.
 pub use protector_behavior::{AgentReport, Attribution, RuntimeObservation, RuntimeReport};
 
-/// The normalized API secret-read lifted from the apiserver audit log (JEF-269) — the
+/// The normalized API secret-read lifted from the apiserver audit log — the
 /// corroborating runtime signal the eBPF agent can't observe. Re-exported here because the
 /// Observer and the audit adapter refer to it as `observe::AuditSecretRead`.
 pub use self::audit::AuditSecretRead;
@@ -251,19 +251,19 @@ pub struct Snapshot {
     /// Vulnerability findings per image (Vulnerability port). Populated from a
     /// scanner; see `observe`'s note on the live source.
     pub image_vulns: Vec<ImageVulnerabilities>,
-    /// Exposed-secret findings per image (JEF-244), from trivy-operator's
+    /// Exposed-secret findings per image, from trivy-operator's
     /// `ExposedSecretReport`. Empty when the reports are absent.
     pub image_secrets: Vec<ImageScanFindings>,
-    /// Misconfiguration findings per audited resource (JEF-244), from trivy-operator's
+    /// Misconfiguration findings per audited resource, from trivy-operator's
     /// `ConfigAuditReport`. Empty when the reports are absent.
     pub config_audits: Vec<WorkloadFindings>,
-    /// RBAC-assessment findings per namespace (JEF-244), from trivy-operator's
+    /// RBAC-assessment findings per namespace, from trivy-operator's
     /// `RbacAssessmentReport`. Empty when the reports are absent.
     pub rbac_assessments: Vec<RbacFindings>,
     /// Live runtime events per workload (RuntimeEvidence port). Populated from a
     /// runtime sensor; see `observe`'s note on the live source.
     pub runtime_events: Vec<RuntimeObservation>,
-    /// Live API secret-reads from the apiserver audit log (JEF-269) — the corroborating
+    /// Live API secret-reads from the apiserver audit log — the corroborating
     /// runtime signal for RBAC-granted secret access that eBPF can't see. Populated from
     /// the audit-webhook ingest ([`self::audit`]); empty when that feed isn't wired.
     pub audit_secret_reads: Vec<AuditSecretRead>,
@@ -310,7 +310,7 @@ impl Snapshot {
                 )
             },
             async { anyhow::Ok(Api::<Service>::all(client.clone()).list(&lp).await?.items) },
-            // Secrets are listed METADATA-ONLY (JEF-268): `list_metadata` asks the
+            // Secrets are listed METADATA-ONLY: `list_metadata` asks the
             // apiserver for `PartialObjectMeta<Secret>`, so `.data`/`stringData` never
             // cross the wire. Only identity (namespace + name) is retained, exactly what
             // `SecretMeta` and the graph's secret-objective nodes need. See the RBAC
@@ -371,7 +371,7 @@ impl Snapshot {
                     .await,
                 )
             },
-            // The other trivy-operator report kinds (JEF-244), best-effort like the CVE
+            // The other trivy-operator report kinds, best-effort like the CVE
             // report — empty when their CRDs are absent, so they never fail the join.
             async { anyhow::Ok(list_trivy_findings(&client).await) },
             async { anyhow::Ok(list_linkerd_authz(&client).await) },
@@ -387,7 +387,7 @@ impl Snapshot {
         // RuntimeAdapter contributes nothing. The adapter and the action-bar
         // corroboration it drives are unit-tested against `RuntimeObservation`.
         let runtime_events = Vec::new();
-        // API secret-reads come from the apiserver's audit webhook (JEF-269), a stream like
+        // API secret-reads come from the apiserver's audit webhook, a stream like
         // the runtime feed — never a list. Wired via the audit ingest in the run loop; this
         // full-list observe path leaves it empty and the AuditSecretReadAdapter contributes
         // nothing.
@@ -447,7 +447,7 @@ async fn list_ingress_routes(
     ))
 }
 
-/// Best-effort list of the other three trivy-operator report kinds (JEF-244):
+/// Best-effort list of the other three trivy-operator report kinds:
 /// `ExposedSecretReport`, `ConfigAuditReport`, and `RbacAssessmentReport`. Each is empty
 /// when its CRD isn't installed or is unreadable, so the engine degrades to no data for that
 /// signal rather than failing. The report→graph mappings are unit-tested in the respective

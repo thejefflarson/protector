@@ -1,4 +1,4 @@
-//! Tests for the signing-inventory mapping (JEF-262): the sweep's `Image/<ref>` rows partitioned
+//! Tests for the signing-inventory mapping: the sweep's `Image/<ref>` rows partitioned
 //! out of the decision log, each posture resolved to one of the four states (never n/a), the signer
 //! label + issuer badge derived from the (untrusted) Fulcio SAN, the image split into repo +
 //! digest/tag, and the images grouped under their repo. Escaping of the untrusted identity is a
@@ -107,7 +107,7 @@ fn invalid_posture_maps_and_would_block() {
         row.enforcement,
         SigningEnforcement::WouldBlock,
         "a genuinely-invalid signature is the loud channel \u{2014} would block independent of any \
-         baseline (JEF-297)"
+         baseline"
     );
     assert!(
         !row.detail.is_empty(),
@@ -117,7 +117,7 @@ fn invalid_posture_maps_and_would_block() {
 
 #[test]
 fn not_signed_on_a_never_signed_repo_is_calm_tofu_and_would_admit() {
-    // JEF-297: not-signed with NO signed baseline is not a regression (nothing to regress against)
+    // not-signed with NO signed baseline is not a regression (nothing to regress against)
     // — TOFU, calm, would-admit. The pre-ADR-0020 gate wrongly blocked it.
     let rows = vec![observed("docker.io/library/postgres:16", "not-signed", "")];
     let row = &build(&rows)[0].images[0];
@@ -143,7 +143,7 @@ fn checking_is_transient_and_continuous_never_a_regression() {
     assert_eq!(
         row.enforcement,
         SigningEnforcement::WouldAdmit,
-        "a transient checking blip is continuous, never a regression (JEF-297)"
+        "a transient checking blip is continuous, never a regression"
     );
 }
 
@@ -157,7 +157,7 @@ fn an_unknown_status_word_reads_as_checking_never_a_false_clean() {
 
 #[test]
 fn consistent_key_based_posture_is_calm_and_would_admit() {
-    // JEF-297 / JEF-276 reproducer 1 (cert-manager, homegrown fleet): a consistently key-based image
+    // reproducer 1 (cert-manager, homegrown fleet): a consistently key-based image
     // has NO keyless baseline, so no downgrade/regression stands for it — it is continuous, CALM, and
     // would-ADMIT. The pre-ADR-0020 keyless-only gate wrongly showed the whole key-based fleet as
     // would-block; that is the bug this ticket fixes.
@@ -178,7 +178,7 @@ fn consistent_key_based_posture_is_calm_and_would_admit() {
     assert_eq!(
         row.enforcement,
         SigningEnforcement::WouldAdmit,
-        "a consistent key-based posture is continuous vs baseline \u{2014} would admit (JEF-297)"
+        "a consistent key-based posture is continuous vs baseline \u{2014} would admit"
     );
     assert!(
         !row.detail.is_empty(),
@@ -188,7 +188,7 @@ fn consistent_key_based_posture_is_calm_and_would_admit() {
 
 #[test]
 fn consistent_keyless_signed_posture_would_admit() {
-    // JEF-297: a keyless-verified image continuous with its baseline admits (no regression stands).
+    // a keyless-verified image continuous with its baseline admits (no regression stands).
     let rows = vec![observed(
         "ghcr.io/acme/app@sha256:aa",
         "signed",
@@ -202,7 +202,7 @@ fn consistent_keyless_signed_posture_would_admit() {
 
 #[test]
 fn consistent_unverifiable_posture_is_calm_and_would_admit() {
-    // JEF-297 / JEF-276 reproducer 2 (curl trust-root variance): honest "couldn't verify here",
+    // reproducer 2 (curl trust-root variance): honest "couldn't verify here",
     // calm-ish, distinct from the loud invalid, and — with no keyless baseline to downgrade from —
     // continuous, so it would admit.
     let rows = vec![observed(
@@ -439,7 +439,7 @@ fn dedup_count_is_carried() {
     assert_eq!(build(&[r])[0].images[0].count, 7);
 }
 
-// ---- JEF-264 signing-regression rows -----------------------------------------------------------
+// ---- signing-regression rows -----------------------------------------------------------
 
 /// A signing-regression finding row exactly as `engine::signing_sweep::regression_record` writes it:
 /// `SigningRegression/<repo>` subject, the drift token in `signature`, the before→after prose in
@@ -629,7 +629,7 @@ fn counts_are_per_repo_not_per_row() {
     );
 }
 
-// ---- JEF-266: baseline strength badge + registry↔log divergence surfacing ---------------------
+// ---- baseline strength badge + registry↔log divergence surfacing ---------------------
 
 /// A per-repo baseline-strength row exactly as `engine::signing_baseline_strength` records it.
 fn strength(repo: &str, word: &str) -> PolicyDecisionRecord {
@@ -726,7 +726,7 @@ fn divergence_findings_render_through_the_regression_channel() {
 
 #[test]
 fn signing_downgrade_findings_render_through_the_regression_channel() {
-    // JEF-280: a key-based / unverifiable downgrade rides the SigningRegression channel with a
+    // a key-based / unverifiable downgrade rides the SigningRegression channel with a
     // distinct downgrade kind — the view parses the self-describing signature token back.
     let key_based = vec![regression(
         "ghcr.io/acme/app",
@@ -751,7 +751,7 @@ fn signing_downgrade_findings_render_through_the_regression_channel() {
     assert!(!reg.established, "a cold-baseline downgrade is a weak lead");
 }
 
-// ---- Build-provenance axis (JEF-275) --------------------------------------------------------
+// ---- Build-provenance axis --------------------------------------------------------
 
 /// A provenance observation row, as `engine::provenance_sweep` records it.
 fn provenance_observed(image: &str, status: &str, reason: &str) -> PolicyDecisionRecord {

@@ -30,7 +30,7 @@ That digest exists: `entry_fingerprint` in `engine/src/engine/reason/adjudicate.
 [ADR-0015](0015-advisory-evidence-egress.md) §5 made it the **stable evidence digest**
 the verdict cache keys on — it hashes the entry's exploited/critical CVEs (with their
 stable advisory fields — CWE, fix reference, capped summary — no timestamps), its COARSE
-runtime-behavior keys, and its reachable-objective set with reach tags ([JEF-79]). It is
+runtime-behavior keys, and its reachable-objective set with reach tags. It is
 deliberately built to change **once** when the evidence that would change the model's
 call changes, and stay stable across passes otherwise. That is precisely the property a
 breach-condition revert key needs: it moves when enrichment (2) meaningfully changes and
@@ -55,7 +55,7 @@ runtime behaviors + objectives + reach tags that constituted the concerning sign
 the breach-condition key the mitigation ledger holds alongside the cut. Reusing the
 existing digest, rather than adding a parallel store, keeps one source of truth for "what
 evidence is this verdict standing on" and inherits ADR-0015's stability guarantee for
-free (it busts once on real change, not per pass — the [JEF-63] budget).
+free (it busts once on real change, not per pass — the budget).
 
 ### 2. Conjunction semantics
 
@@ -96,7 +96,7 @@ doesn't thrash or flap the cut on mundane churn in between.
 This refines ADR-0016 §3 (which named the two clearing conditions but not the key or the
 detection mechanism) and ADR-0009 (the self-reverting action — the revert condition is
 the breach condition, tied to the live proof+enrichment, not a fixed timer). The
-implementation of the revert is [JEF-134]'s revert portion; this ADR is the decision
+implementation of the revert is 's revert portion; this ADR is the decision
 record only.
 
 ## Consequences

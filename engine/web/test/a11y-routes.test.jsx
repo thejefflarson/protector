@@ -1,4 +1,4 @@
-// Axe route-smoke (JEF-499): mount every top-level dashboard surface with mocked props/API and run
+// Axe route-smoke: mount every top-level dashboard surface with mocked props/API and run
 // axe-core over the rendered DOM, asserting NO accessibility violation of impact `serious` or
 // `critical`. This is the runtime companion to the static jsx-a11y lint gate — jsx-a11y catches
 // authoring mistakes in the JSX, axe catches the assembled-DOM failures (bad landmark/heading/aria
@@ -73,7 +73,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 // axe-core keeps a single global "a run is in progress" flag and throws "Axe is already running" if a
-// second `run()` starts before the first has finished (JEF-530). None of the `it`s below are
+// second `run()` starts before the first has finished. None of the `it`s below are
 // `.concurrent`, so vitest itself never overlaps them — but vitest-axe's Promise wrapper has no reject
 // path for an errored run (its callback does `if (err) throw err`, which fires *outside* the Promise
 // executor's synchronous frame and so never settles the promise). If axe-core's async rule evaluation

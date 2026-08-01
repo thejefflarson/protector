@@ -1,5 +1,5 @@
 //! Unit tests for the behavioral wire contract. Moved out of `lib.rs`'s
-//! `#[cfg(test)] mod tests` block into its own file (JEF-320) per the repo's 1,000-line
+//! `#[cfg(test)] mod tests` block into its own file per the repo's 1,000-line
 //! file cap — `lib.rs` was approaching it. `use super::*` resolves to `lib.rs`, exactly
 //! as the inline `mod tests` block did. No test content changed by the move.
 
@@ -99,7 +99,7 @@ fn secret_read_source_distinguishes_mounted_from_api() {
 
 #[test]
 fn secret_read_source_distinguishes_host_path_from_mounted_and_api() {
-    // An on-host credential read (JEF-320) serializes its source explicitly, just like
+    // An on-host credential read serializes its source explicitly, just like
     // `Api`, and round-trips — it is a genuinely distinct runtime fact from a k8s
     // Secret-mount read even though both reach the same `Behavior::SecretRead` shape.
     let host = Behavior::SecretRead {
@@ -163,7 +163,7 @@ fn process_exec_fingerprint_coarsens_to_basename() {
     assert_eq!(a.fingerprint_key(), "exec:bash");
     assert_eq!(a.fingerprint_key(), b.fingerprint_key());
     // The wire type's summary is the bare path; *classification* of a notable exec
-    // (shell / package manager) is engine policy (engine::observe::exec_class, JEF-113),
+    // (shell / package manager) is engine policy (engine::observe::exec_class),
     // so it's not annotated here.
     assert_eq!(a.summary(), "executed /usr/bin/bash");
 }
@@ -171,7 +171,7 @@ fn process_exec_fingerprint_coarsens_to_basename() {
 #[test]
 fn process_exec_summary_is_the_bare_path() {
     // The shared wire type emits only the path — engine policy decides if it's notable
-    // (a shell / package manager) and annotates the prompt/output line (JEF-113).
+    // (a shell / package manager) and annotates the prompt/output line.
     let shell = Behavior::ProcessExec {
         path: "/bin/bash".into(),
         exe_anon_inode: false,
@@ -189,7 +189,7 @@ fn process_exec_summary_is_the_bare_path() {
 
 #[test]
 fn exe_anon_inode_is_a_raw_fact_distinct_from_path_shape_classification() {
-    // JEF-317 (Route A): `exe_anon_inode` is a kernel-observed inode fact, independent
+    // (Route A): `exe_anon_inode` is a kernel-observed inode fact, independent
     // of the path — a `/bin/bash`-looking exec can still be anon-inode-backed (the
     // path is whatever `bprm->filename` resolved to; the flag is a separate read).
     let anon = Behavior::ProcessExec {
@@ -219,7 +219,7 @@ fn exe_anon_inode_is_a_raw_fact_distinct_from_path_shape_classification() {
 
 #[test]
 fn exe_anon_inode_serializes_only_when_true() {
-    // JEF-317: the common (non-anonymous) exec omits the field entirely, keeping the
+    // the common (non-anonymous) exec omits the field entirely, keeping the
     // JSON byte-identical to before this field existed (mirrors SecretReadSource's
     // `Mounted`-is-omitted convention). A `true` flag serializes explicitly and both
     // round-trip; an older sensor's JSON with the field absent defaults to `false`.
@@ -254,11 +254,11 @@ fn exe_anon_inode_serializes_only_when_true() {
 
 #[test]
 fn ptrace_attach_and_module_load_are_fieldless_facts() {
-    // JEF-318: both new variants carry no fields at all — the occurrence, attributed by
+    // both new variants carry no fields at all — the occurrence, attributed by
     // RuntimeObservation::attribution, IS the whole fact. Serde round-trips to a bare
     // `{"kind": "..."}`, summary/fingerprint are fixed strings, and neither is a wire-type
     // Alert (only Behavior::Alert corroborates from this crate's own view — the foothold
-    // scoping is engine policy, JEF-113).
+    // scoping is engine policy).
     let ptrace = Behavior::PtraceAttach;
     let v = serde_json::to_value(&ptrace).unwrap();
     assert_eq!(v, serde_json::json!({"kind": "ptrace_attach"}));
@@ -288,7 +288,7 @@ fn ptrace_attach_and_module_load_are_fieldless_facts() {
 #[test]
 fn ptrace_attach_observation_round_trips_over_the_wire() {
     // The full RuntimeObservation the agent POSTs for a ptrace attach — attributed by pod
-    // UID (the eBPF agent's path), source + node stamped — round-trips (JEF-318).
+    // UID (the eBPF agent's path), source + node stamped — round-trips.
     let obs = RuntimeObservation {
         attribution: Attribution::by_pod_uid("uid"),
         source: Some("protector-agent".into()),
@@ -364,7 +364,7 @@ fn variant_label_is_a_stable_low_cardinality_token() {
 fn file_write_fingerprint_coarsens_to_the_dirname() {
     // Per-file write churn within a directory must collapse to one stable key so a
     // burst of writes (drop-and-execute, a config dir rewritten file-by-file) doesn't
-    // bust the verdict cache — the write signal is high-frequency (JEF-306).
+    // bust the verdict cache — the write signal is high-frequency.
     let a = Behavior::FileWrite {
         path: "/etc/cron.d/dropper".into(),
     };
@@ -393,7 +393,7 @@ fn file_write_fingerprint_coarsens_to_the_dirname() {
 #[test]
 fn file_write_summary_is_the_bare_path_and_never_corroborates() {
     // The shared wire type emits only the path — whether the write is *sensitive*
-    // (container drift / config tampering) is engine corroboration policy (JEF-306 F3),
+    // (container drift / config tampering) is engine corroboration policy (F3),
     // so it's pure data here and, like other mundane behaviors, never an alert.
     let w = Behavior::FileWrite {
         path: "/etc/ssh/sshd_config".into(),
@@ -404,7 +404,7 @@ fn file_write_summary_is_the_bare_path_and_never_corroborates() {
 
 #[test]
 fn file_write_serializes_to_the_kind_tagged_contract() {
-    // Pure-data wire shape: `{"kind":"file_write","path":"..."}`, round-trips (JEF-306).
+    // Pure-data wire shape: `{"kind":"file_write","path":"..."}`, round-trips.
     let w = Behavior::FileWrite {
         path: "/etc/cron.d/x".into(),
     };
@@ -418,7 +418,7 @@ fn file_write_serializes_to_the_kind_tagged_contract() {
 
 #[test]
 fn observation_carries_the_node_and_omits_it_when_absent() {
-    // JEF-308: the agent stamps its node so coverage is derivable PER NODE. When present it
+    // the agent stamps its node so coverage is derivable PER NODE. When present it
     // rides the wire; when absent (a node-agnostic sensor, older agents) it is omitted — never guessed.
     let with_node = RuntimeObservation {
         attribution: Attribution::by_pod_uid("uid"),
@@ -514,7 +514,7 @@ fn agent_report_observed_at_ms_is_omitted_when_absent() {
 
 #[test]
 fn runtime_report_round_trips_with_observations_and_liveness() {
-    // JEF-336: the unified envelope carries the window's observations AND the per-node
+    // the unified envelope carries the window's observations AND the per-node
     // liveness beacon in one shape, and round-trips byte-for-byte.
     let report = RuntimeReport {
         observations: vec![RuntimeObservation {
@@ -589,7 +589,7 @@ fn runtime_report_omits_empty_observations_and_absent_liveness() {
 
 #[test]
 fn image_linkage_serializes_to_the_kind_tagged_contract_and_round_trips() {
-    // JEF-407: the linkage signal rides the same `{"kind": "...", ...}` behavioral wire.
+    // the linkage signal rides the same `{"kind": "...", ...}` behavioral wire.
     // A static-linkage report and a dynamic one both round-trip byte-for-byte.
     let stat = Behavior::ImageLinkage {
         static_linkage: true,

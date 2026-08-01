@@ -1,4 +1,4 @@
-//! Unit tests for the pure build-provenance drift classifier (JEF-275).
+//! Unit tests for the pure build-provenance drift classifier.
 
 use std::collections::BTreeSet;
 

@@ -1,9 +1,9 @@
-// The ACCEPTANCE HEART of JEF-351 / JEF-411 (ADR-0025 / ADR-0028): across a data refresh, an
+// The ACCEPTANCE HEART of (ADR-0025 / ADR-0028): across a data refresh, an
 // expanded row, an open native `<details>` disclosure, AND keyboard focus PERSIST. This is exactly
 // what the v3 innerHTML swap destroyed and the keyed reconcile fixes — so it is tested end-to-end in
 // jsdom.
 //
-// Post-JEF-411 the expansion is LOCAL component state (a plain `useState` in FindingRow) and the
+// Post- the expansion is LOCAL component state (a plain `useState` in FindingRow) and the
 // "show model prompt" disclosure is a NATIVE, UNCONTROLLED `<details>`. Neither is persisted; both
 // survive a poll purely because Preact's keyed diff (`key={f.id}`) keeps the row's DOM in place. The
 // harness re-renders the Findings view with a NEW `view` prop keyed by id (a poll tick), then
@@ -25,7 +25,7 @@ function openDetails(details) {
   fireEvent(details, new Event("toggle"));
 }
 
-describe("state preservation across a refresh (the JEF-351 acceptance heart)", () => {
+describe("state preservation across a refresh (the acceptance heart)", () => {
   it("keeps an expanded row, an open disclosure, and focus after a poll", () => {
     const { container, rerender } = render(
       <FindingsView view={findingsView([finding("a"), finding("b")])} />,
@@ -78,7 +78,7 @@ describe("state preservation across a refresh (the JEF-351 acceptance heart)", (
     expect(rowC.classList.contains("open")).toBe(false);
   });
 
-  it("removes a gone finding via the keyed diff (no client tombstone — JEF-411)", () => {
+  it("removes a gone finding via the keyed diff (no client tombstone —)", () => {
     const { container, rerender } = render(
       <FindingsView view={findingsView([finding("a"), finding("b")])} />,
     );

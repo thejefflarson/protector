@@ -10,7 +10,7 @@ use super::{
     state,
 };
 
-/// Replay the durable journal's admission lines (JEF-237) back into the shared
+/// Replay the durable journal's admission lines back into the shared
 /// admission-decision log on boot, preserving each row's dedup `count` + last-seen, so the
 /// admission log isn't blank after a restart. Returns how many rows were restored. A
 /// disabled/empty journal restores nothing.
@@ -54,7 +54,7 @@ where
     }
 }
 
-/// Build the dashboard's app-level OIDC gate from the environment (ADR-0030 / JEF-487): the
+/// Build the dashboard's app-level OIDC gate from the environment (ADR-0030): the
 /// fail-closed access control that closes the port-forward hole. Returns the `(enforcer, auth-mode)`
 /// to thread into the dashboard:
 /// - issuer CONFIGURED → `Some((Some(enforcer), Oidc))` — verify every request, fail-closed;
@@ -112,7 +112,7 @@ fn build_dashboard_auth() -> Option<(
     }
 }
 
-/// Build the read-only MCP server's OIDC verifier from the environment (ADR-0031 / JEF-488). The
+/// Build the read-only MCP server's OIDC verifier from the environment (ADR-0031). The
 /// MCP surface REQUIRES app-level auth — its tier ceiling + audit line bind to a verified human
 /// subject, so there is NO edge-only bypass here (unlike the dashboard, ADR-0030 §6). Returns the
 /// verifier ONLY when an issuer is configured and the config is valid; otherwise the MCP server is
@@ -182,7 +182,7 @@ fn build_actuator(active: &EnabledActions, client: &kube::Client) -> Box<dyn Act
 
 /// The sigstore TUF trust-root cache directory (`PROTECTOR_TUF_CACHE`, default `/tmp/sigstore`) —
 /// the same path [`cosign_observer_parts`] hands the cosign checker. Its freshness is surfaced in
-/// readiness (JEF-280), so the two must agree on the location.
+/// readiness, so the two must agree on the location.
 fn tuf_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(
         std::env::var("PROTECTOR_TUF_CACHE").unwrap_or_else(|_| "/tmp/sigstore".to_string()),
@@ -193,9 +193,9 @@ fn tuf_cache_dir() -> std::path::PathBuf {
 /// provenance ([`build_provenance_scanner`]) — share: the identical env-driven bounds
 /// (`PROTECTOR_VERIFY_TIMEOUT` / `PROTECTOR_CACHE_TTL` / `PROTECTOR_MAX_IMAGES` /
 /// `PROTECTOR_OIDC_ISSUER` / `PROTECTOR_TUF_CACHE`) plus the SAME `CosignChecker` verifier the
-/// webhook gates with. This is the single source of truth for that shape — factored out (JEF-366)
-/// so the next JEF-326-style timeout tweak lands in ONE place. Two hand-copied builders are exactly
-/// the `registry_auth()` pattern that silently drifted into the JEF-339 outage.
+/// webhook gates with. This is the single source of truth for that shape — factored out
+/// so the next -style timeout tweak lands in ONE place. Two hand-copied builders are exactly
+/// the `registry_auth()` pattern that silently drifted into the outage.
 ///
 /// It reuses the webhook's verifier but for pure observation, so it needs no trusted-identity
 /// config (the Fulcio/Rekor chain is the trust anchor); `observe` ignores the identity regex
@@ -219,12 +219,12 @@ fn cosign_observer_parts(
         .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string());
     let tuf_cache = tuf_cache_dir();
     // 20s (was 5s): a cold-cache keyless verify on the arm64 engine routinely exceeds 5s, which
-    // stranded first-party signed images in perpetual "checking" (JEF-326). Env-overridable.
+    // stranded first-party signed images in perpetual "checking". Env-overridable.
     let verify_timeout = std::time::Duration::from_secs(env_u64("PROTECTOR_VERIFY_TIMEOUT", 20));
     let cache_ttl = std::time::Duration::from_secs(env_u64("PROTECTOR_CACHE_TTL", 300));
     let max_images = env_u64("PROTECTOR_MAX_IMAGES", 32) as usize;
     // The engine's own registry auth is the SAME shared resolver the webhook uses
-    // (`policies::signature::RegistryAuth`, JEF-339/JEF-352): per image, explicit
+    // (`policies::signature::RegistryAuth`): per image, explicit
     // username/password env override → a matching entry in the mounted dockerconfigjson
     // (`PROTECTOR_REGISTRY_AUTH_FILE`, the cluster's `github` pull secret) → Anonymous. Parsing
     // the whole auth file is what lets the sweep fetch signatures/attestations of PRIVATE images on
@@ -242,7 +242,7 @@ fn cosign_observer_parts(
     }
 }
 
-/// Build the signing-posture observer (ADR-0020 Stage 1, JEF-261) the per-pass running-Pod sweep
+/// Build the signing-posture observer (ADR-0020 Stage 1) the per-pass running-Pod sweep
 /// uses. Just the shared cosign observer parts ([`cosign_observer_parts`]) wrapped in a
 /// [`SigningObserver`] — it has no distinct config of its own.
 fn build_signing_observer() -> Option<crate::policies::signature::SigningObserver> {
@@ -252,7 +252,7 @@ fn build_signing_observer() -> Option<crate::policies::signature::SigningObserve
     ))
 }
 
-/// Build the build-provenance scanner (ADR-0020 §5, JEF-275). Default-ON (JEF-410): detection
+/// Build the build-provenance scanner (ADR-0020 §5). Default-ON: detection
 /// features are on by default — only enforcement and egress are gated, never a per-detector
 /// `PROTECTOR_*_ENABLE` flag — so this now mirrors [`build_signing_observer`] exactly, with no
 /// opt-in of its own. It adds NO new outbound call: it observes each running image's SLSA
@@ -268,7 +268,7 @@ fn build_provenance_scanner() -> Option<crate::policies::signature::ProvenanceSc
     ))
 }
 
-/// Build the opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266). Returns `None` — and so
+/// Build the opt-in Rekor transparency-log lane (ADR-0020 §4). Returns `None` — and so
 /// makes NO outbound transparency-log call ever — unless `PROTECTOR_REKOR_ENABLE` is explicitly set
 /// (zero egress preserved by default). When enabled it queries the public log (or a self-hosted
 /// mirror via `PROTECTOR_REKOR_URL`) to corroborate repo baselines and detect registry↔log
@@ -334,7 +334,7 @@ fn build_adjudicator(
 ///
 /// Returns `true` to keep looping, `false` only once `change_rx` has PERMANENTLY closed —
 /// i.e. every clone of its `Sender` (each reflector task's, and the loop's own retained one)
-/// has been dropped, which happens only on total shutdown, never after a single pass (JEF-560:
+/// has been dropped, which happens only on total shutdown, never after a single pass (
 /// pinned by [`tests::wake_channel_survives_many_passes_and_only_closes_when_every_sender_drops`],
 /// a regression test for an operational incident where the engine container was suspected —
 /// wrongly, per that test — of running to completion instead of looping).
@@ -368,37 +368,37 @@ async fn wait_for_wake(
 /// drives is what the tests cover.
 // This is the engine's top-level entrypoint: each argument is an independent wired-in
 // capability (client, arm-state, scope, the optional feed addr, the intel snapshots, the
-// admission-decision ring). Bundling them into a config struct belongs to the JEF-218 split
-// of this orchestrator, not this additive wiring (JEF-226).
+// admission-decision ring). Bundling them into a config struct belongs to the split
+// of this orchestrator, not this additive wiring.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_watch(
     client: kube::Client,
     active: EnabledActions,
     scope: ActuationScope,
     runtime_addr: Option<std::net::SocketAddr>,
-    // The k8s audit-log ingest endpoint (JEF-269): the apiserver's audit webhook POSTs
+    // The k8s audit-log ingest endpoint: the apiserver's audit webhook POSTs
     // secret GET/LIST/WATCH events here for the RBAC-granted "corroborated-now" signal.
     // Unset = no audit feed.
     audit_addr: Option<std::net::SocketAddr>,
-    // KEV + EPSS are hot-reloadable (JEF-384): a background task re-reads each feed file on an
+    // KEV + EPSS are hot-reloadable: a background task re-reads each feed file on an
     // interval and atomically swaps the snapshot, so a daily CronJob refresh takes effect without
     // a restart. Still FILE reads, repeated — zero egress preserved. Each pass reads one immutable
     // snapshot for its whole duration, so a mid-pass reload never disrupts it.
     kev: observe::feed_reload::ReloadableFeed<observe::exploit_intel::KevCatalog>,
     epss: observe::feed_reload::ReloadableFeed<observe::epss::EpssStore>,
-    // The offline IP→ASN dataset (JEF-380): attributes an INTERNET egress peer to its network
+    // The offline IP→ASN dataset: attributes an INTERNET egress peer to its network
     // provider (`GitHub [AS36459]`) for the adjudication prompt — the salient provider signal
     // AND the CDN-rotation churn fix. Hot-reloaded on the same interval as KEV/EPSS; an
     // empty/absent dataset degrades to raw-IP rendering (today's behavior).
     asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
-    // The webhook's admission-decision ring (JEF-226), shared so the admission-decision log
+    // The webhook's admission-decision ring, shared so the admission-decision log
     // carries the same decisions the webhook engine writes.
     policy_log: std::sync::Arc<policy_log::PolicyDecisionLog>,
-    // The read-only, cross-task signing-baseline snapshot (JEF-265, ADR-0020 Stage 3): the engine
+    // The read-only, cross-task signing-baseline snapshot (ADR-0020 Stage 3): the engine
     // is the SOLE writer — it publishes a snapshot after each sweep pass; the admission webhook only
     // ever reads it, so admission can never poison the baseline.
     shared_baseline: state::SharedSigningBaseline,
-    // The scoped "exception accepted" config (JEF-265), read by BOTH the webhook block predicate and
+    // The scoped "exception accepted" config, read by BOTH the webhook block predicate and
     // the sweep's render so the gate and the inventory never disagree about what is excepted.
     signing_exceptions: crate::policies::signature::SigningExceptions,
 ) -> anyhow::Result<()> {
@@ -413,8 +413,8 @@ pub async fn run_watch(
     // Diagnostic judgement log: the full prompt + raw reply + verdict per judgement,
     // written by the adjudicator for later inspection.
     let journal = std::sync::Arc::new(state::JudgementLog::new());
-    // Per-node agent-liveness (JEF-308): the TTL'd store the `/behavior` report envelope's liveness
-    // feeds (JEF-336) and the engine reads each pass to classify runtime-corroboration coverage per
+    // Per-node agent-liveness: the TTL'd store the `/behavior` report envelope's liveness
+    // feeds and the engine reads each pass to classify runtime-corroboration coverage per
     // node. Same 300s
     // freshness window as the runtime feed — a node whose agent stopped beaconing goes stale and
     // reads blind. Shared (`Arc`) between the ingest task and the engine loop.
@@ -428,7 +428,7 @@ pub async fn run_watch(
     // poller task's copy below read the same path independently.
     let break_glass = super::break_glass::BreakGlass::from_env();
 
-    // The durable decision journal (JEF-141): reload pre-restart decisions onto the
+    // The durable decision journal: reload pre-restart decisions onto the
     // in-memory state so the output state isn't blank while the caches + CPU model warm.
     // Unset/unwritable `PROTECTOR_ENGINE_JOURNAL_PATH` ⇒ disabled (in-memory only, no
     // crash) — the engine then behaves exactly as before.
@@ -439,20 +439,20 @@ pub async fn run_watch(
         build_adjudicator(journal.clone()),
     )
     .with_journal(journal::DecisionJournal::from_env())
-    // The one sanctioned outbound path (JEF-144, ADR-0018): operator-configured via
+    // The one sanctioned outbound path (ADR-0018): operator-configured via
     // `PROTECTOR_ENGINE_NOTIFY_URL`, off (zero outbound calls) when unset, redacted by
     // default.
     .with_notifier(notify::BreachNotifier::from_env())
-    // The per-node agent-liveness store (JEF-308): read each pass to stamp the runtime-corroboration
+    // The per-node agent-liveness store: read each pass to stamp the runtime-corroboration
     // coverage into the findings handle the readiness aggregation reads.
     .with_agent_liveness(agent_liveness.clone())
-    // The offline IP→ASN dataset (JEF-380): read each pass to group INTERNET egress by
+    // The offline IP→ASN dataset: read each pass to group INTERNET egress by
     // provider in the prompt. Shares the same swap cell we spawn the reloader on below.
     .with_asn(asn.clone())
     .with_break_glass(break_glass.clone());
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
-    // (JEF-237), so the admission-decision log isn't blank after a restart — parallel to how
+    // so the admission-decision log isn't blank after a restart — parallel to how
     // the engine's `replay_journal` restored the model verdicts above. The engine owns a
     // handle to the same journal file the webhook persists admissions to; we replay its
     // `Admission` lines (preserving each row's dedup count + last-seen) back into the shared
@@ -465,7 +465,7 @@ pub async fn run_watch(
         );
     }
 
-    // The readiness / coverage config summary (JEF-160): presence/absence of each decision
+    // The readiness / coverage config summary: presence/absence of each decision
     // input, captured once here from the same env/handles the engine already reads.
     // Presence/health only — no secret names, no endpoints, no values. The LIVE model health
     // and behavioral-feed counts are stamped per pass into the shared findings handle; this is
@@ -478,7 +478,7 @@ pub async fn run_watch(
             epss_count: epss.snapshot().len(),
             journal_durable: engine.journal().is_enabled(),
             armed: !active.is_empty(),
-            // The signing-trust signals (JEF-280) are LIVE — refreshed each pass below (the TUF
+            // The signing-trust signals are LIVE — refreshed each pass below (the TUF
             // cache ages, and the unverifiable spike is a per-pass fleet reading). Seeded here from
             // the cache's current age; the spike starts clear until the first sweep.
             tuf_cache_age_secs: super::supply_chain::signing_trust::tuf_cache_age_secs(
@@ -486,12 +486,12 @@ pub async fn run_watch(
                 std::time::SystemTime::now(),
             ),
             unverifiable_spike: false,
-            // Refreshed each pass from the sweep (JEF-326); starts clear until the first sweep.
+            // Refreshed each pass from the sweep; starts clear until the first sweep.
             checking_images: 0,
         });
 
-    // The durable forensic/raw MCP disclosure audit sink (ADR-0031 §4, JEF-490): the durable
-    // implementation of the JEF-488 audit seam, built ONCE and shared by BOTH the MCP server (which
+    // The durable forensic/raw MCP disclosure audit sink (ADR-0031 §4): the durable
+    // implementation of the audit seam, built ONCE and shared by BOTH the MCP server (which
     // appends a subject·entry·tool·tier·time line for every forensic/raw disclosure) and the
     // dashboard's "Access" tab (which reads its records, redacted to the caller's own tier). A
     // distinct concern from the DecisionJournal — its OWN file on the journal PVC
@@ -508,7 +508,7 @@ pub async fn run_watch(
     if let Ok(addr_str) = std::env::var("PROTECTOR_DASHBOARD_ADDR") {
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
-                // App-level OIDC enforcement (ADR-0030 / JEF-487): the fail-closed gate that closes
+                // App-level OIDC enforcement (ADR-0030): the fail-closed gate that closes
                 // the port-forward hole. `None` is the MISconfigured case — already logged, and the
                 // dashboard is deliberately NOT served (never served unauthenticated on a bad config).
                 if let Some((auth, auth_mode)) = build_dashboard_auth() {
@@ -524,11 +524,11 @@ pub async fn run_watch(
                         policy_log: policy_log.clone(),
                         cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
                             .unwrap_or_else(|_| "cluster".to_string()),
-                        // Server-derived (ADR-0030 / JEF-487): mirrors exactly the enforcement
+                        // Server-derived (ADR-0030): mirrors exactly the enforcement
                         // decision from `build_dashboard_auth`, so the strip's auth pill can never
                         // claim more than is actually enforced.
                         auth_mode,
-                        // The SAME durable audit sink the MCP server appends to (JEF-490) — the
+                        // The SAME durable audit sink the MCP server appends to — the
                         // "Access" tab reads its records, redacted to the caller's own tier.
                         mcp_audit: mcp_audit.clone(),
                         // The shadow-bake divergence log (ADR-0035's bake step) — the SAME `Arc`
@@ -549,7 +549,7 @@ pub async fn run_watch(
         }
     }
 
-    // The read-only, tiered-redaction MCP server (ADR-0031 / JEF-488), served behind
+    // The read-only, tiered-redaction MCP server (ADR-0031), served behind
     // `PROTECTOR_MCP_ADDR` (a SEPARATE bind from the dashboard). Off when unset — opt-in,
     // zero-egress, in-cluster only. It reads the SAME `state::` handles the dashboard serves
     // (findings, the judgement ring, the admission-decision log) and mounts rmcp BEHIND the same
@@ -566,7 +566,7 @@ pub async fn run_watch(
                         cluster: std::env::var("PROTECTOR_CLUSTER_LABEL")
                             .unwrap_or_else(|_| "cluster".to_string()),
                     };
-                    // The audit seam (ADR-0031 §4): the DURABLE sink (JEF-490) — the same `Arc` the
+                    // The audit seam (ADR-0031 §4): the DURABLE sink — the same `Arc` the
                     // "Access" dashboard tab reads — so every forensic/raw disclosure appends one
                     // subject·entry·tool·tier·time line the operator can review.
                     tokio::spawn(crate::engine::mcp::serve_mcp(
@@ -584,20 +584,20 @@ pub async fn run_watch(
         }
     }
 
-    // Keep-warm (JEF-107): warm the model at startup and ping it periodically so it
+    // Keep-warm: warm the model at startup and ping it periodically so it
     // stays resident between judging passes — the first post-restart pass isn't glacial.
     // Best-effort and shadow-safe; a no-op when no model is configured. Aborted on loop
     // exit so it can't outlive the engine.
     let keep_warm = model::spawn_keep_warm();
 
-    // Keep the exploit-intel feeds current without a restart (JEF-384): a background task per feed
+    // Keep the exploit-intel feeds current without a restart: a background task per feed
     // re-reads its file every `PROTECTOR_FEED_RELOAD_SECS` (default 6h — comfortably inside the
     // daily CronJob refresh) and hot-swaps the snapshot, last-good-preserving (a failed/empty
     // reload keeps serving the good data). Aborted on loop exit so it can't outlive the engine.
     let reload_interval = observe::feed_reload::reload_interval();
     let kev_reloader = kev.spawn_reloader(reload_interval);
     let epss_reloader = epss.spawn_reloader(reload_interval);
-    // The ASN dataset reloads on the same cadence (JEF-380); the engine holds a clone of the
+    // The ASN dataset reloads on the same cadence; the engine holds a clone of the
     // same swap cell, so a refreshed provider table lands without a restart.
     let asn_reloader = asn.spawn_reloader(reload_interval);
 
@@ -608,21 +608,21 @@ pub async fn run_watch(
     let break_glass_poller =
         break_glass.spawn_poller(breakglass_tx, super::break_glass::DEFAULT_POLL_INTERVAL);
 
-    // The signing-posture observer (ADR-0020 Stage 1, JEF-261): built ONCE so its TTL + image
+    // The signing-posture observer (ADR-0020 Stage 1): built ONCE so its TTL + image
     // cache persists across passes — a steady cluster re-sweeps for free. Each pass runs every
     // running-Pod image through it and records the posture (signed / invalid-signature /
     // not-signed / checking) into the shared admission-decision log, covering workloads that
     // were already running when protector started (no admission event ever replays them).
     let signing_observer = build_signing_observer();
 
-    // The opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266): OFF unless
+    // The opt-in Rekor transparency-log lane (ADR-0020 §4): OFF unless
     // `PROTECTOR_REKOR_ENABLE` is set, so the default posture stays fully zero-egress. Built once so
     // its bounded query cache persists across passes. When enabled, the reconcile pass below
     // corroborates repo baselines against the public signing history and surfaces registry↔log
     // divergence.
     let rekor_lane = build_rekor_lane();
 
-    // The build-provenance scanner (ADR-0020 §5, JEF-275): default-ON (JEF-410, detection-on-by-
+    // The build-provenance scanner (ADR-0020 §5): default-ON (detection-on-by-
     // default), built once so its TTL cache persists across passes. It adds NO egress beyond the
     // signing sweep — same round trip, same image. Each pass observes every running image's SLSA
     // provenance posture (verified / unverifiable / no-provenance / checking) and folds the
@@ -630,7 +630,7 @@ pub async fn run_watch(
     // actuates, just surfaces the dashboard's provenance posture column.
     let provenance_scanner = build_provenance_scanner();
 
-    // Bundle the once-built supply-chain observers into the facade's handle (JEF-369). Built once,
+    // Bundle the once-built supply-chain observers into the facade's handle. Built once,
     // borrowed each pass by `supply_chain::run_sweeps`, which sequences the identical
     // sweep/reconcile/provenance/publish/readiness pipeline the loop drove inline before. The TUF
     // cache dir is bound here so the facade can borrow it (its freshness is a readiness signal).
@@ -643,7 +643,7 @@ pub async fn run_watch(
         tuf_cache_dir: &tuf_cache,
     };
 
-    // The durable per-repo TOFU signing baseline (JEF-263, ADR-0020): learned from the sweep's
+    // The durable per-repo TOFU signing baseline (ADR-0020): learned from the sweep's
     // observed postures, persisted to (and, here on boot, replayed from) the SAME decision
     // journal the engine already owns — so a repo's established signed history survives a
     // restart instead of resetting to cold-start trust. Built once and mutated each pass;
@@ -658,7 +658,7 @@ pub async fn run_watch(
             "restored per-repo signing baselines from the durable journal"
         );
     }
-    // Publish the restored baseline to the webhook immediately (JEF-265), so a post-restart
+    // Publish the restored baseline to the webhook immediately, so a post-restart
     // admission consults real, established history rather than an empty (cold ⇒ never-denies)
     // snapshot until the first sweep completes.
     shared_baseline.publish(&signing_baselines);
@@ -669,7 +669,7 @@ pub async fn run_watch(
     // flips a chain's corroboration without changing the graph's shape). Signals expire, so
     // corroboration stays live. The window is env-configurable (`PROTECTOR_RUNTIME_WINDOW_SECS`,
     // default 30 min) so a workload's connection/behavior set saturates into a stable set with
-    // fewer age-in/age-out transitions that churn the adjudicator prompt (JEF-378); memory stays
+    // fewer age-in/age-out transitions that churn the adjudicator prompt; memory stays
     // bounded by `RuntimeEvents::MAX_EVENTS` regardless of the window.
     let runtime_events = std::sync::Arc::new(observe::runtime::RuntimeEvents::new(
         observe::runtime::runtime_window(),
@@ -687,7 +687,7 @@ pub async fn run_watch(
         });
     }
 
-    // API secret-reads from the apiserver audit log (JEF-269): the corroborating signal for
+    // API secret-reads from the apiserver audit log: the corroborating signal for
     // an RBAC-granted secret GET the eBPF agent can't see. Held in a TTL'd store on the same
     // freshness window as the runtime feed and woken the same way — only a *new* read wakes
     // the loop, so a workload re-reading the same secret every reconcile doesn't churn a pass.
@@ -710,7 +710,7 @@ pub async fn run_watch(
     let (pods, pods_w) = reflector::store::<Pod>();
     let (netpols, netpols_w) = reflector::store::<NetworkPolicy>();
     let (services, services_w) = reflector::store::<Service>();
-    // Secrets are watched METADATA-ONLY (JEF-268): the graph only ever needs a
+    // Secrets are watched METADATA-ONLY: the graph only ever needs a
     // Secret's identity (namespace + name — see `SecretMeta`), never its `.data`, so
     // we reflect `PartialObjectMeta<Secret>`. `Api::<PartialObjectMeta<Secret>>` issues
     // metadata-only requests, so the apiserver never sends — and this in-memory store
@@ -765,7 +765,7 @@ pub async fn run_watch(
     spawn_reflector!(pods_w, Pod);
     spawn_reflector!(netpols_w, NetworkPolicy);
     spawn_reflector!(services_w, Service);
-    // Metadata-only Secret watch (JEF-268): reflects `PartialObjectMeta<Secret>`, so the
+    // Metadata-only Secret watch: reflects `PartialObjectMeta<Secret>`, so the
     // stream carries identity only — `.data` never crosses the wire or lands in the store.
     spawn_reflector!(secrets_w, PartialObjectMeta<Secret>);
     spawn_reflector!(roles_w, Role);
@@ -803,7 +803,7 @@ pub async fn run_watch(
 
         let (linkerd_servers_now, linkerd_policies_now, linkerd_mtls_now) =
             observe::list_linkerd_authz(&client).await;
-        // The other trivy-operator report kinds (JEF-244): exposed secrets, config-audit,
+        // The other trivy-operator report kinds: exposed secrets, config-audit,
         // and RBAC-assessment findings, listed best-effort each pass like the CVE reports.
         let (image_secrets_now, config_audits_now, rbac_assessments_now) =
             observe::list_trivy_findings(&client).await;
@@ -847,7 +847,7 @@ pub async fn run_watch(
                 )
                 .await;
                 // One immutable snapshot per pass: a reload that lands mid-pass swaps the next
-                // pass's snapshot, never this in-flight one (JEF-384).
+                // pass's snapshot, never this in-flight one.
                 kev.snapshot().mark_exploited(&mut v);
                 epss.snapshot().annotate(&mut v);
                 v
@@ -856,7 +856,7 @@ pub async fn run_watch(
             config_audits: config_audits_now,
             rbac_assessments: rbac_assessments_now,
             runtime_events: runtime_events.current(),
-            // API secret-reads from the audit log (JEF-269), TTL'd like the runtime feed.
+            // API secret-reads from the audit log, TTL'd like the runtime feed.
             audit_secret_reads: audit_events.current(),
             // Linkerd authz CRDs, listed best-effort each pass (the mesh-native
             // reachability source — see LinkerdReachabilityAdapter).
@@ -864,7 +864,7 @@ pub async fn run_watch(
             linkerd_authz_policies: linkerd_policies_now,
             linkerd_mtls_auths: linkerd_mtls_now,
         };
-        // Run the supply-chain sweep pipeline over this snapshot (JEF-369): observe signing posture,
+        // Run the supply-chain sweep pipeline over this snapshot: observe signing posture,
         // opt-in Rekor reconciliation, default-on provenance observation, publish the whole-pass
         // baseline to the webhook, and refresh the LIVE signing-trust readiness signals — the same
         // sequence, in the same order, that ran inline here before the facade extraction. Run before

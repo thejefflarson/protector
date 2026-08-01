@@ -1,4 +1,4 @@
-//! Tests for the JEF-309 "alarming-now" file-write corroboration arm, kept in their own
+//! Tests for the "alarming-now" file-write corroboration arm, kept in their own
 //! `*_tests.rs` file (repo CLAUDE.md: tests count toward the 1,000-line cap, and `tests.rs`
 //! is already near it). `super` resolves to the proof module, so these exercise the
 //! `pub(super)` seam directly (`corroborate::corroborates`) plus the full `prove` path.
@@ -17,7 +17,7 @@ use crate::engine::observe::{
 };
 
 /// An *alarming* file write — a sensitive-path / drop-and-execute drift — corroborates ANY
-/// objective, exactly like an Alert or a notable exec (JEF-309). This is the blanket
+/// objective, exactly like an Alert or a notable exec. This is the blanket
 /// tamper-now gate for sensitive-path writes and drop-and-execute drift.
 #[test]
 fn sensitive_write_corroborates_any_objective() {
@@ -109,7 +109,7 @@ fn web_entry_with_signal(behavior: Behavior) -> Vec<ProvenChain> {
     prove(&build_graph(&snap, &default_adapters()))
 }
 
-/// End-to-end (JEF-309 + JEF-284): a drop-and-execute write on an exposed, exploitable entry
+/// End-to-end (+): a drop-and-execute write on an exposed, exploitable entry
 /// (a) corroborates its credential-access chain (blanket), and (b) marks the entry
 /// **actively exploited** — the condition-2 quarantine now fires on a drop-and-execute, not
 /// only on an alert / shell. Still shadow-gated for actuation.
@@ -129,7 +129,7 @@ fn drop_and_execute_corroborates_and_marks_actively_exploited() {
     assert_eq!(
         chain.entry_quarantine_reason(),
         Some(QuarantineReason::ActivelyExploited),
-        "a drop-and-execute makes the entry actively exploited (JEF-284 condition 2)"
+        "a drop-and-execute makes the entry actively exploited (condition 2)"
     );
 }
 

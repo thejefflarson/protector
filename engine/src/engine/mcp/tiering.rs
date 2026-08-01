@@ -1,5 +1,5 @@
-//! The tier ceiling + clamp (ADR-0031 §2, JEF-488). The disclosure tier is a **ceiling** derived
-//! server-side from the VERIFIED token claim ([`Tier`], JEF-485); a tool argument may only ever
+//! The tier ceiling + clamp (ADR-0031 §2). The disclosure tier is a **ceiling** derived
+//! server-side from the VERIFIED token claim ([`Tier`]); a tool argument may only ever
 //! NARROW it. The clamp is `min(requested, ceiling)` — the argument is never trusted to WIDEN.
 //!
 //! [`EffectiveTier`] is deliberately a DISTINCT type from the claim [`Tier`]: a value of this type
@@ -14,7 +14,7 @@ use crate::engine::dashboard::auth::claims::Tier;
 /// Ordered `Redacted < Forensic < Raw`, mirroring [`Tier`], so a per-tool cap can further lower it.
 ///
 /// Serializes to the SAME low-cardinality label [`as_str`](Self::as_str) returns (`"redacted"` /
-/// `"forensic"` / `"raw"`), so the durable access-audit line (JEF-490) persists a stable, legible
+/// `"forensic"` / `"raw"`), so the durable access-audit line persists a stable, legible
 /// tier tag that round-trips on replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,7 +80,7 @@ impl EffectiveTier {
 
 /// Parse the optional `tier` tool argument (case-insensitive) into a REQUESTED claim [`Tier`], or
 /// `None` when absent/blank. An unrecognized label floors to [`Tier::Redacted`] (the lenient
-/// token-facing parse, JEF-485) — it can never widen past the ceiling anyway, so a garbage request
+/// token-facing parse) — it can never widen past the ceiling anyway, so a garbage request
 /// resolving to the floor is the safe reading.
 pub fn parse_requested_tier(arg: Option<&str>) -> Option<Tier> {
     arg.map(str::trim)

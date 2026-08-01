@@ -27,7 +27,7 @@
 //!
 //! This changes NOTHING about the shipped `serve_dashboard` or the repo's `dashboard.js`.
 //!
-//! Split into a module directory per the CLAUDE.md 1,000-line file cap (JEF-562), decomposed by
+//! Split into a module directory per the CLAUDE.md 1,000-line file cap, decomposed by
 //! preview scenario/section: [`fixtures`] (shared finding skeletons), [`sample_data`] (shared
 //! journal/policy-log/bake/readiness fixtures), [`scenarios`] (one submodule per honesty state),
 //! [`render`] (the public render-path calls), [`server`] (the axum handlers), and [`samples`]

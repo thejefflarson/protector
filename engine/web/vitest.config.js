@@ -1,4 +1,4 @@
-// Vitest config for the dashboard v4 client (ADR-0025 / JEF-397). Offline, jsdom-backed, and
+// Vitest config for the dashboard v4 client (ADR-0025). Offline, jsdom-backed, and
 // preact-aliased so `@testing-library/preact` and the source's automatic JSX runtime resolve
 // without pulling React. `vitest run` is the offline test entry; nothing here touches the network.
 

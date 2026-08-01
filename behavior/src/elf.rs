@@ -1,5 +1,5 @@
-//! Minimal ELF static-linkage classification (JEF-404), shared by the engine and the
-//! first-party agent (JEF-407).
+//! Minimal ELF static-linkage classification, shared by the engine and the
+//! first-party agent.
 //!
 //! Reachability is proven by correlating a CVE's package against runtime
 //! [`Behavior::LibraryLoaded`](crate::Behavior::LibraryLoaded) events: a `.so` the kernel
@@ -20,7 +20,7 @@
 //! It is byte-only and pure: give it the leading bytes of a binary, get back whether it is
 //! statically linked. That keeps it fully unit-testable with tiny synthetic fixtures and
 //! keeps *where the bytes come from* a separate plumbing concern (the engine had none in
-//! prod until JEF-407 wired the agent as the byte source).
+//! prod until wired the agent as the byte source).
 
 /// The four-byte ELF magic (`0x7f 'E' 'L' 'F'`) every ELF file starts with.
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -39,7 +39,7 @@ const ELFDATA2MSB: u8 = 2;
 /// valid executable) means static linkage.
 const PT_INTERP: u32 = 3;
 
-/// Classify a binary's ELF header as statically vs dynamically linked (JEF-404).
+/// Classify a binary's ELF header as statically vs dynamically linked.
 ///
 /// Returns:
 /// - `Some(true)`  — a valid ELF with **no** `PT_INTERP` program header: statically linked.
@@ -110,7 +110,7 @@ pub fn elf_static_linkage(bytes: &[u8]) -> Option<bool> {
 
 /// Read a little/big-endian `u16` at `off`, or `None` if `off + 2` overflows or runs past
 /// the end. `checked_add` keeps a crafted near-`usize::MAX` offset from overflow-panicking
-/// in a debug build (JEF-407 hardening) — the `bytes.get` bound then handles the truncation.
+/// in a debug build (hardening) — the `bytes.get` bound then handles the truncation.
 fn read_u16(bytes: &[u8], off: usize, le: bool) -> Option<u16> {
     let end = off.checked_add(2)?;
     let b: [u8; 2] = bytes.get(off..end)?.try_into().ok()?;

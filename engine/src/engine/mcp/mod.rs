@@ -1,4 +1,4 @@
-//! The read-only, token-claim-bound tiered-redaction **MCP server** (ADR-0031 / JEF-488): the
+//! The read-only, token-claim-bound tiered-redaction **MCP server** (ADR-0031): the
 //! pull-side sibling of the ADR-0018 breach notifier, and the second sanctioned egress carve-out.
 //! Served on its OWN bind (`PROTECTOR_MCP_ADDR`, opt-in like the dashboard; unset = not served),
 //! riding the SAME OIDC verifier as the dashboard (ADR-0030) and the SAME shared redaction module
@@ -17,7 +17,7 @@
 //! - **redact** — [`render`] applies the shared scrubbers PER ENTRY with the withheld-not-omitted
 //!   sentinel + manifest contract;
 //! - **journal** — [`audit`] appends a subject-bound line for every forensic/raw disclosure (the
-//!   durable sink + "Access" tab are JEF-490; this is the seam it wires into).
+//!   durable sink + "Access" tab are ; this is the seam it wires into).
 //!
 //! rmcp ([`server`] adapter + [`transport`] mount) is transport BELOW the boundary; it frames
 //! JSON-RPC and speaks the discovery/challenge handshake, and makes no trust decision.
@@ -39,7 +39,7 @@ pub use tools::BULK_SCOPE;
 pub use transport::{MCP_PATH, WELL_KNOWN_PATH, serve_mcp};
 
 /// The sentinel a `redacted`-tier viewer sees in place of a withheld workload identity — the SAME
-/// string the tool emits (`render::S_ENTRY`, JEF-488), re-exported so the "Access" screen (JEF-490)
+/// string the tool emits (`render::S_ENTRY`), re-exported so the "Access" screen
 /// redacts a pull's target-class with ONE shared vocabulary across tool + screen.
 pub use render::S_ENTRY as WORKLOAD_IDENTITY_WITHHELD;
 

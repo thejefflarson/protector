@@ -26,7 +26,7 @@ The model must, on cluster-representative cases, get the call right:
   → **refute** — same principle: a scary OUTCOME being reachable is not the outcome being
   exploited.
 
-The principle (JEF-134): the deterministic layer PROVES + ENRICHES — reachability, the
+The principle: the deterministic layer PROVES + ENRICHES — reachability, the
 `[RBAC-GRANTED]` / `[MOUNTED]` / `[same-ns]` / `[cross-ns]` reach tags, and the CVE /
 runtime evidence — and the **model decides breach holistically** from the *conjunction*
 of reachability and evidence. Neither half alone is a breach: authorized-but-unevidenced
@@ -38,9 +38,9 @@ longer pre-decides via deterministic "promotion grounds" (those mis-gated ArgoCD
 is not a decision gate. See the holistic prompt in `build_judgment_prompt`
 (`engine/src/engine/reason/adjudicate.rs`).
 
-### Edge vs. downstream — the exploitability path is not the same evidence bar (JEF-565/JEF-567)
+### Edge vs. downstream — the exploitability path is not the same evidence bar
 
-JEF-565 gave the model its own evidence block for every workload on an entry's *proven* path,
+ gave the model its own evidence block for every workload on an entry's *proven* path,
 not just the entry — but the two positions in the chain are not judged identically:
 
 - **Edge (the internet-facing entry) — the CVE-exploitability path.** A critical CVE observed
@@ -57,7 +57,7 @@ not just the entry — but the two positions in the chain are not judged identic
   - `downstream_only_cve` — a downstream hop with a loaded-at-runtime CVE and *no* behavioral
     evidence, behind a clean edge → **refute**. This is a deliberate keep-honest trap: the
     model must not over-promote on downstream reachability + a loaded CVE alone. (Whether a
-    downstream CVE like this is exploitable via some other proxy/exposure path is the JEF-587
+    downstream CVE like this is exploitable via some other proxy/exposure path is the
     problem — deferred, not judged here.)
   - `downstream_behavioral_compromise` — a downstream hop with an alert / hands-on-keyboard
     signal and no CVE of its own, behind a clean edge → **exploitable**, the same bar as a
@@ -65,7 +65,7 @@ not just the entry — but the two positions in the chain are not judged identic
   - `downstream_clean_marker` — a downstream hop explicitly checked with nothing found →
     **refute**.
 
-> **Recalibration gate (follow-up — JEF-50 arming, not the engine change):** removing the
+> **Recalibration gate (follow-up — arming, not the engine change):** removing the
 > deterministic grounds makes "is argo a breach" the *model's* call, so whether the prod
 > model (granite4:3b-h) decides correctly under the holistic prompt is verified by the
 > bake-off + the `#[ignore]`d e2e gate below — a follow-up gate on arming a class, **not**
@@ -98,7 +98,7 @@ The `#[ignore]`d e2e test in `engine/src/engine/reason/adjudicate.rs` drives the
 judgement path (`build_judgment_prompt` → the model → `parse_verdict`) end-to-end against
 a live endpoint, and **hard-asserts the anchor cases**: log4shell on a reachable
 internet-facing entry → `Exploitable`; the same chain with no CVE / no runtime evidence
-(own-app `[MOUNTED]` secret) → `Refuted`; and the JEF-134 argo anchor — an internet-facing
+(own-app `[MOUNTED]` secret) → `Refuted`; and the argo anchor — an internet-facing
 controller RBAC-granted secrets across many tenants (broad, some high-impact) with no CVE
 and no behavior → `Refuted`. It fails the build if the candidate misses any, so it is a
 real gate when run, not just a print.
@@ -126,10 +126,10 @@ pointed at the candidate.)
 ## Follow-ups (not yet implemented)
 
 - **Circuit breaker** around the model call (trip after sustained failures / timeouts so a
-  degraded endpoint stops being retried every pass). Deferred from JEF-109 as a larger
+  degraded endpoint stops being retried every pass). Deferred from as a larger
   change; the bounded client timeout + the `protector.engine.model_client_fallback` and
   `model_calls{result=unavailable}` metrics are the current backstops.
-- **Prompt text for the edge/downstream split (JEF-567 follow-up):** `build_judgment_prompt`'s
+- **Prompt text for the edge/downstream split (follow-up):** `build_judgment_prompt`'s
   "Downstream evidence" paragraph still tells the model a downstream CVE observed
   loading-at-runtime is exploitation evidence "exactly as if it were on the entry" — the SAME
   bar as an edge CVE. This doc's edge/downstream framing above (and the `downstream_only_cve`

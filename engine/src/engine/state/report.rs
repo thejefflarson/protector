@@ -1,9 +1,9 @@
-//! The would-have-acted report aggregation (JEF-143): the [`Report`] shape and its
+//! The would-have-acted report aggregation: the [`Report`] shape and its
 //! [`WouldActEntry`] / [`LeftAloneEntry`] / [`AttackNoCutEntry`] rows, the [`aggregate_report`]
 //! fold over the journal's decisions, and [`default_window_report`] — the default-window
 //! aggregation the engine's per-pass OTLP mirror reads.
 //!
-//! **JEF-674 (realigned to the ADR-0034 contract):** classification is keyed on the TYPED
+//! ** (realigned to the ADR-0034 contract):** classification is keyed on the TYPED
 //! cut-choice decision (`Decision::Incident`'s `assessment` + `cuts`), never on the legacy
 //! `Decision::Breach` line's verdict PROSE. The Breach timeline is still the cadence backbone
 //! (it alone carries the structured [`crate::engine::journal::EnrichmentCoverage`] the
@@ -64,12 +64,12 @@ pub struct WouldActEntry {
     /// model affirmed exploitability WITHOUT a CVE backing it. These are the would-acts
     /// to scrutinize first.
     pub coverage_gap: bool,
-    /// The model's own one-sentence reason for the most recent would-act episode (JEF-674: the
+    /// The model's own one-sentence reason for the most recent would-act episode (the
     /// typed [`Decision::Incident`]'s `reason`, never re-derived from the legacy Breach verdict
     /// prose this field used to carry).
     pub last_verdict: String,
     /// The distinct node keys the model chose to contain across this entry's would-act
-    /// episodes in the window (JEF-674), sorted + deduped. Would-act classification requires a
+    /// episodes in the window, sorted + deduped. Would-act classification requires a
     /// non-empty cut set for every episode folded in here, so this is never empty.
     pub contained_nodes: Vec<String>,
 }
@@ -88,7 +88,7 @@ pub struct LeftAloneEntry {
 /// One proven path where the model called a REAL attack (`Assessment::Attack`) but named
 /// NOTHING to contain (ADR-0034 D1 — "attack, but no cut warranted" is a VALID decision, not a
 /// parse failure or a downgrade). A distinct, honest class: it is neither a would-act (nothing
-/// stands ready to isolate) nor a left-alone clear (the model did not clear the path) — JEF-674
+/// stands ready to isolate) nor a left-alone clear (the model did not clear the path) —
 /// gives it its own bucket rather than folding it into either and misreporting the shadow diff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AttackNoCutEntry {
@@ -98,7 +98,7 @@ pub struct AttackNoCutEntry {
     pub reason: String,
 }
 
-/// The aggregated shadow report (JEF-143): the would-have-acted diff over a rolling
+/// The aggregated shadow report: the would-have-acted diff over a rolling
 /// window. JSON-serializable; the engine mirrors its headline counts to OTLP per pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
@@ -116,14 +116,14 @@ pub struct Report {
     pub would_act: Vec<WouldActEntry>,
     /// Proven paths the model cleared and left alone, the trust evidence.
     pub left_alone: Vec<LeftAloneEntry>,
-    /// Proven paths the model called a real attack with no cut warranted (JEF-674) — the third
+    /// Proven paths the model called a real attack with no cut warranted — the third
     /// honest class, distinct from both `would_act` and `left_alone`.
     pub attack_no_cut: Vec<AttackNoCutEntry>,
 }
 
 impl Report {
     /// The headline would-act count: DISTINCT contained nodes across every standing proposal in
-    /// the window (JEF-674) — not distinct entries. One entry's decision can name several nodes
+    /// the window — not distinct entries. One entry's decision can name several nodes
     /// (its own front door plus a downstream workload, ADR-0034 D4), so the true "workloads
     /// that would have been isolated" figure is the union of those node keys, not the row
     /// count.
@@ -141,7 +141,7 @@ impl Report {
     }
 
     /// The headline attack-no-cut count: distinct paths the model called a real attack with no
-    /// cut warranted (JEF-674) — the third honest class.
+    /// cut warranted — the third honest class.
     pub fn attack_no_cut_count(&self) -> usize {
         self.attack_no_cut.len()
     }
@@ -158,13 +158,14 @@ impl Report {
 }
 
 /// A would-act decision fired during an enrichment-coverage gap when the model had NO
-/// real enrichment to weigh: no CVE evidence AND no behavioral signal (JEF-145). The
+/// real enrichment to weigh: no CVE evidence AND no behavioral signal. The
 /// classification reads the breach line's STRUCTURED [`EnrichmentCoverage`] — the same
 /// evidence the model was given at decision time — never the verdict prose. A prose
 /// mention of a CVE no longer reads as covered, and a well-enriched verdict that happens
 /// not to print a CVE id no longer reads as a gap.
 ///
-/// Back-compat (AC #3): a pre-JEF-145 line has no structured coverage (`None`). That is
+/// Back-compat (AC #3): a line predating structured enrichment coverage has no coverage
+/// (`None`). That is
 /// "unknown", deliberately NOT a gap — an old record never inflates the scrutinize-first
 /// count with a false positive.
 pub(crate) fn is_coverage_gap(coverage: Option<&EnrichmentCoverage>) -> bool {
@@ -182,7 +183,7 @@ type IncidentPoint<'a> = (u64, &'a Assessment, &'a [JournaledCut], &'a str);
 /// [`Decision::Incident`] line recorded at or before that time. `None` when no `Incident` line
 /// has EVER been recorded for this entry by `at_ms`: a pre-ADR-0034 journal, or an entry only
 /// the legacy path ever judged — so the caller can tell "no typed state" apart from every one
-/// of the three real assessments (JEF-674: never invent a positive from missing data).
+/// of the three real assessments (never invent a positive from missing data).
 fn incident_state_as_of<'a>(
     timeline: &[IncidentPoint<'a>],
     at_ms: u64,
@@ -194,8 +195,8 @@ fn incident_state_as_of<'a>(
         .map(|&(_, assessment, cuts, reason)| (assessment, cuts, reason))
 }
 
-/// Aggregate the journal's decisions into the would-have-acted diff (JEF-143, realigned to the
-/// typed contract by JEF-674). Pure and total: takes the replayed entries (any order — they are
+/// Aggregate the journal's decisions into the would-have-acted diff, realigned to the
+/// typed cut-choice contract (ADR-0034). Pure and total: takes the replayed entries (any order — they are
 /// sorted here by time) and the wall-clock `now` (injected for testability), and folds each
 /// entry's breach decisions into would-act / attack-no-cut / left-alone, classified by the typed
 /// [`Decision::Incident`] in effect at each point — never by verdict prose. Read-only.
@@ -280,7 +281,7 @@ pub(crate) fn aggregate_report(
 
         // Walk the entry's window decisions, folding consecutive would-act moments into
         // episodes. A moment is would-act when the typed decision IN EFFECT at that Breach
-        // line's timestamp is a decisive `Attack` naming at least one node (JEF-674) — never
+        // line's timestamp is a decisive `Attack` naming at least one node — never
         // the Breach line's own verdict prose. An episode's lifetime runs from its first
         // would-act moment to the first non-would-act one that follows (the clear) — or to
         // `now` if it never cleared (still open).
@@ -360,7 +361,7 @@ pub(crate) fn aggregate_report(
             });
         } else if let Some(&(last_at, last_verdict, _)) = decisions.last() {
             // No would-act episode in the window. Resolve the entry's LATEST typed state
-            // (JEF-674): a decisive attack with no cut warranted is its own honest class,
+            // : a decisive attack with no cut warranted is its own honest class,
             // never folded into the calm "cleared" tail; everything else — a real clear, an
             // uncertain call, or no typed state at all (a pre-ADR-0034 line, display-only) —
             // reads as left-alone using the Breach line's own verdict text, exactly as before.
@@ -404,7 +405,7 @@ pub(crate) fn aggregate_report(
 }
 
 /// Aggregate the would-have-acted report over the DEFAULT window from a journal handle
-/// (JEF-143), for the engine to mirror its headline counts to OTLP per pass — the in-process
+/// for the engine to mirror its headline counts to OTLP per pass — the in-process
 /// metrics mirror like the bake counts. A disabled journal replays nothing, so this is an empty
 /// report (all-zero headline). This aggregation exists solely to feed the OTLP mirror in
 /// `engine::mod`.

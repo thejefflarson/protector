@@ -3,12 +3,12 @@
 // mount stays SERVER-RENDERED, so the calm-when-blind first paint (and the honest banner) never
 // depends on this JS running.
 //
-// The engine is Preact-only after the v4 cutover (JEF-398): every tab is client-rendered, so the
+// The engine is Preact-only after the v4 cutover: every tab is client-rendered, so the
 // client intercepts every tab-swap — there is no maud-vs-Preact special case.
 //
 // Zero-egress (ADR-0025): the ONLY network call is a same-origin fetch of the JSON snapshot
 // (`/api/{tab}.json`), enforced by the CSP `connect-src 'self'`. Preact auto-escapes all
-// interpolated text; the raw-HTML escape hatch is banned in src/ by a source guard (the JEF-396
+// interpolated text; the raw-HTML escape hatch is banned in src/ by a source guard (the
 // test). Mount only when the target exists, so the bundle is inert if the mount is absent.
 
 import { render } from "preact";

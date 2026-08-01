@@ -1,8 +1,8 @@
-// The Findings view (ADR-0025 / JEF-397 / JEF-411): the semantic `<table>` (NOT role=grid) of keyed
+// The Findings view (ADR-0025): the semantic `<table>` (NOT role=grid) of keyed
 // rows, or the honest empty-state. Each row is keyed on its STABLE `finding.id`, so Preact patches
 // only what changed — an expanded row, an open disclosure, the active element's focus, and the text
 // selection all survive a poll untouched. A finding that vanishes from the snapshot is removed by
-// Preact's keyed diff (JEF-411 dropped the client-side tombstone; a future "recently cleared" cue is
+// Preact's keyed diff (dropped the client-side tombstone; a future "recently cleared" cue is
 // server-shipped). No reconcile bookkeeping remains — the keyed diff IS the reconcile.
 
 import { FindingRow } from "./row.jsx";

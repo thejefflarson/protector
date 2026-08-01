@@ -4,7 +4,7 @@
  * loud only on a real breach. Meaning is never carried by colour alone — every status
  * also carries a glyph + word (the markup) and a distinct rail texture.
  *
- * Sizing discipline (JEF-256): EVERY size/spacing value comes from a token — the --space-*
+ * Sizing discipline: EVERY size/spacing value comes from a token — the --space-*
  * 4px scale for spacing, the --fs/--lh-* scale for type, and the geometry tokens. No raw px
  * appears outside the :root token block (a guard test asserts this — the no-raw-hex spirit). */
 
@@ -85,7 +85,7 @@
   --focus-ring: 2px solid #1570EF;
   --focus-offset: 1px;
 
-  /* layout rhythm (JEF-256) — ONE page gutter and ONE section gap. The page gutter is the left
+  /* layout rhythm — ONE page gutter and ONE section gap. The page gutter is the left
      edge of the view CONTENT (the findings table). */
   --page-gutter: var(--space-4);
   --section-gap: var(--space-6);
@@ -205,7 +205,7 @@ summary:focus-visible,
 .mode-shadow.warn .pill-glyph { color: var(--mode-shadow); }
 .mode-shadow.warn .pill-sub { color: var(--mode-shadow); }
 
-/* the auth-mode + mode pills sit together on the strip's right (JEF-489). */
+/* the auth-mode + mode pills sit together on the strip's right. */
 .strip-pills { display: inline-flex; align-items: center; gap: var(--space-2); }
 
 /* OIDC (app auth on): the calm, intended state — the same calm blue the ENFORCE pill uses. */
@@ -259,7 +259,7 @@ summary:focus-visible,
 .cov-present { color: var(--cov-present); border-color: var(--cov-present); }
 .cov-degraded { color: var(--cov-degraded); border-color: var(--cov-degraded); }
 .cov-absent { color: var(--cov-absent); }
-/* JEF-421: a WAS-COVERING feed that went dark — the loud breach palette, filled so it can't read
+/* a WAS-COVERING feed that went dark — the loud breach palette, filled so it can't read
    as a calm absence; the ⚠ glyph + feed word carry it without relying on colour alone. Scoped to
    `.cov` (the strip chip) so it doesn't collide with the readiness `.cov-stalled` state word. */
 .cov.cov-stalled {
@@ -278,7 +278,7 @@ summary:focus-visible,
   font-weight: var(--fw-bold);
 }
 
-/* JEF-421: the strip-level coverage-stall banner — a POLITE live region under the axes. Breach
+/* the strip-level coverage-stall banner — a POLITE live region under the axes. Breach
    keyline + a soft breach tint so a stalled fleet is unmissable, composed from the palette. */
 .strip-coverage-alert {
   display: flex; align-items: flex-start; gap: var(--space-2);
@@ -356,10 +356,10 @@ summary:focus-visible,
   padding: 0 var(--space-1);
 }
 
-/* ==================== v4 transitional / connection states (ADR-0025, JEF-401) ==================
+/* ==================== v4 transitional / connection states (ADR-0025) ==================
    The Preact client (ADR-0025) added states the maud server-render never had: a first-load
    "connecting…", the load-bearing "not updating" stale banner, and the one-shot cleared-row
-   tombstone. These carried no CSS after the JEF-398 cutover, so they rendered as un-tokenized
+   tombstone. These carried no CSS after the cutover, so they rendered as un-tokenized
    default text (off colour, no padding). Restyled here from the SAME palette/scale — no new
    tokens. Honesty invariant (ADR-0016): a connecting/stale state is NEVER the cleared green. */
 
@@ -397,11 +397,11 @@ summary:focus-visible,
 .tombstone::before { content: "\2713"; color: var(--cov-present); font-weight: var(--fw-bold); }
 
 /* ============================ findings table ============================ */
-/* Every view's content sits on the same page gutter as the strip and the nav (JEF-256), so the
+/* Every view's content sits on the same page gutter as the strip and the nav, so the
    header / nav / content left edges line up. */
 .view { padding: var(--page-gutter); }
 
-/* ---- shared view chrome: section headings, sub-captions, list rhythm (JEF-256) ----
+/* ---- shared view chrome: section headings, sub-captions, list rhythm ----
    The secondary views (Trust / Readiness / Activity) all share one heading + caption + section
    rhythm so type hierarchy and spacing read identically across views. Type sizes come from the
    .t-* roles in the markup; these rules own only colour + margin rhythm. */
@@ -668,7 +668,7 @@ summary:focus-visible,
   font-weight: var(--fw-bold); letter-spacing: var(--track-micro); text-transform: uppercase;
 }
 
-/* ---- multi-path proven-paths view (JEF-281) ---- */
+/* ---- multi-path proven-paths view ---- */
 /* The legibility header for a wide finding: how many redundant paths reach the objective, and
    whether any single edge severs them (the no-cut reason made explicit). */
 .paths-summary {
@@ -708,7 +708,7 @@ summary:focus-visible,
   font-size: var(--fs-data); line-height: var(--lh-data);
 }
 
-/* the model's cut-choice set (ADR-0034 / JEF-674) — one row per contained node: the fenced key,
+/* the model's cut-choice set (ADR-0034) — one row per contained node: the fenced key,
    its entry-vs-downstream role, the fixed mechanism string, and an advisory blast-radius note. */
 .cut-set-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-data); line-height: var(--lh-data); }
 .cut-row {
@@ -819,9 +819,9 @@ summary:focus-visible,
 /* calm no-alarming-activity: reassuring, NOT green (an all-clear is only ever the model's
    affirmative clearance) and NOT an error — a plain slate empty state. */
 .empty-alerts-calm .empty-head { color: var(--ink-1); }
-/* quiet-but-blind (JEF-308): a quiet Alerts view while a node is blind is elevated, never green. */
+/* quiet-but-blind: a quiet Alerts view while a node is blind is elevated, never green. */
 .empty-alerts-blind .empty-head { color: var(--posture-uncertain); }
-/* auth interstitial (JEF-489): session-expired / no-access. Elevated attention (amber, ≥4.5:1 as
+/* auth interstitial: session-expired / no-access. Elevated attention (amber, ≥4.5:1 as
    body text — the same ink the warming/blind heads use), never green and never the loud breach red —
    being signed out is an attention state, not a breach. */
 .empty-auth .empty-head { color: var(--posture-uncertain); }
@@ -839,7 +839,7 @@ summary:focus-visible,
 }
 .auth-gate-signin:hover { background: var(--surface-hover); }
 
-/* ============================ Alerts view (JEF-323) ============================ */
+/* ============================ Alerts view ============================ */
 /* The live "alarming-now" activity list. An alarming signal is EVIDENCE, never a verdict — the
    list is a neutral surface (no loud red "BREACH" framing); the alarm colour rides only the
    kind token, as behaviour lines do elsewhere. */
@@ -865,7 +865,7 @@ summary:focus-visible,
 .alert-label { color: var(--ink-3); }
 .alert-workload, .alert-recency, .alert-on-chain { word-break: break-word; }
 
-/* the "alarming activity observed" annotation on a finding's detail panel (JEF-323) — NOT
+/* the "alarming activity observed" annotation on a finding's detail panel — NOT
    labelled "corroborated": the engine reserves that axis for the Alert-only subset (ADR-0009). */
 .alarming-now-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-data); line-height: var(--lh-data); }
 .alarming-now-item { margin: var(--space-1) 0; }
@@ -886,7 +886,7 @@ summary:focus-visible,
 .cov-row:last-child { margin-bottom: 0; }
 /* a weakening input that isn't present: an amber keyline draws the eye to the gap. */
 .cov-row-gap { border-left: var(--rail-strong) solid var(--cov-degraded); }
-/* JEF-421: a STALLED runtime row escalates PAST the amber gap to the loud breach keyline — a fleet
+/* a STALLED runtime row escalates PAST the amber gap to the loud breach keyline — a fleet
    that went dark is louder than a never-enabled gap. */
 .cov-row-stalled { border-left: var(--rail-strong) solid var(--posture-breach); }
 .cov-row-head {
@@ -902,7 +902,7 @@ summary:focus-visible,
 .cov-present { color: var(--cov-present); }
 .cov-degraded { color: var(--cov-degraded); }
 .cov-absent { color: var(--cov-absent); }
-/* JEF-421: the stalled state word/glyph reads in the breach palette — loud, never a calm absence. */
+/* the stalled state word/glyph reads in the breach palette — loud, never a calm absence. */
 .cov-stalled { color: var(--posture-breach); font-weight: var(--fw-bold); }
 /* An expected-but-wholly-dark feed reads loud too — same breach palette as stalled. */
 .cov-blind { color: var(--posture-breach); font-weight: var(--fw-bold); }
@@ -928,7 +928,7 @@ summary:focus-visible,
   border-radius: var(--radius-chip); padding: 0 var(--space-1);
 }
 
-/* ==================== Corroboration parity (Falco-retirement F6, JEF-310) ====================
+/* ==================== Corroboration parity (Falco-retirement F6) ====================
    The retirement measurement, its own panel below the decision inputs. Honesty over colour:
    "nothing to compare" is a distinct grey state (never a reassuring green), and the state is
    always carried by glyph + word, not colour alone. */
@@ -1133,20 +1133,20 @@ summary:focus-visible,
 .enforced-admit { color: var(--cov-present); }
 .enforced-deny { color: var(--posture-breach); }
 .enforced-block { color: var(--posture-breach); }
-/* JEF-297: a cold-baseline signing regression — non-green, but a weak lead, never a hard block. */
+/* a cold-baseline signing regression — non-green, but a weak lead, never a hard block. */
 .enforced-uncertain { color: var(--posture-uncertain); }
-/* JEF-265: a scoped, recorded "exception accepted" — calm but DISTINCT (never green-cleared),
+/* a scoped, recorded "exception accepted" — calm but DISTINCT (never green-cleared),
    visible, and never counted toward breach. Its own muted-accent colour + a distinct glyph/word. */
 .enforced-exception { color: var(--posture-uncertain); font-style: italic; }
 .signing-exception-head { display: inline-flex; align-items: baseline; gap: var(--gap-2, .35rem); }
 .signing-exception-word { font-style: italic; }
 
-/* ---- signing inventory (JEF-262 / ADR-0020): the observed per-image signing posture as ONE
+/* ---- signing inventory (ADR-0020): the observed per-image signing posture as ONE
    aligned table for the whole inventory (so the machine columns line up across every repo),
    grouped under repo group-header rows and expandable exactly like the Findings table (reusing the
    .row / .cell / .row-detail / .expander / .detail mechanics). Posture is always signed / invalid
    signature / not signed (or the transient checking) — never n/a; the "if enforced" cell is always
-   a definite continuity verdict — would-admit / would-block / uncertain (JEF-297). ---- */
+   a definite continuity verdict — would-admit / would-block / uncertain. ---- */
 .view > .signing-inventory { margin-bottom: var(--section-gap); }
 
 /* a repo group-header row spanning the table: the repo stays visible without breaking the
@@ -1184,13 +1184,13 @@ summary:focus-visible,
 .issuer-badge { color: var(--ink-2); }
 .signing-count { margin-left: var(--space-1); }
 
-/* per-repo baseline-strength badge (JEF-266): log-corroborated is the calm cleared channel (the
+/* per-repo baseline-strength badge: log-corroborated is the calm cleared channel (the
    transparency log vouches for it), local-only is muted (weaker TOFU). Colour + word, never colour
    alone. */
 .signing-strength[data-strength="corroborated"] { color: var(--cov-present); }
 .signing-strength[data-strength="local"] { color: var(--ink-3); }
 
-/* the loud signing-regression row (JEF-264): a filled glyph + the "signing regression" word in the
+/* the loud signing-regression row: a filled glyph + the "signing regression" word in the
    breach channel, spanning the machine columns. Distinct from calm "not signed". */
 .signing-regression-head {
   display: inline-flex; align-items: center; gap: var(--space-2);
@@ -1212,7 +1212,7 @@ summary:focus-visible,
   border-left-color: var(--cov-present);
 }
 
-/* the signing-posture chip colours (JEF-276): keyless-verified is the calm cleared green;
+/* the signing-posture chip colours: keyless-verified is the calm cleared green;
    signed-key-based is the same calm green (genuinely signed, opaque signer); unverifiable-here is
    caution amber (couldn't verify against our trust root — NOT a failure); invalid is the loud breach
    channel; not signed is calm/muted (no baseline); checking is the transient ochre. Each pairs with
@@ -1224,7 +1224,7 @@ summary:focus-visible,
 .sign-notsigned { color: var(--ink-3); }
 .sign-checking { color: var(--posture-awaiting); }
 
-/* the build-provenance-posture chip colours (JEF-275, ADR-0020 §5): a VERIFIED build is the calm
+/* the build-provenance-posture chip colours (ADR-0020 §5): a VERIFIED build is the calm
    cleared green (the one trusted-build state); unverifiable is caution amber (present but not trusted
    here); no-provenance is calm/muted (the common case today — never an alarm); checking is the
    transient ochre. Each pairs with a distinct glyph + word (meaning never by colour alone). Absent is
@@ -1235,7 +1235,7 @@ summary:focus-visible,
 .prov-checking { color: var(--posture-awaiting); }
 .provenance-by { color: var(--ink-3); }
 
-/* ============================ Access view (JEF-490, ADR-0031 §4) ============================
+/* ============================ Access view (ADR-0031 §4) ============================
    The forensic/raw MCP disclosure audit. "your access" (the caller's tier + the per-tier reveal
    list) sits above "forensic & raw pulls" (the audit table). Honesty over colour: every tier is
    carried by glyph + WORD, never colour alone; raw is the loud/scarce breach palette (a crown-jewel

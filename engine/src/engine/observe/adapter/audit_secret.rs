@@ -3,7 +3,7 @@ use petgraph::visit::EdgeRef;
 use super::*;
 use crate::engine::graph::{Behavior, SecretReadSource};
 
-/// Attributes API secret-reads from the apiserver audit log (JEF-269) to the workloads
+/// Attributes API secret-reads from the apiserver audit log to the workloads
 /// whose ServiceAccount made them — the corroborating runtime signal for a proven
 /// `CanRead [RBAC-GRANTED]` chain that the eBPF agent can't observe (an API GET is a TLS
 /// call to the apiserver, not a file read).
@@ -16,7 +16,7 @@ use crate::engine::graph::{Behavior, SecretReadSource};
 /// Attaching a [`Behavior::SecretRead`] with [`SecretReadSource::Api`] to the workload lets
 /// the existing corroboration seam (`corroborates` — a SecretRead evidences a
 /// CREDENTIAL_ACCESS objective) flip `corroborated-now` on the RBAC-granted chain, exactly
-/// as a mounted read or an `Alert` does (the JEF-117 pattern). It is shadow-gated like
+/// as a mounted read or an `Alert` does (the pattern). It is shadow-gated like
 /// all corroboration: it only sets `corroborated`, never actuates.
 pub struct AuditSecretReadAdapter;
 
@@ -43,7 +43,7 @@ impl Adapter for AuditSecretReadAdapter {
                 continue;
             };
             // Every Workload that runs as this identity: the incoming `RunsAs` edges. An SA
-            // → many pods, so all of them get the signal (honest ambiguity, JEF-269).
+            // → many pods, so all of them get the signal (honest ambiguity).
             let workloads: Vec<NodeKey> = graph
                 .inner()
                 .edges_directed(id_idx, petgraph::Direction::Incoming)
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn an_sa_backing_many_pods_corroborates_all_of_them_not_one() {
-        // Honest ambiguity (JEF-269): when two pods share the SA, the API read — which names
+        // Honest ambiguity: when two pods share the SA, the API read — which names
         // only the SA — attaches to BOTH, since audit can't disambiguate which pod called.
         let mut snap = rbac_granted_snapshot(vec![read("app", "reader-sa", "app", "db-creds")]);
         snap.pods.push(pod(json!({

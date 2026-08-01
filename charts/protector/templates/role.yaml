@@ -3,7 +3,7 @@
 {{- $nsScoped := gt (len .Values.enforceScope.namespaces) 0 }}
 {{- $labelScoped := gt (len (keys .Values.enforceScope.labels)) 0 }}
 {{- /*
-  JEF-277 — least-privilege NetworkPolicy write grant.
+  Least-privilege NetworkPolicy write grant.
 
   NetworkPolicy is a NAMESPACED resource, and under `mode: enforce` the engine only
   writes its reversible cuts inside `enforceScope` (ActuationScope::in_scope: every cut
@@ -31,7 +31,7 @@ metadata:
 rules:
   # The network actuator creates/deletes its own (managed-by: protector) additive,
   # reversible NetworkPolicies to quarantine/sever a corroborated attack path in this
-  # enforced namespace (ADR-0010). Scoped to exactly this namespace (JEF-277).
+  # enforced namespace (ADR-0010). Scoped to exactly this namespace.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "delete", "patch"]

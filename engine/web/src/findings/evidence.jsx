@@ -1,8 +1,8 @@
-// The evidence tables for a finding's detail panel (ADR-0025 / JEF-397) — a 1:1 Preact port of the
+// The evidence tables for a finding's detail panel (ADR-0025) — a 1:1 Preact port of the
 // maud `evidence.rs` DOM: the CVE table, the runtime corroborating/context split, and the
 // exposed-secrets / misconfig / RBAC scanner tables. Severity is the COOLER, subordinate channel;
 // every untrusted string (advisory titles, secret matches, node keys) is interpolated as text, so
-// Preact auto-escapes it — the raw-HTML escape hatch is banned in src/ (the JEF-396 guard enforces
+// Preact auto-escapes it — the raw-HTML escape hatch is banned in src/ (the guard enforces
 // it).
 //
 // When a finding has NO evidence the whole section renders nothing (no implied-absent text),

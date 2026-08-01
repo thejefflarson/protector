@@ -1,4 +1,4 @@
-// The "Access" view (JEF-490 / ADR-0031 §4) — the operator's window onto the read-only MCP server's
+// The "Access" view (ADR-0031 §4) — the operator's window onto the read-only MCP server's
 // forensic/raw disclosure audit. Two sections:
 //
 //  1. "your access" — the caller's OWN tier as a chip (colour + glyph + WORD, never colour alone;

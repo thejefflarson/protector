@@ -1,7 +1,7 @@
 //! Map the webhook's admission-decision log into the [`AdmissionViewProps`] the Admission view
 //! renders (brief §6 — the webhook floor): the tallies header (admitted/audited/denied, so a
-//! healthy view is never blank) + the per-image signing inventory (JEF-262) + the deduped decision
-//! rows (mesh/decision + the JEF-246 "if enforced" what-if). The mesh shadow status
+//! healthy view is never blank) + the per-image signing inventory + the deduped decision
+//! rows (mesh/decision + the "if enforced" what-if). The mesh shadow status
 //! (`verified` / `would-pass` / `would-fail`) is parsed into the presentation enum here so the
 //! components never see a raw status word; the signature posture now lives in the signing inventory
 //! ([`signing_inventory`](super::signing_inventory)). Data layer: touches `engine::`; the

@@ -1,4 +1,4 @@
-//! Tests for the durable per-repository signing baseline (JEF-263). Kept in their own file
+//! Tests for the durable per-repository signing baseline. Kept in their own file
 //! per the repo's 1,000-line cap (CLAUDE.md); tests count toward the limit.
 
 use std::path::{Path, PathBuf};
@@ -48,7 +48,7 @@ fn observing_a_signed_image_creates_a_repo_keyed_baseline() {
     );
     assert_eq!(changed.as_deref(), Some("ghcr.io/org/app"));
     let baseline = store.get("ghcr.io/org/app").expect("baseline learned");
-    // The baseline stores the tag-agnostic continuity identity (JEF-325): the raw SAN's tag value
+    // The baseline stores the tag-agnostic continuity identity: the raw SAN's tag value
     // is collapsed to `*`, so a later version tag folds to the same identity rather than accreting.
     assert!(
         baseline
@@ -100,7 +100,7 @@ fn a_new_tag_or_digest_under_a_known_repo_is_not_a_new_baseline() {
 
 #[test]
 fn successive_release_tags_of_the_same_workflow_collapse_to_one_identity() {
-    // JEF-325: keyless signing embeds the triggering tag in the SAN, so each release produces a SAN
+    // keyless signing embeds the triggering tag in the SAN, so each release produces a SAN
     // that differs only in the version. The baseline must store ONE canonical continuity identity
     // across all of them — never one entry per version (which made continuity meaningless).
     let mut store = SigningBaselineStore::new();
@@ -182,7 +182,7 @@ fn establishment_is_monotonic() {
 #[test]
 fn non_signed_postures_never_create_or_touch_a_baseline() {
     // The store only learns from a verifying signature. A not-signed / invalid / checking
-    // posture is JEF-264's drift concern and must not create or mutate a baseline here.
+    // posture is 's drift concern and must not create or mutate a baseline here.
     let mut store = SigningBaselineStore::new();
     assert_eq!(
         store.observe("ghcr.io/org/x:1", &SigningPosture::NotSigned, 1),
@@ -232,7 +232,7 @@ fn baseline_survives_an_engine_restart_round_trip() {
 
 #[test]
 fn a_learned_baseline_is_keyless_ranked_and_the_rank_survives_a_restart() {
-    // JEF-280: the store only learns from a keyless `Signed` posture, so a learned baseline is
+    // the store only learns from a keyless `Signed` posture, so a learned baseline is
     // `Keyless`-ranked — the yardstick downgrade detection compares against — and that rank must
     // survive a journal round-trip so post-restart downgrade detection stays defined.
     let path = temp_path("rank-roundtrip");
@@ -282,7 +282,7 @@ fn a_pre_jef280_line_without_a_rank_replays_as_keyless() {
 
 #[test]
 fn log_corroboration_is_set_once_and_survives_a_restart() {
-    // JEF-266: marking a repo log-corroborated flips the flag once, and the stronger baseline
+    // marking a repo log-corroborated flips the flag once, and the stronger baseline
     // survives a restart (monotonic — never re-armed to local-only on replay).
     let path = temp_path("corroborate");
     {
@@ -522,7 +522,7 @@ fn repo_key_folds_tags_digests_and_host_variants() {
     assert!(store.get("postgres").is_some());
 }
 
-// ---- provenance axis (JEF-275) ------------------------------------------------------------
+// ---- provenance axis ------------------------------------------------------------
 
 fn verified_provenance(
     source: &str,
@@ -621,7 +621,7 @@ fn provenance_identity_survives_a_restart_round_trip() {
     cleanup(&path);
 }
 
-// ---- SharedSigningBaseline (JEF-265): the read-only cross-task snapshot handle ----
+// ---- SharedSigningBaseline: the read-only cross-task snapshot handle ----
 
 #[test]
 fn shared_baseline_publishes_a_snapshot_the_reader_sees() {
@@ -663,7 +663,7 @@ fn shared_baseline_republish_replaces_the_snapshot() {
 
 #[test]
 fn shared_baseline_reader_holds_no_mutator() {
-    // Structural guarantee (JEF-265): the reader clones values OUT — it cannot mutate the
+    // Structural guarantee: the reader clones values OUT — it cannot mutate the
     // authoritative store, so admission can never poison the baseline. Mutating the clone is a
     // no-op on the shared snapshot.
     let shared = SharedSigningBaseline::new();

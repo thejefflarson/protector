@@ -17,7 +17,7 @@
 
 // Kernel struct bindings (struct file/path/…) — minimal, hand-laid so each read field
 // sits at its running-kernel byte offset. The offset is what the compiler bakes and the
-// verifier checks, so it MUST track the kernel (JEF-324). See vmlinux.rs + docs/ebpf-
+// verifier checks, so it MUST track the kernel. See vmlinux.rs + docs/ebpf-
 // testing-on-nodes.md.
 mod vmlinux;
 
@@ -32,7 +32,7 @@ use aya_ebpf::{
 };
 // The event layouts + kind discriminators are shared verbatim with the userspace loader
 // via this one crate, so the kernel↔userspace byte contract can't drift (ADR-0014). The
-// dedup key/window/decision (JEF-65) live here too so the kernel probe and the userspace
+// dedup key/window/decision live here too so the kernel probe and the userspace
 // tests share one definition and can't drift.
 use protector_agent_common::{
     should_coalesce, ConnEvent, ConnKey, EventHeader, ExecEvent, FileEvent, PrivEvent, ReadKey,
@@ -47,7 +47,7 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
 /// Count of events the kernel had to drop because [`EVENTS`] was full (a
 /// `reserve` returning `None`). Ring-buffer loss is otherwise silent — this makes
-/// it observable so userspace can surface it in the heartbeat (JEF-58). A
+/// it observable so userspace can surface it in the heartbeat. A
 /// `PerCpuArray` with one slot: each CPU bumps its own counter with no atomics or
 /// contention; userspace sums across CPUs for the cumulative total. Incremented
 /// only at the two `EVENTS.reserve` failure sites via [`record_drop`].
@@ -64,7 +64,7 @@ fn record_drop() {
 }
 
 /// Build the [`EventHeader`] common to every emitted event: the kind plus the current
-/// task's pid and cgroup id, both captured AT EVENT TIME (JEF-158). The cgroup id comes
+/// task's pid and cgroup id, both captured AT EVENT TIME. The cgroup id comes
 /// from the stable `bpf_get_current_cgroup_id()` helper (the cgroup v2 directory inode),
 /// recorded while the process is still live so userspace can attribute it to a pod even
 /// after the (often short-lived) process has exited — the exited-process race the
@@ -83,10 +83,10 @@ fn make_header(kind: u32) -> EventHeader {
     }
 }
 
-/// In-kernel connect dedup map (JEF-65): `(pid, daddr, dport)` → last-emit time (ns).
+/// In-kernel connect dedup map: `(pid, daddr, dport)` → last-emit time (ns).
 /// Coalesces high-frequency *repeats* — a chatty process hammering the same destination —
 /// at the source, so a suppressed connect never costs a ring-buffer slot (the volume
-/// problem JEF-58's drop counter measures). LRU so a churn of distinct destinations can't
+/// problem 's drop counter measures). LRU so a churn of distinct destinations can't
 /// exhaust it: the coldest key is evicted and simply re-emits once. Connect is the
 /// firehose probe; the other probes are already volume-bounded (in-kernel filtered to rare
 /// events), so dedup is applied to connect only — the per-(pid, dest) case the ticket names.
@@ -94,7 +94,7 @@ fn make_header(kind: u32) -> EventHeader {
 static CONN_SEEN: LruHashMap<ConnKey, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
 
 /// Count of events coalesced (suppressed in-kernel) by a dedup map — connect repeats via
-/// [`CONN_SEEN`] (JEF-65) and file-write repeats via [`WRITE_SEEN`] (JEF-306). Same
+/// [`CONN_SEEN`] and file-write repeats via [`WRITE_SEEN`]. Same
 /// per-CPU, one-slot shape as [`DROPS`]: each CPU bumps its own slot, no atomics; userspace
 /// sums across CPUs and surfaces the cumulative total in the heartbeat, so the volume cut is
 /// observable rather than invisible. Bumped only in [`record_coalesced`].
@@ -109,7 +109,7 @@ fn record_coalesced() {
     }
 }
 
-/// The connect dedup gate (JEF-65). Returns `true` if this connect to `key` should be
+/// The connect dedup gate. Returns `true` if this connect to `key` should be
 /// emitted, `false` if it's a repeat inside [`DEDUP_WINDOW_NS`] and was coalesced (the
 /// counter is bumped here). On emit, stamps `now` so the next repeat is measured from it.
 /// LRU insert can't fail meaningfully — if it ever did we fall through to emit (fail open:
@@ -132,7 +132,7 @@ fn allow_connect(key: &ConnKey) -> bool {
     true
 }
 
-/// In-kernel file-write dedup map (JEF-306): `(pid, inode)` → last-emit time (ns).
+/// In-kernel file-write dedup map: `(pid, inode)` → last-emit time (ns).
 /// File writes are high-frequency — a process appending to a log or rewriting a state file
 /// hammers the SAME file — so coalescing repeats to the same `(pid, inode)` at the source
 /// keeps a suppressed write from ever costing a ring-buffer slot (the volume problem the
@@ -141,7 +141,7 @@ fn allow_connect(key: &ConnKey) -> bool {
 #[map]
 static WRITE_SEEN: LruHashMap<WriteKey, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
 
-/// The file-write dedup gate (JEF-306), mirroring [`allow_connect`]. Returns `true` if this
+/// The file-write dedup gate, mirroring [`allow_connect`]. Returns `true` if this
 /// write to `key` should be emitted, `false` if it's a repeat inside [`DEDUP_WINDOW_NS`] and
 /// was coalesced (the shared [`COALESCED`] counter is bumped here). On emit, stamps `now` so
 /// the next repeat is measured from it. Fail open: an insert that never fails falls through
@@ -164,7 +164,7 @@ fn allow_write(key: &WriteKey) -> bool {
     true
 }
 
-/// In-kernel dedup map for the credential-basename read gate (JEF-320 security rework):
+/// In-kernel dedup map for the credential-basename read gate (security rework):
 /// `(pid, inode)` → last-emit time (ns). Bounds a HIGH finding from security review: the
 /// `try_file_open` widening past `is_tmpfs` to `SENSITIVE_CREDENTIAL_BASENAMES` had no
 /// dedup, so a chatty reader of a matched basename (e.g. repeatedly opening `/etc/shadow`
@@ -175,7 +175,7 @@ fn allow_write(key: &WriteKey) -> bool {
 static CREDENTIAL_READ_SEEN: LruHashMap<ReadKey, u64> =
     LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
 
-/// The credential-basename-read dedup gate (JEF-320 security rework), mirroring
+/// The credential-basename-read dedup gate (security rework), mirroring
 /// [`allow_write`]. Returns `true` if this read of `key` should be emitted, `false` if
 /// it's a repeat inside [`DEDUP_WINDOW_NS`] and was coalesced (the shared [`COALESCED`]
 /// counter is bumped here). On emit, stamps `now` so the next repeat is measured from it.
@@ -198,7 +198,7 @@ fn allow_credential_read(key: &ReadKey) -> bool {
     true
 }
 
-/// In-kernel dedup map for the ptrace-attach probe (JEF-318): `pid` → last-emit time (ns).
+/// In-kernel dedup map for the ptrace-attach probe: `pid` → last-emit time (ns).
 /// `security_ptrace_access_check` fires on every PTRACE_MODE_ATTACH check — not just a
 /// `ptrace(PTRACE_ATTACH/PTRACE_SEIZE)` syscall, but also `process_vm_readv`/
 /// `process_vm_writev` (a debugger or monitoring tool reading another process's memory),
@@ -206,12 +206,12 @@ fn allow_credential_read(key: &ReadKey) -> bool {
 /// attacking `pid` — no target (see [`try_ptrace_access_check`]'s doc for why the target
 /// `task_struct` is never read): a repeat attach check from the SAME attacker inside the
 /// window is the same "this pid is ptrace-attaching things" fact refreshed, not a new one.
-/// Mirrors [`CREDENTIAL_READ_SEEN`]'s JEF-320 ring-DoS lesson — an unbounded fentry on a hook
+/// Mirrors [`CREDENTIAL_READ_SEEN`]'s ring-DoS lesson — an unbounded fentry on a hook
 /// with a legitimate high-frequency caller is exactly the shape that flooded the ring there.
 #[map]
 static PTRACE_SEEN: LruHashMap<u32, u64> = LruHashMap::with_max_entries(DEDUP_MAP_CAP, 0);
 
-/// The ptrace-attach dedup gate (JEF-318), mirroring [`allow_credential_read`]. Returns
+/// The ptrace-attach dedup gate, mirroring [`allow_credential_read`]. Returns
 /// `true` if an attach check from `pid` should be emitted, `false` if it's a repeat inside
 /// [`DEDUP_WINDOW_NS`] and was coalesced (the shared [`COALESCED`] counter is bumped here).
 /// Fail open: an insert that never fails falls through to emit, so a bookkeeping error never
@@ -289,7 +289,7 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
 
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
     let dport = u16::from_be(dport);
-    // JEF-65: coalesce high-frequency repeats in-kernel. A connect to the same
+    // coalesce high-frequency repeats in-kernel. A connect to the same
     // (pid, daddr, dport) seen again within DEDUP_WINDOW_NS is suppressed here — it never
     // reaches the ring buffer — cutting volume at the source rather than draining + dropping
     // duplicates in userspace. The first sighting (and one per window thereafter) emits.
@@ -317,7 +317,7 @@ fn try_connect(ctx: &ProbeContext) -> Result<(), i64> {
 /// no universal secret marker (see docs/ebpf-testing-on-nodes.md).
 const TMPFS_MAGIC: u64 = 0x0102_1994;
 
-/// A small, fixed allowlist of on-host credential-file BASENAMES (JEF-320, Retire-Falco
+/// A small, fixed allowlist of on-host credential-file BASENAMES (Retire-Falco
 /// G3) — the cheap in-kernel volume gate that lets `try_file_open` widen past `is_tmpfs`
 /// for a read that might be the host shadow/gshadow/sudoers file, an SSH private key, or a
 /// cloud-provider credential file. These live on the container's ordinary rootfs
@@ -330,7 +330,7 @@ const TMPFS_MAGIC: u64 = 0x0102_1994;
 /// shared ring — see its doc comment).
 ///
 /// This is NOT the security classification — same division of labor as the existing
-/// tmpfs-scoped probe: the agent stays pure data (JEF-113), and the engine
+/// tmpfs-scoped probe: the agent stays pure data, and the engine
 /// (`engine::observe::host_credential_class`) makes the real "is this path a known
 /// on-host credential path" call from the FULL path `bpf_d_path` returns below.
 ///
@@ -381,7 +381,7 @@ const O_RDONLY: u64 = 0o0;
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
 
-/// Whether an `open` with these `f_flags` is a **write** (JEF-306): a non-read-only access
+/// Whether an `open` with these `f_flags` is a **write**: a non-read-only access
 /// mode, or a create/truncate. This is the in-kernel filter that keeps the (very high)
 /// read-open volume off the ring buffer — only write-intent opens become FileWrite events.
 fn is_write_open(flags: u64) -> bool {
@@ -391,7 +391,7 @@ fn is_write_open(flags: u64) -> bool {
 /// fentry on `security_file_open(struct file *file)` — the secret-read probe (ADR-0014).
 /// For a tmpfs read, emits a [`FileEvent`] with the container-relative path via
 /// `bpf_d_path`; the engine maps it to a SecretRead (or drops it). Filtering to tmpfs
-/// in-kernel keeps the (very high) file-open volume off the ring buffer. JEF-320 widens
+/// in-kernel keeps the (very high) file-open volume off the ring buffer. widens
 /// this past tmpfs for a small, fixed allowlist of on-host credential-file basenames (see
 /// [`SENSITIVE_CREDENTIAL_BASENAMES`]), bounded by the [`allow_credential_read`] dedup gate
 /// (security rework) so a chatty reader of a matched basename can't flood the ring — ON-NODE
@@ -414,7 +414,7 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
         return Ok(());
     }
     if is_sensitive_credential_basename(file) {
-        // JEF-320 security rework: dedup gate on (pid, inode) — a chatty reader of a
+        // security rework: dedup gate on (pid, inode) — a chatty reader of a
         // matched basename (e.g. hammering `/etc/shadow` or a `credentials` file) must not
         // be able to flood the single shared ring and starve real exec/priv-change/connect
         // signals. A missing inode still emits (fail open, mirrors `try_file_write`): the
@@ -430,7 +430,7 @@ fn try_file_open(ctx: &FEntryContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// fentry on `security_file_open(struct file *file)` — the file-write probe (JEF-306,
+/// fentry on `security_file_open(struct file *file)` — the file-write probe (
 /// ADR-0014). A SECOND program on the same LSM hook as the secret-read probe (aya loads
 /// each program independently), filtered IN-KERNEL to write-intent opens so the read
 /// firehose never reaches the ring. For a write it emits a [`FileEvent`] (kind
@@ -463,7 +463,7 @@ fn try_file_write(ctx: &FEntryContext) -> Result<(), i64> {
     if !is_write_open(flags as u64) {
         return Ok(());
     }
-    // Coalesce repeat writes to the same (pid, inode) in-kernel (JEF-306). A write whose
+    // Coalesce repeat writes to the same (pid, inode) in-kernel. A write whose
     // inode is unreadable still emits (fail open) — the dedup is a volume optimization, not
     // a correctness gate, so a missing inode must never silently drop a real write.
     let pid = (aya_ebpf::helpers::bpf_get_current_pid_tgid() >> 32) as u32;
@@ -497,7 +497,7 @@ fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
     }
     // NOT emit_file_path: bpf_d_path is rejected by the verifier in security_mmap_file
     // (security_mmap_file isn't on the kernel's d_path allowlist, unlike
-    // security_file_open — JEF-68). Userspace only needs the library *name*, which is the
+    // security_file_open —). Userspace only needs the library *name*, which is the
     // leaf basename, so read the dentry's d_name directly with bpf_probe_read_kernel.
     emit_lib_name(file);
     Ok(())
@@ -508,7 +508,7 @@ fn try_mmap_file(ctx: &FEntryContext) -> Result<(), i64> {
 /// runs on every credential change (setuid/setresuid/…), so we filter IN-KERNEL to the only
 /// case worth a signal: a process *gaining* root (`new->uid.val == 0 && old->uid.val != 0`).
 /// That keeps ring volume tiny and the signal meaningful — a non-root process becoming root.
-/// Reads the cred `uid.val` fields with `bpf_probe_read_kernel` (never bpf_d_path — JEF-68).
+/// Reads the cred `uid.val` fields with `bpf_probe_read_kernel` (never bpf_d_path —).
 /// Observe-only; a failed read drops the event, never errors the probe.
 #[fentry(function = "security_task_fix_setuid")]
 pub fn fix_setuid(ctx: FEntryContext) -> u32 {
@@ -553,19 +553,19 @@ fn try_fix_setuid(ctx: &FEntryContext) -> Result<(), i64> {
 }
 
 /// fentry on `security_bprm_check(struct linux_binprm *bprm)` — the process-exec probe
-/// (ADR-0014, JEF-53). This LSM hook fires on every `execve` once the new binary is
+/// (ADR-0014). This LSM hook fires on every `execve` once the new binary is
 /// resolved, so `bprm->filename` is the path the kernel is about to exec. Emits an
 /// [`ExecEvent`] (kind [`KIND_EXEC`]) carrying that path plus the anon-inode fact
-/// (JEF-317, below); userspace turns it into a `ProcessExec`. Observe-only. NOTE: the
+/// (below); userspace turns it into a `ProcessExec`. Observe-only. NOTE: the
 /// attach point is `security_bprm_check` (the exported LSM call, in BTF — like the other
 /// `security_*` probes); the un-prefixed `bprm_check_security` is NOT a BTF function on
-/// 6.8 (verified on-node: JEF-53 deploy). Attached via **fentry, not `lsm/*`**: the fleet
+/// 6.8 (verified on-node: deploy). Attached via **fentry, not `lsm/*`**: the fleet
 /// does not carry `bpf` in its active LSM list (`CONFIG_LSM` omits it, no `lsm=` on the
 /// kernel cmdline — confirmed on-node over SSH on both arches), so an `lsm/` program would
 /// never attach here; fentry on the `security_*` function works regardless of the active
 /// LSM list, which is why every probe in this file uses it.
 ///
-/// JEF-317 (fileless exec / memfd_create parity with Falco), Route A: an EARLIER version
+/// (fileless exec / memfd_create parity with Falco), Route A: an EARLIER version
 /// of this signal classified the exec *path's shape* (`/dev/fd/<n>` etc.) — withdrawn by
 /// security review, because the kernel synthesizes that identical string for a benign
 /// `fexecve()` of an on-disk file too, and runc copies itself into a memfd and re-execs on
@@ -591,11 +591,11 @@ fn try_bprm_check(ctx: &FEntryContext) -> Result<(), i64> {
     Ok(())
 }
 
-/// Emit the exec'd binary's path (plus the anon-inode fact, JEF-317) as a [`KIND_EXEC`]
+/// Emit the exec'd binary's path (plus the anon-inode fact) as a [`KIND_EXEC`]
 /// [`ExecEvent`]. `bprm->filename` is a kernel `char *` (the resolved exec path), so —
 /// like the library-load probe — read the string directly with `bpf_probe_read_kernel_str`.
 /// NOT `bpf_d_path`: `security_bprm_check` isn't on the kernel's d_path allowlist, so the
-/// verifier would reject it (JEF-68).
+/// verifier would reject it.
 fn emit_exec_path(bprm: *const vmlinux::linux_binprm, exe_anon_inode: bool) {
     let mut ev = ExecEvent {
         header: make_header(KIND_EXEC),
@@ -635,7 +635,7 @@ fn emit_exec_path(bprm: *const vmlinux::linux_binprm, exe_anon_inode: bool) {
     }
 }
 
-/// Whether the exec'd binary's backing inode is anonymous (JEF-317, Route A): a
+/// Whether the exec'd binary's backing inode is anonymous (Route A): a
 /// memfd/shmem-backed file (`inode->i_sb->s_magic` is the tmpfs magic — `memfd_create` is
 /// shmem-backed under the hood) OR an unlinked file (`inode->i_nlink == 0` — covers a
 /// memfd, which is never linked into any directory, AND the separate "delete the binary
@@ -645,7 +645,7 @@ fn emit_exec_path(bprm: *const vmlinux::linux_binprm, exe_anon_inode: bool) {
 /// is about to run, not a TOCTOU-able separate lookup. A failed read = "not anonymous"
 /// (fail closed on the flag, matching [`is_tmpfs`]/[`inode_ino`]'s existing convention).
 ///
-/// PURE DATA (JEF-113): this reports a kernel fact only. Whether an anon-inode exec is
+/// PURE DATA: this reports a kernel fact only. Whether an anon-inode exec is
 /// alarming — and the runc-memfd-reexec false-positive risk that makes this conservative
 /// — is engine policy, not decided here.
 fn exe_is_anon_inode(bprm: *const vmlinux::linux_binprm) -> bool {
@@ -675,7 +675,7 @@ fn exe_is_anon_inode(bprm: *const vmlinux::linux_binprm) -> bool {
 const PTRACE_MODE_ATTACH: u32 = 0x02;
 
 /// fentry on `security_ptrace_access_check(struct task_struct *child, unsigned int mode)` —
-/// the ptrace-attach probe (JEF-318, Retire-Falco G2). Falco fires critical on a ptrace
+/// the ptrace-attach probe (Retire-Falco G2). Falco fires critical on a ptrace
 /// ATTACH: the classic process-injection primitive (debugger-attach, code injection via
 /// `PTRACE_POKETEXT`, credential/memory scraping via `process_vm_readv`). This hook fires on
 /// EVERY ptrace access check, including the read-only `PTRACE_MODE_READ` checks
@@ -683,14 +683,14 @@ const PTRACE_MODE_ATTACH: u32 = 0x02;
 /// `mode & PTRACE_MODE_ATTACH` before touching anything else — an ATTACH request
 /// specifically, not a read-only check — then further dedups per attacking pid
 /// ([`allow_ptrace`]) so a legitimate chatty caller (a debugger single-stepping via repeated
-/// `process_vm_readv`) can't flood the ring (the JEF-320 ring-DoS lesson).
+/// `process_vm_readv`) can't flood the ring (the ring-DoS lesson).
 ///
 /// No vmlinux struct read at all: `mode` is passed BY VALUE (a plain `unsigned int`
 /// register), and the attacking workload is already fully identified by [`make_header`]'s
-/// pid/cgroup. **DECISION (JEF-318):** the target `task_struct`'s pid is deliberately NOT
+/// pid/cgroup. **DECISION:** the target `task_struct`'s pid is deliberately NOT
 /// read — `struct task_struct` is enormous and its layout shifts heavily across kernel
 /// configs/versions (far more volatile than the already-ON-NODE-PENDING `linux_binprm`/
-/// `inode` offsets from JEF-317), so adding that offset here would be a materially bigger
+/// `inode` offsets from), so adding that offset here would be a materially bigger
 /// verifier-rejection risk for a field the corroboration predicate below doesn't need — the
 /// attacking pid alone is enough to scope the Falco-parity signal to the foothold entry.
 #[fentry(function = "security_ptrace_access_check")]
@@ -717,7 +717,7 @@ fn try_ptrace_access_check(ctx: &FEntryContext) -> Result<(), i64> {
 /// the enum is a stable, list-ordered generator macro — `LOADING_UNKNOWN`(0),
 /// `LOADING_FIRMWARE`(1), `LOADING_MODULE`(2), `LOADING_KEXEC_IMAGE`(3),
 /// `LOADING_KEXEC_INITRAMFS`(4), `LOADING_POLICY`(5), `LOADING_X509_CERTIFICATE`(6),
-/// `LOADING_MAX_ID`(7). **ON-NODE BTF VERIFICATION PENDING (JEF-318):** confirm against
+/// `LOADING_MAX_ID`(7). **ON-NODE BTF VERIFICATION PENDING:** confirm against
 /// `bpftool btf dump … format c | grep -A8 'enum kernel_load_data_id'` on BOTH fleet arches
 /// before this ships past a spike deploy (docs/ebpf-testing-on-nodes.md). Unlike a struct
 /// offset, a wrong value here is NOT verifier-checked — it's a plain integer compare, so a
@@ -726,7 +726,7 @@ fn try_ptrace_access_check(ctx: &FEntryContext) -> Result<(), i64> {
 const LOADING_MODULE: u32 = 2;
 
 /// fentry on `security_kernel_load_data(enum kernel_load_data_id id, bool contents)` — the
-/// kernel-module-load probe (JEF-318, Retire-Falco G2). Falco fires critical on
+/// kernel-module-load probe (Retire-Falco G2). Falco fires critical on
 /// `init_module`/`finit_module`. `load_module()` (kernel/module/main.c) calls this hook
 /// EARLY — before any parsing — on BOTH syscalls: `init_module`'s in-memory buffer AND
 /// `finit_module`'s fd (which first reaches `security_kernel_read_file(id=READING_MODULE)`
@@ -756,7 +756,7 @@ fn try_kernel_load_data(ctx: &FEntryContext) -> Result<(), i64> {
 }
 
 /// Emit a bare [`EventHeader`]-only fact of `kind` — shared by the ptrace-attach and
-/// module-load probes (JEF-318), whose entire signal IS the occurrence, attributed by
+/// module-load probes, whose entire signal IS the occurrence, attributed by
 /// [`make_header`]'s pid/cgroup, with no further payload. Unlike every other emitter in this
 /// file there is no body struct: the ring event for these two kinds IS the header, so
 /// userspace's `decode` needs no kind-specific byte parse beyond the header it already reads.
@@ -781,7 +781,7 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
     // &file->f_path. bpf_d_path needs the arg to resolve (against kernel BTF, at the baked
     // offset) to a `struct path`; the verifier walks `file` at `f_path`'s offset and checks
     // it lands on `path`. So `f_path`'s offset in vmlinux::file MUST match the running kernel
-    // (JEF-324) — a stale offset lands elsewhere and is rejected ("R1 is of type file …").
+    // — a stale offset lands elsewhere and is rejected ("R1 is of type file …").
     let path_ptr = unsafe { core::ptr::addr_of!((*file).f_path) };
     let n = unsafe {
         bpf_d_path(
@@ -808,7 +808,7 @@ fn emit_file_path(file: *const vmlinux::file, kind: u32) {
 
 /// Emit the library *name* (leaf basename) of `file` as a [`KIND_LIBRARY_LOAD`] event.
 /// The library-load probe can't use `bpf_d_path` (the verifier rejects it in the
-/// security_mmap_file hook — not on the kernel's d_path allowlist; JEF-68). Userspace only
+/// security_mmap_file hook — not on the kernel's d_path allowlist;). Userspace only
 /// needs the basename to name the library, which is the leaf dentry's `d_name`, so read it
 /// directly with bpf_probe_read_kernel(_str) — allowed in any program type.
 fn emit_lib_name(file: *const vmlinux::file) {
@@ -860,7 +860,7 @@ fn emit_lib_name(file: *const vmlinux::file) {
 }
 
 /// Whether `file`'s leaf dentry name is one of [`SENSITIVE_CREDENTIAL_BASENAMES`]
-/// (JEF-320) — the cheap volume gate for `try_file_open`'s past-tmpfs widening. Reads the
+/// — the cheap volume gate for `try_file_open`'s past-tmpfs widening. Reads the
 /// dentry's `d_name` directly rather than `bpf_d_path`ing every non-tmpfs open, the same
 /// allowed-anywhere pattern as [`emit_lib_name`]. A failed read = "not sensitive" (drop,
 /// never a false allow).
@@ -944,7 +944,7 @@ fn is_tmpfs(file: *const vmlinux::file) -> bool {
 }
 
 /// Read `file->f_inode->i_ino` — the inode number, the file-write dedup key's identity
-/// (JEF-306). The pointer chase uses bpf_probe_read_kernel (fixed offsets from the node-BTF
+/// . The pointer chase uses bpf_probe_read_kernel (fixed offsets from the node-BTF
 /// vmlinux), the same safe pattern as [`is_tmpfs`]. `None` on any failed read — the caller
 /// then emits without deduping (fail open), never dropping a real write for a bookkeeping miss.
 fn inode_ino(file: *const vmlinux::file) -> Option<u64> {

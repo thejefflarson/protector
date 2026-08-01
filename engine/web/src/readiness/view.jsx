@@ -1,4 +1,4 @@
-// The Readiness (coverage) view (ADR-0025 / JEF-400) — a 1:1 Preact port of maud
+// The Readiness (coverage) view (ADR-0025) — a 1:1 Preact port of maud
 // `readiness_view.rs`: one row per decision input with its honest Present/Absent/Degraded state
 // (colour + glyph + word, never colour alone), the live detail, why it matters, and the env var to
 // enable it. A weakening-when-absent input carries the amber keyline and surfaces its enablement
@@ -6,7 +6,7 @@
 //
 // Reconcile keying (the only per-view variation): rows key on `ReadinessRowProps.id`, so Preact
 // patches each row in place across a poll. The per-node `<details>` breakdown is a NATIVE,
-// UNCONTROLLED disclosure (JEF-411) — the DOM owns its open state, so it survives reconcile for free
+// UNCONTROLLED disclosure — the DOM owns its open state, so it survives reconcile for free
 // (Preact's keyed diff never disturbs it). The client derives no honesty — it renders the
 // server-decided state tokens verbatim; every untrusted string (node name, detail) is JSX text.
 
@@ -19,7 +19,7 @@ const STATE = {
   // An EXPECTED feed that is wholly dark this pass (cold start / crash-loop) — loud, distinct from
   // absent (never enabled). Forbids the green all-clear, like stalled.
   blind: { glyph: "\u{25CF}", word: "blind" }, // ●
-  // JEF-421: a WAS-COVERING input that went dark — the loud stall register, distinct from absent.
+  // a WAS-COVERING input that went dark — the loud stall register, distinct from absent.
   stalled: { glyph: "\u{26A0}", word: "stalled" }, // ⚠
 };
 

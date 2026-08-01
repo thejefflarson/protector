@@ -1,4 +1,4 @@
-//! Tests for the durable forensic/raw disclosure audit sink (JEF-490): a disclosure records ONE
+//! Tests for the durable forensic/raw disclosure audit sink: a disclosure records ONE
 //! line (subject·entry·tool·tier·time) and round-trips across a "restart" when durable; an absent
 //! or unwritable volume degrades to in-memory-only without crashing; and the ring reads
 //! newest-first. The end-to-end "a forensic/raw pull records exactly one line, a redacted pull

@@ -99,9 +99,9 @@ jobs:
                --set mode=enforce >/dev/null 2>&1; then
             echo "mode: enforce with empty enforceScope was not refused"; exit 1
           fi
-      - name: "Assert namespace-scoped enforce tightens NetworkPolicy write to per-namespace Roles (JEF-277)"
+      - name: "Assert namespace-scoped enforce tightens NetworkPolicy write to per-namespace Roles"
         run: |
-          # JEF-277: NetworkPolicy is namespaced and the engine only writes cuts inside
+          # NetworkPolicy is namespaced and the engine only writes cuts inside
           # enforceScope. A NAMESPACE-only enforceScope must derive a per-namespace
           # Role+RoleBinding for networkpolicies create/delete/patch in EACH listed namespace,
           # and must NOT grant the cluster-wide networkpolicies write on the ClusterRole.
@@ -168,7 +168,7 @@ jobs:
           echo "ok"
       - name: Assert feed-fetcher sidecar is ON by default and auto-wires the engine
         run: |
-          # JEF-238 default-on: a stock install must render the feed-fetcher NATIVE SIDECAR
+          # default-on: a stock install must render the feed-fetcher NATIVE SIDECAR
           # (an initContainer with restartPolicy: Always) on the engine pod, a shared feeds
           # emptyDir, and the engine auto-wired to the KEV file via PROTECTOR_KEV_FILE — with
           # NO CronJob, NO ConfigMap, and NO feed-sync RBAC (the sidecar makes no apiserver
@@ -189,7 +189,7 @@ jobs:
             || { echo "engine not auto-wired to KEV by default"; exit 1; }
           echo "$render" | grep -q 'kev.json' \
             || { echo "engine not pointed at the sidecar kev.json"; exit 1; }
-          # Engine auto-wired to the EPSS file the same sidecar writes (JEF-243) — the
+          # Engine auto-wired to the EPSS file the same sidecar writes — the
           # predictive exploitation axis alongside KEV.
           echo "$render" | grep -q 'PROTECTOR_EPSS_FILE' \
             || { echo "engine not auto-wired to EPSS by default"; exit 1; }
@@ -202,13 +202,13 @@ jobs:
           if echo "$render" | grep -qE 'kev-snapshot|advisory-snapshot'; then
             echo "feed-sync ConfigMaps still rendered (should be an emptyDir now)"; exit 1
           fi
-          # The NVD advisory feed was retired (JEF-242): KEV is the ONLY feed now, so no
+          # The NVD advisory feed was retired: KEV is the ONLY feed now, so no
           # advisory env and no advisory.json must render anywhere.
           if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
-            echo "advisory env rendered despite the advisory feed being retired (JEF-242)"; exit 1
+            echo "advisory env rendered despite the advisory feed being retired"; exit 1
           fi
           if echo "$render" | grep -q 'advisory.json'; then
-            echo "advisory.json path rendered despite the advisory feed being retired (JEF-242)"; exit 1
+            echo "advisory.json path rendered despite the advisory feed being retired"; exit 1
           fi
           echo "ok"
       - name: Assert feedSync.enabled=false renders no sidecar and no auto-wire
@@ -231,9 +231,9 @@ jobs:
             echo "engine auto-wired advisory despite feedSync.enabled=false"; exit 1
           fi
           echo "ok"
-      - name: "Assert liveness/readiness probes tolerate a sweep-CPU burst (JEF-560)"
+      - name: "Assert liveness/readiness probes tolerate a sweep-CPU burst"
         run: |
-          # JEF-560: a protector container was crashlooping (Ready never latching, restart
+          # a protector container was crashlooping (Ready never latching, restart
           # count climbing, clean exit 0) because the default 1s probe timeout / 3-strike
           # (30s) budget was too tight for the CPU the per-pass signing/provenance sweep
           # legitimately bursts under the chart's CPU limit — kubelet SIGTERM'd a healthy,
@@ -256,11 +256,11 @@ jobs:
           # The CPU limit that produced the throttling-induced probe misses also needs
           # headroom (the RAM-tight request is unchanged; only the burst ceiling moves).
           echo "$ready" | grep -q 'cpu: 500m' \
-            || { echo "cpu limit not raised past the JEF-560 250m ceiling"; exit 1; }
+            || { echo "cpu limit not raised past the 250m ceiling"; exit 1; }
           echo "ok"
       - name: Assert the feed-fetcher sidecar is unprivileged and has NO apiserver access
         run: |
-          # JEF-238 egress boundary: the sidecar is the ONLY container with egress. It must
+          # egress boundary: the sidecar is the ONLY container with egress. It must
           # run unprivileged (non-root, no privilege escalation, read-only rootfs, all caps
           # dropped) and — unlike the retired CronJob — make NO apiserver call: no dedicated
           # ServiceAccount, no Role/RoleBinding for it, no kubectl. It fetches the FULL public
@@ -284,12 +284,12 @@ jobs:
             echo "feed-fetcher invokes kubectl (should make no apiserver call)"; exit 1
           fi
           # It must fetch the KEV feed and the EPSS feed (the two exploitation-intel feeds; the
-          # advisory feed was retired, JEF-242).
+          # advisory feed was retired).
           echo "$render" | grep -q 'known_exploited_vulnerabilities.json' \
             || { echo "feed-fetcher does not fetch the KEV feed"; exit 1; }
           echo "$render" | grep -q 'epss_scores-current.csv.gz' \
-            || { echo "feed-fetcher does not fetch the EPSS feed (JEF-243)"; exit 1; }
+            || { echo "feed-fetcher does not fetch the EPSS feed"; exit 1; }
           if echo "$render" | grep -q 'PROTECTOR_ADVISORY_FILE'; then
-            echo "advisory env rendered despite the advisory feed being retired (JEF-242)"; exit 1
+            echo "advisory env rendered despite the advisory feed being retired"; exit 1
           fi
           echo "ok"

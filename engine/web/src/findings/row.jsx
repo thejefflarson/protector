@@ -1,4 +1,4 @@
-// One Findings-table row (ADR-0025 / JEF-397 / JEF-411) — a 1:1 Preact port of maud `finding_row.rs`:
+// One Findings-table row (ADR-0025) — a 1:1 Preact port of maud `finding_row.rs`:
 // the two-row structure (a summary `<tr.row>` whose expander button drives a paired
 // `<tr.row-detail>`), keyed on the STABLE `finding.id`. Preact's keyed diff keeps this row's exact
 // DOM across a poll — focus, open disclosures, selection — so the reconcile "just works": the boring
@@ -6,7 +6,7 @@
 //
 // The expander is a real `<button aria-expanded aria-controls>` and the detail row keeps its
 // `id=detail-{id}` target, so the a11y contract (STYLEGUIDE gate) is preserved. Expansion is LOCAL
-// component state (JEF-411): a plain `useState`, ephemeral by design — the framework's keyed diff
+// component state: a plain `useState`, ephemeral by design — the framework's keyed diff
 // keeps it across a poll, and it does not need to survive a reload.
 
 import { useState } from "preact/hooks";

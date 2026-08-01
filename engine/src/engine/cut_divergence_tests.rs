@@ -17,7 +17,7 @@ use crate::engine::respond::ProposedAction;
 /// pivot-then-objective compromise takes: the front door is popped, then the attacker walks one
 /// hop laterally to the workload actually holding the crown-jewel credential. Both `payments` and
 /// `ledger` are independently compromisable and network-reachable from the internet foothold, so
-/// BOTH qualify as `RemotelyExploitable` quarantine candidates (JEF-284/JEF-322) on top of the
+/// BOTH qualify as `RemotelyExploitable` quarantine candidates on top of the
 /// entry's own surgical edge-cut — the downstream (not just entry) divergence surface this
 /// fixture exists to exercise.
 fn multi_hop_incident_snapshot() -> Snapshot {

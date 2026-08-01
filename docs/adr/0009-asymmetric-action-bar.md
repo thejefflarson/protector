@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-06-12
 
-> **Amendment (JEF-305, 2026-07-04):** this ADR describes the live-corroboration signal
+> **Amendment (2026-07-04):** this ADR describes the live-corroboration signal
 > as "a live Falco signal" because Falco was the only sensor when it was written. That
 > `corroborated-now` predicate is now **tool-agnostic and per-objective**
 > ([ADR-0014](0014-behavioral-telemetry-ebpf.md)): any sensor (Falco, Tetragon, the
@@ -84,7 +84,7 @@ Harder / accepted downsides:
   starting point; this is the considered refinement once the signals' asymmetry
   and the adjudicator were both in place.
 
-## Amendment (JEF-547, 2026-07-27): the adjudicator becomes the cut *selector* ([ADR-0032](0032-model-is-incident-responder.md))
+## Amendment (2026-07-27): the adjudicator becomes the cut *selector* ([ADR-0032](0032-model-is-incident-responder.md))
 
 The `corroborated ∧ adjudicated` auto-gate decided here is **unchanged and reaffirmed** — and
 ADR-0032 *restores* it where the code had drifted: the downstream `QuarantineWorkload` had
@@ -97,5 +97,5 @@ deterministically-selected action; under ADR-0032 the model becomes the **select
 cut (from a deterministically-enumerated menu). The asymmetry (live evidence acts, latent
 exposure proposes) is unchanged, but "acts" now means *the model's cut decision*, and
 auto-action is confined to internet-facing adjudicated paths — an internal-only actively-
-exploited pod is **propose-only** (per ADR-0032, superseding the JEF-284 "internal pods
+exploited pod is **propose-only** (per ADR-0032, superseding the "internal pods
 included" stance in [ADR-0022](0022-quarantine-the-entry-is-the-default-containment.md)).

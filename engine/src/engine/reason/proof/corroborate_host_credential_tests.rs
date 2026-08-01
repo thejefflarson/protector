@@ -1,4 +1,4 @@
-//! Tests for the JEF-320 security-rework entry-scoped corroboration shape — an on-host
+//! Tests for the security-rework entry-scoped corroboration shape — an on-host
 //! credential-path `SecretRead` on the foothold — kept in its own `*_tests.rs` file (repo
 //! CLAUDE.md: tests count toward the 1,000-line cap). `super` resolves to the proof module,
 //! so these exercise the `pub(super)` `corroborate` seam directly.

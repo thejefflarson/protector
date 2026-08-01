@@ -22,7 +22,7 @@ fn input_state(state: InputState) -> InputStateProps {
     }
 }
 
-/// Map an engine node-coverage state into its presentation enum (JEF-308).
+/// Map an engine node-coverage state into its presentation enum.
 fn node_state(state: NodeCoverageState) -> NodeCoverageStateProps {
     match state {
         NodeCoverageState::Healthy => NodeCoverageStateProps::Healthy,
@@ -32,7 +32,7 @@ fn node_state(state: NodeCoverageState) -> NodeCoverageStateProps {
     }
 }
 
-/// Project one engine readiness row into its props, carrying any per-node breakdown (JEF-308).
+/// Project one engine readiness row into its props, carrying any per-node breakdown.
 fn row_props(row: &ReadinessRow) -> ReadinessRowProps {
     ReadinessRowProps {
         id: row.id.to_string(),

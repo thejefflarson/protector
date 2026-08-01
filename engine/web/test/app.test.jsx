@@ -1,7 +1,7 @@
-// App-shell tab-navigation tests (ADR-0025 / JEF-398 / JEF-411): the engine is Preact-only, so EVERY
+// App-shell tab-navigation tests (ADR-0025): the engine is Preact-only, so EVERY
 // tab-swap — including to a secondary view — is a local client view swap (history.pushState + local
 // state update), never a full server navigation. `App` owns the active tab as a plain useState now
-// (no store — JEF-411); these tests drive it and assert via the DOM.
+// (no store —); these tests drive it and assert via the DOM.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/preact";

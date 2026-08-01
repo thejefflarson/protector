@@ -147,7 +147,7 @@ impl IpIndex {
     /// This is the per-pass index. Rewriting a `NetworkConnection` peer string into its
     /// resolved cluster form — and keeping that rendering *stable* across a transient
     /// informer miss — is [`PeerResolutionMemo::resolve_peer`], which layers a last-known
-    /// resolution memo over this probe (JEF-375).
+    /// resolution memo over this probe.
     pub fn resolve(&self, ip: &str) -> Option<&ResolvedPeer> {
         self.by_ip.get(ip)
     }

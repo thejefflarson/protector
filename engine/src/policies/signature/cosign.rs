@@ -7,7 +7,7 @@
 //!   * [`observe`](super::posture::SignatureObserver::observe) — reads any image's
 //!     signing posture (keyless-verified / signed-key-based / unverifiable-here /
 //!     invalid / not-signed) with NO trusted-identity config required (ADR-0020 Stage 1:
-//!     inventory; JEF-276 honest, scheme-aware split). Discovery already covers both the
+//!     inventory; honest, scheme-aware split). Discovery already covers both the
 //!     legacy cosign `.sig` tag AND OCI 1.1 referrer-attached signatures — sigstore-rs
 //!     `trusted_signature_layers` triangulates both and returns their union.
 //!   * [`is_signed`](super::SignatureChecker::is_signed) — the gated admission check,
@@ -46,7 +46,7 @@ pub struct CosignChecker {
     identity: Regex,
     /// OIDC issuer expected in the signing cert for the gated check.
     oidc_issuer: String,
-    /// Per-image registry-auth resolver (JEF-352): the whole mounted dockerconfigjson parsed
+    /// Per-image registry-auth resolver: the whole mounted dockerconfigjson parsed
     /// once, looked up by each image's registry host at verify time — so a private image on ANY
     /// registry authenticates with its own creds, not one hardcoded registry's.
     auth: RegistryAuth,
@@ -103,7 +103,7 @@ impl CosignChecker {
 
     /// Get (or lazily fetch) the sigstore TUF trust root.
     ///
-    /// Fetch-once-and-stick (JEF-377): `get_or_try_init` caches only a *successful* init — on
+    /// Fetch-once-and-stick: `get_or_try_init` caches only a *successful* init — on
     /// `Err` the cell stays empty, so a transient TUF/registry blip is retried on the next call
     /// rather than being frozen, and a success is reused for the process lifetime. There is no
     /// per-verify or interval TUF refresh: the one fetch here (and its one-time tough temp write)
@@ -129,7 +129,7 @@ impl CosignChecker {
     /// infrastructure failure (registry/Rekor/TUF unreachable), which the caller surfaces as
     /// the transient "checking" state — never as a resting posture, never as a clean verdict.
     ///
-    /// MIRROR-SERVED IMAGES (JEF-386): sigstore-rs binds a signature to the image by its
+    /// MIRROR-SERVED IMAGES: sigstore-rs binds a signature to the image by its
     /// **manifest digest** (`triangulate` fetches the pull ref's digest, then verifies each
     /// layer's `simple_signing.critical.image.docker-manifest-digest` — and, on the OCI-1.1
     /// referrer path, the in-toto subject digest — against it). It does NOT compare the
@@ -144,7 +144,7 @@ impl CosignChecker {
     /// tests the verified cert's SAN + issuer, never the docker-reference. See `cosign_tests.rs`.
     async fn fetch_layers(&self, image: &str) -> Result<Vec<SignatureLayer>> {
         let image_ref: OciReference = image.parse()?;
-        // Resolve auth for THIS image's registry (JEF-352): the mounted dockerconfigjson may carry
+        // Resolve auth for THIS image's registry: the mounted dockerconfigjson may carry
         // creds for several registries, so we look up the image's host rather than applying one
         // global credential to every image (which only authenticated ghcr.io and 401ed the rest).
         let auth = self.auth.for_image(image);
@@ -161,7 +161,7 @@ impl CosignChecker {
         .await
         // A distinguishable error type (not a bare string) so the observer can tell a spent
         // verification budget apart from a genuine reachability failure via `downcast_ref` —
-        // the load-bearing distinction for diagnosing a stuck "checking" posture (JEF-326).
+        // the load-bearing distinction for diagnosing a stuck "checking" posture.
         .map_err(|_| anyhow::Error::new(VerifyTimeout(self.verify_timeout)))??;
         Ok(layers)
     }
@@ -179,7 +179,7 @@ impl CosignChecker {
     }
 }
 
-/// Why an image's signing posture could not be resolved this pass (JEF-326) — the transient
+/// Why an image's signing posture could not be resolved this pass — the transient
 /// [`Checking`](SigningPosture::Checking) split into its two operational causes so the log
 /// tells the operator which knob to reach for. Derived from the `fetch_layers` error via
 /// [`classify_checking_reason`]; pure and exhaustively unit-testable without a registry.
@@ -195,7 +195,7 @@ pub(super) enum CheckingReason {
 }
 
 impl CheckingReason {
-    /// A short, human-facing reason clause for the WARN line (JEF-326).
+    /// A short, human-facing reason clause for the WARN line.
     fn describe(&self) -> String {
         match self {
             CheckingReason::TimedOut(budget) => {
@@ -208,7 +208,7 @@ impl CheckingReason {
     }
 }
 
-/// Classify a `fetch_layers` error into the operational [`CheckingReason`] (JEF-326): a spent
+/// Classify a `fetch_layers` error into the operational [`CheckingReason`]: a spent
 /// verification budget (a [`VerifyTimeout`] anywhere in the chain) vs a genuine reachability
 /// failure. Reads the typed cause via `downcast_ref` rather than matching on message text, so the
 /// classification can't silently drift when an error string is reworded.
@@ -225,7 +225,7 @@ impl SignatureObserver for CosignChecker {
         match self.fetch_layers(image).await {
             Ok(layers) => classify(&layers),
             Err(err) => {
-                // WARN, not debug (JEF-326): a stuck "checking" posture was invisible at the default
+                // WARN, not debug: a stuck "checking" posture was invisible at the default
                 // log level, so the perpetual-checking bug was silent. The classified reason names
                 // the cause (timeout vs unreachable) so the operator knows which lever to pull.
                 let reason = classify_checking_reason(&err);
@@ -269,7 +269,7 @@ impl SignatureChecker for CosignChecker {
     }
 }
 
-/// The verification-relevant facts extracted from one fetched [`SignatureLayer`] (JEF-276),
+/// The verification-relevant facts extracted from one fetched [`SignatureLayer`],
 /// decoupled from sigstore's type so [`classify_facts`] is exhaustively unit-testable without
 /// synthesising a full Fulcio cert + verification key. Every field reflects what sigstore-rs
 /// *already verified* when it built the layer: `certificate_signature` is populated ONLY if the
@@ -311,7 +311,7 @@ impl LayerFacts {
     }
 }
 
-/// Read a signing posture from fetched signature layers (ADR-0020 Stage 1; JEF-276 honest split).
+/// Read a signing posture from fetched signature layers (ADR-0020 Stage 1; honest split).
 /// Pure classification — no trusted-identity config required, the Fulcio/Rekor chain is the trust
 /// anchor. Delegates to [`classify_facts`] over the per-layer [`LayerFacts`] so the decision table
 /// is unit-testable without synthesising real certs. The transient "checking" state is produced by
@@ -321,7 +321,7 @@ pub(super) fn classify(layers: &[SignatureLayer]) -> SigningPosture {
     classify_facts(&facts)
 }
 
-/// The honest posture decision table (JEF-276), in strict precedence — the calmest *supported*
+/// The honest posture decision table, in strict precedence — the calmest *supported*
 /// evidence wins, and the loud `InvalidSignature` is reserved for a genuine failure:
 ///   1. any layer with a **verified keyless signer** ⇒ [`Signed`](SigningPosture::Signed) — the one
 ///      trusted-identity posture (a broken keyless image is dropped by sigstore before it reaches
@@ -335,7 +335,7 @@ pub(super) fn classify(layers: &[SignatureLayer]) -> SigningPosture {
 ///   4. no layers at all ⇒ [`NotSigned`](SigningPosture::NotSigned). A genuinely-failed signature
 ///      (tampered payload / a cert whose Rekor inclusion doesn't hold) is dropped by sigstore-rs
 ///      before it reaches us and so lands here too — the SAFE direction: calm and never a false
-///      "signed", and still caught loudly as a signing regression on an established repo (JEF-264);
+///      "signed", and still caught loudly as a signing regression on an established repo;
 ///   5. a degenerate layer with neither signer, verified bundle, nor even a signature ⇒
 ///      [`InvalidSignature`](SigningPosture::InvalidSignature), the RESERVED loud channel.
 ///
@@ -358,7 +358,7 @@ pub(super) fn classify_facts(facts: &[LayerFacts]) -> SigningPosture {
     }
 }
 
-/// Project the SLSA build-provenance facts (JEF-275) off fetched layers: one [`ProvenanceFacts`]
+/// Project the SLSA build-provenance facts off fetched layers: one [`ProvenanceFacts`]
 /// per layer whose in-toto predicate type is a SLSA provenance type (a plain signature layer never
 /// produces one). `keyless_verified` mirrors the signing axis — sigstore populates
 /// `certificate_signature` ONLY when the attestation's cert chained to the trusted Fulcio root AND
@@ -416,7 +416,7 @@ fn pae_payload(raw: &[u8]) -> Option<&[u8]> {
 }
 
 /// The per-image verification budget was exhausted before the registry/Rekor round trip returned
-/// (JEF-326). A typed error (rather than a formatted string) so [`classify_checking_reason`] can
+/// . A typed error (rather than a formatted string) so [`classify_checking_reason`] can
 /// tell a spent timeout apart from a reachability failure via `downcast_ref`, robust to message
 /// rewording. Carries the budget that elapsed for the operator-facing WARN line.
 #[derive(Debug, thiserror::Error)]
@@ -511,7 +511,7 @@ mod checking_reason_tests {
 
     #[test]
     fn a_verify_timeout_error_classifies_as_timed_out_with_its_budget() {
-        // The typed timeout — the perpetual-checking symptom on the slow keyless path (JEF-326).
+        // The typed timeout — the perpetual-checking symptom on the slow keyless path.
         let err = anyhow::Error::new(VerifyTimeout(Duration::from_secs(20)));
         assert_eq!(
             classify_checking_reason(&err),

@@ -1,4 +1,4 @@
-//! Unit tests for SLSA build-provenance observation (JEF-275): the pure predicate parser, the
+//! Unit tests for SLSA build-provenance observation: the pure predicate parser, the
 //! posture classifier, and the bounded/cached scanner.
 
 use std::sync::Arc;

@@ -29,9 +29,9 @@ pub enum Behavior {
     /// A read of a secret. `source` distinguishes *how* it was read: a mounted-file read
     /// (the eBPF agent's on-disk path), a Kubernetes API GET/LIST/WATCH via the
     /// workload's ServiceAccount RBAC (observed engine-side from the apiserver audit log,
-    /// JEF-269), or a well-known ON-HOST credential path — the host shadow file, an SSH
+    /// ), or a well-known ON-HOST credential path — the host shadow file, an SSH
     /// private-key dir, a cloud-credential file (observed engine-side from the path alone,
-    /// JEF-320) — three genuinely different runtime facts that all reach credential
+    /// ) — three genuinely different runtime facts that all reach credential
     /// material. Older sensors omit `source`, which defaults to
     /// [`SecretReadSource::Mounted`] (the only kind eBPF originally saw), preserving the
     /// pre-existing wire shape.
@@ -54,15 +54,15 @@ pub enum Behavior {
     /// agent's privilege-change probe, fentry on `security_task_fix_setuid`). Model
     /// evidence, not blanket corroboration:
     /// legitimate workloads sometimes escalate (init/entrypoint), so wiring this to
-    /// corroborate a specific attack is JEF-49's job.
+    /// corroborate a specific attack is 's job.
     PrivilegeChange { from_uid: u32, to_uid: u32 },
     /// A process was exec'd in the workload — the runtime signal for "unexpected process
     /// spawned" (ADR-0014). `path` is the exec'd binary's path as the kernel saw it
     /// (`linux_binprm->filename`). PURE DATA: whether a `path` is a shell / package manager
-    /// is engine classification (`observe::exec_class`, JEF-113), not a property of this
+    /// is engine classification (`observe::exec_class`), not a property of this
     /// shared wire type.
     ///
-    /// `exe_anon_inode` (JEF-317, Route A) is a SEPARATE kernel-observed fact, not derived
+    /// `exe_anon_inode` (Route A) is a SEPARATE kernel-observed fact, not derived
     /// from `path`: whether the exec'd binary's backing inode is anonymous — memfd/shmem-
     /// backed, or unlinked (`i_nlink == 0`) — rather than a normal, linked, on-disk file.
     /// This is the Falco-parity signal ("memfd_create + execve of an anonymous fd") a path
@@ -70,7 +70,7 @@ pub enum Behavior {
     /// `bprm->filename` for a benign `fexecve()` of an on-disk file as it does for a real
     /// memfd payload, so an earlier version of this signal that classified the *path shape*
     /// was withdrawn (a security review caught it forging corroboration on routine
-    /// behavior — see JEF-317). The exec probe now reads `bprm->file->f_inode` directly
+    /// behavior — see). The exec probe now reads `bprm->file->f_inode` directly
     /// instead. Defaulted `false` (an older sensor, or a sensor without inode access, omits
     /// it) — never inferred, so an unset flag reads as "not anonymous", never guessed
     /// `true`. A raw kernel fact, not a verdict: whether it's alarming is engine policy
@@ -85,14 +85,14 @@ pub enum Behavior {
     /// (a new file created then run) and config tampering (an existing file overwritten).
     /// The eBPF agent's file-write probe (fentry on `security_file_open` filtered to
     /// write-intent open flags, ADR-0014). `path` is the
-    /// written file's path as the kernel saw it (`bpf_d_path`). PURE DATA (JEF-306): whether
+    /// written file's path as the kernel saw it (`bpf_d_path`). PURE DATA: whether
     /// the path is *sensitive* — the container-drift / tamper judgement — is engine
-    /// corroboration policy (JEF-306 F3), not a property of this shared wire type. The agent
+    /// corroboration policy (F3), not a property of this shared wire type. The agent
     /// emits the path; the engine classifies. Model evidence only today.
     FileWrite { path: String },
-    /// The workload's entrypoint binary's **static/dynamic linkage** (JEF-407) — read by
+    /// The workload's entrypoint binary's **static/dynamic linkage** — read by
     /// the node-local agent from the executable's ELF header (`/proc/<pid>/exe`, no
-    /// `PT_INTERP` ⇒ statically linked). This is the byte source that ACTIVATES JEF-404's
+    /// `PT_INTERP` ⇒ statically linked). This is the byte source that ACTIVATES 's
     /// static-linkage reachability in prod: the engine has no in-cluster access to the
     /// entrypoint bytes, so without this signal `Image::static_binary` stays `None` and a
     /// Go / musl-static CVE renders `not-observed` forever. `static_linkage == true` ⇒ a
@@ -103,9 +103,9 @@ pub enum Behavior {
     /// corroborates ([`Self::is_alert`] is false) and is CONTEXT only. Reported over the
     /// SAME behavioral channel (ADR-0014), so no new egress (the zero-egress invariant
     /// holds — the agent already sees `/proc/<pid>/exe`). PURE DATA: the agent classifies
-    /// the bytes; the *reachability* consequence is engine policy (JEF-404).
+    /// the bytes; the *reachability* consequence is engine policy.
     ImageLinkage { static_linkage: bool },
-    /// A ptrace ATTACH access check (JEF-318, Retire-Falco G2): the eBPF agent's
+    /// A ptrace ATTACH access check (Retire-Falco G2): the eBPF agent's
     /// `security_ptrace_access_check` probe, filtered in-kernel to `mode &
     /// PTRACE_MODE_ATTACH` so the read-only `PTRACE_MODE_READ` checks `/proc/<pid>/…` makes
     /// constantly never reach the wire. The classic process-injection primitive Falco fires
@@ -114,17 +114,17 @@ pub enum Behavior {
     /// occurrence fact — the attacking workload is already carried by
     /// [`RuntimeObservation::attribution`], and the target process's pid is deliberately not
     /// read by the agent (a `struct task_struct` offset read judged too fragile for this
-    /// signal — see the agent's probe doc). PURE DATA (JEF-113): whether an attach on this
+    /// signal — see the agent's probe doc). PURE DATA: whether an attach on this
     /// entry is alarming is engine policy (`engine::reason::proof::corroborate`),
     /// conservatively foothold-scoped, not decided here.
     PtraceAttach,
-    /// A kernel module load (JEF-318, Retire-Falco G2): the eBPF agent's
+    /// A kernel module load (Retire-Falco G2): the eBPF agent's
     /// `security_kernel_load_data` probe, filtered in-kernel to `id == LOADING_MODULE` so
     /// firmware/kexec/policy/x509 loads on the SAME hook never reach the wire. Covers BOTH
     /// `init_module` and `finit_module` — `load_module()` reaches this hook on either path.
     /// The module-load parity signal Falco fires critical on: a container loading arbitrary
     /// code into the HOST kernel. No fields — the occurrence, attributed by
-    /// [`RuntimeObservation::attribution`], is the whole fact. PURE DATA (JEF-113): engine
+    /// [`RuntimeObservation::attribution`], is the whole fact. PURE DATA: engine
     /// policy decides whether it's alarming, conservatively foothold-scoped, not this crate.
     ModuleLoad,
 }
@@ -132,7 +132,7 @@ pub enum Behavior {
 /// How a [`Behavior::SecretRead`] was observed — a type distinction, not a string
 /// convention. The wire type stays cluster-agnostic (ADR-0003): a sensor names only the
 /// *kind* of read it saw; the engine, not the agent, resolves the ServiceAccount→edge
-/// attribution for an API read (JEF-269).
+/// attribution for an API read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretReadSource {
@@ -147,8 +147,8 @@ pub enum SecretReadSource {
     Api,
     /// The path read is a well-known ON-HOST sensitive credential path — the host
     /// password/shadow file, a per-user SSH private-key directory, or a cloud-provider
-    /// credential file — outside any k8s Secret mount (JEF-320, Retire-Falco G3). The
-    /// eBPF agent still only emits a path (pure data, JEF-113); the engine classifies it
+    /// credential file — outside any k8s Secret mount (Retire-Falco G3). The
+    /// eBPF agent still only emits a path (pure data); the engine classifies it
     /// (`engine::observe::host_credential_class`), same division of labor as `Mounted`.
     HostPath,
 }
@@ -163,7 +163,7 @@ impl SecretReadSource {
 
 /// Whether `b` is `false` — a named predicate for `#[serde(skip_serializing_if)]` (no
 /// built-in one exists for `bool`). Used to omit a `false` anon-inode-exec flag from the
-/// wire (JEF-317), keeping the common (non-anonymous) exec's JSON byte-identical to before
+/// wire, keeping the common (non-anonymous) exec's JSON byte-identical to before
 /// this field existed.
 fn is_false(b: &bool) -> bool {
     !b
@@ -174,7 +174,7 @@ fn is_false(b: &bool) -> bool {
 /// path to a stable, low-cardinality cache token.
 ///
 /// Note: exec *classification* (is this a shell / package manager?) is engine policy, not
-/// part of this wire type — it lives in `engine::observe::exec_class` (JEF-113), keyed on
+/// part of this wire type — it lives in `engine::observe::exec_class`, keyed on
 /// this same basename token, so a list change rebuilds only the engine, never the agent.
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -207,7 +207,7 @@ impl Behavior {
     /// A stable, **low-cardinality** label naming this behavior's variant — one of a
     /// fixed, small set (`alert`/`connection`/`secret-read`/`library-load`/`file-read`/
     /// `priv-change`/`exec`). Used as a metric label for behavioral-signal counters
-    /// (JEF-100): it must never carry per-instance payload (a peer, a path, a secret
+    /// : it must never carry per-instance payload (a peer, a path, a secret
     /// name), which would explode metric cardinality — only the variant name. Distinct
     /// from [`Self::summary`] (human prose) and [`Self::fingerprint_key`] (cache key).
     pub fn variant_label(&self) -> &'static str {
@@ -229,7 +229,7 @@ impl Behavior {
     /// A one-line, human summary for the adjudication prompt. For a
     /// [`Behavior::ProcessExec`] this is the bare `executed {path}` — *classification* of a
     /// notable exec (shell / package manager in container) is engine policy
-    /// (`engine::observe::exec_class`, JEF-113), not a property of this shared wire type, so
+    /// (`engine::observe::exec_class`), not a property of this shared wire type, so
     /// the engine annotates the path when it builds the prompt/output line rather than
     /// this crate baking a rule list into the contract.
     pub fn summary(&self) -> String {
@@ -251,7 +251,7 @@ impl Behavior {
             Behavior::PrivilegeChange { from_uid, to_uid } => {
                 format!("privilege change uid {from_uid} -> {to_uid}")
             }
-            // The exec'd path, plus the raw `exe_anon_inode` kernel fact when set (JEF-317)
+            // The exec'd path, plus the raw `exe_anon_inode` kernel fact when set
             // — unlike the shell/package-manager CLASSIFICATION (a curated list, engine
             // policy in `engine::observe::exec_class`), this is a single kernel-computed
             // boolean the agent already resolved, so it rides the bare summary like
@@ -269,7 +269,7 @@ impl Behavior {
                 }
             }
             // Just the written path. Whether the write is *sensitive* (container drift /
-            // config tampering) is engine corroboration policy (JEF-306 F3), not a property
+            // config tampering) is engine corroboration policy (F3), not a property
             // of this shared wire type — the agent emits the path, the engine classifies.
             Behavior::FileWrite { path } => format!("wrote file {path}"),
             // A structural linkage fact, not an action. Named so the prompt/dashboard read
@@ -283,7 +283,7 @@ impl Behavior {
                 }
             }
             // No fields to render — the occurrence, attributed by the observation's
-            // workload, is the whole fact (JEF-318).
+            // workload, is the whole fact.
             Behavior::PtraceAttach => "ptrace attach (process injection primitive)".to_string(),
             Behavior::ModuleLoad => "loaded a kernel module".to_string(),
         }
@@ -324,7 +324,7 @@ impl Behavior {
             // Coarsen to the basename so repeated execs of the same binary from different
             // absolute paths collapse to one stable key (mirrors how LibraryLoaded keys on
             // the lib name, not the full path) — keeps exec churn from busting the cache.
-            // `exe_anon_inode` is kept in the key (JEF-317): it is a genuinely different
+            // `exe_anon_inode` is kept in the key: it is a genuinely different
             // security-relevant fact about the SAME binary name (an on-disk `bash` vs. an
             // anonymous-inode exec that happens to report itself as "bash"), so folding it
             // in must not silently collapse the two into one cache entry.
@@ -346,7 +346,7 @@ impl Behavior {
             // bool verbatim — the two states are genuinely distinct facts, and it's
             // low-cardinality by construction (exactly two values).
             Behavior::ImageLinkage { static_linkage } => format!("linkage:{static_linkage}"),
-            // No varying fields, so a fixed token is already maximally coarse (JEF-318) —
+            // No varying fields, so a fixed token is already maximally coarse —
             // mirrors how a fieldless fact would key regardless of source.
             Behavior::PtraceAttach => "ptrace-attach".to_string(),
             Behavior::ModuleLoad => "module-load".to_string(),
@@ -355,7 +355,7 @@ impl Behavior {
 }
 
 /// How a sensor **attributed** an observation to a workload — a type distinction, not an
-/// empty-string convention (JEF-59). A sensor either knows the pod's cgroup UID (the
+/// empty-string convention. A sensor either knows the pod's cgroup UID (the
 /// first-party eBPF agent, which stays node-local and can't resolve names itself) or it
 /// already has the namespace/name (a sensor that reads k8s metadata). The engine resolves
 /// [`Self::ByPodUid`] → namespace/pod via its own pod watch (ADR-0014); the agent needs no
@@ -433,7 +433,7 @@ pub struct RuntimeObservation {
     /// batch interval + a judging pass). Defaulted → adapter uses now().
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at_ms: Option<u64>,
-    /// The Kubernetes NODE the sensor observed this on (JEF-308) — the eBPF agent reports its
+    /// The Kubernetes NODE the sensor observed this on — the eBPF agent reports its
     /// own node (from the downward API, `spec.nodeName`), so the engine can reason about
     /// runtime-corroboration coverage PER NODE ("blind on node X"), not just fleet-aggregate.
     /// Defaulted (older agents, or a node-agnostic sensor, omit it) — an absent node is
@@ -444,7 +444,7 @@ pub struct RuntimeObservation {
     pub behavior: Behavior,
 }
 
-/// A per-node **agent-liveness beacon** (JEF-308): the eBPF agent's own self-report, one per
+/// A per-node **agent-liveness beacon**: the eBPF agent's own self-report, one per
 /// report window, distinct from a workload [`RuntimeObservation`]. It is what makes
 /// runtime-corroboration coverage honestly derivable per node: liveness is **signal-flow**, not
 /// pod-Ready — a Ready agent whose eBPF probes failed to attach is still BLIND (a Ready-but-blind
@@ -467,7 +467,7 @@ pub struct AgentReport {
     /// build with no collection (the default no-eBPF image), which is also honestly blind.
     pub probes_total: u32,
     /// Signals the agent emitted this window. `0` is HEALTHY-quiet when probes are loaded — a
-    /// quiet node is not a down sensor (the JEF-308 quiet≠blind invariant).
+    /// quiet node is not a down sensor (the quiet≠blind invariant).
     pub signals_emitted: u64,
     /// When the window closed, as Unix epoch millis. Defaulted → the engine stamps ingest time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,10 +490,10 @@ impl AgentReport {
     }
 }
 
-/// A per-window **runtime report** (JEF-336): the single envelope every sensor POSTs to the
+/// A per-window **runtime report**: the single envelope every sensor POSTs to the
 /// engine's unified runtime ingest (`/behavior`). It carries the window's normalized
 /// [`RuntimeObservation`]s AND — for a sensor that has one — its per-node liveness
-/// [`AgentReport`], so liveness ALWAYS travels with the report. That is what keeps the JEF-308
+/// [`AgentReport`], so liveness ALWAYS travels with the report. That is what keeps the
 /// "quiet ≠ blind" guarantee honest: a node that saw nothing still POSTs an envelope with empty
 /// `observations` and its `liveness` present, so the engine records it HEALTHY-quiet instead of
 /// reading it blind for want of a beacon.
@@ -507,7 +507,7 @@ pub struct RuntimeReport {
     /// The normalized observations seen this window — possibly empty (a quiet node still reports).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observations: Vec<RuntimeObservation>,
-    /// This sensor's per-node liveness beacon (JEF-308), when it has one. Absent for a
+    /// This sensor's per-node liveness beacon, when it has one. Absent for a
     /// node-agnostic third-party sensor with no agent-specific liveness to report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness: Option<AgentReport>,

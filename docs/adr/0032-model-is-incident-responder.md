@@ -16,7 +16,7 @@ decides." The code honors it for the entry lane and violates it downstream in th
 ways: (1) the adjudication prompt is entry-scoped — a popped pod two hops in is invisible to
 the judge; (2) `RemotelyExploitable` (reachability + CVE *presence*) and `ActivelyExploited`
 (a deterministic live signal) both auto-fire via `is_live_corroborated`'s unconditional
-`true` for `QuarantineWorkload` — the model is never consulted (see the JEF-284 amendment to
+`true` for `QuarantineWorkload` — the model is never consulted (see the amendment to
 [ADR-0022](0022-quarantine-the-entry-is-the-default-containment.md)); (3) the model emits
 only a 4-value verdict and chooses no cut (scope is the deterministic `containment_for`
 precedence). Operator rationale: *"if determinism worked, someone would have solved this
@@ -46,7 +46,7 @@ decision itself. The VISION north star names this: the model is the incident res
    **human-proposal fallback** when the model is unavailable/uncertain (nothing auto-fires
    without the model). The `is_live_corroborated` unconditional-`true` branch is **deleted**.
 6. **Internal-only actively-exploited pods (no internet path) → propose-only** — outside the
-   north star's two lanes; retires the JEF-284/JEF-322 auto-cut asymmetry in the north-star
+   north star's two lanes; retires the auto-cut asymmetry in the north-star
    direction.
 7. **Rails unchanged (deterministic):** shadow-default + per-class arming + `enforceScope`
    ([ADR-0021](0021-two-setting-operating-posture.md)); blast-radius/alive-collateral gate;
@@ -54,7 +54,7 @@ decision itself. The VISION north star names this: the model is the incident res
    zero-egress; fenced/budgeted untrusted text; view-never-gates
    ([ADR-0016](0016-severity-vs-urgency.md)).
 
-Supersedes **[ADR-0022](0022-quarantine-the-entry-is-the-default-containment.md)'s JEF-284
+Supersedes **[ADR-0022](0022-quarantine-the-entry-is-the-default-containment.md)'s
 amendment *as a decision procedure*** (the per-pod deterministic bar is no longer the
 auto-action trigger; internal-only pods become propose-only) — its containment vocabulary,
 additive/reversible shapes, and precedence ladder survive as the menu's ordering/annotation
@@ -62,7 +62,7 @@ and the proposal fallback. **Evolves [ADR-0009](0009-asymmetric-action-bar.md)**
 adjudicator moves from a one-way veto over a deterministically-selected action to the
 *selector* of the cut; the `corroborated ∧ adjudicated` auto-gate survives and is extended to
 the whole path (the `QuarantineWorkload` unconditional auto-fire that bypassed it is removed).
-Resolves **JEF-322 / JEF-547**. The responder **judge tier** is deferred to **ADR-0033**
+Resolves ****. The responder **judge tier** is deferred to **ADR-0033**
 pending the extended bakeoff (do **not** assume qwen3:1.7b; expected qwen3:4b).
 
 ## Consequences

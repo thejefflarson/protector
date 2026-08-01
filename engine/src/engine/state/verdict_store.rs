@@ -1,4 +1,4 @@
-//! The single per-entry verdict store (JEF-157) and the coverage shapes that ride alongside it:
+//! The single per-entry verdict store and the coverage shapes that ride alongside it:
 //! the [`VerdictStore`] + its per-entry [`VerdictEntry`], the behavioral-bake [`BakeStats`]
 //! snapshot, the [`ModelHealth`] enum, and the [`ReadinessConfig`] presence/absence summary.
 //!
@@ -18,13 +18,13 @@ use crate::engine::reason::backoff::{CircuitBreaker, EntryBackoff};
 
 use super::recency::{Delta, RecencyInfo, StoredPosture};
 
-/// Default number of decisive-verdict slots retained per entry (JEF-390). Wide enough that a
+/// Default number of decisive-verdict slots retained per entry. Wide enough that a
 /// workload whose evidence oscillates between a handful of recently-judged states serves every
 /// return to a recent state from cache instead of re-judging the (slow, CPU-bound) model.
 pub const DEFAULT_VERDICT_CACHE_SLOTS: usize = 32;
 
-/// The smallest per-entry cache the env may configure (JEF-390). A single slot is exactly the
-/// pre-JEF-390 behaviour that thrashes on an A→B→A flip, so even a hostile/typo'd env can't
+/// The smallest per-entry cache the env may configure. A single slot is exactly the
+/// one-slot behaviour that thrashes on an A→B→A flip, so even a hostile/typo'd env can't
 /// shrink the cache below the two slots it takes to retain the previous state across one flip.
 const MIN_VERDICT_CACHE_SLOTS: usize = 2;
 
@@ -50,13 +50,13 @@ fn parse_verdict_cache_slots(raw: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_VERDICT_CACHE_SLOTS)
 }
 
-/// A bounded per-entry LRU of `(evidence fingerprint → decisive Verdict)` — the JEF-390 widening
+/// A bounded per-entry LRU of `(evidence fingerprint → decisive Verdict)` — the widening
 /// of the old single verdict slot. A workload whose evidence oscillates between recently-judged
 /// states (A→B→A) returns to a state that is still cached and HITS, so it re-judges only on a
 /// genuinely new fingerprint rather than on every flip. Ordered most-recently-used FIRST; at
 /// N≈32 an ordered `Vec` with move-to-front + truncate is the whole data structure (no crate).
 ///
-/// Only DECISIVE verdicts are ever inserted (JEF-234): an `Uncertain` is a transient model
+/// Only DECISIVE verdicts are ever inserted: an `Uncertain` is a transient model
 /// outage gated by [`EntryBackoff`], never pinned here. An exact-fingerprint hit is byte-identical
 /// evidence (the fingerprint is the whole-prompt hash), so a served verdict is exactly as valid as
 /// when it was judged — wider retention introduces no new staleness.
@@ -89,8 +89,8 @@ impl VerdictLru {
     }
 }
 
-/// The behavioral-bake snapshot (JEF-48): what the behavioral port saw in the most
-/// recent pass. The same per-pass figures feed the OTLP counters (JEF-100) — this is the
+/// The behavioral-bake snapshot: what the behavioral port saw in the most
+/// recent pass. The same per-pass figures feed the OTLP counters — this is the
 /// in-process mirror. Purely observational: it carries no per-pod payload, only counts and
 /// low-cardinality variant labels.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -103,7 +103,7 @@ pub struct BakeStats {
     /// (a namespace/name attribution, or a cgroup UID matching a pod in the snapshot).
     pub resolved: u64,
     /// Signals this pass whose attribution did NOT resolve (unknown cgroup UID — pod
-    /// gone or not yet observed). A sustained nonzero share is the JEF-48 attribution
+    /// gone or not yet observed). A sustained nonzero share is the attribution
     /// exit-criterion to watch.
     pub unresolved: u64,
     /// The live (TTL'd) runtime-store cardinality as of this pass — the working set.
@@ -115,14 +115,14 @@ pub struct BakeStats {
 
 impl BakeStats {
     /// Total signals ingested this pass (the sum across variants), the volume figure
-    /// for the JEF-48 "signal volume per node is sane" criterion.
+    /// for the "signal volume per node is sane" criterion.
     pub fn total_signals(&self) -> u64 {
         self.signals_by_variant.values().copied().sum()
     }
 
     /// The fraction of attributed signals that did NOT resolve to a live workload, in
     /// `[0, 1]`; `0.0` when nothing was attributed this pass (no signals → no misses).
-    /// This is the engine-side resolution rate JEF-48 reads attribution quality from.
+    /// This is the engine-side resolution rate reads attribution quality from.
     #[allow(dead_code)]
     pub fn unresolved_fraction(&self) -> f64 {
         let total = self.resolved + self.unresolved;
@@ -135,7 +135,7 @@ impl BakeStats {
 }
 
 /// The LIVE health of the model adjudicator, derived cheaply by piggybacking the LAST
-/// adjudication outcome (JEF-160) — NOT a fresh model call. The judging loop stamps this
+/// adjudication outcome — NOT a fresh model call. The judging loop stamps this
 /// on every fresh call (cache misses): a decisive verdict is [`Ok`](Self::Ok); an
 /// inconclusive one ("model unavailable" — a CPU-model timeout / down endpoint) is
 /// [`Timeout`](Self::Timeout). [`Unknown`](Self::Unknown) until the model has actually
@@ -174,7 +174,7 @@ impl ModelHealth {
     }
 }
 
-/// The engine's **config summary** for the readiness aggregation (JEF-160): presence/absence of
+/// The engine's **config summary** for the readiness aggregation: presence/absence of
 /// each decision input, NOT a config echo. This carries no secret names, no endpoints, no
 /// values — only whether an input is wired and (for the file-backed stores) how many
 /// entries loaded, which is a non-sensitive coverage figure. Captured once at boot from the
@@ -189,7 +189,7 @@ pub struct ReadinessConfig {
     /// How many KEV CVE ids loaded from the mounted catalogue. `0` ⇒ the store is absent
     /// or empty, so no known-exploited enrichment reaches the model.
     pub kev_count: usize,
-    /// How many EPSS scores loaded from the mounted FIRST.org feed (JEF-243). `0` ⇒ the
+    /// How many EPSS scores loaded from the mounted FIRST.org feed. `0` ⇒ the
     /// store is absent or empty, so no exploit-prediction enrichment reaches the model.
     pub epss_count: usize,
     /// The decision journal is durable (a writable `PROTECTOR_ENGINE_JOURNAL_PATH` volume
@@ -201,18 +201,18 @@ pub struct ReadinessConfig {
     /// it rather than infer it.
     pub armed: bool,
     /// Age (seconds) of the sigstore **TUF trust-root cache** (`PROTECTOR_TUF_CACHE`), or `None`
-    /// when no cache has been fetched yet (JEF-280). A stale/starved trust root causes signatures
+    /// when no cache has been fetched yet. A stale/starved trust root causes signatures
     /// to read [`UnverifiableHere`](crate::policies::signature::SigningPosture::UnverifiableHere)
     /// and can mass-blind signing detection, so its freshness is surfaced in readiness. Refreshed
     /// each pass from the cache dir's newest mtime.
     pub tuf_cache_age_secs: Option<u64>,
-    /// A fleet-wide spike in `UnverifiableHere` postures this pass (JEF-280): a large fraction of
+    /// A fleet-wide spike in `UnverifiableHere` postures this pass: a large fraction of
     /// observed images suddenly fail to verify against our trust root — a hint the trust root
     /// drifted or is being starved. Surfaced (non-green) rather than silently swallowed. Computed
     /// each pass by [`is_unverifiable_spike`](crate::engine::supply_chain::signing_trust::is_unverifiable_spike).
     pub unverifiable_spike: bool,
     /// How many images were left in the transient
-    /// [`Checking`](crate::policies::signature::SigningPosture::Checking) state this pass (JEF-326):
+    /// [`Checking`](crate::policies::signature::SigningPosture::Checking) state this pass:
     /// verification couldn't complete (registry/Rekor/TUF unreachable, or the per-image budget
     /// `PROTECTOR_VERIFY_TIMEOUT` was exhausted), so their signing posture is UNKNOWN, not clean.
     /// `Checking` is deliberately never cached, so a persistently non-zero count means signing
@@ -220,7 +220,7 @@ pub struct ReadinessConfig {
     pub checking_images: usize,
 }
 
-/// The delta-aware baseline (ADR-0023, JEF-391): the surface the model judged at an entry's last
+/// The delta-aware baseline (ADR-0023): the surface the model judged at an entry's last
 /// DECISIVE verdict, paired with that verdict. The re-judge gate diffs the current surface against
 /// `surface` — a purely subtractive / unchanged delta serves `verdict` with no fresh model call.
 #[derive(Debug, Clone)]
@@ -234,7 +234,7 @@ pub struct VerdictBaseline {
 }
 
 /// One internet-facing entry's verdict state — the SINGLE source of truth for the
-/// model's call on that entry (JEF-157). Collapses what used to be four separate
+/// model's call on that entry. Collapses what used to be four separate
 /// per-entry maps in the engine (`last_verdict` / `verdict_cache` / `restored_verdicts`
 /// / `journaled_verdicts`) into one record, so the findings snapshot and the judgement
 /// record can never disagree on an entry's verdict and the verdict is visible the instant
@@ -245,25 +245,25 @@ pub struct VerdictEntry {
     /// memory (formerly `last_verdict`). `None` until a live verdict has been displayed
     /// this run; a journal-restored entry carries [`restored`](Self::restored) instead.
     pub display: Option<Verdict>,
-    /// A verdict restored from the durable journal on boot (JEF-141), its summary string
+    /// A verdict restored from the durable journal on boot, its summary string
     /// — held until a live verdict supersedes it (formerly `restored_verdicts`). Cleared
     /// once `display` lands a live verdict for the entry.
     pub restored: Option<String>,
     /// The bounded per-entry LRU of DECISIVE verdicts keyed by evidence fingerprint —
-    /// the re-judge gate (formerly `verdict_cache`, a single slot). JEF-390 widened it from
+    /// the re-judge gate (formerly `verdict_cache`, a single slot). widened it from
     /// one slot to N so a workload whose evidence oscillates between recently-judged states
     /// (A→B→A) HITS on the return instead of re-judging every flip. Only decisive verdicts
     /// are ever inserted; a matching fingerprint serves without calling the (slow CPU) model.
     pub cached: VerdictLru,
-    /// The delta-aware baseline (ADR-0023, JEF-391): the [`JudgedSurface`] snapshotted at this
+    /// The delta-aware baseline (ADR-0023): the [`JudgedSurface`] snapshotted at this
     /// entry's LAST DECISIVE verdict, paired with that verdict. The re-judge gate diffs the
     /// CURRENT surface against this: an ADDITIVE delta (something new) re-judges; a purely
     /// subtractive / unchanged delta serves this stored verdict without a fresh model call (the
     /// prior decisive verdict still holds — its surface only shrank). `None` until the entry has
     /// been judged decisively this run (a first judgment re-judges). Only DECISIVE verdicts set
-    /// it — an `Uncertain` never does (JEF-234), so a failed call never establishes a baseline
+    /// it — an `Uncertain` never does, so a failed call never establishes a baseline
     /// that could suppress a later re-judge. In-memory only: a restart re-seeds the LRU from the
-    /// journal (JEF-301) but NOT the baseline, so a post-restart entry re-judges once (fail
+    /// journal but NOT the baseline, so a post-restart entry re-judges once (fail
     /// toward re-judging) before its baseline is re-established. Bounded — one snapshot per
     /// entry, replaced each decisive verdict, sized by the entry's proven surface.
     pub baseline: Option<VerdictBaseline>,
@@ -271,36 +271,36 @@ pub struct VerdictEntry {
     /// (formerly `journaled_verdicts`), so a steady-state cluster writes/notifies once
     /// per change, not per pass.
     pub journaled: Option<String>,
-    /// Exponential-backoff state for INCONCLUSIVE adjudication (JEF-234). An `Uncertain`
+    /// Exponential-backoff state for INCONCLUSIVE adjudication. An `Uncertain`
     /// verdict (a model timeout / Ollama-down / OOM) is never cached, so without this gate
     /// the entry is re-judged every pass and hammers a struggling model. Each `Uncertain`
     /// grows the retry delay; a decisive verdict resets it. The verdict cache above still
     /// serves decisive verdicts — this only gates the re-judge of failed ones.
     pub backoff: EntryBackoff,
-    /// When this entry's key FIRST appeared (JEF-201) — set the first pass the key is seen,
+    /// When this entry's key FIRST appeared — set the first pass the key is seen,
     /// never overwritten after. The Δ column's age is measured from here, NOT from render
     /// time, so it survives repeated reads. A journal-restored entry seeds this with a
     /// synthetic PAST instant (so it never reads as "this pass") via [`restored_recency`].
     ///
     /// [`restored_recency`]: Self::restored_recency
     pub first_seen: Option<Instant>,
-    /// The DISPLAY posture this entry carried on the PREVIOUS pass (JEF-201), updated each
+    /// The DISPLAY posture this entry carried on the PREVIOUS pass, updated each
     /// pass by diffing the new posture against it. `None` until the first recency update; the
     /// diff against it yields the Δ glyph (escalated / de-escalated / unchanged).
     pub prev_posture: Option<StoredPosture>,
-    /// The Δ verdict computed on the LAST recency update (JEF-201) — what changed at the most
+    /// The Δ verdict computed on the LAST recency update — what changed at the most
     /// recent pass. Held here (not recomputed at render) so a re-read with no new pass shows
     /// the same Δ rather than flickering to NEW. `None` until the first recency update has run
     /// for the entry.
     pub last_delta: Option<Delta>,
-    /// Whether this entry was RESTORED from the durable journal on boot (JEF-201, JEF-141) —
+    /// Whether this entry was RESTORED from the durable journal on boot —
     /// it existed before this run, so its first live recency update must read [`Delta::Restored`],
     /// never NEW. Cleared once a live pass re-judges it.
     pub restored_recency: bool,
     /// When the model itself last answered THIS entry DECISIVELY (a genuine `judge()` call
     /// that landed, not a cache hit or a delta-hold serve) — the actuation-trust clock. `None`
     /// until the entry has had a fresh decisive call this run. Deliberately NOT touched by a
-    /// cache hit (JEF-390) or a subtractive-delta hold (JEF-391): those are exactly as valid
+    /// cache hit or a subtractive-delta hold: those are exactly as valid
     /// for DISPLAY as the call they replay (ADR-0023), but they resolve before the breaker
     /// check (`adj_gate`) and so can serve a decisive-looking verdict while the model is
     /// CURRENTLY known to be down. [`verdict_fresh`](Self::verdict_fresh) is the actuation
@@ -320,7 +320,7 @@ impl VerdictEntry {
             .or_else(|| self.restored.clone())
     }
 
-    /// The entry's resolved recency facts at `now` (JEF-201): the stored Δ verdict and the
+    /// The entry's resolved recency facts at `now`: the stored Δ verdict and the
     /// age since `first_seen`. The Δ is the one computed at the LAST recency update (held in
     /// `last_delta`), so this is stable across repeated reads — `now` only freshens the
     /// human age, never the glyph. A restored entry reports no meaningful age (its first_seen
@@ -338,7 +338,7 @@ impl VerdictEntry {
     }
 }
 
-/// The single per-entry verdict store (JEF-157): the one source of truth for the
+/// The single per-entry verdict store: the one source of truth for the
 /// model's verdict per internet-facing entry, shared (`Arc`) between the judging loop (the
 /// writer) and the findings snapshot (the reader). Both the findings snapshot (via
 /// [`super::Findings::snapshot`]) and the per-pass display derive each finding's verdict by
@@ -346,13 +346,13 @@ impl VerdictEntry {
 /// there is no end-of-pass re-publish lag. Keyed by the entry's node key.
 pub struct VerdictStore {
     entries: Mutex<BTreeMap<String, VerdictEntry>>,
-    /// The GLOBAL inconclusive-adjudication circuit-breaker (JEF-234): when the model
+    /// The GLOBAL inconclusive-adjudication circuit-breaker: when the model
     /// looks fully down (a run of consecutive `Uncertain` calls across all entries), the
     /// whole judging pass skips its model calls for a cooldown, so a fully-down Ollama's
     /// total calls-per-window is bounded regardless of entry count. A decisive success
     /// closes it. Separate lock from `entries` — it is touched once per call, not per entry.
     breaker: Mutex<CircuitBreaker>,
-    /// The per-entry LRU capacity (JEF-390), resolved once at construction from
+    /// The per-entry LRU capacity, resolved once at construction from
     /// `PROTECTOR_VERDICT_CACHE_SLOTS` so every entry's cache is bounded consistently and the
     /// process-global env is read exactly once, not per insert.
     cache_slots: usize,
@@ -364,7 +364,7 @@ impl Default for VerdictStore {
     }
 }
 
-/// A stable per-entry seed for the backoff jitter (JEF-234), derived from the entry key
+/// A stable per-entry seed for the backoff jitter, derived from the entry key
 /// so two entries that fail on the same pass spread their retries apart rather than
 /// thundering back together. A plain `DefaultHasher` of the key — deterministic per key,
 /// no external dependency.
@@ -380,7 +380,7 @@ impl VerdictStore {
         Self::with_cache_slots(verdict_cache_slots())
     }
 
-    /// Construct with an explicit per-entry LRU capacity (JEF-390), bypassing the
+    /// Construct with an explicit per-entry LRU capacity, bypassing the
     /// process-global env — so tests exercise eviction deterministically without racing on
     /// `PROTECTOR_VERDICT_CACHE_SLOTS` under parallel `nextest`.
     fn with_cache_slots(cache_slots: usize) -> Self {
@@ -409,10 +409,10 @@ impl VerdictStore {
         f(entries.entry(entry.to_string()).or_default());
     }
 
-    /// Seed a journal-restored verdict summary for an entry (JEF-141) — held until a
+    /// Seed a journal-restored verdict summary for an entry — held until a
     /// live verdict supersedes it. Does not touch the cache or the journaled-dedup key.
     ///
-    /// JEF-201: a restored entry existed BEFORE this run, so it must never read as NEW in the
+    /// a restored entry existed BEFORE this run, so it must never read as NEW in the
     /// Δ column. This marks it `restored_recency` and seeds its `first_seen` with a synthetic
     /// PAST instant (`restored_at`, the journal's last-pass time) so the recency tracker treats
     /// it as pre-existing. The first live pass that re-judges it clears the restored flag.
@@ -428,11 +428,11 @@ impl VerdictStore {
         });
     }
 
-    /// Record this pass's display POSTURE for an entry and compute its Δ (JEF-201): set
+    /// Record this pass's display POSTURE for an entry and compute its Δ: set
     /// `first_seen` on first sight, diff the new posture against the stored `prev_posture`,
     /// store the resulting [`Delta`], and roll `prev_posture` forward. `now` is injected (the
     /// pass's single `Instant`) so the recency tracking is deterministic in tests and shares
-    /// the same clock as the JEF-234 backoff. Pure presentation metadata — never gates a
+    /// the same clock as the backoff. Pure presentation metadata — never gates a
     /// decision (ADR-0016). A previously-restored entry's first live posture clears the
     /// restored flag and reads as `Restored` for one pass (it existed before this run), then
     /// diffs normally.
@@ -460,7 +460,7 @@ impl VerdictStore {
         });
     }
 
-    /// The entry's resolved recency facts at `now` (JEF-201) — the Δ verdict + age the Δ
+    /// The entry's resolved recency facts at `now` — the Δ verdict + age the Δ
     /// column renders. `None` when the entry has no record yet (never seen). `now` is injected
     /// for deterministic tests.
     pub fn recency_for(&self, entry: &str, now: Instant) -> Option<RecencyInfo> {
@@ -474,7 +474,7 @@ impl VerdictStore {
     /// The cached decisive verdict for an entry whose fingerprint matches ANY slot in its
     /// per-entry LRU — the re-judge gate. `Some(verdict)` serves the cache (no model call) and
     /// promotes that state to most-recently-used, so a repeatedly-revisited state survives
-    /// eviction (JEF-390); `None` means re-judge. Takes `&mut` through the lock because a HIT
+    /// eviction; `None` means re-judge. Takes `&mut` through the lock because a HIT
     /// reorders the LRU.
     pub fn cached_for(&self, entry: &str, fingerprint: &str) -> Option<Verdict> {
         self.entries
@@ -484,14 +484,14 @@ impl VerdictStore {
             .and_then(|e| e.cached.get(fingerprint))
     }
 
-    /// Cache a fresh DECISIVE verdict + its fingerprint in the entry's per-entry LRU (JEF-390),
+    /// Cache a fresh DECISIVE verdict + its fingerprint in the entry's per-entry LRU,
     /// evicting the least-recently-used state once the cache exceeds its capacity.
     pub fn cache_decisive(&self, entry: &str, fingerprint: String, verdict: Verdict) {
         let cap = self.cache_slots;
         self.update(entry, |e| e.cached.insert(fingerprint, verdict, cap));
     }
 
-    /// ADR-0023 (JEF-391) — the entry's delta-aware baseline: the [`JudgedSurface`] + decisive
+    /// ADR-0023 — the entry's delta-aware baseline: the [`JudgedSurface`] + decisive
     /// verdict captured at its last decisive judgment, or `None` if it has none yet this run. The
     /// classification loop reads this BEFORE building the prompt so it can render the additions
     /// since the baseline and decide whether the delta is additive (re-judge) or purely
@@ -504,9 +504,9 @@ impl VerdictStore {
             .and_then(|e| e.baseline.clone())
     }
 
-    /// ADR-0023 (JEF-391) — snapshot the entry's judged surface + this DECISIVE verdict as its
+    /// ADR-0023 — snapshot the entry's judged surface + this DECISIVE verdict as its
     /// new baseline, replacing any prior one. Called only for a decisive verdict (an `Uncertain`
-    /// never sets a baseline — JEF-234 — so a failed call can never suppress a later re-judge).
+    /// never sets a baseline — — so a failed call can never suppress a later re-judge).
     /// A subtractive-serve does NOT call this: the baseline stays put so the verdict remains
     /// "valid as of baseline B" until a genuinely additive delta arrives.
     pub fn set_baseline(&self, entry: &str, surface: JudgedSurface, verdict: Verdict) {
@@ -515,7 +515,7 @@ impl VerdictStore {
         });
     }
 
-    /// JEF-234 — whether the judging loop should SKIP the model call for `entry` this pass
+    /// — whether the judging loop should SKIP the model call for `entry` this pass
     /// because it is in inconclusive-adjudication backoff at `now`. On a cache MISS the loop
     /// checks this BEFORE calling `judge()`: if backing off it keeps the prior display
     /// verdict and does not touch the (struggling) model. `now` is injected for testability.
@@ -527,7 +527,7 @@ impl VerdictStore {
             .is_some_and(|e| e.backoff.is_backing_off(now))
     }
 
-    /// JEF-234 — record an INCONCLUSIVE (`Uncertain`) adjudication for `entry` at `now`:
+    /// — record an INCONCLUSIVE (`Uncertain`) adjudication for `entry` at `now`:
     /// grow the entry's exponential backoff AND advance the global breaker's failure run.
     /// The jitter seed is derived from the entry key so distinct entries de-sync their
     /// retries. Does NOT cache the verdict (Uncertain is never decisive) — the backoff is
@@ -541,11 +541,11 @@ impl VerdictStore {
             .record_failure(now);
     }
 
-    /// JEF-234 — record a DECISIVE adjudication for `entry`: clear the entry's backoff and
+    /// — record a DECISIVE adjudication for `entry`: clear the entry's backoff and
     /// close the global breaker (the model answered). Pairs with [`cache_decisive`], which
     /// the loop still calls to cache the verdict itself. Also stamps `decisive_at` (the
     /// actuation-trust clock read by [`verdict_fresh`](Self::verdict_fresh)) — `now` is the
-    /// pass's single injected clock, shared with the JEF-234 backoff.
+    /// pass's single injected clock, shared with the backoff.
     ///
     /// [`cache_decisive`]: Self::cache_decisive
     pub fn record_decisive(&self, entry: &str, now: Instant) {
@@ -579,7 +579,7 @@ impl VerdictStore {
             .is_some_and(|at| now.saturating_duration_since(at) <= max_age)
     }
 
-    /// JEF-234 — whether the GLOBAL breaker is open at `now`: the whole judging pass should
+    /// — whether the GLOBAL breaker is open at `now`: the whole judging pass should
     /// skip its model calls (the model looks fully down). `now` is injected for testability.
     pub fn breaker_open(&self, now: Instant) -> bool {
         self.breaker
@@ -611,18 +611,18 @@ impl VerdictStore {
     }
 
     /// Resolve AND record what to DISPLAY for an entry given THIS pass's verdict, in one
-    /// place (JEF-371). This is the single owner of the display carry-forward policy — the
-    /// blank-dashboard-incident surface (JEF-157) — collapsing the precedence that used to be
+    /// place. This is the single owner of the display carry-forward policy — the
+    /// blank-dashboard-incident surface — collapsing the precedence that used to be
     /// split between the engine's publish phase and [`set_display`](Self::set_display):
     ///
     /// - A DECISIVE verdict this pass is shown as-is and becomes the new displayed verdict.
     /// - An `Uncertain` this pass (a transient model timeout / outage) does NOT regress the
     ///   displayed posture: if a prior DECISIVE verdict is on display it is CARRIED FORWARD, so
     ///   the dashboard keeps showing the last real call rather than blanking to "uncertain"
-    ///   (JEF-234's Uncertain-never-cached discipline lives on the cache path; this is its
+    ///   ('s Uncertain-never-cached discipline lives on the cache path; this is its
     ///   display twin). With no prior decisive verdict, the `Uncertain` itself is shown.
     /// - Whatever is chosen becomes the live `display`, which SUPERSEDES any journal-restored
-    ///   summary for the entry (a live verdict always wins over a boot-restored one — JEF-141).
+    ///   summary for the entry (a live verdict always wins over a boot-restored one —).
     ///   A restored summary therefore shows only until the first live verdict lands here.
     ///
     /// Returns the resolved verdict so the caller can journal / notify / stamp chains with the

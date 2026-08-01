@@ -1,4 +1,4 @@
-//! The k8s audit-log ingest (JEF-269): the corroborating runtime signal the eBPF agent
+//! The k8s audit-log ingest: the corroborating runtime signal the eBPF agent
 //! **cannot** see — a secret fetched through the Kubernetes API via a workload's
 //! ServiceAccount RBAC (`get`/`list`/`watch` on `secrets`).
 //!
@@ -54,7 +54,7 @@ fn bounded(s: &str) -> String {
     s.chars().take(MAX_FIELD_LEN).collect()
 }
 
-/// A normalized, allowed API secret-read lifted from one audit event (JEF-269) — the
+/// A normalized, allowed API secret-read lifted from one audit event — the
 /// requesting ServiceAccount and the `objectRef` secret it read. Carries a secret's
 /// *name/ref* only, never its value. The verb is retained so a `list`/`watch` of a
 /// collection (no single `secret_name`) is represented honestly rather than as a `get` of
@@ -278,17 +278,17 @@ async fn ingest(
     StatusCode::OK
 }
 
-/// Serve the k8s audit-log ingest (JEF-269). One route (`/`) accepts the apiserver's audit
+/// Serve the k8s audit-log ingest. One route (`/`) accepts the apiserver's audit
 /// webhook POSTs. Guarded exactly like the runtime ingest ([`super::runtime::serve_runtime`]):
 /// a REQUIRED bearer token (rejected 401 before deserialization; a missing token refuses
-/// to bind at all — JEF-576), a per-peer rate limit, and a body-size cap. This is the
+/// to bind at all —), a per-peer rate limit, and a body-size cap. This is the
 /// cluster-facing glue; the parser and store it drives are what the tests cover.
 pub async fn serve_audit(
     addr: SocketAddr,
     events: Arc<AuditEvents>,
     notify: Sender<()>,
 ) -> anyhow::Result<()> {
-    // REQUIRED, not optional (JEF-576): a missing token refuses to start this listener
+    // REQUIRED, not optional: a missing token refuses to start this listener
     // rather than serving it unauthenticated — see `serve_runtime`'s comment for the full
     // rationale (the same posture applies here).
     let token = require_token(IngestToken::from_env(), "k8s audit-log ingest", addr)?;

@@ -10,7 +10,7 @@
 # DaemonSet's securityContext, never baked into the image.
 
 # bookworm-based to match the bookworm-slim runtime's glibc 2.36.
-# Via mirror.gcr.io (Docker Hub pull-through) to dodge the anonymous 429 (JEF-78).
+# Via mirror.gcr.io (Docker Hub pull-through) to dodge the anonymous 429.
 FROM mirror.gcr.io/library/rust:1-bookworm AS builder
 WORKDIR /app
 # cmake: reqwest's rustls provider (aws-lc-rs → aws-lc-sys) is a C build. zstd: unpacks
@@ -20,7 +20,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake curl ca-certificates zstd \
     && rm -rf /var/lib/apt/lists/*
 ENV CFLAGS=-std=gnu17
-# sccache (JEF-84) is the dep-caching layer — it shares the rustc object cache with the in-cluster
+# sccache is the dep-caching layer — it shares the rustc object cache with the in-cluster
 # Redis (cluster repo charts/sccache), reached via the meshed BuildKit's own identity, so a
 # workspace dep compiled by ANY repo's image build (or the CI test build) is reused here. sccache
 # is a HARD GATE — if it can't start against Redis the build FAILS (no fallback). The build
@@ -35,7 +35,7 @@ RUN set -eux; ver=0.16.0; \
 ENV RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0
 # Prebuilt bpf-linker (sha256-pinned, per-arch) + nightly/rust-src for the bpf target's
 # build-std. Prebuilt so the image build stays light (no LLVM source build).
-# ARCH-AWARE: with native multi-arch builders (JEF-295/#161) this builder stage runs on
+# ARCH-AWARE: with native multi-arch builders (#161) this builder stage runs on
 # the TARGET arch, so a hardcoded aarch64 bpf-linker Syntax-errors when run on the amd64
 # build leg ("bpf-linker: 1: Syntax error"). Pick the musl build by TARGETARCH
 # (arm64->aarch64, amd64->x86_64), keeping the per-arch SHA-256 pin.
@@ -63,7 +63,7 @@ COPY agent/ agent/
 COPY behavior/ behavior/
 WORKDIR /app/agent
 # Workspace target is /app/agent/target; the excluded ebpf crate keeps its own.
-# sccache backend = the shared Cloudflare R2 bucket (charts/sccache, ADR-0020, JEF-584).
+# sccache backend = the shared Cloudflare R2 bucket (charts/sccache, ADR-0020).
 # Config + bucket-scoped token arrive as build SECRETS, never ENV/build-arg (those persist
 # in `docker history`). Fail-soft: scripts/start-sccache-docker.sh probes, retries, then
 # degrades to a local disk cache rather than failing the build.

@@ -41,18 +41,18 @@ fn from_report(report: &Value) -> Option<ImageVulnerabilities> {
                         sources: vec![Provenance::new("trivy", SystemTime::now())],
                         // Package coordinates (trivy-operator field names): `resource`
                         // is the package name, `installedVersion`/`fixedVersion` the
-                        // versions. `pkg_name` drives the JEF-51 runtime correlation.
+                        // versions. `pkg_name` drives the runtime correlation.
                         pkg_name: opt_str(v, "resource"),
                         installed_version: opt_str(v, "installedVersion"),
                         fixed_version: opt_str(v, "fixedVersion"),
-                        // Advisory free-text (JEF-66): trivy-operator's
+                        // Advisory free-text: trivy-operator's
                         // `VulnerabilityReport` items carry a short `title` and a
                         // `primaryLink` URL (it omits the full `description` to keep CRs
                         // small). Both are UNTRUSTED third-party text — they are fenced
                         // before they reach the model prompt, never trusted here.
                         title: opt_str(v, "title"),
                         primary_link: opt_str(v, "primaryLink"),
-                        // CVSS base score (JEF-242): trivy-operator emits a `score` float
+                        // CVSS base score: trivy-operator emits a `score` float
                         // per vulnerability when it has one. A STRUCTURED numeric severity
                         // signal (not free-text) — absent ⇒ None. We lean on Trivy for CVE
                         // metadata now that the NVD advisory feed is retired.
@@ -106,13 +106,13 @@ mod tests {
         assert_eq!(v0.severity, Severity::Critical);
         // trivy alone never asserts active exploitation.
         assert!(!v0.exploited_in_wild);
-        // Package coordinates are now preserved (JEF-51).
+        // Package coordinates are now preserved.
         assert_eq!(v0.pkg_name.as_deref(), Some("log4j-core"));
         assert_eq!(v0.installed_version.as_deref(), Some("2.14.0"));
         assert_eq!(v0.fixed_version.as_deref(), Some("2.17.0"));
         // Reachability is not asserted by the scanner — it starts Unknown.
         assert_eq!(v0.reachability, Reachability::Unknown);
-        // Advisory free-text (JEF-66): title + primaryLink are now preserved.
+        // Advisory free-text: title + primaryLink are now preserved.
         assert_eq!(
             v0.title.as_deref(),
             Some("Remote code execution via JNDI lookup")
@@ -128,7 +128,7 @@ mod tests {
         // primaryLink is None — both stay off the prompt rather than emitting blanks.
         assert_eq!(parsed.vulnerabilities[1].title, None);
         assert_eq!(parsed.vulnerabilities[1].primary_link, None);
-        // CVSS score (JEF-242): the float trivy emits parses; absent ⇒ None.
+        // CVSS score: the float trivy emits parses; absent ⇒ None.
         assert_eq!(v0.score, Some(9.8));
         assert_eq!(
             parsed.vulnerabilities[1].score, None,

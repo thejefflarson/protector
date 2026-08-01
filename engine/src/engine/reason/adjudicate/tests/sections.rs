@@ -1,4 +1,4 @@
-//! Adjudicator unit tests, JEF-387: the per-section prompt fingerprints and the chain-shape
+//! Adjudicator unit tests, the per-section prompt fingerprints and the chain-shape
 //! hash the churn-attribution harness relies on. Kept in its own submodule (like `group_1`..)
 //! purely to hold every test file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]

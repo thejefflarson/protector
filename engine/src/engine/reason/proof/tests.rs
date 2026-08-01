@@ -148,7 +148,7 @@ fn redundant_paths_have_no_single_edge_cut() {
         from_web.single_edge_cuts.is_empty(),
         "redundant paths ⇒ no single edge severs the chain"
     );
-    // JEF-281: the redundancy is enumerated, not collapsed to one path — BOTH proven paths
+    // the redundancy is enumerated, not collapsed to one path — BOTH proven paths
     // (web → db → secret AND web → cache → secret) are carried, so the finding detail can show
     // the complete picture. This is the exact information that explains the no-single-edge-cut
     // disposition. Bounded and not truncated on this small graph.

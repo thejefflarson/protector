@@ -121,7 +121,7 @@ we do not build a bespoke ID-JAG path.
 ADR-0016 establishes that the **deterministic layer proves and enriches; the model decides
 breach; presentation is a view, never a decision gate** — and the repo carries that
 "presentation is a view, never a gate" principle from ADR-0016 throughout (the dashboard
-module's own doc-comment, ADR-0020 §JEF-265.4, ADR-0025's "Reaffirms 0016"). Nothing here
+module's own doc-comment, ADR-0020 §.4, ADR-0025's "Reaffirms 0016"). Nothing here
 touches that:
 
 - Authentication gates **who may look at the view.** It is upstream of, and orthogonal to,
@@ -145,7 +145,7 @@ endpoint it points at. That is an **outbound call.** Protector's posture is zero
 ADR-0020 hold.
 
 It resolves cleanly under **the exact test ADR-0015 established** for the CISA KEV catalogue
-fetch (§Context.1, §JEF-238 amendment): the rejected lane there was a **per-CVE** OSV/NVD
+fetch (§Context.1, § amendment): the rejected lane there was a **per-CVE** OSV/NVD
 lookup, because it is *keyed on the cluster's own data* (its CVE profile) and leaks that
 profile to a third party on every pass. The **sanctioned** lane was the KEV catalogue GET,
 because it is **the same request for every relying party** and carries **no cluster-specific
