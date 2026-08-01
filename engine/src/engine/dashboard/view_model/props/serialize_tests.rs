@@ -669,6 +669,10 @@ fn sample_finding(id: &str, posture: Posture, verdict: Option<String>) -> Findin
         paths: vec![],
         paths_truncated: false,
         cut: None,
+        cuts: CutSetProps {
+            assessment: "awaiting",
+            rows: vec![],
+        },
         evidence: EvidenceProps::default(),
         judgement: JudgementProps::default(),
         blind_node_caveat: None,

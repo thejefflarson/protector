@@ -707,6 +707,40 @@ summary:focus-visible,
   border-radius: var(--radius-chip); padding: var(--space-1) var(--space-2);
   font-size: var(--fs-data); line-height: var(--lh-data);
 }
+
+/* the model's cut-choice set (ADR-0034 / JEF-674) — one row per contained node: the fenced key,
+   its entry-vs-downstream role, the fixed mechanism string, and an advisory blast-radius note. */
+.cut-set-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-data); line-height: var(--lh-data); }
+.cut-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2);
+  padding: var(--space-2) 0; border-bottom: var(--hairline) solid var(--border);
+}
+.cut-row:last-child { border-bottom: none; }
+.cut-row-node {
+  display: inline-block;
+  background: var(--surface); border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-chip); padding: var(--space-1) var(--space-2);
+  font-size: var(--fs-data); line-height: var(--lh-data); word-break: break-word;
+}
+.cut-row-role {
+  font-family: var(--font-data);
+  font-size: var(--fs-micro); line-height: var(--lh-micro);
+  font-weight: var(--fw-micro); letter-spacing: var(--track-micro); text-transform: uppercase;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-chip);
+  border: var(--hairline) solid var(--border);
+  color: var(--ink-2);
+}
+.cut-row-entry { color: var(--ink-1); font-weight: var(--fw-bold); }
+.cut-row-mechanism { color: var(--ink-2); }
+.cut-row-blast { font-size: var(--fs-micro); line-height: var(--lh-micro); }
+/* "attack, no cut warranted" (ADR-0034 D1) — a valid decision, not an error state, so it is
+   NOT posture-red; and "uncertain" is deliberately styled off the amber awaiting/uncertain
+   token, NEVER the cleared/green one (the honesty invariant, ADR-0016). */
+.cut-attack-no-cut { font-size: var(--fs-data); line-height: var(--lh-data); color: var(--ink-2); }
+.cut-uncertain { color: var(--posture-uncertain); }
+.cut-caveat .caveat-glyph { margin-right: var(--space-1); }
+
 /* evidence tables — numerics right-aligned, severity muted */
 .ev-group { margin-bottom: var(--space-3); }
 .ev-table {
@@ -1251,3 +1285,30 @@ summary:focus-visible,
    in-memory reset note is muted but present so an empty log is never over-read. */
 .empty-access-calm .empty-head { color: var(--ink-1); }
 .access-reset-note { color: var(--ink-3); }
+
+/* ==================== Pre-arm scope-simulation preview panel (Action tab) ==================== */
+/* A candidate-scope form, not a poll-driven table — same field/label rhythm as the rest of the
+   dashboard so it never reads like a bolted-on widget. Computing the preview mutates nothing. */
+.scope-preview-form {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.scope-preview-field {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  min-width: 22ch; flex: 1 1 22ch;
+}
+.scope-preview-field input {
+  font-family: var(--font-data); font-size: var(--fs-body);
+  color: var(--ink-1); background: var(--surface);
+  border: var(--hairline) solid var(--border); border-radius: var(--radius-chip);
+  padding: var(--space-2) var(--space-3);
+}
+.scope-preview-submit {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  font-family: var(--font-ui); font-size: var(--fs-body); font-weight: var(--fw-bold);
+  color: var(--ink-1); background: var(--surface-raised);
+  border: var(--hairline) solid var(--border); border-radius: var(--radius-chip);
+  padding: var(--space-2) var(--space-4);
+}
+.scope-preview-submit:hover { background: var(--surface-hover); }
+.scope-preview-result .trust-entry-meta { font-family: var(--font-data); }

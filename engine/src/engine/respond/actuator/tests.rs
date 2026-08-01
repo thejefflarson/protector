@@ -625,6 +625,15 @@ fn from_names_arms_only_network_and_ignores_non_actuatable_classes() {
     assert!(!policy.is_enabled(ProposedAction::RemoveEscapePrimitive));
 }
 
+/// Every class the fixtures below apply, all armed — isolates the health/justification
+/// axes these lifecycle tests exercise from the disarm axis (covered by
+/// `reconcile_reverts_when_the_action_class_is_no_longer_armed_even_if_still_justified`).
+fn fully_armed() -> EnabledActions {
+    EnabledActions::none()
+        .enable(ProposedAction::RevokeRbacGrant)
+        .enable(ProposedAction::DenyNetworkPath)
+}
+
 #[test]
 fn lifecycle_reverts_on_health_divergence_and_retirement_else_holds() {
     let rbac = mitigation(
@@ -652,6 +661,7 @@ fn lifecycle_reverts_on_health_divergence_and_retirement_else_holds() {
     let reversions = log.reconcile(
         &health(&[("workload/app/Pod/api", Health::Halted)]),
         &HashSet::new(),
+        &fully_armed(),
     );
     assert_eq!(reversions.len(), 2);
     assert_eq!(log.active_count(), 0);
@@ -663,9 +673,48 @@ fn lifecycle_reverts_on_health_divergence_and_retirement_else_holds() {
     assert!(
         log.reconcile(
             &health(&[("workload/app/Pod/api", Health::Alive)]),
-            &justified
+            &justified,
+            &fully_armed(),
         )
         .is_empty()
+    );
+    assert_eq!(log.active_count(), 1);
+}
+
+/// The core disarm mechanism (ADR-0021's enforcement gate narrowing, and the
+/// break-glass kill switch): an action reverts the instant its OWN class is no longer
+/// armed, independent of health or chain justification — both held perfectly good here,
+/// so the ONLY thing that changed is the armed set going empty (an `enforce`→`audit`
+/// narrow, or break-glass engaging).
+#[test]
+fn reconcile_reverts_when_the_action_class_is_no_longer_armed_even_if_still_justified() {
+    let net = mitigation(
+        "workload/app/Pod/web",
+        "reaches/Tcp/5432",
+        "workload/app/Pod/db",
+        ProposedAction::DenyNetworkPath,
+    );
+    let mut log = ActionLog::new();
+    log.record(net.clone(), vec![]);
+    let justified = HashSet::from([net.cut_signature()]);
+
+    // Healthy baseline AND still-justified — the ONLY change is the disarm.
+    let reversions = log.reconcile(&health(&[]), &justified, &EnabledActions::none());
+    assert_eq!(
+        reversions.len(),
+        1,
+        "a disarmed class must revert even a still-justified, healthy action"
+    );
+    assert_eq!(log.active_count(), 0);
+
+    // Re-arming the SAME class, with the same health/justification, holds it — proving
+    // the revert above was specifically the disarm, not some other axis.
+    let mut log = ActionLog::new();
+    log.record(net.clone(), vec![]);
+    let armed = EnabledActions::none().enable(ProposedAction::DenyNetworkPath);
+    assert!(
+        log.reconcile(&health(&[]), &justified, &armed).is_empty(),
+        "the same action, still armed, holds"
     );
     assert_eq!(log.active_count(), 1);
 }

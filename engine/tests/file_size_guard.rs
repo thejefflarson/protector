@@ -62,8 +62,10 @@ fn no_source_file_exceeds_the_line_cap() {
     let root = repo_root();
     // First-party crate source trees. `agent/` is its own (out-of-workspace) eBPF crate,
     // but its hand-written source is still subject to the rule — only `vmlinux.rs` is
-    // exempt (handled by `is_generated`).
-    let src_trees = ["engine/src", "behavior/src", "agent"];
+    // exempt (handled by `is_generated`). `engine/examples` is included too (JEF-562):
+    // CLAUDE.md's cap has no example-file carve-out, and this tree previously went
+    // unchecked, which is exactly how `dashboard_preview.rs` grew past it unnoticed.
+    let src_trees = ["engine/src", "engine/examples", "behavior/src", "agent"];
 
     let mut files = Vec::new();
     for tree in src_trees {

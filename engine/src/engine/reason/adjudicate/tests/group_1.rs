@@ -633,8 +633,9 @@ fn prompt_includes_the_chain_evidence() {
         "names the runtime signal"
     );
     assert!(
-        prompt.contains("refuted"),
-        "offers the skeptic refuted verdict"
+        prompt.contains("no_attack"),
+        "offers the skeptic no_attack assessment (ADR-0034 D2: the 4-value verdict collapsed \
+         to a 3-value assessment)"
     );
     // JEF-51: the CVE is tagged with its reachability (here loaded-at-runtime — the only
     // reachability the JEF-453 filter shows the judge).
@@ -682,18 +683,18 @@ fn prompt_includes_the_chain_evidence() {
             && prompt.contains("cross-namespace"),
         "frames breach as exploitation evidence only — reachability (incl. cross-namespace) is severity, not a breach"
     );
-    // Calibration: the verdict menu now FORBIDS the `uncertain` escape hatch for
-    // absence-of-evidence. The argocd-server false-uncertain reason ("No exposed secrets,
-    // no live runtime signals, and no critical CVEs running") was a textbook refute; the
-    // strengthened menu line directs that case to `refuted`, reserving `uncertain` for
+    // Calibration: the assessment instruction now FORBIDS the `uncertain` escape hatch for
+    // absence-of-evidence (ADR-0034's ancestor: the argocd-server false-uncertain reason "No
+    // exposed secrets, no live runtime signals, and no critical CVEs running" was a textbook
+    // `no_attack`); the instruction directs that case to `no_attack`, reserving `uncertain` for
     // self-contradictory / unintelligible evidence only.
     assert!(
         prompt.contains(
-            "\"uncertain\"   — ONLY when the evidence is self-contradictory or unintelligible. \
-             Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, \
-             and no exposed secret is a confident \"refuted\", not \"uncertain\"."
+            "Absence of evidence anywhere on the path is a confident \"no_attack\", not \
+             \"uncertain\" — reserve \"uncertain\" for self-contradictory or unintelligible \
+             evidence only."
         ),
-        "absence of evidence is directed to refuted, not the uncertain escape hatch"
+        "absence of evidence is directed to no_attack, not the uncertain escape hatch"
     );
 }
 

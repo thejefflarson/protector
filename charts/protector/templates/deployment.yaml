@@ -7,6 +7,11 @@
 {{- if and (eq .Values.mode "enforce") (not .Values.enforceScope.namespaces) (not .Values.enforceScope.labels) }}
 {{- fail "mode: enforce requires a non-empty enforceScope (namespaces and/or labels) — there is no enforce-everywhere wildcard (ADR-0021)" }}
 {{- end }}
+{{- /* ADR-0035 arming-ladder validation (defense-in-depth; the engine also falls back to
+  the narrowest rung on an unrecognized value): enforceRung must be a rung on the ladder. */}}
+{{- if not (or (eq .Values.enforceRung "edge-cut") (eq .Values.enforceRung "quarantine")) }}
+{{- fail (printf "enforceRung must be 'edge-cut' or 'quarantine', got %q" .Values.enforceRung) }}
+{{- end }}
 {{- /*
 Feed-fetcher sidecar wiring (JEF-238, JEF-243). When feedSync is ON (the default), a native
 sidecar (an initContainer with restartPolicy: Always) fetches TWO public read-only feeds
@@ -238,6 +243,13 @@ spec:
               value: {{ join "," .Values.enforceScope.namespaces | quote }}
             - name: PROTECTOR_ENFORCE_SCOPE_LABELS
               value: {{ include "protector.enforceScopeLabels" . | quote }}
+            # The ordered network-cut arming ladder (ADR-0035): how far `mode: enforce`
+            # is armed. `edge-cut` (the default) arms ONLY the surgical DenyNetworkPath
+            # cut; `quarantine` is an explicit second opt-in that adds the broader
+            # QuarantineEntry/QuarantineWorkload denies (implying the edge-cut rung too
+            # — one ordered position, not independent toggles). Ignored under mode: audit.
+            - name: PROTECTOR_ENFORCE_RUNG
+              value: {{ .Values.enforceRung | quote }}
             {{- if .Values.rekor.enabled }}
             # Rekor transparency-log lane (ADR-0020 §4): the one opt-in egress carve-out on
             # the signing lane. Off unless enabled here; timeouts/caps use code defaults.
@@ -283,10 +295,11 @@ spec:
             {{- end }}
             {{- if .Values.engine.enabled }}
             # --- mitigation engine ---
-            # Arming is derived from the top-level `mode`/`enforceScope` (ADR-0021), NOT a
-            # per-engine switch: `mode: enforce` arms the reversible network cut confined to
-            # `enforceScope`; `mode: audit` (default) is dry-run (shadow). `actuator` only
-            # selects the CNI mechanism used when it does actuate.
+            # Arming is derived from the top-level `mode`/`enforceScope`/`enforceRung`
+            # (ADR-0021/0035), NOT a per-engine switch: `mode: enforce` arms the reversible
+            # network cut(s) up to `enforceRung`, confined to `enforceScope`; `mode: audit`
+            # (default) is dry-run (shadow). `actuator` only selects the CNI mechanism used
+            # when it does actuate.
             - name: PROTECTOR_ENGINE_ACTUATOR
               value: {{ .Values.engine.actuator | quote }}
             {{- if .Values.engine.falco.enabled }}

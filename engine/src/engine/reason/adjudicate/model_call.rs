@@ -8,17 +8,18 @@
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 
-use super::evidence::{cve_ids_of, entry_evidence, entry_findings, retain_reachable_cves};
-use super::guards::{
-    guard_fabricated_cve, guard_fabricated_reachability_tag, guard_unsupported_exploitable,
+use super::evidence::{entry_evidence, entry_findings, reachable_cve_lines};
+use super::guards::guard_unsupported_exploitable;
+use super::incident::{
+    Assessment, IncidentDecision, Menu, guard_assessment_cuts_consistency,
+    guard_containment_grounding, guard_fabrication, parse_incident_decision,
 };
-use super::prompt::parse_verdict;
 use super::{Adjudicator, Verdict};
 
 /// The downstream counterpart of the entry's own evidence fetch below (JEF-565): every
 /// downstream node on the entry's proven paths is real, structural evidence — same standing as
 /// the entry's own — so the anti-fabrication and zero-anchor backstops must ground against it
-/// too, exactly as the prompt shows it (same per-node fetch + [`retain_reachable_cves`] filter
+/// too, exactly as the prompt shows it (same per-node fetch + [`reachable_cve_lines`] filter
 /// the downstream prompt blocks use).
 fn downstream_backstop_evidence(
     graph: &SecurityGraph,
@@ -28,8 +29,7 @@ fn downstream_backstop_evidence(
     let mut has_secret = false;
     let mut behaviors = Vec::new();
     for node in downstream {
-        let (mut node_cves, node_behaviors) = entry_evidence(graph, node);
-        retain_reachable_cves(&mut node_cves);
+        let (node_cves, node_behaviors) = reachable_cve_lines(graph, node);
         cves.extend(node_cves);
         behaviors.extend(node_behaviors);
         let (secret_lines, _posture) = entry_findings(graph, node);
@@ -69,24 +69,61 @@ impl ModelAdjudicator {
         self
     }
 
-    /// Record a judgement into the diagnostic log, if one is attached.
+    /// Record a judgement into the diagnostic log, if one is attached. Logs the legacy
+    /// [`Verdict`] shape (via [`IncidentDecision::to_verdict`]) so the diagnostic record's
+    /// format is unchanged (JEF-570) — the cuts themselves are the caller's `judge` return.
     fn record_judgement(
         &self,
         entry: &NodeKey,
         objectives: usize,
         prompt: Option<String>,
         reply: Option<String>,
-        verdict: &Verdict,
+        decision: &IncidentDecision,
     ) {
         if let Some(journal) = &self.journal {
             journal.record(crate::engine::state::Judgement {
                 entry: entry.0.clone(),
                 objectives,
-                verdict: format!("{verdict:?}"),
+                verdict: format!("{:?}", decision.to_verdict()),
                 prompt,
                 reply,
             });
         }
+    }
+}
+
+/// ADR-0034 D5 (grandfathered): the zero-anchor backstop
+/// ([`guard_unsupported_exploitable`]), reused UNCHANGED by round-tripping an `Attack`
+/// decision through the legacy [`Verdict`] shape it operates on — no reimplementation. A
+/// zero-anchor `Attack` (no CVE, no exposed secret, no corroborating behavior anywhere in the
+/// entry+downstream evidence this call already fetched) downgrades all the way to `NoAttack`
+/// (the old `Refuted`), never merely `Uncertain`: reachability alone was never a breach, so
+/// there is nothing here to re-judge later, exactly the pre-ADR-0034 behavior. Every other
+/// assessment passes through untouched — this only ever narrows an `Attack`.
+fn guard_zero_anchor(
+    decision: IncidentDecision,
+    cves: &[String],
+    behaviors: &[Behavior],
+    has_exposed_secret: bool,
+) -> IncidentDecision {
+    if decision.assessment != Assessment::Attack {
+        return decision;
+    }
+    let verdict = guard_unsupported_exploitable(
+        Verdict::Exploitable(decision.reason.clone()),
+        cves,
+        behaviors,
+        has_exposed_secret,
+    );
+    match verdict {
+        Verdict::Refuted(reason) => IncidentDecision {
+            assessment: Assessment::NoAttack,
+            reason,
+            cuts: Vec::new(),
+        },
+        // `guard_unsupported_exploitable` only ever returns the verdict unchanged or
+        // downgrades it to `Refuted` — no other arm is reachable.
+        _ => decision,
     }
 }
 
@@ -104,7 +141,8 @@ impl Adjudicator for ModelAdjudicator {
         graph: &SecurityGraph,
         prompt: &str,
         downstream: &[NodeKey],
-    ) -> Verdict {
+        menu: &Menu,
+    ) -> IncidentDecision {
         // Fetch the entry's evidence ONCE for the two anti-fabrication backstops. JEF-134:
         // the deterministic layer PROVES + ENRICHES only — there is no pre-call decision
         // filter and no deterministic promotion-ground gate. EVERY breach-relevant entry's
@@ -133,49 +171,47 @@ impl Adjudicator for ModelAdjudicator {
         // JEF-350: the caller already built this exact prompt to derive the verdict-cache key
         // (its hash); reuse those bytes for the model call rather than rebuilding, so the input
         // the cache keyed on and the input the model sees can never drift.
-        let (reply, verdict) =
+        let (reply, decision) =
             match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, prompt)
                 .await
             {
-                // The sole deterministic backstop on a promotion is anti-fabrication (JEF-79):
-                // a fabricated CVE citation can never auto-promote (→ skeptic). This is NOT a
-                // breach-decision gate — it only ensures the model cannot cite a CVE absent
-                // from the real evidence. A genuine `Exploitable` (a real CVE, or a non-CVE
-                // step that cites no CVE) passes through untouched.
                 Some(reply) => {
-                    // Two deterministic backstops, chained, both only ever acting on an
-                    // `Exploitable` verdict: anti-fabrication first (a cited CVE absent from the
-                    // evidence → skeptic), then the symmetric zero-anchor net (an `Exploitable`
-                    // with NO CVE, NO exposed secret, and NO corroborating runtime behavior →
-                    // `Refuted`, since reachability is not a breach — the watcher-server false
-                    // breach). Order is harmless: the fabrication guard only fires when a CVE is
-                    // cited, the unsupported guard only when no anchor exists.
-                    let verdict = guard_fabricated_cve(parse_verdict(&reply), &cve_ids_of(&cves));
-                    // JEF-451 (G1): a cited-real-id Exploitable that fabricates the
-                    // `[reachability: loaded-at-runtime]` TAG the evidence doesn't carry → skeptic.
-                    // Grounding/integrity, not a breach gate (ADR-0029 scope-note); reads the same
-                    // rendered `cves` strings the prompt shows.
-                    let verdict = guard_fabricated_reachability_tag(verdict, &cves);
-                    let verdict = guard_unsupported_exploitable(
-                        verdict,
-                        &cves,
-                        &behaviors,
-                        has_exposed_secret,
-                    );
-                    (Some(reply), verdict)
+                    // The tolerant, skeptic-default parser (ADR-0034 D3): unparseable/out-of-
+                    // range/non-member `contain` all degrade to Uncertain, no cuts — the
+                    // membership check against `menu` is the structural grounding guard.
+                    let decision = parse_incident_decision(&reply, menu);
+                    // The ADR-0034 D5 grounding guards, chained (all downgrade to `Uncertain`,
+                    // never `Refuted`/carry a hidden line of evidence): a contained downstream
+                    // node with no exploitation evidence of its own, then the reused
+                    // anti-fabrication backstops (a fabricated CVE id, or a fabricated
+                    // `[reachability: loaded-at-runtime]` tag — JEF-451 G1) over the
+                    // entry+downstream evidence union, then the assessment↔cuts consistency
+                    // check (idempotent — the parser already enforces it).
+                    let decision = guard_containment_grounding(decision, graph, entry);
+                    let decision = guard_fabrication(decision, graph, entry, downstream);
+                    let decision = guard_assessment_cuts_consistency(decision);
+                    // Grandfathered zero-anchor backstop (ADR-0029 scope note): an `Attack`
+                    // resting on NO anchor at all (no CVE, no exposed secret, no corroborating
+                    // behavior anywhere in the entry+downstream evidence) downgrades all the way
+                    // to `NoAttack`, not merely `Uncertain` — reachability alone was never a
+                    // breach, so there is nothing to re-judge later (the watcher-server false
+                    // breach this backstop was built for).
+                    let decision =
+                        guard_zero_anchor(decision, &cves, &behaviors, has_exposed_secret);
+                    (Some(reply), decision)
                 }
                 // Model unavailable → skeptic: do not let an auto-action proceed.
-                None => (None, Verdict::Uncertain("model unavailable".to_string())),
+                None => (None, IncidentDecision::uncertain("model unavailable")),
             };
-        // Capture the prompt the model saw, its raw reply, and the guarded verdict so an
-        // `exploitable` call can be diagnosed from the judgement record (JEF diagnostic).
+        // Capture the prompt the model saw, its raw reply, and the guarded decision so an
+        // `attack` call can be diagnosed from the judgement record (JEF diagnostic).
         self.record_judgement(
             entry,
             objectives.len(),
             Some(prompt.to_string()),
             reply,
-            &verdict,
+            &decision,
         );
-        verdict
+        decision
     }
 }

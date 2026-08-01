@@ -1,17 +1,32 @@
 //! The would-have-acted report aggregation (JEF-143): the [`Report`] shape and its
-//! [`WouldActEntry`] / [`LeftAloneEntry`] rows, the [`aggregate_report`] fold over the journal's
-//! breach decisions, and [`default_window_report`] — the default-window aggregation the engine's
-//! per-pass OTLP mirror reads.
+//! [`WouldActEntry`] / [`LeftAloneEntry`] / [`AttackNoCutEntry`] rows, the [`aggregate_report`]
+//! fold over the journal's decisions, and [`default_window_report`] — the default-window
+//! aggregation the engine's per-pass OTLP mirror reads.
+//!
+//! **JEF-674 (realigned to the ADR-0034 contract):** classification is keyed on the TYPED
+//! cut-choice decision (`Decision::Incident`'s `assessment` + `cuts`), never on the legacy
+//! `Decision::Breach` line's verdict PROSE. The Breach timeline is still the cadence backbone
+//! (it alone carries the structured [`crate::engine::journal::EnrichmentCoverage`] the
+//! coverage-gap classification needs), but at every point on it the would-act question is
+//! answered by looking up the typed decision IN EFFECT at that moment
+//! ([`incident_state_as_of`]) — `assessment == Attack && !cuts.is_empty()`. A journal that
+//! predates ADR-0034 (Breach lines only, no `Incident` lines ever recorded) therefore resolves
+//! "no typed state known" everywhere and contributes NOTHING to `would_act`: it replays
+//! display-only (via the engine's separate verdict-restore path), never inflating this
+//! aggregation's counts.
 //!
 //! This is data, not markup — it holds no rendering. The aggregation exists SOLELY to back the
 //! engine's per-pass OTLP would-have-acted mirror over the default window.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
-use crate::engine::journal::{Decision, DecisionJournal, EnrichmentCoverage, JournalEntry};
+use crate::engine::journal::{
+    Decision, DecisionJournal, EnrichmentCoverage, JournalEntry, JournaledCut,
+};
+use crate::engine::reason::adjudicate::incident::Assessment;
 
 /// Default rolling window for the OTLP would-have-acted mirror, in hours (7 days). The
 /// journal's own rotation bounds how far back history actually reaches.
@@ -29,10 +44,11 @@ pub(crate) const DEFAULT_SHORT_LIVED_SECS: u64 = 5 * 60;
 pub struct WouldActEntry {
     /// The internet-facing workload key that reached the exploitable verdict.
     pub entry: String,
-    /// How many would-act episodes occurred in the window (consecutive runs of
-    /// exploitable verdicts) — the frequency of the breach condition recurring.
+    /// How many would-act episodes occurred in the window (consecutive runs of a decisive
+    /// `Attack` assessment naming at least one node) — the frequency of the breach condition
+    /// recurring.
     pub episodes: usize,
-    /// How many breach decisions in the window affirmed exploitability for this entry
+    /// How many breach decisions in the window fell inside a would-act episode for this entry
     /// (the raw "would-cut" frequency, ≥ `episodes`).
     pub would_act_decisions: usize,
     /// The longest projected would-be cut lifetime across this entry's episodes, in
@@ -48,9 +64,14 @@ pub struct WouldActEntry {
     /// model affirmed exploitability WITHOUT a CVE backing it. These are the would-acts
     /// to scrutinize first.
     pub coverage_gap: bool,
-    /// The model's verdict for the most recent would-act episode (its own words) — the
-    /// human-readable "why it would have cut".
+    /// The model's own one-sentence reason for the most recent would-act episode (JEF-674: the
+    /// typed [`Decision::Incident`]'s `reason`, never re-derived from the legacy Breach verdict
+    /// prose this field used to carry).
     pub last_verdict: String,
+    /// The distinct node keys the model chose to contain across this entry's would-act
+    /// episodes in the window (JEF-674), sorted + deduped. Would-act classification requires a
+    /// non-empty cut set for every episode folded in here, so this is never empty.
+    pub contained_nodes: Vec<String>,
 }
 
 /// One proven path the model deliberately CLEARED in the window — the entry's latest
@@ -62,6 +83,19 @@ pub struct LeftAloneEntry {
     pub entry: String,
     /// The model's clearing verdict (its own words — "not exploitable — …").
     pub verdict: String,
+}
+
+/// One proven path where the model called a REAL attack (`Assessment::Attack`) but named
+/// NOTHING to contain (ADR-0034 D1 — "attack, but no cut warranted" is a VALID decision, not a
+/// parse failure or a downgrade). A distinct, honest class: it is neither a would-act (nothing
+/// stands ready to isolate) nor a left-alone clear (the model did not clear the path) — JEF-674
+/// gives it its own bucket rather than folding it into either and misreporting the shadow diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttackNoCutEntry {
+    /// The internet-facing workload key the model called an attack with no cut warranted.
+    pub entry: String,
+    /// The model's own one-sentence reason.
+    pub reason: String,
 }
 
 /// The aggregated shadow report (JEF-143): the would-have-acted diff over a rolling
@@ -82,17 +116,34 @@ pub struct Report {
     pub would_act: Vec<WouldActEntry>,
     /// Proven paths the model cleared and left alone, the trust evidence.
     pub left_alone: Vec<LeftAloneEntry>,
+    /// Proven paths the model called a real attack with no cut warranted (JEF-674) — the third
+    /// honest class, distinct from both `would_act` and `left_alone`.
+    pub attack_no_cut: Vec<AttackNoCutEntry>,
 }
 
 impl Report {
-    /// The headline would-act count: distinct workloads that would have been cut.
+    /// The headline would-act count: DISTINCT contained nodes across every standing proposal in
+    /// the window (JEF-674) — not distinct entries. One entry's decision can name several nodes
+    /// (its own front door plus a downstream workload, ADR-0034 D4), so the true "workloads
+    /// that would have been isolated" figure is the union of those node keys, not the row
+    /// count.
     pub fn would_act_count(&self) -> usize {
-        self.would_act.len()
+        self.would_act
+            .iter()
+            .flat_map(|w| w.contained_nodes.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 
     /// The headline left-alone count: distinct proven-but-cleared paths.
     pub fn left_alone_count(&self) -> usize {
         self.left_alone.len()
+    }
+
+    /// The headline attack-no-cut count: distinct paths the model called a real attack with no
+    /// cut warranted (JEF-674) — the third honest class.
+    pub fn attack_no_cut_count(&self) -> usize {
+        self.attack_no_cut.len()
     }
 
     /// Would-acts flagged short-lived (the likely-FP subset).
@@ -104,16 +155,6 @@ impl Report {
     pub fn coverage_gap_count(&self) -> usize {
         self.would_act.iter().filter(|w| w.coverage_gap).count()
     }
-}
-
-/// A model verdict AFFIRMS exploitability when its own words begin with "exploitable"
-/// (or "confirmed" — an already-corroborated live attack that should stand). A "not
-/// exploitable — …" / "refuted" / "uncertain" verdict does not. This mirrors the
-/// posture convention so the aggregation and the findings snapshot agree on what counts
-/// as a would-act.
-pub(crate) fn verdict_would_act(verdict: &str) -> bool {
-    let v = verdict.trim_start().to_ascii_lowercase();
-    v.starts_with("exploitable") || v.starts_with("confirmed")
 }
 
 /// A would-act decision fired during an enrichment-coverage gap when the model had NO
@@ -133,10 +174,31 @@ pub(crate) fn is_coverage_gap(coverage: Option<&EnrichmentCoverage>) -> bool {
     }
 }
 
-/// Aggregate the journal's breach decisions into the would-have-acted diff (JEF-143).
-/// Pure and total: takes the replayed entries (any order — they are sorted here by
-/// time) and the wall-clock `now` (injected for testability), and folds each entry's
-/// breach decisions into would-act episodes vs. left-alone clears. Read-only.
+/// One [`Decision::Incident`] line reduced to what the would-act classification needs: WHEN it
+/// was recorded, the 3-value call, the nodes it named, and the model's one-sentence reason.
+type IncidentPoint<'a> = (u64, &'a Assessment, &'a [JournaledCut], &'a str);
+
+/// The typed cut-choice decision in effect for an entry at `at_ms` — the LATEST
+/// [`Decision::Incident`] line recorded at or before that time. `None` when no `Incident` line
+/// has EVER been recorded for this entry by `at_ms`: a pre-ADR-0034 journal, or an entry only
+/// the legacy path ever judged — so the caller can tell "no typed state" apart from every one
+/// of the three real assessments (JEF-674: never invent a positive from missing data).
+fn incident_state_as_of<'a>(
+    timeline: &[IncidentPoint<'a>],
+    at_ms: u64,
+) -> Option<(&'a Assessment, &'a [JournaledCut], &'a str)> {
+    timeline
+        .iter()
+        .filter(|(t, ..)| *t <= at_ms)
+        .max_by_key(|(t, ..)| *t)
+        .map(|&(_, assessment, cuts, reason)| (assessment, cuts, reason))
+}
+
+/// Aggregate the journal's decisions into the would-have-acted diff (JEF-143, realigned to the
+/// typed contract by JEF-674). Pure and total: takes the replayed entries (any order — they are
+/// sorted here by time) and the wall-clock `now` (injected for testability), and folds each
+/// entry's breach decisions into would-act / attack-no-cut / left-alone, classified by the typed
+/// [`Decision::Incident`] in effect at each point — never by verdict prose. Read-only.
 pub(crate) fn aggregate_report(
     entries: &[JournalEntry],
     now: SystemTime,
@@ -157,16 +219,16 @@ pub(crate) fn aggregate_report(
     // journal from one with history but nothing in this particular window.)
     let mut any_breach = false;
 
-    // Collect breach decisions per entry, in time order, restricted to the window.
-    // BTreeMap keeps the output stable (entry-keyed) before the final sustained-first sort.
-    // Each breach carries its structured enrichment-coverage (JEF-145) so the gap is
-    // classified from the model's actual evidence, not the verdict prose.
+    // Collect breach decisions per entry, in time order, restricted to the window — the cadence
+    // backbone this aggregation still walks (it alone carries the structured
+    // enrichment-coverage the coverage-gap classification needs). BTreeMap keeps the output
+    // stable (entry-keyed) before the final sustained-first sort.
     type Breach<'a> = (u64, &'a str, Option<&'a EnrichmentCoverage>); // (at_ms, verdict, coverage)
     let mut by_entry: BTreeMap<&str, Vec<Breach>> = BTreeMap::new();
     let mut sorted: Vec<&JournalEntry> = entries.iter().collect();
     sorted.sort_by_key(|e| e.at_ms);
     let mut decisions_in_window = 0usize;
-    for e in sorted {
+    for e in &sorted {
         if let Decision::Breach {
             entry,
             verdict,
@@ -178,7 +240,7 @@ pub(crate) fn aggregate_report(
             if e.at_ms >= window_start_ms {
                 by_entry.entry(entry.as_str()).or_default().push((
                     e.at_ms,
-                    verdict,
+                    verdict.as_str(),
                     coverage.as_ref(),
                 ));
                 decisions_in_window += 1;
@@ -186,42 +248,82 @@ pub(crate) fn aggregate_report(
         }
     }
 
+    // The typed cut-choice timeline (ADR-0034 D8), per entry, deliberately UNWINDOWED: a Breach
+    // decision at the window's leading edge still needs to resolve "what was the model's typed
+    // call at this point", which may have been recorded before the window opened.
+    let mut incidents_by_entry: BTreeMap<&str, Vec<IncidentPoint>> = BTreeMap::new();
+    for e in &sorted {
+        if let Decision::Incident {
+            entry,
+            assessment,
+            cuts,
+            reason,
+            ..
+        } = &e.decision
+        {
+            incidents_by_entry.entry(entry.as_str()).or_default().push((
+                e.at_ms,
+                assessment,
+                cuts.as_slice(),
+                reason.as_str(),
+            ));
+        }
+    }
+    let empty_timeline: Vec<IncidentPoint> = Vec::new();
+
     let mut would_act: Vec<WouldActEntry> = Vec::new();
     let mut left_alone: Vec<LeftAloneEntry> = Vec::new();
+    let mut attack_no_cut: Vec<AttackNoCutEntry> = Vec::new();
 
     for (entry, decisions) in by_entry {
-        // Walk the entry's window decisions, folding consecutive exploitable verdicts
-        // into episodes. An episode's lifetime runs from its first exploitable verdict
-        // to the first NON-exploitable verdict that follows (the clear) — or to `now`
-        // if it never cleared (still open). The closing decision's timestamp is the
-        // best evidence of when the breach condition lifted in the journal.
+        let timeline = incidents_by_entry.get(entry).unwrap_or(&empty_timeline);
+
+        // Walk the entry's window decisions, folding consecutive would-act moments into
+        // episodes. A moment is would-act when the typed decision IN EFFECT at that Breach
+        // line's timestamp is a decisive `Attack` naming at least one node (JEF-674) — never
+        // the Breach line's own verdict prose. An episode's lifetime runs from its first
+        // would-act moment to the first non-would-act one that follows (the clear) — or to
+        // `now` if it never cleared (still open).
         let mut episodes = 0usize;
         let mut would_act_decisions = 0usize;
         let mut max_lifetime_ms = 0u64;
         let mut max_open = false;
         let mut coverage_gap = false;
-        let mut last_would_act_verdict: Option<&str> = None;
+        let mut last_reason: Option<&str> = None;
+        let mut contained_nodes: BTreeSet<String> = BTreeSet::new();
 
         let mut i = 0usize;
         while i < decisions.len() {
-            let (start_ms, verdict, _) = decisions[i];
-            if !verdict_would_act(verdict) {
-                i += 1;
-                continue;
-            }
-            // Start of an episode: consume the run of consecutive exploitable verdicts.
-            episodes += 1;
+            let start_ms = decisions[i].0;
+            // Consume the run of consecutive would-act decisions starting at `i`. The loop's own
+            // FIRST iteration (`j == i`) is what decides whether an episode begins at all — no
+            // separate pre-check duplicating this same lookup at `start_ms`.
             let mut j = i;
             let mut episode_gap = false;
-            while j < decisions.len() && verdict_would_act(decisions[j].1) {
+            while j < decisions.len() {
+                let at = decisions[j].0;
+                let Some((Assessment::Attack, cuts, reason)) = incident_state_as_of(timeline, at)
+                else {
+                    break;
+                };
+                if cuts.is_empty() {
+                    break;
+                }
                 would_act_decisions += 1;
                 if is_coverage_gap(decisions[j].2) {
                     episode_gap = true;
                 }
-                last_would_act_verdict = Some(decisions[j].1);
+                last_reason = Some(reason);
+                contained_nodes.extend(cuts.iter().map(|c| c.node.clone()));
                 j += 1;
             }
-            // The episode closes at the next (non-exploitable) decision if there is one,
+            if j == i {
+                // No would-act moment at `start_ms` — not the start of an episode.
+                i += 1;
+                continue;
+            }
+            episodes += 1;
+            // The episode closes at the next (non-would-act) decision if there is one,
             // else it's still open and projected to `now`.
             let (end_ms, open) = if j < decisions.len() {
                 (decisions[j].0, false)
@@ -253,16 +355,28 @@ pub(crate) fn aggregate_report(
                 open: max_open,
                 short_lived: short,
                 coverage_gap,
-                last_verdict: last_would_act_verdict.unwrap_or_default().to_string(),
+                last_verdict: last_reason.unwrap_or_default().to_string(),
+                contained_nodes: contained_nodes.into_iter().collect(),
             });
-        } else {
-            // No would-act episode in the window: the entry's paths were all proven and
-            // CLEARED. The trust half — surface the latest (clearing) verdict.
-            if let Some((_, verdict, _)) = decisions.last() {
-                left_alone.push(LeftAloneEntry {
-                    entry: entry.to_string(),
-                    verdict: verdict.to_string(),
-                });
+        } else if let Some(&(last_at, last_verdict, _)) = decisions.last() {
+            // No would-act episode in the window. Resolve the entry's LATEST typed state
+            // (JEF-674): a decisive attack with no cut warranted is its own honest class,
+            // never folded into the calm "cleared" tail; everything else — a real clear, an
+            // uncertain call, or no typed state at all (a pre-ADR-0034 line, display-only) —
+            // reads as left-alone using the Breach line's own verdict text, exactly as before.
+            match incident_state_as_of(timeline, last_at) {
+                Some((Assessment::Attack, [], reason)) => {
+                    attack_no_cut.push(AttackNoCutEntry {
+                        entry: entry.to_string(),
+                        reason: reason.to_string(),
+                    });
+                }
+                _ => {
+                    left_alone.push(LeftAloneEntry {
+                        entry: entry.to_string(),
+                        verdict: last_verdict.to_string(),
+                    });
+                }
             }
         }
     }
@@ -276,6 +390,7 @@ pub(crate) fn aggregate_report(
             .then(a.entry.cmp(&b.entry))
     });
     left_alone.sort_by(|a, b| a.entry.cmp(&b.entry));
+    attack_no_cut.sort_by(|a, b| a.entry.cmp(&b.entry));
 
     Report {
         window_secs: window.as_secs(),
@@ -284,6 +399,7 @@ pub(crate) fn aggregate_report(
         journal_empty: !any_breach,
         would_act,
         left_alone,
+        attack_no_cut,
     }
 }
 
@@ -302,106 +418,5 @@ pub fn default_window_report(journal: &DecisionJournal) -> Report {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn breach(at_ms: u64, entry: &str, verdict: &str) -> JournalEntry {
-        JournalEntry {
-            at_ms,
-            decision: Decision::Breach {
-                entry: entry.to_string(),
-                objectives: 1,
-                verdict: verdict.to_string(),
-                coverage: None,
-                fingerprint: None,
-                verdict_typed: None,
-            },
-        }
-    }
-
-    #[test]
-    fn verdict_would_act_keys_on_affirmative_prefix() {
-        assert!(verdict_would_act("exploitable — CVE reachable"));
-        assert!(verdict_would_act("confirmed live attack"));
-        assert!(verdict_would_act("  Exploitable"));
-        assert!(!verdict_would_act("not exploitable — internal only"));
-        assert!(!verdict_would_act("refuted"));
-        assert!(!verdict_would_act("uncertain — model timed out"));
-    }
-
-    #[test]
-    fn aggregate_folds_an_open_would_act_episode() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
-        let now_ms = 10_000_000;
-        let entries = vec![
-            breach(now_ms - 600_000, "web", "exploitable — RCE"),
-            breach(now_ms - 300_000, "web", "exploitable — RCE"),
-        ];
-        let report = aggregate_report(
-            &entries,
-            now,
-            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
-            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
-        );
-        assert_eq!(report.would_act_count(), 1);
-        assert_eq!(report.left_alone_count(), 0);
-        let w = &report.would_act[0];
-        assert_eq!(w.entry, "web");
-        assert!(w.open, "still the latest verdict → open episode");
-        assert!(!w.short_lived, "an open episode is never short-lived");
-        assert_eq!(w.episodes, 1);
-        assert_eq!(w.would_act_decisions, 2);
-    }
-
-    #[test]
-    fn aggregate_classifies_a_cleared_path_as_left_alone() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
-        let now_ms = 10_000_000;
-        let entries = vec![breach(
-            now_ms - 60_000,
-            "api",
-            "not exploitable — internal only",
-        )];
-        let report = aggregate_report(
-            &entries,
-            now,
-            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
-            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
-        );
-        assert_eq!(report.would_act_count(), 0);
-        assert_eq!(report.left_alone_count(), 1);
-        assert_eq!(report.left_alone[0].entry, "api");
-    }
-
-    #[test]
-    fn aggregate_marks_a_short_lived_episode() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
-        let now_ms = 10_000_000;
-        // An episode that opened then cleared within a minute (< the 5-minute threshold).
-        let entries = vec![
-            breach(now_ms - 120_000, "web", "exploitable — RCE"),
-            breach(now_ms - 90_000, "web", "not exploitable — patched"),
-        ];
-        let report = aggregate_report(
-            &entries,
-            now,
-            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
-            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
-        );
-        assert_eq!(report.would_act_count(), 1);
-        assert!(report.would_act[0].short_lived);
-        assert_eq!(report.short_lived_count(), 1);
-    }
-
-    #[test]
-    fn empty_journal_reports_journal_empty() {
-        let report = aggregate_report(
-            &[],
-            SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
-            Duration::from_secs(DEFAULT_WINDOW_HOURS * 3600),
-            Duration::from_secs(DEFAULT_SHORT_LIVED_SECS),
-        );
-        assert!(report.journal_empty);
-        assert_eq!(report.decisions_in_window, 0);
-    }
-}
+#[path = "report_tests.rs"]
+mod tests;

@@ -4,11 +4,13 @@
 //!
 //! The findings snapshot, the judgement ring, and the mitigation ledger are all in-memory: a
 //! restart loses them. The journal closes that gap. Each pass appends its **breach
-//! decisions** (the model's per-entry verdict) and its **ledger deltas** (a mitigation
-//! applied or a cut reverted, with the [`Reversion`](super::respond::actuator::Reversion)
-//! reason) as JSON lines to a file on a mounted volume; on boot the engine replays the
-//! tail so the findings snapshot, the judgement record, and the reversion log populate
-//! immediately — before a fresh model pass lands.
+//! decisions** (the model's per-entry verdict), its per-entry **cut-choice decisions**
+//! (ADR-0034 D8, JEF-639 — see [`Decision::Incident`]), and its **ledger deltas** (a
+//! mitigation applied or a cut reverted, with the
+//! [`Reversion`](super::respond::actuator::Reversion) reason) as JSON lines to a file on a
+//! mounted volume; on boot the engine replays the tail so the findings snapshot, the
+//! judgement record, and the reversion log populate immediately — before a fresh model pass
+//! lands.
 //!
 //! Shape and posture mirror the mounted-snapshot port (`exploit_intel.rs`, the KEV
 //! catalogue): the path is a `PROTECTOR_ENGINE_*` env var pointing at an
@@ -25,6 +27,11 @@
 //! Each line is one [`JournalEntry`]; the file format is line-delimited JSON ("JSON
 //! lines"), append-friendly and trivially tail-replayable. Parsing is tolerant: a
 //! corrupt or truncated line (a crash mid-write) is skipped, never fatal.
+//!
+//! Split into a module directory (repo CLAUDE.md's 1,000-line cap): this file is the types +
+//! the durable store; [`tests`] holds the file's own unit tests. The engine-orchestration
+//! integration tests (journal replay wired into `Engine::process`) live in the sibling
+//! `engine::journal_tests` module instead — a different file, a different concern.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -72,6 +79,23 @@ impl EnrichmentCoverage {
     }
 }
 
+/// One cut the model chose, durably recorded (ADR-0034 D8, JEF-639) as exactly the two
+/// facts the replay-lock checks — the node it named and the mechanism determinism resolved
+/// it to AT DECISION TIME. The mechanism/edge (`ProposedAction`/`Link`) are deliberately
+/// **not** persisted: on replay they are always RE-DERIVED from the CURRENT menu (never
+/// trusted from disk) — see `engine::adj_pass::rearm_restored_decision`. Persisting a copy
+/// here would only invite a future caller to skip that re-derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournaledCut {
+    /// The node key the model named (verbatim from `contain`, engine-resolved before this
+    /// point — never raw model text).
+    pub node: String,
+    /// The stable cut identity ([`crate::engine::respond::cut_signature`]) determinism
+    /// resolved this node to when the decision was made — the replay-lock's second lock
+    /// compares this byte-for-byte against a FRESH resolution before re-arming.
+    pub cut_signature: String,
+}
+
 /// What a journal line records — the engine's decision atoms, durable across restarts.
 /// Tagged so the JSON line is self-describing and forward-compatible (an unknown future
 /// variant is skipped on reload rather than breaking the replay).
@@ -112,6 +136,71 @@ pub enum Decision {
         /// never a persisted "awaiting". `None` on pre-JEF-301 lines (display-only restore).
         #[serde(default)]
         verdict_typed: Option<crate::engine::reason::adjudicate::Verdict>,
+    },
+    /// One incident cut-choice decision (ADR-0034 D8, JEF-639): the model's per-entry
+    /// `IncidentDecision`, durably keyed by the resolved [`JournaledCut::cut_signature`]s it
+    /// chose AND the full-prompt `fingerprint` it was judged against. This is the persistence
+    /// gap JEF-570 deliberately left open — its Engine-local `decisions` map was in-memory
+    /// only, so a restart dropped every standing model-chosen cut to the `containment_for`
+    /// human-proposal fallback until re-judged (a real gap under ENFORCE mode: the standing
+    /// cut looks retired for the model's cold-start window).
+    ///
+    /// **On replay, this line re-arms EXACTLY the decision it recorded, or nothing — a
+    /// DOUBLE replay-lock** (see `engine::adj_pass::rearm_restored_decision`, run once this
+    /// run's own state is available):
+    /// 1. `fingerprint` must match the entry's RECOMPUTED full-prompt hash byte-identically
+    ///    (the fingerprint ⊇ the menu render, ADR-0034 D4/D9, so a shifted node→mechanism
+    ///    mapping already busts it — a fingerprint match alone does NOT re-arm);
+    /// 2. AND every cut in `cuts` must re-resolve, byte-identically, to the SAME
+    ///    `cut_signature` against the FRESHLY-rebuilt current menu — guards against a
+    ///    label/ladder RESOLVER drift between deployed versions that an unchanged fingerprint
+    ///    alone can't catch (the prompt hash covers the RENDERED menu text, not the resolver
+    ///    code that produced it).
+    ///
+    /// Either lock failing re-arms **nothing** for this entry — a cold re-judge, never a
+    /// partial or best-guess repoint (SECURITY-SENSITIVE: this is the replay/re-arm path for
+    /// a possibly-armed cut; an over-eager re-arm could auto-apply a cut the current state no
+    /// longer justifies). Old, pre-JEF-639 journals hold no `Incident` lines at all — every
+    /// entry cold-re-judges for cuts on first boot after the upgrade (their `Breach` lines
+    /// still replay exactly as before, display-only for the verdict text). Only DECISIVE
+    /// decisions are ever journaled (mirrors [`Breach`](Self::Breach)); a fresh `Uncertain`
+    /// never is (ADR-0034 D7's retirement asymmetry is orthogonal to persistence).
+    Incident {
+        /// The internet-facing entry this decision was judged for (the ledger's key).
+        entry: String,
+        /// How many objectives the entry reached when judged (display-only, mirrors
+        /// [`Breach::objectives`](Self::Breach)).
+        objectives: usize,
+        /// The model's 3-value call (ADR-0034 D1).
+        assessment: crate::engine::reason::adjudicate::incident::Assessment,
+        /// The model's one-sentence reason (display-only; never re-parsed or re-guarded).
+        reason: String,
+        /// The cuts the model chose, exactly as determinism resolved them AT DECISION TIME —
+        /// re-verified, never trusted, on replay (see the type's own docs).
+        cuts: Vec<JournaledCut>,
+        /// The full-prompt fingerprint this decision was judged against — the replay-lock's
+        /// first lock (see the variant docs above).
+        fingerprint: String,
+    },
+    /// One entry's shadow-bake divergence classification (the model-vs-deterministic cut
+    /// comparator, `super::cut_divergence`): how the model's chosen cut-set for this entry, this
+    /// pass, compared against the deterministic fallback set `respond::containment_for` +
+    /// `respond::quarantine_workload_link` would have proposed for the same chains. Durable so
+    /// the bake history survives a restart rather than resetting the arm-readiness window (see
+    /// `docs/adr/0037-shadow-bake-arm-readiness.md`). Audit only — a consumer reads this to decide
+    /// whether the bake has cleared the
+    /// exit criterion; nothing re-arms or auto-applies from it (ADR-0016).
+    CutDivergence {
+        /// The internet-facing entry this classification was computed for.
+        entry: String,
+        /// How the model's cut-set compared to the deterministic fallback set.
+        class: crate::engine::cut_divergence::DivergenceClass,
+        /// Node keys the model named this pass (sorted, deduped) — empty for a decisive
+        /// `NoAttack`.
+        model_cuts: Vec<String>,
+        /// Node keys determinism alone would have proposed for the same chains (sorted,
+        /// deduped).
+        deterministic_cuts: Vec<String>,
     },
     /// A mitigation applied (a cut went live), keyed by its cut signature.
     Apply {
@@ -395,346 +484,4 @@ fn rotate_if_needed(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A unique temp path for one test, without pulling in a temp-file crate: the
-    /// system temp dir plus the test name and a per-call nonce (pid + an atomic counter),
-    /// so parallel tests never collide. Cleaned up at the end of each test.
-    fn temp_path(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NONCE: AtomicU64 = AtomicU64::new(0);
-        let n = NONCE.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "protector-journal-{tag}-{}-{n}.jsonl",
-            std::process::id()
-        ))
-    }
-
-    /// Remove a journal's files (active + rolled) so a test leaves no residue.
-    fn cleanup(path: &Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(rolled_path(path));
-    }
-
-    #[test]
-    fn round_trips_decisions_across_a_reopen() {
-        // The acceptance criterion: decisions written before a "restart" replay after it.
-        let path = temp_path("roundtrip");
-        {
-            let journal = DecisionJournal::open(&path);
-            assert!(journal.is_enabled(), "a writable path enables the journal");
-            journal.record(Decision::Breach {
-                entry: "workload/app/Pod/web".into(),
-                objectives: 3,
-                verdict: "exploitable — CVE-2021-44228 reaches the secret".into(),
-                coverage: Some(EnrichmentCoverage {
-                    cves: vec!["CVE-2021-44228".into()],
-                    behavioral: false,
-                }),
-                fingerprint: Some("cves=CVE-2021-44228|rt=|objs=secret|findings=".into()),
-                verdict_typed: Some(crate::engine::reason::adjudicate::Verdict::Exploitable(
-                    "CVE-2021-44228 reaches the secret".into(),
-                )),
-            });
-            journal.record(Decision::Apply {
-                cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
-            });
-            journal.record(Decision::Revert {
-                cut: "workload/app/Pod/web -[reaches/Tcp]-> workload/app/Pod/db".into(),
-                reason: "no proven chain still justifies this control".into(),
-            });
-        }
-        // A fresh journal on the same path (the "post-restart" engine) replays it all.
-        let reopened = DecisionJournal::open(&path);
-        let entries = reopened.replay();
-        assert_eq!(entries.len(), 3, "all three decisions survive the reopen");
-        // JEF-301: the breach line carries the evidence fingerprint AND the TYPED decisive
-        // verdict across the reopen, so the post-restart engine can re-seed the verdict cache
-        // (serve an unchanged entry with no model call) and replay the EXACT prior decision.
-        match &entries[0].decision {
-            Decision::Breach {
-                fingerprint,
-                verdict_typed,
-                ..
-            } => {
-                assert_eq!(
-                    fingerprint.as_deref(),
-                    Some("cves=CVE-2021-44228|rt=|objs=secret|findings="),
-                    "the evidence fingerprint (the freshness key) survives the reopen"
-                );
-                assert_eq!(
-                    verdict_typed.as_ref(),
-                    Some(&crate::engine::reason::adjudicate::Verdict::Exploitable(
-                        "CVE-2021-44228 reaches the secret".into()
-                    )),
-                    "a persisted BREACH replays as the EXACT typed Exploitable, not a downgrade"
-                );
-            }
-            other => panic!("expected a Breach, got {other:?}"),
-        }
-        assert!(matches!(entries[1].decision, Decision::Apply { .. }));
-        match &entries[2].decision {
-            Decision::Revert { cut, reason } => {
-                assert!(cut.contains("web"));
-                assert!(reason.contains("no proven chain"));
-            }
-            other => panic!("expected a Revert, got {other:?}"),
-        }
-        // The recorded time is recent (sane wall-clock stamp).
-        let age = SystemTime::now()
-            .duration_since(entries[0].at())
-            .expect("recorded in the past");
-        assert!(age.as_secs() < 60, "the stamp is a recent wall-clock time");
-        cleanup(&path);
-    }
-
-    #[test]
-    fn an_unset_path_degrades_to_in_memory_only_and_never_records() {
-        // No volume configured ⇒ disabled journal: records are no-ops, replay is empty,
-        // and nothing is created on disk. This is the "absent volume = today's behavior".
-        let journal = DecisionJournal::disabled();
-        assert!(!journal.is_enabled());
-        journal.record(Decision::Apply { cut: "x".into() });
-        assert!(
-            journal.replay().is_empty(),
-            "a disabled journal replays nothing"
-        );
-    }
-
-    #[test]
-    fn an_unwritable_path_degrades_gracefully_without_crashing() {
-        // A path whose parent can't be created (a file standing in for a directory) is
-        // unwritable. `open` must NOT panic — it degrades to disabled.
-        let file = temp_path("not-a-dir");
-        std::fs::write(&file, b"i am a file, not a directory").unwrap();
-        let under_a_file = file.join("journal.jsonl"); // parent is a regular file
-        let journal = DecisionJournal::open(&under_a_file);
-        assert!(
-            !journal.is_enabled(),
-            "an unwritable path disables the journal rather than crashing"
-        );
-        // Recording is a safe no-op on the degraded journal.
-        journal.record(Decision::Apply { cut: "y".into() });
-        assert!(journal.replay().is_empty());
-        cleanup(&file);
-    }
-
-    #[test]
-    fn write_failure_mid_run_disables_without_crashing() {
-        // Open successfully, then delete the file's directory out from under it so the
-        // next append fails. The journal must disable itself, not crash.
-        let dir = std::env::temp_dir().join(format!(
-            "protector-journal-vanish-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("journal.jsonl");
-        let journal = DecisionJournal::open(&path);
-        assert!(journal.is_enabled());
-        journal.record(Decision::Apply {
-            cut: "first".into(),
-        });
-        // The mount "goes away".
-        std::fs::remove_dir_all(&dir).unwrap();
-        // This append can no longer create the file (parent gone) ⇒ disables, no panic.
-        journal.record(Decision::Apply {
-            cut: "second".into(),
-        });
-        assert!(
-            !journal.is_enabled(),
-            "a write failure disables the journal"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rotation_bounds_the_journal_and_replay_spans_the_boundary() {
-        // Force rotation by writing past MAX_BYTES, then confirm: the active file is
-        // bounded, a rolled generation exists, and replay still sees lines from BOTH —
-        // i.e. the oldest pre-rotation decision and the newest post-rotation one.
-        let path = temp_path("rotation");
-        let journal = DecisionJournal::open(&path);
-        // A fat reason so each line is ~1 KiB. Write ~1.3× MAX_BYTES so the active file
-        // crosses the cap EXACTLY ONCE: the first chunk rolls to `.1` (holding cut-0) and
-        // the remainder is the active file (holding the newest cut). With single-generation
-        // rotation only the most recent ~2× window is retained — writing well past 2× would
-        // legitimately roll cut-0 away — so this stays just over one cap to assert the
-        // boundary-spanning replay deterministically.
-        let fat = "z".repeat(1000);
-        let lines = (MAX_BYTES as usize / 1000) * 13 / 10;
-        for i in 0..lines {
-            journal.record(Decision::Revert {
-                cut: format!("cut-{i}"),
-                reason: fat.clone(),
-            });
-        }
-        // The active file is bounded near the cap (a rotation happened).
-        let active_len = std::fs::metadata(&path).unwrap().len();
-        assert!(
-            active_len < MAX_BYTES,
-            "the active file is rotated below the cap (was {active_len})"
-        );
-        assert!(
-            std::fs::metadata(rolled_path(&path)).is_ok(),
-            "a rolled generation exists after crossing the cap"
-        );
-        // Replay spans the boundary: it includes the very first cut (in the rolled file)
-        // and the very last (in the active file), in order.
-        let entries = journal.replay();
-        let cuts: Vec<&str> = entries
-            .iter()
-            .filter_map(|e| match &e.decision {
-                Decision::Revert { cut, .. } => Some(cut.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            cuts.contains(&"cut-0"),
-            "the oldest decision survives in the roll"
-        );
-        assert!(
-            cuts.contains(&format!("cut-{}", lines - 1).as_str()),
-            "the newest decision is in the active file"
-        );
-        // Total on-disk size stays bounded by ~2× the cap (one rolled generation only).
-        let rolled_len = std::fs::metadata(rolled_path(&path)).unwrap().len();
-        assert!(
-            active_len + rolled_len < 2 * MAX_BYTES + 2000,
-            "two generations cap total size at ~2× MAX_BYTES"
-        );
-        cleanup(&path);
-    }
-
-    #[test]
-    fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
-        // Back-compat (JEF-145): a journal line written before the structured
-        // enrichment-coverage field existed has no `coverage` key. `#[serde(default)]`
-        // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per the
-        // would-have-acted report aggregation) NOT a false coverage gap.
-        let line = r#"{"at_ms":1,"kind":"breach","entry":"workload/app/Pod/web","objectives":2,"verdict":"exploitable — reaches the secret"}"#;
-        let entry: JournalEntry = serde_json::from_str(line).expect("old line still parses");
-        match entry.decision {
-            Decision::Breach {
-                coverage,
-                fingerprint,
-                verdict_typed,
-                ..
-            } => {
-                assert!(
-                    coverage.is_none(),
-                    "absent coverage degrades to unknown, not a gap"
-                );
-                // JEF-301 back-compat: a line written before the fingerprint/typed-verdict
-                // fields existed has neither key. `#[serde(default)]` must yield `None` for
-                // both — the replay then restores it display-only (exactly today's behaviour)
-                // and never treats a missing fingerprint as a cache hit against changed
-                // evidence.
-                assert!(
-                    fingerprint.is_none(),
-                    "an absent fingerprint replays as None (display-only, no false cache hit)"
-                );
-                assert!(
-                    verdict_typed.is_none(),
-                    "an absent typed verdict replays as None (display-only restore)"
-                );
-            }
-            other => panic!("expected a Breach, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn enrichment_coverage_is_backed_when_a_cve_or_behavior_is_present() {
-        assert!(
-            !EnrichmentCoverage {
-                cves: vec![],
-                behavioral: false
-            }
-            .is_backed(),
-            "no CVE and no behavior ⇒ unbacked (a gap)"
-        );
-        assert!(
-            EnrichmentCoverage {
-                cves: vec!["CVE-2021-44228".into()],
-                behavioral: false
-            }
-            .is_backed(),
-            "a CVE backs the decision"
-        );
-        assert!(
-            EnrichmentCoverage {
-                cves: vec![],
-                behavioral: true
-            }
-            .is_backed(),
-            "a behavioral signal backs the decision"
-        );
-    }
-
-    #[test]
-    fn admission_decisions_round_trip_across_a_reopen() {
-        // JEF-237 persistence: an admission record written before a "restart" replays after
-        // it, with its dedup count + last-seen intact, so the admission decision log
-        // repopulates on boot.
-        use crate::engine::policy_log::PolicyDecisionRecord;
-        let path = temp_path("admission");
-        {
-            let journal = DecisionJournal::open(&path);
-            let mut record = PolicyDecisionRecord::now(
-                "admission",
-                "allow",
-                "Pod/web",
-                "ghcr.io/org/app:1",
-                "signed",
-                "meshed",
-                "default",
-                "",
-            );
-            record.count = 4;
-            record.at_ms = 42;
-            journal.record(Decision::Admission { record });
-        }
-        let reopened = DecisionJournal::open(&path);
-        let entries = reopened.replay();
-        assert_eq!(entries.len(), 1);
-        match &entries[0].decision {
-            Decision::Admission { record } => {
-                assert_eq!(record.subject, "Pod/web");
-                assert_eq!(record.image, "ghcr.io/org/app:1");
-                assert_eq!(record.signature, "signed");
-                assert_eq!(record.mesh, "meshed");
-                assert_eq!(record.decision, "allow");
-                assert_eq!(record.count, 4, "the dedup count survives the reopen");
-                assert_eq!(record.at_ms, 42, "the last-seen survives the reopen");
-            }
-            other => panic!("expected an Admission, got {other:?}"),
-        }
-        cleanup(&path);
-    }
-
-    #[test]
-    fn replay_skips_corrupt_lines() {
-        // A crash mid-write can leave a partial trailing line; replay must skip it, not
-        // fail, and still return the good lines.
-        let path = temp_path("corrupt");
-        let journal = DecisionJournal::open(&path);
-        journal.record(Decision::Apply { cut: "good".into() });
-        // Append a garbage half-line, as a crash would.
-        {
-            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
-            f.write_all(b"{\"at_ms\": 1, \"kind\": \"appl").unwrap();
-        }
-        let entries = journal.replay();
-        assert_eq!(
-            entries.len(),
-            1,
-            "the good line survives, the garbage is skipped"
-        );
-        assert!(matches!(entries[0].decision, Decision::Apply { .. }));
-        cleanup(&path);
-    }
-}
+mod tests;

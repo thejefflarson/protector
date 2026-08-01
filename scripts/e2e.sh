@@ -10,26 +10,41 @@
 # actuator exactly as it behaves in prod. (Cilium/Calico is only needed for the
 # ANP actuator, which this test does not cover.)
 #
-# The scenario proves the whole asymmetric action bar (ADR-0009) and the Q5
-# self-revert invariant end-to-end:
+# The scenario proves the target-choice contract (ADR-0034 — the model names the
+# compromised node, determinism resolves the narrowest cut) and the Q5 self-revert
+# invariant end-to-end:
 #
 #   web (internet-exposed) ──reaches──▶ store ──can-read──▶ secret/session-key
 #
-#   A. shadow      — the chain proves (store reachable + compromisable), but the
-#                    entry has no foothold and no corroboration yet.
-#   B. corroborate — an `Alert` behavior on `web` (posted to the behavioral port)
-#                    flips it to "auto-eligible", but nothing is applied (shadow).
-#   C. hard mode   — enable=network: the engine applies a default-deny
-#                    NetworkPolicy quarantining `web`.
-#   D. self-revert — remove the durable allow (store-ingress); the chain stops
-#                    being provable, so the engine DELETES its NetworkPolicy.
+#   A. shadow        — the chain proves (store reachable + compromisable), but the
+#                      entry has no foothold and no corroboration yet.
+#   B. corroborate   — an `Alert` behavior on `web` (posted to the behavioral port)
+#                      flips it breach-relevant + corroborated, but nothing is
+#                      applied OR proposed yet (shadow).
+#   C. hard, NO model — enable=network, live corroboration alone: ADR-0034 D6
+#                      DELETES ADR-0009's corroboration-only auto-fire — the engine
+#                      only PROPOSES the entry's containment_for fallback (stamped
+#                      non-auto), it applies NOTHING. Only a model's decisive
+#                      `attack` naming a node drives an auto-cut now (see F below).
+#   D. fallback retires — remove the durable allow (store-ingress); the chain
+#                      stops being provable, so the (never-applied) fallback
+#                      proposal itself retires — proposals are chain-gated exactly
+#                      like an applied cut would be.
 #
-# Then the core thesis — proofs WINNOW, the model DECIDES:
+# Then the core thesis — proofs WINNOW, the model DECIDES what to cut:
 #   E. log4j present, NO model — a critical CVE is proven reachable, but presence
 #      is not proof of exploitability, so the engine only PROPOSES (no auto-cut).
-#   F. log4j + model — the model examines the proven path, judges it EXPLOITABLE,
-#      and ONLY THEN does the engine cut. The determination is the model's, not a
-#      rule's. (Skipped if no Ollama is reachable; see PROTECTOR_E2E_MODEL.)
+#   F. log4j + model — the model examines the proven path, decides `attack` naming
+#      the entry, and ONLY THEN does the engine cut. The determination — and the
+#      TARGET — are the model's, not a rule's (ADR-0034). (Skipped if no Ollama is
+#      reachable; see PROTECTOR_E2E_MODEL. The model-driven auto-cut/self-revert
+#      cycle this phase exercises is this e2e's ONLY apply/revert coverage against a
+#      REAL cluster + a real model now that C/D no longer apply anything — it is
+#      Ollama-gated here, but the SAME `Engine::process` apply path is also exercised
+#      unconditionally in CI by a Rust integration test with a stub `Adjudicator`:
+#      `engine::tests::a_model_chosen_cut_auto_applies_in_enforce_mode` (the shadow-vs-
+#      enforce contrast lives alongside it as
+#      `a_model_chosen_cut_only_proposes_in_shadow_by_default`).)
 #   G. self-revert — the model-driven cut reverts when the chain stops proving.
 #
 # Requirements: docker, k3d, kubectl, jq, curl. A reachable Ollama for E/F.
@@ -172,22 +187,38 @@ managed_np_name() {
 managed_np_present() { [ -n "$(managed_np_name)" ]; }
 managed_np_absent()  { [ -z "$(managed_np_name)" ]; }
 
+# ADR-0034 D6: with no model, the corroborated entry's `containment_for` fallback is only a
+# PROPOSAL — never a NetworkPolicy — so the observable proof is the engine's own log line
+# (`LedgerDelta::emit`, respond/mod.rs), not the cluster's NetworkPolicy state. Two-stage grep
+# (message, then the cut string) so field order in the log formatter can't break the match, the
+# same defensive shape `chains_proven` already uses for its own log-line assertion.
+mitigation_proposed_for_web() {
+  kubectl -n "$NS" logs deploy/protector 2>/dev/null \
+    | grep 'mitigation proposed' | grep -q 'workload/app/Pod/web'
+}
+mitigation_retired_for_web() {
+  kubectl -n "$NS" logs deploy/protector 2>/dev/null \
+    | grep 'mitigation retired' | grep -q 'workload/app/Pod/web'
+}
+
 # Hard mode can apply MORE than one managed policy at once (ADR-0022 / JEF-284), so an
 # assertion must name the workload ROLE it means, never assume a single policy or grab
-# "the first one" (that races). Two distinct controls coexist on the web→store→secret
+# "the first one" (that races). Two distinct controls exist on the web→store→secret
 # scenario:
-#   - the ENTRY cut (role=web): the internet-facing entry is isolated once its chain
-#     meets the asymmetric action bar — live corroboration (ADR-0009) or a model
-#     "exploitable" verdict (ADR-0011). It is gated: no cut on mere CVE presence.
+#   - the ENTRY cut (role=web): the internet-facing entry is isolated ONLY once the
+#     model decides `attack` and names it (ADR-0034 D6). Live corroboration ALONE no
+#     longer auto-cuts it — that's ADR-0009's contract, which D6 supersedes; corroborated-
+#     but-unjudged now PROPOSES the `containment_for` fallback (stamped non-auto), never
+#     applies.
 #   - the PIVOT quarantine (role=store): a *remotely-exploitable* pod — a non-entry
 #     workload reachable from the internet-exposed entry that runs a critical/KEV CVE —
-#     is IDENTIFIED as a quarantine candidate DETERMINISTICALLY (JEF-284: reachable +
-#     critical CVE, no model needed). But auto-ACTION on it now clears the SAME bar as
-#     the entry (JEF-566 / ADR-0032): its justifying chain must be corroborated/promoted,
-#     adjudicated, and breach-relevant. Corroborated ⇒ auto-quarantined; otherwise it
-#     stays propose-only. Reachability + CVE presence alone no longer auto-cuts the pivot.
-# The two race, and store's policy-name can sort either side of web's, so the old
-# `managed_np_name | head -n1`-selects-web check was inherently flaky.
+#     is still IDENTIFIED as a quarantine CANDIDATE deterministically at the proof layer
+#     (JEF-284: reachable + critical CVE, no model needed), but is no longer PROPOSED at
+#     all without the model naming it (ADR-0034 D6: the `containment_for` fallback is
+#     entry-only, never a downstream workload) — reachability + CVE presence, and even
+#     live corroboration, no longer surfaces it as a proposal, let alone auto-cuts it.
+# The old "corroboration alone auto-quarantines a race between the two" scenario is GONE;
+# a policy can now only exist for a workload the model itself named.
 managed_np_roles() {
   kubectl -n "$APP_NS" get networkpolicy -l app.kubernetes.io/managed-by=protector \
     -o jsonpath='{range .items[*]}{.spec.podSelector.matchLabels.role}{"\n"}{end}' 2>/dev/null
@@ -508,7 +539,7 @@ spec:
 YAML
 kubectl -n "$APP_NS" wait --for=condition=Ready pod/web pod/store --timeout=120s
 
-step "6/11  SHADOW: chain proves structurally, then corroboration would flip it auto-eligible — but NOTHING is applied"
+step "6/11  SHADOW: chain proves structurally, then corroboration lands — but NOTHING is applied (shadow proposes, never acts)"
 # This is the FIRST proof pass after a fresh rollout, and it is gated behind the engine's
 # per-pass signing-posture sweep (ADR-0020), which runs BEFORE process() on every image
 # running in the cluster. On a cold TUF cache with CI's constrained egress that first sweep
@@ -527,35 +558,39 @@ post_alert
 sleep 10
 
 managed_np_absent || fail "shadow mode applied a NetworkPolicy — propose-only was violated"
-pass "shadow mode applied nothing (propose-only honored) — corroboration would meet the asymmetric action bar, but shadow only proposes"
+pass "shadow mode applied nothing (propose-only honored) — shadow is the default posture regardless of what phase 7 goes on to (not) auto-cut"
 
-step "7/11  HARD MODE: enable=network + actuation RBAC; engine cuts the corroborated entry (web) AND quarantines the remotely-exploitable pivot (store)"
+step "7/11  HARD MODE, NO model: live corroboration ALONE no longer auto-cuts (ADR-0034 D6 supersedes ADR-0009) — the engine only PROPOSES the entry's fallback; nothing is applied"
 deploy_protector network true "" ""
 kubectl -n "$NS" rollout status deploy/protector --timeout=180s
 pf_reset
 # The pod was replaced, so its runtime-evidence store reset — re-send the alert that
-# corroborates web (the internet-facing entry), which is what flips its chain to
-# auto-eligible under the asymmetric action bar.
+# corroborates web (the internet-facing entry).
 post_alert
-# Wait for the ENTRY cut specifically (role=web) — the corroboration-driven control this
-# step exists to prove — not "the first managed policy". The SAME live alert that
-# corroborates web's chain also corroborates the pivot `store`'s justifying chain (they
-# share it), so the engine ALSO auto-quarantines the remotely-exploitable pivot `store`:
-# JEF-284 identifies the candidate (reachable from the entry + a critical CVE), and
-# JEF-566 clears it to auto-action because that chain is now corroborated. The two race,
-# so naming the role is the only stable assertion.
-wait_until "engine cuts the corroborated entry web" 120 managed_np_for web
-pass "engine quarantined role=web — live corroboration met the asymmetric action bar (ADR-0009)"
-# The pivot is ALSO isolated — its justifying chain is corroborated by the same alert
-# (JEF-566: the pivot clears the same auto-action bar as the entry, not a separate one).
-managed_np_for store \
-  || fail "engine did not quarantine the remotely-exploitable pivot role=store (corroborated chain)"
-pass "engine also quarantined role=store — a remotely-exploitable pivot on a corroborated chain"
+# Give reconcile a few cycles, exactly like the shadow-mode assertion in step 6.
+sleep 10
+# ADR-0034 D6: with NO model configured the engine has no decisive decision for ANY
+# entry — corroboration alone is no longer the auto-action trigger (that was ADR-0009;
+# D6 deletes the deterministic auto-fire it drove). So NEITHER the entry NOR the pivot
+# is ever actually isolated here, no matter how corroborated the chain is.
+managed_np_for_absent web \
+  || fail "engine auto-cut the corroborated entry web with NO model — ADR-0034 D6 (the model, not corroboration alone, must decide the cut) was violated"
+managed_np_for_absent store \
+  || fail "engine auto-quarantined the pivot role=store on corroboration alone with NO model — D6 makes downstream proposals model-only too"
+pass "no NetworkPolicy applied for web or store — corroboration alone no longer auto-cuts (ADR-0034 D6)"
+# The corroborated entry still surfaces something to a human: the containment_for
+# fallback, stamped non-auto (never the pivot — D6's fallback is entry-only; a
+# downstream proposal now requires the model to name it, see phase 10).
+wait_until "engine proposes the corroborated entry's fallback (non-auto)" 60 mitigation_proposed_for_web
+pass "engine proposed role=web's containment_for fallback — surfaced to a human, never auto-applied"
 
-step "8/11  SELF-REVERT: remove the durable allow; web is no longer provable AND store is no longer reachable-from-internet, so the engine reverts BOTH controls"
+step "8/11  the fallback proposal is chain-gated: remove the durable allow, the (never-applied) proposal retires exactly like an applied cut would"
 kubectl -n "$APP_NS" delete networkpolicy store-ingress
-wait_until "engine deletes every managed NetworkPolicy" 120 managed_np_absent
-pass "engine reverted both compensating controls once the chain stopped being proven (Q5 invariant)"
+wait_until "engine retires the fallback proposal once the chain stops proving" 120 mitigation_retired_for_web
+pass "engine retired the fallback proposal once the chain stopped being proven (Q5 invariant holds for a proposal too)"
+# No NetworkPolicy ever existed to delete, but reassert absence for symmetry with the
+# pre-ADR-0034 self-revert step this one replaces.
+managed_np_absent || fail "a NetworkPolicy exists that phase 7 should never have applied"
 
 step "9/11  LOG4J PRESENT, NO MODEL: a critical CVE on the exposed image is PROVEN reachable — but presence ≠ exploitability, so with no analyst to judge it, the engine only PROPOSES (no auto-cut)"
 # The VulnerabilityReport CRD was created in phase 5. Now a CRITICAL log4shell finding

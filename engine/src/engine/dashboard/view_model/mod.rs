@@ -16,6 +16,7 @@ mod alerts;
 mod findings;
 mod posture;
 mod readiness;
+mod scope_preview;
 mod signing_inventory;
 mod strip;
 
@@ -24,11 +25,14 @@ use std::time::SystemTime;
 use crate::engine::dashboard::auth::claims::Tier;
 use crate::engine::mcp::AccessRecord;
 use crate::engine::policy_log::PolicyDecisionRecord;
+use crate::engine::respond::Mitigation;
+use crate::engine::respond::actuator::BlastRadius;
 use crate::engine::state::{CoverageState, Finding, Judgement, Readiness, Report, ReversionRecord};
 
 use props::{
     AccessViewProps, ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingProps,
-    FindingsViewProps, Posture, ReadinessViewProps, StatusStripProps, StripCoverageAlert,
+    FindingsViewProps, Posture, ReadinessViewProps, ScopePreviewViewProps, StatusStripProps,
+    StripCoverageAlert,
 };
 
 /// Build the persistent status strip with the TRUE findings headline counts (brief §3/§4). The
@@ -157,6 +161,18 @@ pub fn build_access_view(
     durable: bool,
 ) -> AccessViewProps {
     access::build(strip, caller_tier, records, durable)
+}
+
+/// Build the whole scope-preview panel's props (ADR-0021, ADR-0016): the persistent strip + the
+/// candidate `enforceScope` classification against `standing` — this pass's `(Mitigation,
+/// BlastRadius)` snapshot. Pure given its inputs: it applies, arms, and mutates nothing.
+pub fn build_scope_preview_view(
+    strip: StatusStripProps,
+    standing: &[(Mitigation, BlastRadius)],
+    namespaces: &[String],
+    labels: &[(String, String)],
+) -> ScopePreviewViewProps {
+    scope_preview::build(strip, standing, namespaces, labels)
 }
 
 /// The standing signing-regression counts `(established, cold)` derived from the admission-decision

@@ -6,6 +6,7 @@
 //! Pure data: no rendering. Each finding's verdict + recency are resolved from the shared
 //! [`VerdictStore`] at snapshot time, so a verdict the engine just wrote is visible immediately.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -14,7 +15,9 @@ use k8s_openapi::api::core::v1::Pod;
 use crate::engine::graph::SecurityGraph;
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::observe::Snapshot;
+use crate::engine::observe::health::HealthReport;
 use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::adjudicate::incident::{self, Assessment, IncidentDecision};
 use crate::engine::reason::proof::ProvenChain;
 
 use super::agent_liveness::{
@@ -48,6 +51,67 @@ pub enum CoverageEdge {
         /// Expected sensor-node count in scope this pass.
         expected: usize,
     },
+}
+
+/// One node the model chose to contain (ADR-0034), projected for the finding detail's cut-set
+/// list (JEF-674) — the named node, its FIXED mechanism string (never model/untrusted text,
+/// [`crate::engine::respond::ProposedAction::describe`]), whether it's the breach entry itself
+/// vs. a downstream workload, and an advisory blast-radius note (the SAME fixed-shape phrasing
+/// the model's menu line showed, [`incident::blast_note`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutRow {
+    /// The node key the model named (untrusted — escape at render).
+    pub node: String,
+    /// The fixed mechanism string for the resolved action — never model-supplied text.
+    pub mechanism: &'static str,
+    /// Whether this row is the breach ENTRY itself (the front door) vs. a downstream
+    /// compromised workload (ADR-0022's entry/downstream distinction).
+    pub is_entry: bool,
+    /// The advisory blast-radius note (fixed-shape, count-only — no workload names).
+    pub blast_note: String,
+}
+
+/// The model's cut-choice decision for a finding's entry (ADR-0034), for the finding detail's
+/// cut-set list (JEF-674). `None` on [`Finding`] while the entry hasn't been through the
+/// incident adjudicator this run (no model configured, or not yet judged) — distinct from
+/// `Some` carrying an EMPTY `cuts` (a decisive `no_attack`/`uncertain`, or a decisive `attack`
+/// with no cut warranted, ADR-0034 D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncidentSummary {
+    /// The model's 3-value call (ADR-0034 D1) — the SAME typed value [`super::report`]'s
+    /// would-act aggregation classifies on (JEF-674): never re-derived from verdict prose.
+    pub assessment: Assessment,
+    /// The resolved cut-set, in the order the model named it — empty is a valid, honest state.
+    pub cuts: Vec<CutRow>,
+}
+
+impl IncidentSummary {
+    /// Project this pass's engine-local [`IncidentDecision`] for `chain`'s entry into the
+    /// display-only [`IncidentSummary`] the finding detail renders (JEF-674). Recomputes each
+    /// chosen cut's blast-radius note against the CURRENT graph/health via the same
+    /// [`predict_blast_radius`] the menu itself calls — advisory only, never re-derived from
+    /// model text.
+    fn of(
+        decision: &IncidentDecision,
+        chain: &ProvenChain,
+        graph: &SecurityGraph,
+        health: &HealthReport,
+    ) -> Self {
+        let cuts = decision
+            .cuts
+            .iter()
+            .map(|c| CutRow {
+                node: c.node.0.clone(),
+                mechanism: c.action.describe(),
+                is_entry: c.node == chain.entry,
+                blast_note: incident::cut_blast_note(&c.cut, c.action, graph, health),
+            })
+            .collect();
+        Self {
+            assessment: decision.assessment,
+            cuts,
+        }
+    }
 }
 
 /// One ENTRY-rooted proven attack path, its evidence, and the model's typed verdict — the
@@ -116,6 +180,11 @@ pub struct Finding {
     /// blind-node caveat: a latent/propose-only finding on a node with no live sensor must not
     /// render as reassuringly calm — absence of a signal there is not evidence of safety.
     pub node: Option<String>,
+    /// The model's cut-choice decision for this entry (ADR-0034), for the finding detail's
+    /// cut-set list (JEF-674). `None` when the entry hasn't been through the incident
+    /// adjudicator this run — distinct from `Some` carrying an empty cut set (see
+    /// [`IncidentSummary`]).
+    pub incident: Option<IncidentSummary>,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
@@ -143,8 +212,16 @@ impl Finding {
     /// Build a finding from a proven chain and the graph it was proven over. The graph is
     /// needed for the per-entry evidence blocks (JEF-133): the chain alone carries the
     /// topology, but the CVEs and runtime signals live on the entry's graph node — the same
-    /// place the adjudicator reads them.
-    pub fn from_chain(chain: &ProvenChain, graph: &SecurityGraph) -> Self {
+    /// place the adjudicator reads them. `decisions` is this pass's (or, for the pre-adjudication
+    /// publish, the CARRIED-FORWARD prior pass's) per-entry cut-choice decision map (ADR-0034);
+    /// `health` is this pass's health assessment — both needed to resolve the finding detail's
+    /// cut-set list (JEF-674), specifically each chosen cut's advisory blast-radius note.
+    pub fn from_chain(
+        chain: &ProvenChain,
+        graph: &SecurityGraph,
+        decisions: &BTreeMap<String, IncidentDecision>,
+        health: &HealthReport,
+    ) -> Self {
         // The disposition and the displayed cut both follow the response layer's
         // containment precedence (surgical edge-cut → entry quarantine → durable-fix),
         // so the dashboard names the *same* control the engine would propose/apply.
@@ -180,6 +257,11 @@ impl Finding {
             // Stamped by the engine after construction (it has the snapshot); the chain/graph
             // alone don't carry the entry's node.
             node: None,
+            // The model's cut-choice decision for this entry, if one has been made this run
+            // (JEF-674) — projected into the display-only shape the finding detail renders.
+            incident: decisions
+                .get(&chain.entry.0)
+                .map(|d| IncidentSummary::of(d, chain, graph, health)),
         }
     }
 
@@ -305,17 +387,22 @@ impl Findings {
     /// Build and publish this pass's findings from the proven chains, stamping each finding's entry
     /// node (JEF-308) from the snapshot so a latent finding on a blind node can carry its "no live
     /// sensor here" caveat. Keeps the engine's `process` free of the per-finding node resolution.
+    /// `decisions` + `health` feed each finding's model-chosen cut-set (JEF-674) — see
+    /// [`Finding::from_chain`].
     pub fn publish_chains(
         &self,
         chains: &[ProvenChain],
         graph: &SecurityGraph,
         snapshot: &Snapshot,
+        decisions: &BTreeMap<String, IncidentDecision>,
+        health: &HealthReport,
     ) {
         self.replace(
             chains
                 .iter()
                 .map(|c| {
-                    Finding::from_chain(c, graph).with_node(entry_node(&snapshot.pods, &c.entry.0))
+                    Finding::from_chain(c, graph, decisions, health)
+                        .with_node(entry_node(&snapshot.pods, &c.entry.0))
                 })
                 .collect(),
         );
@@ -591,7 +678,8 @@ mod tests {
             .find(|c| c.entry.0 == "workload/edge/Pod/argocd-server")
             .expect("a direct breach chain");
 
-        let finding = Finding::from_chain(&chain, &graph);
+        let finding =
+            Finding::from_chain(&chain, &graph, &BTreeMap::new(), &HealthReport::default());
         assert_eq!(finding.disposition, "quarantine entry (default-deny)");
         // The displayed cut names the entry workload, never the objective secret.
         let cut = finding.cut.expect("a containment is proposed");
@@ -641,7 +729,8 @@ mod tests {
             .find(|c| c.entry.0 == "workload/app/Pod/watcher")
             .expect("the internal chain");
 
-        let finding = Finding::from_chain(&chain, &graph);
+        let finding =
+            Finding::from_chain(&chain, &graph, &BTreeMap::new(), &HealthReport::default());
         assert_eq!(finding.disposition, "quarantine — actively exploited");
         assert!(
             !finding.breach_relevant,
