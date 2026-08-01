@@ -21,7 +21,7 @@ export function DetailPanel({ f }) {
       <AlarmingNow alerts={f.alerts} />
       <PathBlock f={f} />
       <EvidenceTables ev={f.evidence} />
-      <CutBlock cut={f.cut} />
+      <CutBlock cuts={f.cuts} />
       <ModelPrompt judgement={f.judgement} />
     </div>
   );
@@ -217,18 +217,60 @@ function ChainEdge({ hop, step }) {
   );
 }
 
-function CutBlock({ cut }) {
+// The model's cut-choice decision (ADR-0034 / JEF-674): one line per contained node — the fenced
+// node key, its FIXED mechanism string, its entry-vs-downstream role, and an advisory
+// blast-radius note. `assessment` drives the honest empty states: "attack" with no rows reads as
+// "attack, no cut warranted" (a VALID decision, not a gap); "uncertain" NEVER reads as a green
+// all-clear (the honesty invariant, ADR-0016); "awaiting" means no incident decision has been
+// made yet for this entry.
+function CutBlock({ cuts }) {
+  const assessment = cuts?.assessment ?? "awaiting";
+  const rows = cuts?.rows ?? [];
   return (
     <section class="detail-section cut-block">
       <h3 class="detail-h">proposed cut</h3>
-      {cut != null ? (
-        <p class="cut-sig">
-          <code>{cut}</code>
-        </p>
-      ) : (
-        <p class="muted">no single-edge cut — this chain is not severable by one network edge</p>
-      )}
+      <CutSetBody assessment={assessment} rows={rows} />
     </section>
+  );
+}
+
+function CutSetBody({ assessment, rows }) {
+  if (assessment === "awaiting") {
+    return <p class="muted">awaiting judgement — no cut decision yet</p>;
+  }
+  if (assessment === "uncertain") {
+    // Never a green all-clear: an uncertain call is not safety, it's a decision we couldn't make.
+    return (
+      <p class="cut-caveat cut-uncertain" role="note">
+        <span class="caveat-glyph" aria-hidden="true">
+          {"\u{25D0} "}
+        </span>
+        uncertain — the model could not decide; no cut is standing
+      </p>
+    );
+  }
+  if (rows.length === 0) {
+    return assessment === "attack" ? (
+      <p class="cut-attack-no-cut">
+        attack, no cut warranted — the model named nothing to contain
+      </p>
+    ) : (
+      <p class="muted">not exploitable — no cut proposed</p>
+    );
+  }
+  return (
+    <ul class="cut-set-list">
+      {rows.map((r, i) => (
+        <li class="cut-row" key={i}>
+          <code class="cut-row-node">{r.node}</code>
+          <span class={`cut-row-role ${r["is-entry"] ? "cut-row-entry" : "cut-row-downstream"}`}>
+            {r["is-entry"] ? "entry" : "downstream"}
+          </span>
+          <span class="cut-row-mechanism">{r.mechanism}</span>
+          <span class="cut-row-blast muted">{r["blast-note"]}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

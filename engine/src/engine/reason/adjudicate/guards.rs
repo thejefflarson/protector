@@ -116,19 +116,28 @@ pub(crate) fn guard_fabricated_cve(
 /// why: `loaded-at-runtime` is the most-primed phrase in the prompt (≈10× in the instructions,
 /// 0× in the evidence), so the model copy-completes it.
 ///
+/// `evidence_has_loaded` is whether the entry's (or entry+downstream's) evidence carries a
+/// genuinely loaded-at-runtime CVE. It MUST be decided by the caller from the TYPED
+/// `Vulnerability::reachability` field (e.g. by checking whether
+/// [`super::evidence::reachable_cve_lines`] — which filters on that typed field before
+/// rendering — is non-empty), never by substring-matching the rendered CVE evidence lines
+/// this guard used to take directly. Those lines carry the untrusted trivy `title` appended
+/// last (JEF-106), so a `not-observed` CVE whose title is forged to read the literal tag
+/// text would satisfy a substring test even though nothing was ever observed loading — the
+/// same forgery the CVE-evidence filter itself had to close, one guard deeper.
+///
 /// **This is a GROUNDING/integrity check, not a breach-decision gate (ADR-0029 scope-note).** It
-/// is a string-membership test over the CLOSED three-value reachability vocabulary *our own code*
+/// is a membership test over the CLOSED three-value reachability vocabulary *our own code*
 /// renders ([`graph::Reachability::label`]) — it weighs no severity, re-derives no breach, and can
 /// never fire toward a breach. Like [`guard_fabricated_cve`] it acts ONLY on an `Exploitable` and
 /// downgrades to the skeptic `Uncertain` (never `Refuted`), so the entry is simply re-judged next
 /// pass. It fires only when the `Exploitable` reason ASSERTS a loaded-at-runtime tag the evidence
 /// does not contain; an `Exploitable` that cites a genuinely loaded-at-runtime CVE, or cites no
 /// such tag at all (a real exposed-secret / live-signal breach), passes through untouched.
-pub(crate) fn guard_fabricated_reachability_tag(verdict: Verdict, cves: &[String]) -> Verdict {
-    // The exact tag the prompt renders for a genuinely-running CVE. If ANY evidence CVE line
-    // carries it, a loaded-at-runtime claim is grounded — leave the verdict alone.
-    const TAG: &str = "reachability: loaded-at-runtime";
-    let evidence_has_loaded = cves.iter().any(|c| c.contains(TAG));
+pub(crate) fn guard_fabricated_reachability_tag(
+    verdict: Verdict,
+    evidence_has_loaded: bool,
+) -> Verdict {
     guard_exploitable(verdict, |reason| {
         // The model's free prose may write the tag with or without the surrounding brackets, and
         // with either the hyphenated (`loaded-at-runtime`) or spaced (`loaded at runtime`) form.

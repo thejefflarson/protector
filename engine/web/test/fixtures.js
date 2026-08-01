@@ -51,6 +51,19 @@ export function finding(id, overrides = {}) {
     paths: [[{ from: "web", "from-glyph": "\u{1F310}", relation: "reaches", to: "db", "to-glyph": "\u{1F5C4}", structural: false, "is-cut": true, shared: false }]],
     "paths-truncated": false,
     cut: "web -> db",
+    // The model's cut-choice decision (ADR-0034 / JEF-674) — a single entry-line default,
+    // mirroring the deterministic `cut` fallback above so both stay believable together.
+    cuts: {
+      assessment: "attack",
+      rows: [
+        {
+          node: `entry-${id}`,
+          mechanism: "add a scoped deny NetworkPolicy/AuthorizationPolicy",
+          "is-entry": true,
+          "blast-note": "blast radius: no alive collateral",
+        },
+      ],
+    },
     evidence: {
       cves: [{ id: "CVE-2021-0001", severity: "critical", score: "9.8", kev: true, epss: "90%", reachability: "reachable", fix: "upgrade", title: "a bad bug" }],
       corroborating: [],

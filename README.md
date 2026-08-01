@@ -170,6 +170,13 @@ they exclude out-of-scope reporters (nodes the agent isn't scheduled on):
 | `protector.engine.coverage_blind_nodes` | Expected nodes with no live corroboration — not reporting, or Ready-but-blind (probes failed to attach). |
 | `protector.engine.agent_signals_this_pass` | Total agent signals emitted across healthy nodes this pass (summed, no per-node dimension). |
 
+The actuation-trust signal (don't arm blind, see [`docs/alerts.md`](docs/alerts.md)):
+
+| Metric | Meaning |
+|--------|---------|
+| `protector.engine.judge_degraded` | `1` when the model adjudicator's global breaker is open this pass, else `0` — the model is not currently verifiable, so no NEW cut auto-applies. |
+| `protector.engine.mitigations{action="held_degraded"}` | A NEW auto-apply that was held as a proposal because the judge wasn't fresh (breaker open, or no decisive verdict within the trust window). Reuses the same `mitigations` counter as `applied`/`reverted`. |
+
 ## Honest bounds
 
 - **Small to mid-size clusters by design** — multi-hop proving is tractable because

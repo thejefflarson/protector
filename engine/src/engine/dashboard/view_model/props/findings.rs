@@ -211,6 +211,40 @@ pub struct HopProps {
     pub shared: bool,
 }
 
+/// One node the model chose to contain (ADR-0034), for the finding detail's cut-set list
+/// (JEF-674). `node` is UNTRUSTED (a workload node key — escaped at render, ADR-0019); `mechanism`
+/// and `blast_note` are FIXED-shape strings computed by determinism, never model text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct CutRowProps {
+    pub node: String,
+    /// The resolved mechanism, in fixed words (`ProposedAction::describe`) — never the model's
+    /// own text.
+    pub mechanism: &'static str,
+    /// Whether this row is the breach ENTRY (the front door) vs. a downstream workload.
+    pub is_entry: bool,
+    /// The advisory blast-radius note (fixed-shape, count-only).
+    pub blast_note: String,
+}
+
+/// The model's cut-choice decision for a finding's entry (ADR-0034), for the detail panel's
+/// cut-set list (JEF-674) — a REPLACEMENT for the old single opaque cut-signature string,
+/// naming every contained node with its role and mechanism. Always present (never `Option`):
+/// `assessment == "awaiting"` with empty `rows` is itself the honest "not judged yet" state,
+/// mirroring [`Posture::Awaiting`]'s convention rather than introducing a second null channel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct CutSetProps {
+    /// The typed 3-value call, as a stable lowercase tag (ADR-0025): `"attack"` / `"no-attack"`
+    /// / `"uncertain"` / `"awaiting"` (no incident decision has been made yet for this entry).
+    /// `"uncertain"` NEVER reads as the cleared/green state (the honesty invariant, ADR-0016).
+    pub assessment: &'static str,
+    /// One row per node the model chose to contain, in the order it named them. Empty is a
+    /// valid, honest state for every `assessment` value — see the detail panel's `CutBlock` for
+    /// how each combination renders (e.g. `"attack"` + empty ⇒ "attack, no cut warranted").
+    pub rows: Vec<CutRowProps>,
+}
+
 /// The verbatim model judgement behind a finding, for the "show model prompt" disclosure.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -310,8 +344,13 @@ pub struct FindingProps {
     /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
     /// detail shows a "+N more" note rather than an unbounded wall (JEF-281).
     pub paths_truncated: bool,
-    /// The proposed/applied cut signature, if one exists.
+    /// The proposed/applied cut signature, if one exists — the deterministic `containment_for`
+    /// fallback the chain-diagram's cut-hop marker ([`HopProps::is_cut`]) uses. Distinct from
+    /// [`cuts`](Self::cuts): the MODEL's chosen cut-set (ADR-0034), which can name several nodes.
     pub cut: Option<String>,
+    /// The model's cut-choice decision for this finding's entry (ADR-0034), for the detail
+    /// panel's cut-set list (JEF-674) — see [`CutSetProps`].
+    pub cuts: CutSetProps,
     pub evidence: EvidenceProps,
     pub judgement: JudgementProps,
     /// The blind-node caveat (JEF-308): set when this finding sits on a node with NO live runtime

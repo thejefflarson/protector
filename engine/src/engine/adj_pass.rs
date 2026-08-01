@@ -21,13 +21,25 @@
 //! This is a behavior-neutral code move: it mutates exactly the state the inline block did
 //! (`verdicts`, `journal`, `notifier`, `findings`, `metrics`) and stamps verdicts onto the
 //! passed-in `chains` in place. The caller re-publishes the enriched chains afterward.
+//!
+//! **ADR-0034 (JEF-570):** each entry's model call now returns an
+//! [`incident::IncidentDecision`] (a 3-value assessment + the engine-resolved cuts it chose
+//! from the entry's deterministic menu, built in Phase 1), not the bare legacy
+//! [`reason::adjudicate::Verdict`]. The pass folds it two ways: `to_verdict()` derives the
+//! `Verdict` every existing rail here — the cache, the re-judge gate, the journal `Breach`
+//! line, the notifier, the display — keeps consuming unchanged (ADR-0023 stays intact), while
+//! the decision itself is collected and returned so the caller can hand it to
+//! [`super::respond::MitigationLedger::reconcile`] (D6/D7): the ledger's desired set is now the
+//! model-chosen cuts, not a deterministic insertion.
 
 use futures::StreamExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
-    Engine, PendingEntry, adj_gate, churn_diag, graph, journal, model, notify, reason, state,
+    Engine, PendingEntry, RestoredDecision, adj_gate, churn_diag, graph, journal, model, notify,
+    observe, reason, state,
 };
+use reason::adjudicate::incident;
 
 impl Engine {
     /// Run the four-phase adjudication pass over this pass's breach-relevant chains (see the
@@ -35,12 +47,15 @@ impl Engine {
     /// `chain.emit()` log and the `from_chain` fallback) and writes the resolved verdict to the
     /// shared store the instant it's decided, so the findings snapshot resolves it immediately.
     /// `pass_now` is the pass's single injected clock, shared with every backoff/breaker decision.
+    /// Returns this pass's per-entry cut-choice decision (ADR-0034), keyed by entry key, for the
+    /// ledger reconcile.
     pub(super) async fn run_adjudication_pass(
         &mut self,
         chains: &mut [reason::proof::ProvenChain],
         graph: &graph::SecurityGraph,
+        health: &observe::health::HealthReport,
         pass_now: std::time::Instant,
-    ) {
+    ) -> BTreeMap<String, incident::IncidentDecision> {
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant PATH,
         // always. The deterministic proof winnows to the paths an internet-facing
         // workload can actually reach (internet → entry → objective); the model then
@@ -118,11 +133,22 @@ impl Engine {
             // block for (see `downstream_workloads`).
             let downstream = downstream_workloads(&entry, idxs, chains);
 
+            // ADR-0034 D4 (JEF-570): the deterministic cut-choice menu for this entry, unioned
+            // across every one of its objective-chains (see `entry_menu`) — the SAME menu the
+            // prompt's containment-options section renders and the model's `contain` reply
+            // resolves against.
+            let menu = entry_menu(idxs, chains, graph, health);
+
             // Build the entry's delta-aware pending record (prompt + fingerprint + projected
             // surface) and read its baseline — see [`Engine::prepare_pending`] (ADR-0023 / JEF-350
             // / JEF-387). `additive` says whether the delta since the baseline is additive.
-            let (pending, additive, baseline) =
-                self.prepare_pending(entry_key, entry, objectives, downstream, idxs, graph, &asn);
+            let (pending, additive, baseline) = self.prepare_pending(
+                entry_key, entry, objectives, downstream, idxs, graph, &asn, menu,
+            );
+            // ADR-0034 D8 (JEF-639): attempt the double replay-lock BEFORE the re-judge gate —
+            // a no-op once this run already has a LIVE decision for the entry, or when nothing
+            // was journal-restored for it. See `try_rearm_decision`/`rearm_restored_decision`.
+            self.try_rearm_decision(&pending);
             // The layered re-judge gate (JEF-390 LRU / JEF-391 delta hold / JEF-234 breaker +
             // backoff / re-judge), decided WITHOUT a model call — see [`adj_gate`].
             match adj_gate::classify_adjudication(
@@ -164,40 +190,44 @@ impl Engine {
         // other entries' adjudication in the same pass.
         let judged_results: Vec<(
             PendingEntry,
-            reason::adjudicate::Verdict,
+            incident::IncidentDecision,
             std::time::Duration,
         )> = {
             let adjudicator = &self.adjudicator;
             let graph_ref = graph;
             futures::stream::iter(to_judge.into_iter().map(|pending| async move {
                 let started = std::time::Instant::now();
-                let verdict = adjudicator
+                let decision = adjudicator
                     .judge(
                         &pending.entry,
                         &pending.objectives,
                         graph_ref,
                         &pending.prompt,
                         &pending.downstream,
+                        &pending.menu,
                     )
                     .await;
-                (pending, verdict, started.elapsed())
+                (pending, decision, started.elapsed())
             }))
             .buffer_unordered(model::model_concurrency())
             .collect()
             .await
         };
 
-        // Phase 3 — fold each fresh verdict back into the per-entry store (sequential; each
-        // step mutates the engine). Cache a decisive verdict + clear its backoff/close the
-        // breaker; arm backoff on an Uncertain; record the model-call latency + outcome. This
-        // is the SAME bookkeeping the old sequential loop did per fresh call — only the
-        // dispatch shape (concurrent, above) changed.
-        for (pending, verdict, elapsed) in judged_results {
+        // Phase 3 — fold each fresh decision back into the per-entry store (sequential; each
+        // step mutates the engine). Cache a decisive verdict (derived from the decision,
+        // ADR-0034) + clear its backoff/close the breaker; arm backoff on an Uncertain; record
+        // the model-call latency + outcome. This is the SAME bookkeeping the old sequential loop
+        // did per fresh call — only the dispatch shape (concurrent, above) changed.
+        for (pending, decision, elapsed) in judged_results {
             // Time the (slow, CPU-bound) model call so its latency tail is observable in
             // shadow (JEF-100). Recorded for every fresh call; `result` labels the outcome.
             self.metrics
                 .model_latency_ms
                 .record(elapsed.as_secs_f64() * 1000.0, &[]);
+            // The legacy 4-value Verdict every rail below still consumes unchanged (ADR-0023's
+            // cache/gate/journal/notify/display — see `IncidentDecision::to_verdict`).
+            let verdict = decision.to_verdict();
             // An Uncertain is usually a transient model outage — re-judge later rather than
             // pin the failure into the cache. Logged at info: on a slow CPU model nearly every
             // verdict lands here, and a silent inconclusive is indistinguishable from "the
@@ -209,10 +239,44 @@ impl Engine {
                     // breaker's failure run, so the next pass does NOT re-judge it immediately.
                     self.verdicts
                         .record_inconclusive(&pending.entry_key, pass_now);
+                    // ADR-0034 D7: a fresh Uncertain retires nothing and cuts nothing — leave
+                    // whatever decision (if any) is already recorded for this entry standing,
+                    // rather than clearing it. Inert both ways.
                     "unavailable"
                 }
                 decisive => {
                     tracing::info!(entry = %pending.entry.0, objectives = pending.objectives.len(), verdict = ?decisive, "adjudicated entry");
+                    // ADR-0034 D8 (JEF-639): durably record THIS pass's decisive cut-choice
+                    // decision — the double replay-lock's source material on a future restart
+                    // (see `rearm_restored_decision`). Only when it actually CHANGED from the
+                    // decision already standing for this entry: `Exploitable`/`Attack` is
+                    // re-verified every pass (JEF-445), so an unchanged standing incident would
+                    // otherwise write an identical line every pass — the exact per-pass spam the
+                    // journal's rotation-window design (several restarts' worth of history)
+                    // depends on NOT happening. A no-op when the journal is disabled.
+                    if self.decisions.get(&pending.entry_key) != Some(&decision) {
+                        self.journal.record(journal::Decision::Incident {
+                            entry: pending.entry_key.clone(),
+                            objectives: pending.objectives.len(),
+                            assessment: decision.assessment,
+                            reason: decision.reason.clone(),
+                            cuts: decision
+                                .cuts
+                                .iter()
+                                .map(|c| journal::JournaledCut {
+                                    node: c.node.0.clone(),
+                                    cut_signature: c.cut_signature.clone(),
+                                })
+                                .collect(),
+                            fingerprint: pending.fingerprint.clone(),
+                        });
+                    }
+                    // ADR-0034 D6/D7: record THIS pass's decisive cut-choice decision — the
+                    // ledger reconcile reads it back below. Overwrites any prior decision for
+                    // this entry, so a fresh decisive decision that DROPS a cut is exactly what
+                    // retires it (the ledger's own active-vs-desired diff does the rest).
+                    self.decisions
+                        .insert(pending.entry_key.clone(), decision.clone());
                     self.verdicts.cache_decisive(
                         &pending.entry_key,
                         pending.fingerprint.clone(),
@@ -229,7 +293,8 @@ impl Engine {
                     );
                     // JEF-234: a decisive answer means the model is alive — clear this entry's
                     // backoff and close the global breaker so judging resumes for the fleet.
-                    self.verdicts.record_decisive(&pending.entry_key);
+                    // Also stamps the actuation-trust clock (`decisive_at`) `pass_now` reads.
+                    self.verdicts.record_decisive(&pending.entry_key, pass_now);
                     "ok"
                 }
             };
@@ -388,7 +453,90 @@ impl Engine {
                 "adjudication pass (model calls = judged)"
             );
         }
+        // ADR-0034 D6/D7 (JEF-570): drop decisions for entries that no longer exist this pass
+        // (mirrors `self.verdicts.retain_present` above) — a stale decision must never outlive
+        // the entry it was judged for. Every entry STILL present keeps its last DECISIVE
+        // decision even on a cache-hit/held/backoff pass this cycle (no fresh call ran), which
+        // is exactly D7's retirement asymmetry: only a fresh decisive decision (Phase 3 above)
+        // or the entry disappearing here changes what the ledger sees; a this-pass Uncertain
+        // (skipped/backoff) never clears it.
+        self.decisions
+            .retain(|k, _| current_entries.contains(k.as_str()));
+        // ADR-0034 D8 (JEF-639): a journal-restored decision that never got the chance to be
+        // checked this run (its entry wasn't breach-relevant this pass, or vanished before
+        // `try_rearm_decision` ran) can't outlive the entry either — same prune as above.
+        self.restored_decisions
+            .retain(|k, _| current_entries.contains(k.as_str()));
+        self.decisions.clone()
     }
+
+    /// ADR-0034 D8 (JEF-639): attempt to re-arm a journal-restored decision for this entry
+    /// against THIS pass's freshly-rebuilt fingerprint + menu — the double replay-lock (see
+    /// [`rearm_restored_decision`]). A no-op once a LIVE decision already governs the entry
+    /// this run (a fresh Phase 3 judgment always wins over a restored one) or when nothing
+    /// was journal-restored for it. Consumes the restored entry either way — armed into
+    /// [`Engine::decisions`] on a lock hold, discarded on a miss — so it is never re-checked
+    /// or retried blind on a later pass.
+    fn try_rearm_decision(&mut self, pending: &PendingEntry) {
+        if self.decisions.contains_key(&pending.entry_key) {
+            return; // a live decision (this run) already governs this entry
+        }
+        let Some(restored) = self.restored_decisions.remove(&pending.entry_key) else {
+            return; // nothing was journal-restored for this entry
+        };
+        match rearm_restored_decision(&restored, &pending.fingerprint, &pending.menu) {
+            Some(decision) => {
+                tracing::info!(
+                    entry = %pending.entry_key,
+                    cuts = decision.cuts.len(),
+                    "re-armed a journal-restored decision (double replay-lock held, ADR-0034 D8)"
+                );
+                self.decisions.insert(pending.entry_key.clone(), decision);
+            }
+            None => {
+                tracing::info!(
+                    entry = %pending.entry_key,
+                    "journal-restored decision failed the replay-lock — cold re-judging for cuts (ADR-0034 D8)"
+                );
+            }
+        }
+    }
+}
+
+/// The ADR-0034 D8 double replay-lock, pure: re-arm `restored` ONLY when BOTH (1) its
+/// fingerprint matches `current_fingerprint` byte-identically, and (2) EVERY one of its cuts
+/// re-resolves, byte-identically, to the SAME `cut_signature` against `current_menu` — the
+/// exact menu this pass would show the model if it re-judged now. Either lock failing returns
+/// `None` — re-arm NOTHING for this entry (a cold re-judge), never a partial or best-guess
+/// repoint.
+///
+/// SECURITY-SENSITIVE: this is the replay/re-arm path for a possibly-armed cut. A mis-keyed or
+/// over-eager re-arm here would auto-apply a cut the current state doesn't justify, so both
+/// locks fail closed — lock 1 catches evidence/menu drift (the fingerprint covers the full
+/// prompt, including the rendered menu, ADR-0034 D4/D9); lock 2 additionally catches a
+/// mechanism-RESOLVER version drift that an unchanged fingerprint alone can't (the prompt hash
+/// covers the rendered menu TEXT, not the resolver code that produced it).
+pub(super) fn rearm_restored_decision(
+    restored: &RestoredDecision,
+    current_fingerprint: &str,
+    current_menu: &incident::Menu,
+) -> Option<incident::IncidentDecision> {
+    if restored.fingerprint != current_fingerprint {
+        return None;
+    }
+    let mut cuts = Vec::with_capacity(restored.cuts.len());
+    for cut in &restored.cuts {
+        let resolved = current_menu.resolve(&graph::NodeKey(cut.node.clone()))?;
+        if resolved.cut_signature != cut.cut_signature {
+            return None;
+        }
+        cuts.push(resolved);
+    }
+    Some(incident::IncidentDecision {
+        assessment: restored.assessment,
+        reason: restored.reason.clone(),
+        cuts,
+    })
 }
 
 /// The deduped, sorted workload [`graph::NodeKey`]s on this entry's PROVEN paths (JEF-565),
@@ -414,3 +562,34 @@ fn downstream_workloads(
     nodes.dedup();
     nodes
 }
+
+/// The deterministic cut-choice menu for one entry (ADR-0034 D4, JEF-570), unioned across
+/// EVERY one of its objective-chains — [`incident::build_menu`] itself takes just one
+/// [`reason::proof::ProvenChain`] (an (entry, objective) pair), but the model is judged once
+/// PER ENTRY over every objective it reaches, so the menu it's shown must be the union of what
+/// each of those chains would offer. Pure data merge (no decision logic duplicated): re-sorts +
+/// dedups exactly as `build_menu` does internally, so a node covered by more than one chain
+/// (e.g. two objectives sharing a downstream pivot) still appears exactly once.
+fn entry_menu(
+    idxs: &[usize],
+    chains: &[reason::proof::ProvenChain],
+    graph: &graph::SecurityGraph,
+    health: &observe::health::HealthReport,
+) -> incident::Menu {
+    let mut selectable = Vec::new();
+    let mut uncontainable = Vec::new();
+    for &i in idxs {
+        let m = incident::build_menu(&chains[i], graph, health);
+        selectable.extend(m.selectable);
+        uncontainable.extend(m.uncontainable);
+    }
+    incident::normalize_menu(&mut selectable, &mut uncontainable);
+    incident::Menu {
+        selectable,
+        uncontainable,
+    }
+}
+
+#[cfg(test)]
+#[path = "adj_pass_tests.rs"]
+mod tests;

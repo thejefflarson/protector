@@ -6,15 +6,16 @@
 use std::collections::HashSet;
 
 use crate::engine::graph::{Behavior, NodeKey};
+use crate::engine::reason::adjudicate::incident::Assessment;
 use crate::engine::state::{
-    CveEvidence, EntryEvidence, Finding, FindingEvidence, Judgement, NodeCoverageState, PathStep,
-    Readiness,
+    CutRow, CveEvidence, EntryEvidence, Finding, FindingEvidence, IncidentSummary, Judgement,
+    NodeCoverageState, PathStep, Readiness,
 };
 
 use super::posture::{delta_of, live_tag_of, posture_of};
 use super::props::{
-    BehaviorProps, CveProps, EvidenceProps, EvidenceSummary, FindingProps, HopProps,
-    JudgementProps, LiveTag, Posture, ScanProps,
+    BehaviorProps, CutRowProps, CutSetProps, CveProps, EvidenceProps, EvidenceSummary,
+    FindingProps, HopProps, JudgementProps, LiveTag, Posture, ScanProps,
 };
 
 /// A reasonable threshold past which an entry's reachable-objective set reads as a fan-out
@@ -109,6 +110,39 @@ fn evidence_summary(ev: &EntryEvidence) -> EvidenceSummary {
         kev: ev.cves.iter().any(|c| c.kev),
         runtime_alerts: ev.runtime.iter().filter(|b| b.is_alert()).count(),
         exposed_secrets: ev.exposed_secrets.len(),
+    }
+}
+
+/// Project one model-chosen cut into its row props (JEF-674): the node key ships UNTRUSTED (the
+/// render layer escapes it, ADR-0019); the mechanism and blast note are already fixed strings.
+fn cut_row_props(c: &CutRow) -> CutRowProps {
+    CutRowProps {
+        node: NodeKey::short_of(&c.node).to_string(),
+        mechanism: c.mechanism,
+        is_entry: c.is_entry,
+        blast_note: c.blast_note.clone(),
+    }
+}
+
+/// Build the finding detail's cut-set props from the finding's model decision (ADR-0034,
+/// JEF-674) — a REPLACEMENT for the old single opaque cut-signature string. `None` (no incident
+/// decision made yet for this entry) maps to the honest `"awaiting"` state, mirroring
+/// [`Posture::Awaiting`]'s convention: never a second null channel, never inferred from the
+/// verdict's prose.
+fn cut_set_props(incident: &Option<IncidentSummary>) -> CutSetProps {
+    match incident {
+        None => CutSetProps {
+            assessment: "awaiting",
+            rows: Vec::new(),
+        },
+        Some(s) => CutSetProps {
+            assessment: match s.assessment {
+                Assessment::Attack => "attack",
+                Assessment::NoAttack => "no-attack",
+                Assessment::Uncertain => "uncertain",
+            },
+            rows: s.cuts.iter().map(cut_row_props).collect(),
+        },
     }
 }
 
@@ -291,6 +325,7 @@ pub(super) fn finding_props(
         paths: multi_path_props(&f.paths, &f.path, f.cut.as_deref(), f.foothold),
         paths_truncated: f.paths_truncated,
         cut: f.cut.clone(),
+        cuts: cut_set_props(&f.incident),
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),
         blind_node_caveat: blind_node_caveat(f, blind_nodes),

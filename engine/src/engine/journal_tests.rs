@@ -10,12 +10,14 @@ use super::*;
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::reason::adjudicate::Verdict;
+use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, Menu};
 use crate::engine::respond::actuator::DryRunActuator;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::tests::{
-    CountingAdjudicator, FixedAdjudicator, engine_with, engine_with_adjudicator, exposed_snapshot,
+    CountingAdjudicator, FixedAdjudicator, decision_of, engine_with, engine_with_adjudicator,
+    exposed_snapshot,
 };
 
 /// A unique temp journal path for a test, without a temp-file crate.
@@ -239,9 +241,10 @@ impl reason::adjudicate::Adjudicator for AlwaysUncertain {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Verdict::Uncertain("model unavailable".into())
+        IncidentDecision::uncertain("model unavailable")
     }
 }
 
@@ -285,12 +288,13 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
         _graph: &SecurityGraph,
         _prompt: &str,
         _downstream: &[NodeKey],
-    ) -> Verdict {
+        _menu: &Menu,
+    ) -> IncidentDecision {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.down_for {
-            Verdict::Uncertain("model unavailable".into())
+            IncidentDecision::uncertain("model unavailable")
         } else {
-            Verdict::Exploitable("RCE reaches the secret".into())
+            decision_of(Verdict::Exploitable("RCE reaches the secret".into()))
         }
     }
 }
@@ -371,7 +375,7 @@ fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
         store.record_inconclusive(&format!("entry-{i}"), now);
     }
     assert!(store.breaker_open(now), "tripped again");
-    store.record_decisive("entry-0");
+    store.record_decisive("entry-0", now);
     assert!(
         !store.breaker_open(now),
         "the first decisive success closes the breaker"
@@ -428,4 +432,226 @@ async fn a_persisted_exploitable_is_reverified_on_restart_and_self_heals() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+// --- ADR-0034 D8 (JEF-639): the journal schema v2 cut-choice replay-lock ---
+
+/// Back-compat: a journal holding only pre-JEF-639 `Breach` lines (no `Incident` line ever
+/// existed for the entry) restores NOTHING into the decision-restore state on boot — there is
+/// nothing to double-lock-verify, so the entry simply cold-re-judges for cuts on its first live
+/// pass (the documented ~20-min startup cost). The verdict TEXT still restores display-only,
+/// unaffected — see `journal_restores_findings_and_freshness_without_a_fresh_pass` above
+/// (ADR-0023 kept intact).
+#[test]
+fn a_pre_jef639_journal_restores_no_decision_state() {
+    let path = temp_journal_path("pre-jef639-decisions");
+    let journal = journal::DecisionJournal::open(&path);
+    journal.record(journal::Decision::Breach {
+        entry: "workload/app/Pod/web".into(),
+        objectives: 1,
+        verdict: "exploitable — reaches the secret".into(),
+        coverage: None,
+        fingerprint: Some("fp-1".into()),
+        verdict_typed: Some(Verdict::Exploitable("reaches the secret".into())),
+    });
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine = engine_with(calls).with_journal(journal::DecisionJournal::open(&path));
+    assert!(
+        engine.decisions.is_empty(),
+        "a pre-JEF-639 journal has no cut-choice decision to restore"
+    );
+    assert!(
+        engine.restored_decisions.is_empty(),
+        "nothing is staged for the double replay-lock either — there was never an Incident line"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// ADR-0034 D8 acceptance: a restart under ENFORCE mode preserves a STANDING model-chosen cut
+/// across the model's cold-start window — closing the gap JEF-570 left open (its Engine-local
+/// `decisions` map was in-memory only, so a restart dropped every standing cut to the
+/// `containment_for` human-proposal fallback until re-judged).
+///
+/// Pre-restart: the model names the entry itself, `network`+`judgement` armed, so the cut
+/// auto-applies and is durably journaled (both the `Breach` line and, per JEF-639, the new
+/// `Incident` line carrying the resolved cut signature + fingerprint). Post-"restart": a FRESH
+/// engine (journal replayed) whose adjudicator is UNCERTAIN — standing in for the model's
+/// cold-start window, where it hasn't answered yet. The double replay-lock (fingerprint +
+/// cut-signature, both unchanged since the evidence didn't change) re-arms the EXACT prior
+/// decision on this first post-restart pass, so the ledger's active/desired set shows the
+/// model's OWN cut (`adjudicated: true`), not the weaker `containment_for` fallback
+/// (`adjudicated: false` by construction). Actual re-APPLICATION stays correctly gated by the
+/// existing, unrelated JEF-566 rails (`is_live_corroborated` requires THIS PASS's own
+/// corroboration/promotion, a deliberate Uncertain-vetoes-auto-action safety property this
+/// ticket does not change) — see the acceptance criteria's own "still gated by the existing
+/// arm/shadow rails".
+#[tokio::test]
+async fn enforce_mode_restart_preserves_the_standing_cut_across_the_cold_start_window() {
+    let path = temp_journal_path("d8-enforce-restart");
+
+    struct AlwaysAttacksTheEntry;
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for AlwaysAttacksTheEntry {
+        async fn judge(
+            &self,
+            entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+            _prompt: &str,
+            _downstream: &[NodeKey],
+            menu: &Menu,
+        ) -> IncidentDecision {
+            let cut = menu
+                .resolve(entry)
+                .expect("the entry is selectable on its own menu");
+            IncidentDecision {
+                assessment: Assessment::Attack,
+                reason: "RCE reaches the secret".to_string(),
+                cuts: vec![cut],
+            }
+        }
+    }
+
+    // Pre-restart: enforce mode, a real Attack decision naming the entry — it auto-applies.
+    let cut_sig = {
+        let mut engine = Engine::new(
+            EnabledActions::from_names(["network", "judgement"]),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(AlwaysAttacksTheEntry),
+        )
+        .with_journal(journal::DecisionJournal::open(&path));
+        engine.process(&exposed_snapshot(true)).await;
+        assert!(
+            engine.actions.active_count() > 0,
+            "pre-restart: the model-chosen cut actually applies in enforce mode"
+        );
+        let written = journal::DecisionJournal::open(&path).replay();
+        assert!(
+            written
+                .iter()
+                .any(|e| matches!(e.decision, journal::Decision::Incident { .. })),
+            "the cut-choice decision is durable (ADR-0034 D8)"
+        );
+        engine
+            .ledger
+            .active()
+            .next()
+            .expect("one active mitigation")
+            .cut_signature()
+    };
+
+    // "Restart": a fresh engine, SAME enforce posture, journal replayed on boot — but its
+    // adjudicator is Uncertain (the model hasn't answered yet this exact pass).
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = Engine::new(
+        EnabledActions::from_names(["network", "judgement"]),
+        ActuationScope::unscoped(),
+        Box::new(DryRunActuator),
+        Box::new(AlwaysUncertain(calls.clone())),
+    )
+    .with_journal(journal::DecisionJournal::open(&path));
+
+    engine.process(&exposed_snapshot(true)).await;
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the model WAS consulted (the cold-start window) but hasn't answered decisively yet"
+    );
+
+    let active: Vec<_> = engine.ledger.active().cloned().collect();
+    assert_eq!(
+        active.len(),
+        1,
+        "the standing cut is preserved — not dropped to nothing"
+    );
+    assert_eq!(
+        active[0].cut_signature(),
+        cut_sig,
+        "it's the EXACT SAME cut the model chose pre-restart (ADR-0034 D8), not a different \
+         object silently repointed"
+    );
+    assert!(
+        active[0].justifications.iter().all(|j| j.adjudicated),
+        "it's re-armed as the model's own DECISIVE choice, not demoted to the human-proposal \
+         fallback (`fallback_proposal` always stamps `adjudicated: false`)"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file({
+        let mut s = path.clone().into_os_string();
+        s.push(".1");
+        std::path::PathBuf::from(s)
+    });
+}
+
+/// The negative contrast: when the EVIDENCE changed since the journal write (a new critical CVE
+/// enters the entry's evidence, changing its full-prompt fingerprint), the double replay-lock's
+/// first lock fails — the restart does NOT blindly re-arm the stale cut. The entry falls back
+/// to the `containment_for` human-proposal path (never silently repointed) until a fresh
+/// decisive judgment lands.
+#[tokio::test]
+async fn a_changed_fingerprint_across_a_restart_does_not_blindly_rearm_the_stale_cut() {
+    let path = temp_journal_path("d8-fingerprint-mismatch");
+
+    struct AlwaysAttacksTheEntry;
+    #[async_trait::async_trait]
+    impl reason::adjudicate::Adjudicator for AlwaysAttacksTheEntry {
+        async fn judge(
+            &self,
+            entry: &NodeKey,
+            _objectives: &[(NodeKey, AttackRef)],
+            _graph: &SecurityGraph,
+            _prompt: &str,
+            _downstream: &[NodeKey],
+            menu: &Menu,
+        ) -> IncidentDecision {
+            let cut = menu
+                .resolve(entry)
+                .expect("the entry is selectable on its own menu");
+            IncidentDecision {
+                assessment: Assessment::Attack,
+                reason: "RCE reaches the secret".to_string(),
+                cuts: vec![cut],
+            }
+        }
+    }
+
+    {
+        let mut engine = Engine::new(
+            EnabledActions::from_names(["network", "judgement"]),
+            ActuationScope::unscoped(),
+            Box::new(DryRunActuator),
+            Box::new(AlwaysAttacksTheEntry),
+        )
+        .with_journal(journal::DecisionJournal::open(&path));
+        // No CVE yet — the entry is breach-relevant via the mounted secret alone.
+        engine.process(&exposed_snapshot(false)).await;
+        assert!(engine.actions.active_count() > 0, "pre-restart cut applies");
+    }
+
+    // Restart with DIFFERENT evidence (a critical CVE now present) and an Uncertain model —
+    // the recomputed fingerprint no longer matches the journaled one, so lock 1 fails.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut engine = Engine::new(
+        EnabledActions::from_names(["network", "judgement"]),
+        ActuationScope::unscoped(),
+        Box::new(DryRunActuator),
+        Box::new(AlwaysUncertain(calls.clone())),
+    )
+    .with_journal(journal::DecisionJournal::open(&path));
+    engine.process(&exposed_snapshot(true)).await;
+
+    assert!(
+        engine.decisions.is_empty(),
+        "a fingerprint mismatch must re-arm nothing — the entry cold-re-judges for cuts"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file({
+        let mut s = path.clone().into_os_string();
+        s.push(".1");
+        std::path::PathBuf::from(s)
+    });
 }

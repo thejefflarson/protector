@@ -200,9 +200,21 @@ impl Mitigation {
     /// unconditional-`true` special case — it can only move a mitigation from
     /// AutoApply to Propose, never the reverse.
     pub fn is_live_corroborated(&self) -> bool {
+        self.live_corroborating_entries().next().is_some()
+    }
+
+    /// The internet-facing entries whose justification clears the SAME bar
+    /// [`is_live_corroborated`](Self::is_live_corroborated) checks — corroborated or
+    /// promoted, adjudicated, and breach-relevant — yielding the entry keys rather than a
+    /// bool. Exposed separately so the engine's actuation-freshness gate can check THOSE
+    /// SPECIFIC entries' verdict age against the verdict store, without `respond`/`actuator`
+    /// taking a dependency on `state::VerdictStore` (this module stays pure over its own
+    /// types). The one predicate lives here; `is_live_corroborated` is just "any at all".
+    pub fn live_corroborating_entries(&self) -> impl Iterator<Item = &str> {
         self.justifications
             .iter()
-            .any(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
+            .filter(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
+            .map(|j| j.entry.as_str())
     }
 }
 
@@ -235,7 +247,12 @@ const QUARANTINE_WORKLOAD_RELATION: &str = "quarantine-workload";
 /// entry pod precisely (ADR-0010). Returns `None` when the entry has no labels — we
 /// will not widen a quarantine to a whole namespace (that would punish bystanders);
 /// such a chain falls through to durable-fix/no-cut instead.
-fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
+///
+/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's entry line reuses the
+/// SAME [`containment_for`] ladder this module's own `reconcile` runs, so a helper it calls
+/// (this one, transitively) must be visible outside `respond`. `reconcile` itself is
+/// untouched — only this pure builder's visibility widens.
+pub(crate) fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
     // The first hop's `from` is always the entry (the path is reconstructed from the
     // entry outward), and its `from_labels` are the entry workload's labels.
     let first = chain.links.first()?;
@@ -257,7 +274,13 @@ fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
 /// pod precisely (ADR-0010). Returns `None` when the pod has no labels — we decline
 /// (never widen a quarantine to a whole namespace, punishing bystanders), exactly as
 /// [`quarantine_link`] does for the entry.
-fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link> {
+///
+/// `pub(crate)` (JEF-609): the ADR-0034 `incident/` menu resolver's downstream lines
+/// resolve each `quarantine_targets` workload through this exact builder — the SAME
+/// `None`-on-unlabeled decline the ledger's `reconcile` uses — so the menu and the ledger
+/// can never disagree on which downstream nodes are containable. `reconcile` itself is
+/// untouched — only this pure builder's visibility widens.
+pub(crate) fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link> {
     if target.labels.is_empty() {
         return None;
     }
@@ -310,6 +333,67 @@ pub fn containment_for(chain: &ProvenChain) -> Option<(Link, ProposedAction)> {
         .single_edge_cuts
         .first()
         .map(|cut| (cut.clone(), ProposedAction::for_cut(cut)))
+}
+
+/// The `containment_for` human-proposal fallback for one breach-relevant chain's entry (ADR-0034
+/// D6) — stamped `adjudicated = false` so [`Mitigation::is_live_corroborated`] can never clear
+/// it, no matter how corroborated the chain actually is. Used both when there is no standing
+/// cut to carry forward ([`carry_forward_or_fallback`]) and for a decisive `Attack` that named
+/// no cut (D1 — a decisive omission).
+fn fallback_proposal(chain: &ProvenChain, desired: &mut BTreeMap<String, Mitigation>) {
+    let Some((cut, action)) = containment_for(chain) else {
+        return;
+    };
+    let mut justification = Justification::of(chain);
+    justification.adjudicated = false;
+    desired
+        .entry(cut_signature(&cut))
+        .or_insert_with(|| Mitigation {
+            cut,
+            action,
+            justifications: Vec::new(),
+        })
+        .justifications
+        .push(justification);
+}
+
+/// ADR-0034 D7 (the retirement asymmetry, safety-critical): when this pass has no decisive
+/// decision for `chain`'s entry (no decision at all, or a fresh `Uncertain` — model
+/// unavailable, not yet judged, or the cold-start window after a restart), it must be INERT —
+/// neither open a live attack path nor sever one. A previous pass's model-chosen cut (its
+/// signature generally differs from `containment_for`'s own default — a downstream
+/// `QuarantineWorkload` line always does) must NOT quietly drop out of the desired set just
+/// because this pass rebuilt it from scratch: dropping it would read to the caller as "no
+/// longer justified" and trigger the self-revert loop, tearing down a live isolation control on
+/// a transient model wobble. So: carry every mitigation ALREADY active for this entry forward
+/// unchanged (re-justified against THIS pass's chain, so a genuine chain-clear next pass still
+/// retires it structurally, exactly like any other mitigation) — never rebuild from
+/// `containment_for` while a standing cut exists. Only when there is NO standing cut for this
+/// entry does the `containment_for` fallback apply, so a human still has something to review.
+fn carry_forward_or_fallback(
+    chain: &ProvenChain,
+    active: &BTreeMap<String, Mitigation>,
+    desired: &mut BTreeMap<String, Mitigation>,
+) {
+    let standing: Vec<&Mitigation> = active
+        .values()
+        .filter(|m| m.justifications.iter().any(|j| j.entry == chain.entry.0))
+        .collect();
+    if standing.is_empty() {
+        fallback_proposal(chain, desired);
+        return;
+    }
+    for mitigation in standing {
+        desired
+            .entry(mitigation.cut_signature())
+            .or_insert_with(|| Mitigation {
+                cut: mitigation.cut.clone(),
+                action: mitigation.action,
+                justifications: Vec::new(),
+            })
+            .justifications
+            .push(Justification::of(chain));
+    }
 }
 
 /// What changed in the ledger this cycle.
@@ -379,42 +463,106 @@ impl MitigationLedger {
         Self::default()
     }
 
-    /// Reconcile the ledger against this cycle's proven chains. The active set
-    /// becomes exactly the mitigations justified by a current chain; the delta
-    /// reports what that added and removed.
-    pub fn reconcile(&mut self, chains: &[ProvenChain]) -> LedgerDelta {
+    /// Reconcile the ledger against this cycle's proven chains AND this pass's per-entry
+    /// cut-choice decisions (ADR-0034 D6/D7, JEF-570). The active set becomes exactly:
+    ///
+    /// - **model-chosen cuts** whose entry still has a proven, breach-relevant justifying
+    ///   chain and a DECISIVE `Attack` decision naming them (they clear the JEF-566
+    ///   `is_live_corroborated` auto-action gate on their own justifications, same as before);
+    /// - **carried-forward standing cuts** (D7's retirement asymmetry, safety-critical) — when
+    ///   this pass has NO decisive decision for a breach-relevant entry (no decision at all, or
+    ///   a fresh `Uncertain`: model unavailable, not yet judged, or the cold-start window after
+    ///   a restart), any mitigation ALREADY active for that entry stays active, UNCHANGED, this
+    ///   cycle — a transient model wobble/outage must never look like a decisive omission and
+    ///   sever a standing, possibly downstream, cut (that would tear down a live isolation
+    ///   NetworkPolicy in enforce mode, reopening the path). Re-justified against this pass's
+    ///   chain (so a genuine chain-clear still retires it structurally, next pass, exactly as
+    ///   for any other mitigation);
+    /// - **`containment_for` FALLBACK proposals** — the entry's own ladder result only, never a
+    ///   downstream workload — for a breach-relevant entry with no decisive cut AND no standing
+    ///   cut to carry forward, OR a decisive `Attack` with an empty `contain` (D1's "attack, but
+    ///   no cut warranted" — a decisive OMISSION, so it retires same as `NoAttack` and offers
+    ///   only the fallback). Stamped `adjudicated = false` so
+    ///   [`Mitigation::is_live_corroborated`] can never clear it — the human-proposal fallback,
+    ///   never auto-applied. A decisive `NoAttack` gets NEITHER (the model confidently cleared
+    ///   the entry — nothing to propose, and any standing cut retires).
+    ///
+    /// The deterministic `quarantine_targets` desired-set insertion is **deleted** for
+    /// breach-relevant chains — completing the ADR-0032 auto-fire removal — but UNCHANGED for
+    /// a non-breach-relevant (internal-only) chain's JEF-284 condition-2 targets: those never
+    /// reach the model at all (`adj_pass` only judges breach-relevant entries) and stay outside
+    /// the north star's two lanes (ADR-0032 §6 propose-only, deferred by ADR-0034), so their
+    /// proposal mechanism is untouched by this ticket.
+    pub fn reconcile(
+        &mut self,
+        chains: &[ProvenChain],
+        decisions: &BTreeMap<String, crate::engine::reason::adjudicate::incident::IncidentDecision>,
+    ) -> LedgerDelta {
+        use crate::engine::reason::adjudicate::incident::Assessment;
+
         let mut desired: BTreeMap<String, Mitigation> = BTreeMap::new();
         let mut unsevered = Vec::new();
 
         for chain in chains {
-            // Choose the containment by precedence (surgical edge-cut → entry
-            // quarantine → durable-fix). A chain with none can't be severed by one
-            // action, so it is surfaced as unsevered.
-            let primary = containment_for(chain);
-            match &primary {
-                Some((cut, action)) => {
-                    desired
-                        .entry(cut_signature(cut))
-                        .or_insert_with(|| Mitigation {
-                            cut: cut.clone(),
-                            action: *action,
-                            justifications: Vec::new(),
-                        })
-                        .justifications
-                        .push(Justification::of(chain));
-                }
-                None => unsevered.push(Justification::of(chain)),
+            // Structural report only (independent of any decision): a chain with no
+            // single-edge cut can't be severed by one action.
+            if containment_for(chain).is_none() {
+                unsevered.push(Justification::of(chain));
             }
 
-            // Sibling pass (JEF-284): additionally quarantine each *compromised workload
-            // on the chain* — a remotely-exploitable or actively-exploited pod. Independent
-            // of the primary containment, so several qualifying pods on one chain are each
-            // isolated (independent compromises). The chain **entry** is governed entirely
-            // by the primary above: when the primary already contains it with an additive-
-            // live control (surgical edge-cut or entry quarantine) we skip the entry here,
-            // preserving JEF-279's behavior and the "prefer the narrower surgical cut"
-            // invariant. The entry is quarantined here only when nothing else contained it —
-            // the internal actively-exploited pod whose primary is a durable-fix / no-cut.
+            if chain.is_breach_relevant() {
+                match decisions.get(&chain.entry.0) {
+                    // A decisive Attack that named cuts: the model-chosen desired set.
+                    Some(d) if d.assessment == Assessment::Attack && !d.cuts.is_empty() => {
+                        for cut in &d.cuts {
+                            desired
+                                .entry(cut.cut_signature.clone())
+                                .or_insert_with(|| Mitigation {
+                                    cut: cut.cut.clone(),
+                                    action: cut.action,
+                                    justifications: Vec::new(),
+                                })
+                                .justifications
+                                .push(Justification::of(chain));
+                        }
+                    }
+                    // A decisive, confident NoAttack: the model cleared this entry — no
+                    // fallback proposal either (nothing to hand a human to review), and any
+                    // standing cut is deliberately NOT carried forward (it retires).
+                    Some(d) if d.assessment == Assessment::NoAttack => {}
+                    // No decision at all, or a fresh Uncertain: D7's retirement asymmetry —
+                    // INERT. Carry any standing cut for this entry forward unchanged; only
+                    // when there is none do we offer the fallback proposal.
+                    None => carry_forward_or_fallback(chain, &self.active, &mut desired),
+                    Some(d) if d.assessment == Assessment::Uncertain => {
+                        carry_forward_or_fallback(chain, &self.active, &mut desired)
+                    }
+                    // A decisive Attack naming no cut (D1): a decisive OMISSION — retires any
+                    // standing cut and offers only the containment_for fallback.
+                    Some(_) => fallback_proposal(chain, &mut desired),
+                }
+                continue;
+            }
+
+            // Non-breach-relevant (internal-only): UNCHANGED pre-ADR-0034 behavior — never
+            // reaches the model, so it is governed entirely by determinism, exactly as before.
+            let primary = containment_for(chain);
+            if let Some((cut, action)) = &primary {
+                desired
+                    .entry(cut_signature(cut))
+                    .or_insert_with(|| Mitigation {
+                        cut: cut.clone(),
+                        action: *action,
+                        justifications: Vec::new(),
+                    })
+                    .justifications
+                    .push(Justification::of(chain));
+            }
+            // Sibling pass (JEF-284): additionally quarantine each *compromised workload on
+            // the chain* — an internal-only actively-exploited pod (condition 2), outside the
+            // north star's two lanes. The chain's entry is governed entirely by the primary
+            // above: skip it here when the primary already additively contains it (JEF-279,
+            // "prefer the narrower surgical cut").
             let entry_additively_contained = primary
                 .as_ref()
                 .is_some_and(|(_, action)| action.is_additive_live());
@@ -465,3 +613,10 @@ impl MitigationLedger {
 
 #[cfg(test)]
 mod tests;
+
+// ADR-0034 (JEF-570): the cut-choice decision-consumption tests, split into their own file
+// (rather than growing `tests.rs` toward the 1,000-line cap, CLAUDE.md) — the D6 desired-set
+// rules (model cuts / fallback / confident-clear) and D5's non-member whole-decision degrade
+// reaching `reconcile` end to end.
+#[cfg(test)]
+mod decisions_tests;

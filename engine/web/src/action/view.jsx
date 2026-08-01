@@ -12,6 +12,7 @@
 // reason / prompt / reply) renders via JSX text interpolation (Preact auto-escapes).
 
 import { JudgementEntry } from "./judgement.jsx";
+import { ScopePreviewPanel } from "../scope_preview/view.jsx";
 
 /**
  * @param {object} props
@@ -24,6 +25,7 @@ export function ActionView({ view }) {
       <ProposedCuts v={view} />
       <LeftAlone v={view} />
       <JudgementAudit v={view} />
+      <ScopePreviewPanel />
     </main>
   );
 }

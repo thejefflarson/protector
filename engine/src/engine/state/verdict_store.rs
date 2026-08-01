@@ -297,6 +297,15 @@ pub struct VerdictEntry {
     /// it existed before this run, so its first live recency update must read [`Delta::Restored`],
     /// never NEW. Cleared once a live pass re-judges it.
     pub restored_recency: bool,
+    /// When the model itself last answered THIS entry DECISIVELY (a genuine `judge()` call
+    /// that landed, not a cache hit or a delta-hold serve) — the actuation-trust clock. `None`
+    /// until the entry has had a fresh decisive call this run. Deliberately NOT touched by a
+    /// cache hit (JEF-390) or a subtractive-delta hold (JEF-391): those are exactly as valid
+    /// for DISPLAY as the call they replay (ADR-0023), but they resolve before the breaker
+    /// check (`adj_gate`) and so can serve a decisive-looking verdict while the model is
+    /// CURRENTLY known to be down. [`verdict_fresh`](Self::verdict_fresh) is the actuation
+    /// gate that reads this; nothing else does.
+    pub decisive_at: Option<Instant>,
 }
 
 impl VerdictEntry {
@@ -534,15 +543,40 @@ impl VerdictStore {
 
     /// JEF-234 — record a DECISIVE adjudication for `entry`: clear the entry's backoff and
     /// close the global breaker (the model answered). Pairs with [`cache_decisive`], which
-    /// the loop still calls to cache the verdict itself.
+    /// the loop still calls to cache the verdict itself. Also stamps `decisive_at` (the
+    /// actuation-trust clock read by [`verdict_fresh`](Self::verdict_fresh)) — `now` is the
+    /// pass's single injected clock, shared with the JEF-234 backoff.
     ///
     /// [`cache_decisive`]: Self::cache_decisive
-    pub fn record_decisive(&self, entry: &str) {
-        self.update(entry, |e| e.backoff.record_success());
+    pub fn record_decisive(&self, entry: &str, now: Instant) {
+        self.update(entry, |e| {
+            e.backoff.record_success();
+            e.decisive_at = Some(now);
+        });
         self.breaker
             .lock()
             .expect("verdict store breaker mutex poisoned")
             .record_success();
+    }
+
+    /// Whether `entry`'s most recent DECISIVE model answer is fresh enough to trust for a
+    /// **new** auto-actuation (the freshness gate `engine::gate_on_judge_freshness` applies at
+    /// the actuation choke point — never at display or cache time, which stay governed by
+    /// ADR-0023 unchanged). Fresh requires BOTH: the global breaker is CLOSED right now (the
+    /// model is not currently known-down), AND the entry actually landed a decisive verdict
+    /// within `max_age` (not `None` — a cold-start entry that has never been decisively judged
+    /// this run fails safe as NOT fresh, never trusted by default). `now` is injected so tests
+    /// drive the clock deterministically.
+    pub fn verdict_fresh(&self, entry: &str, now: Instant, max_age: std::time::Duration) -> bool {
+        if self.breaker_open(now) {
+            return false;
+        }
+        self.entries
+            .lock()
+            .expect("verdict store mutex poisoned")
+            .get(entry)
+            .and_then(|e| e.decisive_at)
+            .is_some_and(|at| now.saturating_duration_since(at) <= max_age)
     }
 
     /// JEF-234 — whether the GLOBAL breaker is open at `now`: the whole judging pass should

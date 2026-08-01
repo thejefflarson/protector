@@ -11,7 +11,7 @@ use protector::engine::observe::epss::EpssStore;
 use protector::engine::observe::exploit_intel::KevCatalog;
 use protector::engine::observe::feed_reload::ReloadableFeed;
 use protector::engine::policy_log::PolicyDecisionLog;
-use protector::engine::respond::ProposedAction;
+use protector::engine::respond::actuator::arming_ladder::ArmingRung;
 use protector::engine::respond::actuator::{ActuationScope, EnabledActions};
 use protector::engine::state::SharedSigningBaseline;
 use protector::metrics::Metrics;
@@ -65,8 +65,9 @@ fn env_pairs(key: &str) -> Vec<(String, String)> {
 }
 
 /// The two-setting operating posture (ADR-0021): `audit` (the default — everything
-/// observes and proposes, nothing blocks or acts) or `enforce` (arm all three surfaces
-/// — signature webhook deny, mesh webhook deny, engine live cut — confined to exactly
+/// observes and proposes, nothing blocks or acts) or `enforce` (arm the signature
+/// webhook deny, the mesh webhook deny, and — up to the ordered [`ArmingRung`]
+/// (ADR-0035) — the engine's live network cut, all confined to exactly
 /// `enforceScope`). Parsed once at startup and derived into the internal
 /// `EnforceScope`/`ActuationScope`/`EnabledActions`; there is no per-surface toggle and
 /// no enforce-everywhere wildcard.
@@ -76,12 +77,16 @@ struct Posture {
     /// The single enforced scope. Empty (namespaces + labels) is audit-everywhere.
     namespaces: HashSet<String>,
     labels: Vec<(String, String)>,
+    /// How far up the network-cut arming ladder `enforce` is armed (ADR-0035). Only
+    /// consulted when `enforce` is true; irrelevant under `audit`.
+    rung: ArmingRung,
 }
 
 impl Posture {
     /// Resolve `PROTECTOR_MODE` + `PROTECTOR_ENFORCE_SCOPE_NAMESPACES` /
-    /// `PROTECTOR_ENFORCE_SCOPE_LABELS`. `mode: enforce` with an empty scope is refused
-    /// — enforcing everywhere is the footgun ADR-0021 guards against (no wildcard).
+    /// `PROTECTOR_ENFORCE_SCOPE_LABELS` + `PROTECTOR_ENFORCE_RUNG`. `mode: enforce`
+    /// with an empty scope is refused — enforcing everywhere is the footgun ADR-0021
+    /// guards against (no wildcard).
     fn from_env() -> Result<Self> {
         let mode = env_or("PROTECTOR_MODE", "audit")
             .trim()
@@ -100,10 +105,12 @@ impl Posture {
                  wildcard (ADR-0021). List the namespaces/labels to enforce."
             );
         }
+        let rung = ArmingRung::from_name(&env_or("PROTECTOR_ENFORCE_RUNG", "edge-cut"));
         Ok(Self {
             enforce,
             namespaces,
             labels,
+            rung,
         })
     }
 
@@ -118,19 +125,17 @@ impl Posture {
         }
     }
 
-    /// What the engine may auto-actuate. Under `enforce`: the reversible network cuts are
-    /// armed — the surgical edge-cut (`DenyNetworkPath`), the default-deny entry quarantine
-    /// (`QuarantineEntry`), and the compromised-workload quarantine (`QuarantineWorkload`,
-    /// JEF-284), all additive/reversible network denies (ADR-0010) — confined to
-    /// `enforceScope` (namespaces or Pod labels). Under `audit`: nothing armed (dry-run) and
-    /// unscoped — the shadow default.
+    /// What the engine may auto-actuate. Under `enforce`: the reversible network cuts
+    /// (ADR-0010) armed by `self.rung` — the ORDERED arming ladder (ADR-0035). The
+    /// narrowest rung arms only the surgical edge-cut (`DenyNetworkPath`) alone; the
+    /// quarantines (`QuarantineEntry`, `QuarantineWorkload`) require the explicit
+    /// second rung, which still implies the edge-cut. Either way, confined to
+    /// `enforceScope` (namespaces or Pod labels). Under `audit`: nothing armed
+    /// (dry-run) and unscoped — the shadow default.
     fn engine_arming(&self) -> (EnabledActions, ActuationScope) {
         if self.enforce {
             (
-                EnabledActions::none()
-                    .enable(ProposedAction::DenyNetworkPath)
-                    .enable(ProposedAction::QuarantineEntry)
-                    .enable(ProposedAction::QuarantineWorkload),
+                self.rung.enabled_actions(),
                 ActuationScope::new(self.namespaces.clone(), self.labels.clone()),
             )
         } else {
@@ -492,13 +497,25 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::Posture;
+    use crate::ArmingRung;
     use protector::engine::respond::ProposedAction;
     use protector::policy::EnforceScope;
     use std::collections::HashSet;
 
     /// Build a Posture directly, bypassing env, so the derivation is tested without
-    /// touching process-global env.
+    /// touching process-global env. Defaults to the narrowest rung (`edge-cut`) — the
+    /// `enforce` default (ADR-0035) — so existing callers exercise the safe default.
     fn posture(enforce: bool, namespaces: &[&str], labels: &[(&str, &str)]) -> Posture {
+        posture_with_rung(enforce, namespaces, labels, ArmingRung::EdgeCut)
+    }
+
+    /// Same as [`posture`] but with an explicit arming rung (ADR-0035).
+    fn posture_with_rung(
+        enforce: bool,
+        namespaces: &[&str],
+        labels: &[(&str, &str)],
+        rung: ArmingRung,
+    ) -> Posture {
         Posture {
             enforce,
             namespaces: namespaces.iter().map(|s| s.to_string()).collect(),
@@ -506,6 +523,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            rung,
         }
     }
 
@@ -523,6 +541,15 @@ mod tests {
             active.is_empty(),
             "audit mode arms no engine actuation (dry-run)"
         );
+    }
+
+    #[test]
+    fn audit_arms_nothing_even_at_the_quarantine_rung() {
+        // ADR-0035: the rung is only ever consulted under `enforce` — `audit` stays
+        // byte-identical shadow behavior no matter what rung is configured.
+        let p = posture_with_rung(false, &["payments"], &[], ArmingRung::Quarantine);
+        let (active, _scope) = p.engine_arming();
+        assert!(active.is_empty(), "audit arms nothing, regardless of rung");
     }
 
     #[test]
@@ -546,6 +573,35 @@ mod tests {
             !active.judgement_enabled(),
             "enforce does NOT enable model promotion — only the corroborated cut"
         );
+    }
+
+    #[test]
+    fn enforce_narrowest_rung_arms_only_the_edge_cut() {
+        // ADR-0035: the narrowest rung (the `enforce` default) arms the surgical
+        // `DenyNetworkPath` edge-cut ALONE — the quarantines stay propose-only.
+        let p = posture_with_rung(true, &["payments"], &[], ArmingRung::EdgeCut);
+        let (active, _scope) = p.engine_arming();
+        assert!(active.is_enabled(ProposedAction::DenyNetworkPath));
+        assert!(
+            !active.is_enabled(ProposedAction::QuarantineEntry),
+            "the entry quarantine stays propose-only until the second rung is opted in"
+        );
+        assert!(
+            !active.is_enabled(ProposedAction::QuarantineWorkload),
+            "the workload quarantine stays propose-only until the second rung is opted in"
+        );
+    }
+
+    #[test]
+    fn enforce_quarantine_rung_adds_both_quarantines_and_still_implies_the_edge_cut() {
+        // ADR-0035: the second rung is an explicit opt-in that ADDS the quarantines — it
+        // is not a replacement, so the edge-cut stays armed too (a rung implies its
+        // narrower predecessors; this is one ordered position, not independent toggles).
+        let p = posture_with_rung(true, &["payments"], &[], ArmingRung::Quarantine);
+        let (active, _scope) = p.engine_arming();
+        assert!(active.is_enabled(ProposedAction::DenyNetworkPath));
+        assert!(active.is_enabled(ProposedAction::QuarantineEntry));
+        assert!(active.is_enabled(ProposedAction::QuarantineWorkload));
     }
 
     #[test]
@@ -595,6 +651,36 @@ mod tests {
         unsafe {
             std::env::remove_var("PROTECTOR_MODE");
             std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+        }
+    }
+
+    #[test]
+    fn enforce_rung_env_var_selects_the_ladder_position() {
+        // ADR-0035: `PROTECTOR_ENFORCE_RUNG` unset defaults to the narrowest rung
+        // (edge-cut-only); `quarantine` opts into the second rung.
+        // SAFETY: single-threaded within this test; vars are set + cleared here only.
+        unsafe {
+            std::env::set_var("PROTECTOR_MODE", "enforce");
+            std::env::set_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES", "payments");
+            std::env::remove_var("PROTECTOR_ENFORCE_RUNG");
+        }
+        let default_rung = Posture::from_env().expect("scoped enforce is accepted");
+        assert_eq!(
+            default_rung.rung,
+            ArmingRung::EdgeCut,
+            "unset PROTECTOR_ENFORCE_RUNG is the safe narrowest default"
+        );
+
+        unsafe {
+            std::env::set_var("PROTECTOR_ENFORCE_RUNG", "quarantine");
+        }
+        let quarantine_rung = Posture::from_env().expect("quarantine rung is accepted");
+        assert_eq!(quarantine_rung.rung, ArmingRung::Quarantine);
+
+        unsafe {
+            std::env::remove_var("PROTECTOR_MODE");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+            std::env::remove_var("PROTECTOR_ENFORCE_RUNG");
         }
     }
 }

@@ -115,6 +115,7 @@ mod tests {
             chain: "ch1".into(),
             surface: crate::engine::reason::adjudicate::JudgedSurface::default(),
             idxs: vec![],
+            menu: crate::engine::reason::adjudicate::incident::Menu::default(),
         };
 
         let buf = Arc::new(Mutex::new(Vec::new()));

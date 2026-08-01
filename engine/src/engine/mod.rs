@@ -33,6 +33,11 @@
 // the engine's output state (zero-egress, light theme). view_model → components → page → routes;
 // wired into the watch loop behind PROTECTOR_DASHBOARD_ADDR.
 pub mod dashboard;
+// The GitOps-independent disarm kill switch (ADR-0021's enforcement gate, fast path): a
+// mounted flag file, polled every pass, that narrows the running posture to dry-run and
+// drives standing cuts to revert with no restart. See the module doc for why a file over a
+// local admin endpoint.
+pub mod break_glass;
 pub mod graph;
 pub mod journal;
 pub mod model;
@@ -62,6 +67,13 @@ pub mod state;
 mod metrics;
 use metrics::EngineMetrics;
 
+// The shadow-bake divergence comparator (ADR-0035's "bake a model-vs-deterministic cut
+// comparator in shadow" step): compares each entry's model-chosen cut-set against the
+// deterministic fallback `respond::containment_for`/`quarantine_workload_link` would have
+// proposed for the same chains. View only — see the module docs. `pub` so `state::divergence`
+// and the dashboard's read-only view can share its record/class types.
+pub mod cut_divergence;
+
 // The ADJ-MISS-DIAG re-judge diagnostic (JEF-387), extracted to keep this orchestrator under
 // the file-size cap (CLAUDE.md). Emits the compact, per-section-fingerprinted line the churn
 // harness ingests.
@@ -75,15 +87,32 @@ mod adj_gate;
 // `Engine::process` (JEF-370) to keep this orchestrator under the file-size cap and make the
 // pass independently testable. Behavior-neutral code move.
 mod adj_pass;
+
+// Boot-time journal replay (durable decisions → in-memory views), extracted from
+//  to keep this orchestrator under the file-size cap. Behavior-neutral
+// code move.
+mod restore;
 use graph::delta::GraphSnapshot;
 use observe::Snapshot;
 use observe::adapter::Adapter;
 use observe::health::{Health, PodStatusHealth};
+use respond::Mitigation;
 use respond::MitigationLedger;
 use respond::actuator::{
     ActionLog, ActuationScope, Actuator, Decision, EnabledActions, decide, predict_blast_radius,
 };
 use std::collections::HashSet;
+
+/// How long a mitigation's justifying entry may trust its last DECISIVE model verdict for a
+/// **brand-new** auto-actuation, once the global judge breaker is closed again (see
+/// [`Engine::gate_on_judge_freshness`]). Chosen well inside the documented model cold-start
+/// window (tens of minutes on a cold local CPU model) so a judge that never comes back up is
+/// caught well before an operator would notice on their own, while comfortably above the
+/// breaker cooldown and the per-entry backoff ceiling (`reason::backoff::CAP`, 10 minutes) so
+/// ordinary retry cadence never trips it. A code default, not an operator toggle — CLAUDE.md's
+/// "detection on by default" rule reads across to actuation trust: there is nothing to turn
+/// off, only a bound tuned once here.
+const JUDGE_FRESHNESS_BOUND: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// One breach-relevant ENTRY queued for adjudication this pass: its identity, the
 /// (objective, technique) set the model judges it over, the DETERMINISTIC prompt the model
@@ -118,6 +147,28 @@ struct PendingEntry {
     /// baseline when this pass judges it decisively, so the next pass measures additions against it.
     surface: reason::adjudicate::JudgedSurface,
     idxs: Vec<usize>,
+    /// The deterministic cut-choice menu (ADR-0034 D4, JEF-570) `prompt`'s containment-options
+    /// section rendered — carried alongside the prompt so [`reason::adjudicate::Adjudicator::judge`]
+    /// parses/resolves the model's `contain` reply against the EXACT menu the entry's prompt
+    /// showed (never rebuilt, so the two can never drift).
+    menu: reason::adjudicate::incident::Menu,
+}
+
+/// A journal-restored per-entry cut-choice decision (ADR-0034 D8, JEF-639), held until the
+/// DOUBLE replay-lock verifies it against THIS RUN's own freshly-rebuilt state (see
+/// [`adj_pass::rearm_restored_decision`]). Deliberately NOT an
+/// [`incident::IncidentDecision`](reason::adjudicate::incident::IncidentDecision) — its cuts
+/// carry only the two facts the journal persisted (node key + resolved cut signature); the
+/// mechanism/edge are re-derived from the CURRENT menu on a lock hold, never trusted from
+/// disk (see [`journal::JournaledCut`]).
+struct RestoredDecision {
+    /// The full-prompt fingerprint this decision was judged against — the first lock.
+    fingerprint: String,
+    assessment: reason::adjudicate::incident::Assessment,
+    reason: String,
+    /// The cuts the model chose, as recorded — re-resolved against the current menu before
+    /// ever being trusted (the second lock).
+    cuts: Vec<journal::JournaledCut>,
 }
 
 /// The engine's stateful processing core. It owns everything that persists across
@@ -139,6 +190,12 @@ pub struct Engine {
     /// The reversion log (JEF-141): recent lifted cuts + why. Seeded from the journal on boot
     /// so a self-revert survives a restart.
     reversions: std::sync::Arc<state::ReversionLog>,
+    /// The shadow-bake divergence log (ADR-0035's bake step): the bounded ring of recent
+    /// model-vs-deterministic [`cut_divergence::DivergenceRecord`]s, read-only input to the
+    /// human arm-readiness review (see `docs/adr/0037-shadow-bake-arm-readiness.md`). Written every pass alongside the durable
+    /// journal's own `CutDivergence` lines; never read back by the engine itself (a view, never
+    /// a gate, ADR-0016).
+    divergence: std::sync::Arc<state::DivergenceLog>,
     /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
     /// apply/revert deltas are appended here so a restart replays them. Disabled (a
     /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
@@ -176,6 +233,25 @@ pub struct Engine {
     /// end-of-pass re-publish lag. Pruned to present entries each pass (ephemeral workloads,
     /// removed exposure).
     verdicts: std::sync::Arc<state::VerdictStore>,
+    /// This pass's per-entry cut-choice decision (ADR-0034, JEF-570/JEF-639): the model's last
+    /// DECISIVE [`reason::adjudicate::incident::IncidentDecision`], keyed by entry key. Engine-
+    /// local (no `Arc`, no reader shares it — only [`respond::MitigationLedger::reconcile`]
+    /// consumes it, via [`adj_pass::run_adjudication_pass`]'s return value). Retained across a
+    /// cache-hit/backoff pass exactly like [`Self::verdicts`]'s cache (D7's retirement
+    /// asymmetry: a this-pass `Uncertain` never clears it); pruned to present entries each pass.
+    /// Seeded ACROSS a restart from the durable journal (ADR-0034 D8, JEF-639) — see
+    /// [`Self::restored_decisions`] and [`adj_pass::rearm_restored_decision`] — so a standing
+    /// model-chosen cut survives the model's cold-start window rather than dropping to the
+    /// `containment_for` human-proposal fallback until re-judged.
+    decisions: std::collections::BTreeMap<String, reason::adjudicate::incident::IncidentDecision>,
+    /// Journal-restored decisions (ADR-0034 D8, JEF-639), pending the double replay-lock
+    /// verification against THIS RUN's own freshly-rebuilt state — see
+    /// [`adj_pass::rearm_restored_decision`]. Seeded once at boot from the journal's `Incident`
+    /// lines ([`Self::replay_journal`], chronological replay ⇒ last-write-wins per entry);
+    /// each entry is consumed (removed) the first pass it's checked, whether the lock holds or
+    /// not — a hold arms it into [`Self::decisions`], a miss discards it (cold re-judge, never
+    /// repointed or retried blind on a later pass). Nothing else ever reads this map directly.
+    restored_decisions: std::collections::BTreeMap<String, RestoredDecision>,
     /// Per-node agent-liveness (JEF-308), shared with the ingest; classified each pass into the
     /// runtime-corroboration coverage the readiness row reads. `None` when no ingest is wired.
     agent_liveness: Option<std::sync::Arc<state::AgentLivenessStore>>,
@@ -185,8 +261,27 @@ pub struct Engine {
     /// Defaults to an empty dataset (every internet peer falls back to its raw `IP:port`,
     /// exactly today's behavior) until the watch loop attaches the file-backed feed.
     asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
+    /// The GitOps-independent kill switch (ADR-0021's enforcement gate, fast path):
+    /// checked every pass. Its presence clamps this pass's armed classes to none, for
+    /// both the auto-apply decision and the self-revert check, so a standing cut starts
+    /// reverting the very next pass with no restart. Defaults to
+    /// [`break_glass::BreakGlass::disabled`] (never engaged), so every engine built
+    /// without [`Self::with_break_glass`] — every existing test, and any embedding that
+    /// doesn't opt in — is unaffected by this module's existence.
+    break_glass: break_glass::BreakGlass,
+    /// Whether break-glass was engaged as of the previous pass, so the engage/clear
+    /// transition is logged and metered exactly ONCE (an edge), not every pass —
+    /// mirroring the collapse/recovery edge-detection already used above for runtime-
+    /// coverage.
+    break_glass_was_engaged: bool,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
+    /// This pass's standing-cut snapshot (ADR-0021, ADR-0016) — every active mitigation
+    /// paired with the blast radius already computed for it below, for the dashboard's
+    /// read-only pre-arm scope-simulation preview to classify against a candidate
+    /// `enforceScope` on demand. Written at the SAME point the live blast gate computes
+    /// each blast, never a second, independently-derived pass over the graph/health.
+    scope_preview: std::sync::Arc<state::ScopePreviewStore>,
 }
 
 impl Engine {
@@ -221,6 +316,7 @@ impl Engine {
             adjudicator,
             findings,
             reversions: std::sync::Arc::new(state::ReversionLog::new()),
+            divergence: std::sync::Arc::new(state::DivergenceLog::new()),
             // Disabled by default — durability is opt-in via a mounted volume. The watch
             // path enables it from the env (see [`with_journal`]); tests run in-memory.
             journal: std::sync::Arc::new(journal::DecisionJournal::disabled()),
@@ -231,11 +327,16 @@ impl Engine {
             ledger: MitigationLedger::new(),
             actions: ActionLog::new(),
             verdicts,
+            decisions: std::collections::BTreeMap::new(),
+            restored_decisions: std::collections::BTreeMap::new(),
             agent_liveness: None,
             // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
             // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
             asn: observe::feed_reload::ReloadableFeed::from_store(observe::asn::AsnDb::empty()),
+            break_glass: break_glass::BreakGlass::disabled(),
+            break_glass_was_engaged: false,
             metrics: EngineMetrics::new(),
+            scope_preview: std::sync::Arc::new(state::ScopePreviewStore::new()),
         }
     }
 
@@ -287,86 +388,13 @@ impl Engine {
         self
     }
 
-    /// Replay the journal's durable decisions onto the in-memory views: the last-known
-    /// verdict per entry (so findings show a judgement without re-judging), the recent
-    /// reversions ring, and the last-pass freshness stamp. Idempotent and bounded by the
-    /// journal's own rotation window.
-    fn replay_journal(&mut self, journal: &journal::DecisionJournal) {
-        let entries = journal.replay();
-        if entries.is_empty() {
-            return;
-        }
-        let mut latest_at = std::time::SystemTime::UNIX_EPOCH;
-        let mut restored_verdicts = 0usize;
-        let mut restored_reversions = 0usize;
-        // The boot instant the recency tracker stamps as a restored entry's synthetic
-        // `first_seen` (JEF-201) — a past instant relative to any later pass, so a restored
-        // entry is never mislabeled NEW. (Restored ages are suppressed regardless.)
-        let restored_at = std::time::Instant::now();
-        for entry in &entries {
-            latest_at = latest_at.max(entry.at());
-            match &entry.decision {
-                journal::Decision::Breach {
-                    entry: key,
-                    verdict,
-                    fingerprint,
-                    verdict_typed,
-                    ..
-                } => {
-                    // Carry the model's prior words forward verbatim as a display memory,
-                    // so the breach path shows its last judgement IMMEDIATELY while a fresh
-                    // one is computed. Replayed in chronological order, so the final write
-                    // per entry wins. Display-only: the action logic still uses the live
-                    // verdict, never this restored string.
-                    //
-                    // JEF-201: a restored entry existed BEFORE this run, so it must never read
-                    // as NEW in the Δ column. `restored_at` (boot `Instant`) seeds its
-                    // `first_seen` in the past and flags it `restored`; the recency cell shows
-                    // `Restored`, not NEW, until a live pass re-judges it.
-                    self.verdicts
-                        .seed_restored(key, verdict.clone(), restored_at);
-                    // JEF-301: re-seed the verdict CACHE so an UNCHANGED entry skips a fresh
-                    // (slow, OOM-prone) model call across a restart — the big request-volume cut.
-                    // Restores the EXACT prior decision (a persisted `Exploitable` stays one);
-                    // `cached_for` serves it only while the fingerprint matches, so changed
-                    // evidence re-judges — never a stale verdict. Older lines are display-only.
-                    if let (Some(fp), Some(typed)) = (fingerprint, verdict_typed) {
-                        self.verdicts.cache_decisive(key, fp.clone(), typed.clone());
-                    }
-                    restored_verdicts += 1;
-                }
-                journal::Decision::Revert { cut, reason } => {
-                    self.reversions.record(state::ReversionRecord {
-                        cut: cut.clone(),
-                        reason: reason.clone(),
-                        at_ms: entry.at_ms,
-                    });
-                    restored_reversions += 1;
-                }
-                // Applies are durable for the audit trail but don't seed output state directly
-                // (the live ledger re-derives the active set from current proof each pass).
-                journal::Decision::Apply { .. } => {}
-                // Admission decisions (JEF-237) restore into the webhook's admission-decision
-                // log, not the engine's findings or reversion state — `run_watch` does that
-                // restore from the same journal, since it (not the engine) holds the shared
-                // decision ring.
-                journal::Decision::Admission { .. } => {}
-                // Per-repo signing baselines (JEF-263) restore into the dedicated
-                // `SigningBaselineStore`, not the engine's findings/reversion state —
-                // `run_watch` does that restore from the same journal, since it (not the engine
-                // core) owns the baseline store the sweep feeds each pass.
-                journal::Decision::SigningBaseline { .. } => {}
-            }
-        }
-        if latest_at > std::time::SystemTime::UNIX_EPOCH {
-            self.findings.mark_pass(latest_at);
-        }
-        tracing::info!(
-            decisions = entries.len(),
-            restored_verdicts,
-            restored_reversions,
-            "replayed decision journal on boot (output state populated from durable history)"
-        );
+    /// Attach the break-glass kill switch (ADR-0021's enforcement gate, fast path):
+    /// watched every pass thereafter. Builder-style; called once on boot by
+    /// [`run_watch`]. Tests that don't call this get [`break_glass::BreakGlass::disabled`]
+    /// (never engaged) from [`Self::new`] — behavior is unaffected.
+    pub fn with_break_glass(mut self, break_glass: break_glass::BreakGlass) -> Self {
+        self.break_glass = break_glass;
+        self
     }
 
     /// A handle to the current findings snapshot (proven chains + verdicts), for a reader.
@@ -377,6 +405,49 @@ impl Engine {
     /// A handle to the reversion log (JEF-141): the recent lifted-cuts ring.
     pub fn reversions(&self) -> std::sync::Arc<state::ReversionLog> {
         self.reversions.clone()
+    }
+
+    /// A handle to the shadow-bake divergence log, for the dashboard's read-only view (and any
+    /// future arm-readiness aggregation) to snapshot. Shares the same `Arc` the engine writes
+    /// through each pass.
+    pub fn divergence(&self) -> std::sync::Arc<state::DivergenceLog> {
+        self.divergence.clone()
+    }
+
+    /// A handle to this pass's standing-cut snapshot (ADR-0021, ADR-0016), for the
+    /// dashboard's read-only pre-arm scope-simulation preview.
+    pub fn scope_preview(&self) -> std::sync::Arc<state::ScopePreviewStore> {
+        self.scope_preview.clone()
+    }
+
+    /// This pass's effective armed classes (ADR-0021's enforcement gate, fast disarm path):
+    /// a single local file-existence check, fresh every pass. Break-glass engaged narrows
+    /// `self.active` (the mode/enforceScope the process booted with, never mutated) down to
+    /// `EnabledActions::none()` for this pass alone — feeding both the auto-apply decision and
+    /// the self-revert check, so a standing cut starts reverting the very next pass with no
+    /// restart. Logs and meters ONLY the engage/clear EDGE, not every pass.
+    fn poll_break_glass(&mut self) -> EnabledActions {
+        let engaged = self.break_glass.engaged();
+        if engaged != self.break_glass_was_engaged {
+            self.break_glass_was_engaged = engaged;
+            if engaged {
+                tracing::warn!(
+                    "BREAK-GLASS ENGAGED: actuation clamped to dry-run; standing cuts begin \
+                     reverting this pass"
+                );
+            } else {
+                tracing::info!(
+                    "break-glass CLEARED: posture restored to the configured mode/enforceScope"
+                );
+            }
+            self.metrics.record_break_glass_transition(engaged);
+        }
+        self.metrics.record_break_glass(engaged);
+        if engaged {
+            EnabledActions::none()
+        } else {
+            self.active.clone()
+        }
     }
 
     /// Run the five-question pipeline against one observed snapshot.
@@ -469,7 +540,11 @@ impl Engine {
         // fresh verdict into the store it is resolved IMMEDIATELY — no end-of-pass
         // re-publish is needed to surface it. `publish_chains` also stamps each finding's entry
         // node (JEF-308) so a latent finding on a blind node can carry its "no live sensor" caveat.
-        self.findings.publish_chains(&chains, &graph, snapshot);
+        // `self.decisions` here is the CARRIED-FORWARD prior pass's cut-choice map (JEF-674) —
+        // this pass's adjudication hasn't run yet, so the finding detail shows the last-known
+        // cut-set immediately, refreshed by the re-publish below once fresh decisions land.
+        self.findings
+            .publish_chains(&chains, &graph, snapshot, &self.decisions, &health);
 
         // Snapshot gauges for this pass.
         self.metrics.chains.record(chains.len() as u64, &[]);
@@ -523,15 +598,20 @@ impl Engine {
         // Adjudicate (ADR-0013): the model is the JUDGE of every breach-relevant path — group
         // the breach-relevant chains by their internet-facing entry, judge each entry once, and
         // fold the verdicts back into the store / journal / notifier, stamping each chain in
-        // place. Extracted whole (JEF-370); see [`adj_pass`] for the four-phase detail.
-        self.run_adjudication_pass(&mut chains, &graph, pass_now)
+        // place. Extracted whole (JEF-370); see [`adj_pass`] for the four-phase detail. Returns
+        // this pass's per-entry cut-choice decisions (ADR-0034, JEF-570), consumed by the ledger
+        // reconcile below.
+        let decisions = self
+            .run_adjudication_pass(&mut chains, &graph, &health, pass_now)
             .await;
         // Re-publish the enriched chains — promotions move into remediations, vetoes flip
         // `adjudicated`, so the disposition is current. JEF-157: the VERDICT is no longer
         // what this re-publish is for (it was already written to the shared store the
         // instant each entry was judged, and the findings snapshot resolves it from there) —
-        // this only refreshes the structural enrichment of the rows (+ re-stamps entry nodes).
-        self.findings.publish_chains(&chains, &graph, snapshot);
+        // this only refreshes the structural enrichment of the rows (+ re-stamps entry nodes) —
+        // and, with THIS pass's fresh `decisions` (JEF-674), the finding detail's cut-set list.
+        self.findings
+            .publish_chains(&chains, &graph, snapshot, &decisions, &health);
 
         if structurally_changed && !chains.is_empty() {
             tracing::info!(count = chains.len(), "proven chains");
@@ -548,8 +628,26 @@ impl Engine {
             }
         }
 
-        // Reconcile proposed mitigations against the current chains (Q4 and Q5).
-        let ledger_delta = self.ledger.reconcile(&chains);
+        // Shadow-bake divergence comparator (ADR-0035's bake step): for every entry with a
+        // decisive cut-choice decision this pass, compare the model's chosen cut-set against the
+        // deterministic fallback `containment_for`/`quarantine_workload_link` would have proposed
+        // for the SAME chains. VIEW ONLY — reads `chains`/`decisions`, never feeds back into the
+        // reconcile below or anything else that arms/mutates state; it is the read-only signal the
+        // human arm-readiness review reads (`docs/adr/0037-shadow-bake-arm-readiness.md`), never an auto-arm.
+        for record in cut_divergence::compute(&chains, &decisions) {
+            let row = state::DivergenceRow::now(record);
+            self.journal.record(journal::Decision::CutDivergence {
+                entry: row.entry.clone(),
+                class: row.class,
+                model_cuts: row.model_cuts.clone(),
+                deterministic_cuts: row.deterministic_cuts.clone(),
+            });
+            self.divergence.record(row);
+        }
+
+        // Reconcile proposed mitigations against the current chains AND this pass's model
+        // decisions (Q4 and Q5, ADR-0034 D6/D7).
+        let ledger_delta = self.ledger.reconcile(&chains, &decisions);
         if !ledger_delta.is_empty() {
             ledger_delta.emit();
         }
@@ -559,6 +657,11 @@ impl Engine {
             .map(|m| m.cut_signature())
             .collect();
 
+        // The break-glass kill switch (ADR-0021's enforcement gate, fast path): checked fresh
+        // every pass, narrowing `self.active` down for THIS pass alone when engaged. See
+        // `poll_break_glass`.
+        let effective_active = self.poll_break_glass();
+
         // Decide over *all* active mitigations (Q4 hard mode), not just the
         // newly-proposed ones — so a corroboration flip on an existing proposal is
         // acted on. AutoApply is deduped by the action log; propose/forbid is logged
@@ -567,9 +670,25 @@ impl Engine {
         self.metrics
             .active_mitigations
             .record(active_mitigations.len() as u64, &[]);
+        // The actuation-trust signal for this pass (JUDGE FRESHNESS): mirror the global
+        // breaker's CURRENT state so an operator watching only `/metrics` sees a degraded
+        // judge at a glance, independent of whether anything was actually held this pass.
+        self.metrics
+            .judge_degraded
+            .record(u64::from(self.verdicts.breaker_open(pass_now)), &[]);
+        // This pass's blast radii, in step with `active_mitigations`, so the read-only
+        // pre-arm scope-simulation preview (ADR-0021, ADR-0016) can be built below from the
+        // SAME numbers the live blast gate just computed, without a second `Mitigation`
+        // clone or a recomputation that could drift from what the gate acted on.
+        let mut blasts = Vec::with_capacity(active_mitigations.len());
         for mitigation in &active_mitigations {
             let blast = predict_blast_radius(mitigation, &graph, &health);
-            match decide(mitigation, &self.active, &self.scope, &blast) {
+            // Break-glass narrows the armed classes for THIS pass (`effective_active`, #307),
+            // then judge-freshness downgrades an AutoApply to a degraded Propose when the model
+            // can't currently verify (#306). Both gates only ever REFUSE to arm a new cut.
+            let decision = decide(mitigation, &effective_active, &self.scope, &blast);
+            let decision = self.gate_on_judge_freshness(mitigation, decision, pass_now);
+            match decision {
                 Decision::AutoApply => {
                     if !self.actions.is_active(mitigation) {
                         self.actuator.apply(mitigation).await;
@@ -597,13 +716,21 @@ impl Engine {
                     }
                 }
             }
+            blasts.push(blast);
         }
+        self.scope_preview
+            .set(active_mitigations.into_iter().zip(blasts).collect());
 
         // Self-reverting closed loop, every pass: revert any applied action whose
-        // protected workload went down (health divergence) or whose justifying
-        // chain is no longer proven (posture improved).
+        // protected workload went down (health divergence), whose justifying chain is
+        // no longer proven (posture improved), or whose action class is no longer
+        // armed — a mode/enforceScope narrow to audit, or break-glass engaging, must
+        // drive every standing cut to revert exactly like any other retirement.
         let justified: HashSet<String> = self.ledger.active().map(|m| m.cut_signature()).collect();
-        for reversion in self.actions.reconcile(&health, &justified) {
+        for reversion in self
+            .actions
+            .reconcile(&health, &justified, &effective_active)
+        {
             tracing::info!(reason = %reversion.reason, "reverting applied mitigation");
             self.actuator.revert(&reversion.mitigation).await;
             self.metrics
@@ -635,6 +762,59 @@ impl Engine {
 
         self.previous = current;
     }
+
+    /// Gate a `decide()` verdict on JUDGE FRESHNESS before it can newly actuate: an
+    /// `AutoApply` is downgraded to a degraded-judge `Propose` unless at least one entry
+    /// granting this mitigation's live-corroboration
+    /// ([`Mitigation::live_corroborating_entries`]) has a decisive verdict from the model
+    /// within [`JUDGE_FRESHNESS_BOUND`], with the global breaker currently CLOSED
+    /// ([`state::VerdictStore::verdict_fresh`]).
+    ///
+    /// This closes the one gap `decide()`'s own checks (`is_live_corroborated`) don't: the
+    /// JEF-390 verdict-cache hit and the JEF-391 subtractive-delta hold both resolve BEFORE
+    /// the breaker check (`adj_gate`), by design — an unchanged evidence fingerprint is
+    /// exactly as valid to DISPLAY as when it was judged (ADR-0023) — so a fingerprint that
+    /// happens to replay while the judge is CURRENTLY down can otherwise still read as
+    /// decisively confirmed or promoted for actuation purposes too. Gating once, here, at the
+    /// single actuation choke point leaves that display/cache correctness untouched; it only
+    /// refuses to let a not-currently-verifiable judge arm a NEW cut.
+    ///
+    /// `Propose`/`Forbidden` pass through unchanged. An `AutoApply` for a mitigation that is
+    /// ALREADY applied costs nothing extra either way — the `AutoApply` arm only acts on a
+    /// mitigation that isn't active yet — and a REVERT runs on the wholly separate
+    /// `ActionLog::reconcile` path below, which this gate never touches: a degraded judge
+    /// still LIFTS a cut whose health or justification no longer holds. The fail-safe
+    /// asymmetry stays toward lifting, never toward cutting.
+    fn gate_on_judge_freshness(
+        &self,
+        mitigation: &Mitigation,
+        decision: Decision,
+        now: std::time::Instant,
+    ) -> Decision {
+        if decision != Decision::AutoApply {
+            return decision;
+        }
+        let fresh = mitigation.live_corroborating_entries().any(|entry| {
+            self.verdicts
+                .verdict_fresh(entry, now, JUDGE_FRESHNESS_BOUND)
+        });
+        if fresh {
+            return decision;
+        }
+        self.metrics.mitigations.add(
+            1,
+            &[opentelemetry::KeyValue::new("action", "held_degraded")],
+        );
+        tracing::info!(
+            cut = %mitigation.cut_signature(),
+            "auto-actuation held: judge is degraded (breaker open or no fresh decisive verdict)"
+        );
+        Decision::Propose(
+            "judge is degraded (breaker open, or no fresh decisive verdict within the trust \
+             window); held as a proposal until the model verifiably answers again"
+                .to_string(),
+        )
+    }
 }
 
 // The engine's driver (`run_watch`) and its env-driven builders live in a sibling
@@ -659,3 +839,18 @@ mod tests;
 // file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod journal_tests;
+
+// The judge-freshness actuation gate's tests, split out of `tests.rs` to keep every file under
+// the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod judge_freshness_tests;
+
+// The break-glass disarm tests (enforce→audit self-revert + the fast, GitOps-independent kill
+// switch), split out of `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod break_glass_tests;
+
+// The pre-arm scope-simulation preview's engine-level mutation-free proof (ADR-0021,
+// ADR-0016), split out of `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod scope_preview_tests;
