@@ -1,4 +1,4 @@
-//! Posture-classification (JEF-276) + admission signing-continuity (ADR-0020 Stage 3 / JEF-265)
+//! Posture-classification + admission signing-continuity (ADR-0020 Stage 3)
 //! tests, split out of `tests.rs` purely to keep every file under the 1,000-line cap (CLAUDE.md).
 //! The shared admission fixtures (`pod_request`, `policy`, `scope`, `signer`) and the fake
 //! checker/observer come from `super::tests`, matching the sibling `*_tests.rs` pattern.
@@ -16,7 +16,7 @@ use crate::engine::state::{SharedSigningBaseline, SigningBaselineStore};
 use super::tests::{FakeChecker, FakeObserver, pod_request, policy, scope, signer};
 
 // ---------------------------------------------------------------------------
-// JEF-276: honest, scheme-aware posture classification (classify_facts)
+// honest, scheme-aware posture classification (classify_facts)
 // ---------------------------------------------------------------------------
 
 /// A keyless-verified layer: a Fulcio signer that chained + Rekor-verified (sigstore only ever
@@ -105,7 +105,7 @@ fn classify_reserves_invalid_for_a_genuine_failure() {
     // The reserved loud channel: a degenerate layer with neither a signer, a verified bundle, nor
     // even a signature — the only shape treated as genuinely invalid. (sigstore-rs drops a
     // tamper/failed-Rekor layer before it reaches classify; see the classify note — such an image
-    // lands as not-signed and, on an established repo, still regresses loudly via JEF-264.)
+    // lands as not-signed and, on an established repo, still regresses loudly via .)
     let degenerate = LayerFacts {
         signer: None,
         has_verified_bundle: false,
@@ -155,7 +155,7 @@ fn email_subject_is_recorded_as_a_legitimate_signer() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0020 Stage 3: admission signing-CONTINUITY enforcement (JEF-265)
+// ADR-0020 Stage 3: admission signing-CONTINUITY enforcement
 // ---------------------------------------------------------------------------
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -232,7 +232,7 @@ async fn continuity_out_of_scope_audits_only() {
 
 #[tokio::test]
 async fn continuity_unconfigured_denies_nothing() {
-    // No continuity gate wired (the default, pre-JEF-265) + an established regression + enforced
+    // No continuity gate wired (the default, pre-) + an established regression + enforced
     // scope ⇒ still Allow. Unconfigured operators see ZERO behavior change.
     let policy = policy(&[], true); // no gated prefixes, no continuity
     let d = policy.evaluate(&pod_request(&["ghcr.io/org/app:2"])).await;

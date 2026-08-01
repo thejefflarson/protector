@@ -1,6 +1,6 @@
-// Client escaping test (ADR-0025 / JEF-397 / JEF-411): untrusted strings from the JSON (verdict
+// Client escaping test (ADR-0025): untrusted strings from the JSON (verdict
 // prose, CVE titles, node keys, model prompts) render as TEXT, never as live HTML. Preact
-// auto-escapes all interpolated text; `dangerouslySetInnerHTML` is banned in src/ (the JEF-396
+// auto-escapes all interpolated text; `dangerouslySetInnerHTML` is banned in src/ (the
 // guard). This asserts the guarantee holds end-to-end: an XSS-laden snapshot produces escaped DOM,
 // no injected element.
 

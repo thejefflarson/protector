@@ -129,7 +129,7 @@ pub(super) type PathSteps = Vec<(NodeIndex, NodeIndex, EdgeIndex)>;
 
 /// The maximum number of distinct proven paths we enumerate (and the dashboard renders)
 /// per (entry, objective). A wide finding can be reachable by many redundant paths (the
-/// exact shape that makes a chain no-single-edge-cut, JEF-281); we surface up to this many
+/// exact shape that makes a chain no-single-edge-cut); we surface up to this many
 /// as stacked hop-lists and collapse the rest to a "+N more" note, so a dense mesh never
 /// produces an unbounded wall of paths. Bounds both the enumeration and the render.
 pub(super) const MAX_PROVEN_PATHS: usize = 6;
@@ -137,7 +137,7 @@ pub(super) const MAX_PROVEN_PATHS: usize = 6;
 /// A hard ceiling on the enumeration's exploration budget (edge relaxations) for a single
 /// (entry, objective). A dense graph can hold exponentially many simple paths; this caps
 /// the *work* regardless of density, so [`proven_paths`] can never blow up combinatorially
-/// (JEF-281). When the budget is exhausted we stop and report `truncated`.
+/// . When the budget is exhausted we stop and report `truncated`.
 const PATH_ENUM_BUDGET: usize = 50_000;
 
 /// The mutable state of a single [`proven_paths`] depth-first enumeration, kept in one
@@ -176,7 +176,7 @@ struct Frame {
 
 impl PathEnum<'_> {
     /// The bounded simple-path DFS from `start`, run on an **explicit work-stack** rather
-    /// than the call stack (JEF-298 — stack-safe for adversarially deep chains). It records
+    /// than the call stack (— stack-safe for adversarially deep chains). It records
     /// a path on reaching the objective; otherwise it expands over movement
     /// edges, honouring the SAME compromise gate as [`movement_tree`] (you may only move
     /// *out of* a workload you control — the entry or a compromisable one), so every
@@ -292,7 +292,7 @@ impl PathEnum<'_> {
 /// paths, returned shortest-first (then by node order for a stable render). The `bool` is
 /// `truncated`: `true` when more than `cap` paths exist or the [`PATH_ENUM_BUDGET`] was
 /// exhausted, so the caller can render a "+N more" note. This is the multi-path picture the
-/// finding detail restores (JEF-281): the several redundant paths ARE the reason a chain is
+/// finding detail restores: the several redundant paths ARE the reason a chain is
 /// no-single-edge-cut. Never blows up combinatorially — the budget caps total work.
 pub(super) fn proven_paths(
     graph: &SecurityGraph,
@@ -353,9 +353,9 @@ pub(super) fn path_steps(
 
 /// Whether a workload node carries **direct live on-pod runtime evidence** of
 /// exploitation right now — any "alarming-now" signal ([`is_alarming_now`]): an
-/// `Alert`, a hands-on-keyboard notable exec (interactive shell / package manager, JEF-117),
-/// or an alarming file write (sensitive-path drop-and-execute / config tamper, JEF-309). This
-/// is the "actively exploited" predicate (JEF-284 condition 2): unlike [`compromisable`] (a
+/// `Alert`, a hands-on-keyboard notable exec (interactive shell / package manager),
+/// or an alarming file write (sensitive-path drop-and-execute / config tamper). This
+/// is the "actively exploited" predicate (condition 2): unlike [`compromisable`] (a
 /// static CVE), it is a *live* signal, so it warrants quarantine regardless of the pod's
 /// network position — a drop-and-execute on an internal pod counts. Non-workload nodes have no
 /// runtime and are never actively exploited. Shares the single [`is_alarming_now`] definition
@@ -369,7 +369,7 @@ fn actively_exploited(graph: &SecurityGraph, node: NodeIndex) -> bool {
 
 /// Whether an edge relation is a **network hop** — `reaches` (lateral movement) or
 /// `can-egress` (the exfil channel). These are the edges a pod is "network-reachable"
-/// over from an internet foothold (JEF-284 condition 1); an identity/RBAC/data edge
+/// over from an internet foothold (condition 1); an identity/RBAC/data edge
 /// (`runs-as`/`can-do`/`can-read`) is not a network hop.
 fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
     graph.inner().edge_weight(edge).is_some_and(|e| {
@@ -381,7 +381,7 @@ fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
 }
 
 /// The workloads on this chain path that qualify for a full-isolation quarantine
-/// (JEF-284). Two independent, HIGH bars — full isolation of a pod is coarse, so it is
+/// . Two independent, HIGH bars — full isolation of a pod is coarse, so it is
 /// reserved for a pod with real *exploitation* evidence, never a merely-reached one:
 ///
 /// 1. **Remotely exploitable** ([`QuarantineReason::RemotelyExploitable`]) — a
@@ -400,11 +400,11 @@ fn is_network_hop(graph: &SecurityGraph, edge: EdgeIndex) -> bool {
 /// (a Secret) or, if a workload, one with neither a CVE nor a live signal — reached ≠
 /// exploited. `ActivelyExploited` takes precedence when a pod meets both bars.
 ///
-/// **JEF-322/JEF-566 note:** bar 1's [`compromisable`] is the *static* CVE/KEV
+/// ** note:** bar 1's [`compromisable`] is the *static* CVE/KEV
 /// predicate, not a live signal — so `RemotelyExploitable` still fires on reachability
 /// and CVE *presence* alone at THIS (proof) layer, identifying a *candidate* target. It
 /// no longer auto-actions on that alone, though: `respond::Mitigation::is_live_corroborated`
-/// (JEF-566) additionally requires the target's justifying chain to be corroborated or
+/// additionally requires the target's justifying chain to be corroborated or
 /// model-promoted, adjudicated, and breach-relevant before the actuator will apply it,
 /// the same ADR-0013 bar the entry-foothold lane clears. A candidate behind a clean,
 /// unpromoted edge stays a human-facing proposal. See `pivot_quarantine_tests.rs` for

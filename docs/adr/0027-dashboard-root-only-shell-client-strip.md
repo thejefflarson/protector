@@ -13,7 +13,7 @@
 
 Under ADR-0025 the engine went Preact-only for every view *body*, but kept TWO parts server-rendered
 in maud — the status strip and the tab nav — so the honest calm-when-blind banner would paint before
-any JS ran. That split had two concrete costs that surfaced in production (JEF-408):
+any JS ran. That split had two concrete costs that surfaced in production:
 
 1. **A dead recurring poll masqueraded as a working one.** `poll.js` called its injected interval as
    `(ms, fn)`, but the default was native `setInterval` (`(fn, ms)`), so `setInterval(POLL_MS, tick)`

@@ -31,7 +31,7 @@ jobs:
       # Secret via envFrom, so none of it belongs in this workflow and no credential is
       # committed here.
       #
-      # The redis backend is deliberately NOT set here any more (JEF-564): sccache selects
+      # The redis backend is deliberately NOT set here any more: sccache selects
       # ONE backend from its env, so setting both would make which one you get an
       # implementation detail of sccache's precedence -- the R2 cutover could read as done
       # while every build still went to redis. If the pod env is missing, sccache degrades
@@ -80,13 +80,13 @@ jobs:
         npm --prefix engine/web ci --ignore-scripts
         npm --prefix engine/web run build
     - name: Lint dashboard client (eslint + jsx-a11y)
-      # JEF-499: the accessibility gate. eslint-plugin-jsx-a11y (recommended, mapped onto Preact
+      # the accessibility gate. eslint-plugin-jsx-a11y (recommended, mapped onto Preact
       # JSX) fails the build on an a11y authoring regression in engine/web/src; the axe route-smoke
       # (the runtime half) runs in the `test` job's `npm run test`. Deps were installed by the
       # `npm ci --ignore-scripts` above.
       run: npm --prefix engine/web run lint
     - name: Typecheck dashboard client (tsc --noEmit)
-      # JEF-399: eslint's no-unused-vars (JEF-499) catches unused imports; it does not type-check.
+      # eslint's no-unused-vars catches unused imports; it does not type-check.
       # `tsc --noEmit` over engine/web/src (tsconfig.json: checkJs, jsx: react-jsx / preact, offline —
       # no `.d.ts` fetch) fails the build on a real type error (e.g. a JSX prop of the wrong type)
       # slipping into the bundle. Deps were installed by the `npm ci --ignore-scripts` above.
@@ -105,7 +105,7 @@ jobs:
     runs-on: protector-runners
     env:
       # sccache backend comes from the runner pod's `sccache-r2` envFrom -- see the
-      # note on the first job. The redis backend is deliberately unset (JEF-564).
+      # note on the first job. The redis backend is deliberately unset.
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: "0"
       # Authenticate binstall's GitHub REST API calls (release-artifact lookups). The
@@ -138,9 +138,9 @@ jobs:
         npm --prefix engine/web ci --ignore-scripts
         npm --prefix engine/web run build
     - name: Dashboard client tests
-      # The v4 Preact client's offline unit + interaction tests (vitest + jsdom, ADR-0025 /
-      # JEF-397): the keyed reconcile, the state-preservation (JEF-351) acceptance test, client
-      # escaping, the honesty empty-states, and the JEF-499 vitest-axe route-smoke (every top-level
+      # The v4 Preact client's offline unit + interaction tests (vitest + jsdom, ADR-0025):
+      # the keyed reconcile, the state-preservation acceptance test, client
+      # escaping, the honesty empty-states, and the vitest-axe route-smoke (every top-level
       # view + AuthGate + status strip asserted free of serious/critical axe violations — an a11y
       # regression goes red here). `npm ci` above installed the dev toolchain.
       run: npm --prefix engine/web run test
@@ -183,7 +183,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
-      attestations: write # JEF-275: write the Sigstore-signed SLSA build-provenance attestation
+      attestations: write # write the Sigstore-signed SLSA build-provenance attestation
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -236,7 +236,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # sccache's R2 backend for the in-image cargo build (JEF-584, ADR-0020).
+          # sccache's R2 backend for the in-image cargo build (ADR-0020).
           # `secret-envs` (key=envname) reads these straight out of the RUNNER POD's env,
           # where the `sccache-r2` Secret is injected via envFrom (cluster repo:
           # charts/actions/runners/values-protector.yaml) — the repo has no Actions secret
@@ -272,7 +272,7 @@ jobs:
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "missing/invalid build digest: '$DIGEST'" >&2; exit 1; }
           echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
       # Sigstore-signed SLSA build-provenance attestation (keyless: Fulcio + Rekor), pushed to ghcr
-      # as an OCI referrer. This is what protector's own provenance observer VERIFIES (JEF-275): the
+      # as an OCI referrer. This is what protector's own provenance observer VERIFIES: the
       # SLSA v1 predicate carries this repo + workflow as builder.id + workflow.repository, and the
       # keyless Fulcio/Rekor chain is what trips `keyless_verified` → the "verified" posture. The
       # buildx `provenance: true` above is the UNSIGNED variant embedded in the image index, which

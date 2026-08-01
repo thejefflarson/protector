@@ -1,4 +1,4 @@
-// The finding detail's cut-set list (ADR-0034 / JEF-674): a REPLACEMENT for the old opaque
+// The finding detail's cut-set list (ADR-0034): a REPLACEMENT for the old opaque
 // single-cut-signature string — one line per node the model chose to contain (fenced key + fixed
 // mechanism + entry-vs-downstream role + an advisory blast-radius note), plus the honest empty
 // states: "attack" with no rows reads as "attack, no cut warranted" (a valid decision, never an
@@ -20,7 +20,7 @@ function expand(container, id) {
   fireEvent.click(container.querySelector(`tr.row[data-finding="${id}"]`));
 }
 
-describe("finding detail cut-set panel (JEF-674)", () => {
+describe("finding detail cut-set panel", () => {
   it("renders one row per contained node: fenced key, role, mechanism, blast note", () => {
     const f = finding("multi-1", {
       cuts: {

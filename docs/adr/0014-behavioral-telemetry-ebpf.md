@@ -93,10 +93,10 @@ telemetry without requiring any third-party sensor.
   corroborates only the objective class whose ATT&CK *tactic* it evidences: internet
   egress → EXFILTRATION (T1041), secret read → CREDENTIAL_ACCESS (T1552), vuln-library
   load → the INITIAL_ACCESS / EXPLOIT_PUBLIC_FACING foothold (T1190, matched against the
-  entry's foothold tactic per JEF-77 as well as the objective's). An *alerting* signal
+  entry's foothold tactic as well as the objective's). An *alerting* signal
   (`Behavior::Alert`) still corroborates **any** chain — "an attack is happening now"
   regardless of which objective — and a *notable* exec (interactive shell / package
-  manager, JEF-55/JEF-117) corroborates broadly the same way, as the agent-side
+  manager) corroborates broadly the same way, as the agent-side
   equivalent of Falco's shell/pkg-mgr criticals. A *bare* `ProcessExec` and mundane
   in-cluster connections remain model-evidence only, so the predicate never becomes the
   "everything corroborates everything" blanket. This is entirely **shadow-gated**: the
@@ -170,7 +170,7 @@ Shadow-first, mirroring the engine's posture ([ADR-0001](0001-async-mitigation-e
    `mode: enforce` within `enforceScope` (ADR-0021), never by the mere presence of a
    signal.
 
-## Addendum — retiring Falco: the corroboration-parity bar (JEF-305, 2026-07-04)
+## Addendum — retiring Falco: the corroboration-parity bar (2026-07-04)
 
 Falco 0.44.1 crash-loops on the cluster's `7.0.0-1014-raspi` arm64 kernel (a libsinsp
 ABI mismatch against the syscall tracepoints it parses), leaving live corroboration down
@@ -208,7 +208,7 @@ no behavior changes with it.**
 
 4. **"Alarming-now → blanket corroboration" is an engine-side classifier policy.** The
    decision that an *alerting* signal corroborates any chain (and that a notable exec does
-   the same) is **classification policy that lives engine-side**, following the JEF-113
+   the same) is **classification policy that lives engine-side**, following the
    pattern: the wire behavior type stays pure data, and the "is this alarming now?"
    judgement is made in the engine (as `observe::exec_class` already does for
    shell/pkg-mgr execs). A new sensor does not encode the blanket-corroboration policy on
@@ -219,7 +219,7 @@ None of these four touch the honesty, zero-egress, or shadow-by-default framing:
 agent stays observe-only, the graph and evidence stay in-cluster, and corroboration only
 ever promotes a cut behind the existing reversible, self-reverting, `enforce`-gated bar.
 
-## Addendum — Falco adapter retired; the first-party agent is the sole deployed corroboration source (JEF-312, 2026-07-05)
+## Addendum — Falco adapter retired; the first-party agent is the sole deployed corroboration source (2026-07-05)
 
 The retirement is complete. Falco is dead on the cluster's `7.0.0` arm64 kernel
 (crash-loops, zero events forwarded), so there is no live Falco left to compare the agent

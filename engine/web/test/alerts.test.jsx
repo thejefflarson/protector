@@ -1,4 +1,4 @@
-// Alerts view tests (ADR-0025 / JEF-400 / JEF-411): the content-hash reconcile key (an identical
+// Alerts view tests (ADR-0025): the content-hash reconcile key (an identical
 // alarm persisting across passes does NOT flicker; a genuinely new alarm appears as a new node), the
 // honesty states (LOUD blind caveat vs calm empty — SERVER-DERIVED, the client selects only), and
 // escaping (an XSS payload in a signal/workload renders inert). The view was already `view`-only; a

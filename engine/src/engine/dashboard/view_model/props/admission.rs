@@ -15,7 +15,7 @@
 use super::signing::SigningRepoProps;
 use super::status::StatusStripProps;
 
-/// A per-gate shadow status (JEF-246) for the admission view — the "was this actually checked?"
+/// A per-gate shadow status for the admission view — the "was this actually checked?"
 /// three-state vocabulary from `ShadowVerdict::status()`: `verified` (in scope, checked, passed),
 /// `would-pass` (out of scope, shadow-checked, would pass), `would-fail` (would deny if enforced),
 /// or `None` when the gate has no opinion (the field was empty). Carried as colour + glyph + word
@@ -35,7 +35,7 @@ pub enum GateStatus {
 
 impl GateStatus {
     /// Parse the engine's coarse shadow status word into the presentation enum. An empty string
-    /// (or any unknown legacy word, e.g. the pre-JEF-246 `signed`/`unsigned`) reads as
+    /// (or any unknown legacy word, e.g. the older `signed`/`unsigned`) reads as
     /// [`NotApplicable`](Self::NotApplicable) rather than a misleading pass/fail.
     pub fn parse(word: &str) -> GateStatus {
         match word {
@@ -158,9 +158,9 @@ pub struct DecisionRowProps {
     /// The request's namespace, untrusted. Empty for a cluster-scoped object.
     pub namespace: String,
     /// The mesh gate's shadow status. (The signature posture now lives in the dedicated signing
-    /// inventory — JEF-262 — so the decision log no longer carries a signature *gate* column.)
+    /// inventory — — so the decision log no longer carries a signature *gate* column.)
     pub mesh: GateStatus,
-    /// The "if enforced" net counterfactual (JEF-246): would this be admitted if every gate were
+    /// The "if enforced" net counterfactual: would this be admitted if every gate were
     /// enforced? Display-only — the honest API verdict is [`decision`](Self::decision).
     pub would_admit: bool,
     /// The human-actionable reason, untrusted. Empty for a plain admit.
@@ -183,7 +183,7 @@ pub struct AdmissionViewProps {
     pub denied: u64,
     /// Total decisions across all outcomes — drives the honest-empty state when zero.
     pub total: u64,
-    /// The per-image signing inventory (JEF-262 / ADR-0020), grouped under its repo — the
+    /// The per-image signing inventory (ADR-0020), grouped under its repo — the
     /// observed signing posture of every image, sitting between the tallies header and the
     /// decision log. Empty renders an honest "no images observed yet" (never an all-clear).
     pub signing: Vec<SigningRepoProps>,

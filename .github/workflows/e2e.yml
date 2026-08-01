@@ -12,7 +12,7 @@ name: e2e (k3d)
 permissions:
   contents: read
 on:
-  # Gate PRs AND every merge to main (JEF-303): e2e is a REQUIRED check via branch
+  # Gate PRs AND every merge to main: e2e is a REQUIRED check via branch
   # protection, so it must run on PRs to block a red merge — not just post-merge (the
   # old post-merge-only signal let a red e2e land silently). It builds an image and
   # stands up k3d (minutes) on a GitHub-hosted runner (it needs a local Docker daemon,

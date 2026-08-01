@@ -1,7 +1,7 @@
-//! SLSA **build-provenance** observation (ADR-0020 §5, JEF-275) — the second supply-chain
+//! SLSA **build-provenance** observation (ADR-0020 §5) — the second supply-chain
 //! continuity axis, alongside signature continuity.
 //!
-//! A cosign *signature* proves *who* signed an image (the signer identity — JEF-261). SLSA
+//! A cosign *signature* proves *who* signed an image (the signer identity —). SLSA
 //! **provenance** proves *how it was built*: the source repository and the builder/workflow that
 //! produced it. Protector already observes signer identity; this module adds the missing axis —
 //! observe every image's provenance posture into one of four definitive resting states (never
@@ -26,7 +26,7 @@
 //! the signer. The per-repo TOFU provenance baseline, drift findings, and the inventory render
 //! consume the [`ProvenancePosture`] this exposes.
 //!
-//! ## Reuse, not a second verifier (JEF-275 technical note)
+//! ## Reuse, not a second verifier (technical note)
 //!
 //! The production observer ([`CosignChecker`](super::CosignChecker)) fetches the attestation on
 //! the SAME sanctioned registry/sigstore round trip as signature verification (ADR-0015) —
@@ -61,7 +61,7 @@ pub struct Provenance {
     pub builder: String,
 }
 
-/// An image's observed build-provenance posture (ADR-0020 §5, JEF-275). Four definitive resting
+/// An image's observed build-provenance posture (ADR-0020 §5). Four definitive resting
 /// states plus one transient. Never `NotApplicable`: observation always reaches a posture, and a
 /// registry blip is the explicit [`Checking`](Self::Checking), not a fake clean.
 ///
@@ -114,7 +114,7 @@ impl ProvenancePosture {
     }
 }
 
-/// The verification-relevant facts extracted from one fetched attestation layer (JEF-275),
+/// The verification-relevant facts extracted from one fetched attestation layer,
 /// decoupled from sigstore's type so [`classify_provenance`] is exhaustively unit-testable without
 /// synthesising a full Fulcio cert + DSSE envelope. Built ONLY for layers whose in-toto predicate
 /// type [`is_slsa_predicate_type`]; a plain signature layer never produces one.
@@ -131,7 +131,7 @@ pub struct ProvenanceFacts {
     pub keyless_verified: bool,
 }
 
-/// Classify a build-provenance posture from fetched attestation facts (ADR-0020 §5, JEF-275). Pure
+/// Classify a build-provenance posture from fetched attestation facts (ADR-0020 §5). Pure
 /// classification — the Fulcio/Rekor chain is the trust anchor, no config required. Precedence:
 ///   1. a **keyless-verified** SLSA layer whose predicate yields a builder identity ⇒
 ///      [`Verified`](ProvenancePosture::Verified) — the one trusted-build posture;

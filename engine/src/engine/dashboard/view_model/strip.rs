@@ -16,7 +16,7 @@ use super::props::{AuthMode, CoverageChip, StatusStripProps};
 const COVERAGE_FEEDS: [(&str, &str); 3] = [
     ("kev", "KEV"),
     ("epss", "EPSS"),
-    // ONE agent-sourced runtime-corroboration chip (JEF-308). It goes degraded the moment any
+    // ONE agent-sourced runtime-corroboration chip. It goes degraded the moment any
     // expected node is blind (the collapsed readiness row's Degraded state), and reads as a gap
     // (not present) when corroboration is wholly blind.
     ("runtime-corroboration", "Runtime"),
@@ -76,7 +76,7 @@ pub(super) fn status_strip(
         warming_up: readiness.warming_up,
         model_attached: readiness.model_attached(),
         coverage: coverage_chips(readiness),
-        // Overlaid later by the caller with the cross-pass stall register (JEF-421).
+        // Overlaid later by the caller with the cross-pass stall register.
         coverage_alert: None,
         last_pass: last_pass.map(last_pass_age),
         breach_count,
@@ -84,12 +84,12 @@ pub(super) fn status_strip(
         uncertain_count,
         cleared_count,
         escalated_count,
-        // Signing-regression counts (JEF-264) are wired in by the caller that holds the
+        // Signing-regression counts are wired in by the caller that holds the
         // admission-decision log (`DashboardState::with_signing_regressions`); the findings-derived
         // strip carries none of its own.
         signing_regression_breach: 0,
         signing_regression_uncertain: 0,
-        // The app-level auth mode (ADR-0030 / JEF-487) is wired in by the caller that knows whether
+        // The app-level auth mode (ADR-0030) is wired in by the caller that knows whether
         // an OIDC issuer was configured (`DashboardState::with_auth_mode`); the pure findings-derived
         // strip defaults to the most-conservative `EdgeOnly` (never falsely claims `oidc`).
         auth_mode: AuthMode::EdgeOnly,
@@ -151,7 +151,7 @@ mod tests {
         assert!(strip.all_clear());
         assert!(!strip.watching());
         assert!(!strip.armed);
-        // Runtime corroboration is ONE agent-sourced Runtime chip (JEF-308).
+        // Runtime corroboration is ONE agent-sourced Runtime chip.
         assert!(strip.coverage.iter().all(|c| c.label != "eBPF"));
         let runtime = strip
             .coverage
@@ -162,7 +162,7 @@ mod tests {
         assert!(!runtime.degraded);
     }
 
-    /// JEF-308: the Runtime chip goes degraded the moment any expected node is blind.
+    /// the Runtime chip goes degraded the moment any expected node is blind.
     #[test]
     fn a_blind_node_degrades_the_runtime_chip() {
         let cov = coverage(&[
@@ -191,7 +191,7 @@ mod tests {
         );
     }
 
-    /// JEF-421: a covering Runtime feed that STALLED (server-derived `CoverageState::Stalled`)
+    /// a covering Runtime feed that STALLED (server-derived `CoverageState::Stalled`)
     /// marks the chip stalled, forbids the green all-clear, ships the strip-level coverage-alert —
     /// and leaves the JUDGING axis independent (the model is still judging; a coverage stall must
     /// NOT downgrade "model judging" to blind).
@@ -230,7 +230,7 @@ mod tests {
         assert_ne!(strip.judging_state(), "no-model");
     }
 
-    /// JEF-421: an ABSENT (never-enabled) coverage feed stays muted/honest — no stall banner, and
+    /// an ABSENT (never-enabled) coverage feed stays muted/honest — no stall banner, and
     /// its known-absence does NOT by itself forbid the green all-clear.
     #[test]
     fn absent_coverage_is_muted_not_stalled() {
@@ -278,7 +278,7 @@ mod tests {
         assert!(strip.last_pass.is_none());
     }
 
-    /// JEF-264: an ESTABLISHED-baseline signing regression counts toward breach — it forbids the
+    /// an ESTABLISHED-baseline signing regression counts toward breach — it forbids the
     /// green all-clear AND the calm "watching" reading (it is louder than watching).
     #[test]
     fn established_signing_regression_forbids_green_and_watching() {
@@ -302,7 +302,7 @@ mod tests {
         );
     }
 
-    /// JEF-264: a COLD-baseline signing regression maps to uncertain — it forbids green, but reads
+    /// a COLD-baseline signing regression maps to uncertain — it forbids green, but reads
     /// as the calmer, non-green "watching" register (a weak lead, not a breach).
     #[test]
     fn cold_signing_regression_is_watching_not_green() {

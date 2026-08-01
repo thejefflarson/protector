@@ -19,7 +19,7 @@ pub struct Judgement {
     /// The final verdict (Debug form: variant + reason), after both guards.
     pub verdict: String,
     /// The full prompt sent to the model. `None` when the deterministic pre-call
-    /// filter (JEF-112) refuted the entry without asking the model.
+    /// filter refuted the entry without asking the model.
     pub prompt: Option<String>,
     /// The model's raw reply, before parsing/guards. `None` when the model was
     /// unavailable (timeout).

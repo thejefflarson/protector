@@ -1,6 +1,6 @@
-//! The durable, per-repository TOFU signing baseline (JEF-263, ADR-0020 §2).
+//! The durable, per-repository TOFU signing baseline (ADR-0020 §2).
 //!
-//! Observation (JEF-261) is a *snapshot*: it says "this image is signed by X right now". It
+//! Observation is a *snapshot*: it says "this image is signed by X right now". It
 //! cannot see a **change** in signing posture over time — which is the actual supply-chain
 //! attack (a repo that has always shipped signed by one CI identity suddenly ships signed by
 //! a different one, or unsigned). This module learns and remembers the missing history: for
@@ -29,10 +29,10 @@
 //! per-pass compaction is a handful of small lines, negligible against the journal cap; the
 //! [`DEFAULT_MAX_REPOS`] cap bounds the pathological case.
 //!
-//! ## Scope (JEF-263)
+//! ## Scope
 //!
-//! Persistence + in-memory store + boot replay ONLY. Drift *detection*/findings (JEF-264),
-//! enforcement (JEF-265), the dashboard render (JEF-262), and Rekor history (JEF-266) consume
+//! Persistence + in-memory store + boot replay ONLY. Drift *detection*/findings,
+//! enforcement, the dashboard render, and Rekor history consume
 //! the baseline this exposes; they are NOT built here. The store only ever *learns* from a
 //! `Signed` posture — it never emits a verdict, never gates, and treats a new tag/digest
 //! under a known repo as the same baseline (not drift). The identities/issuers are UNTRUSTED
@@ -47,7 +47,7 @@ use crate::policies::signature::{PostureRank, ProvenancePosture, SigningPosture,
 
 /// How long after `first_seen` a baseline is considered [`established`](SigningBaseline::established).
 ///
-/// **Design decision (ADR-0020 addendum, JEF-263): `established` = wall-clock age, not
+/// **Design decision (ADR-0020 addendum): `established` = wall-clock age, not
 /// digest-count.** A baseline matures 24h after the repo was first observed signed. Rationale:
 /// the whole point of a TOFU baseline is that the FIRST observation is the weakest evidence
 /// (it could be the attacker's first signed push), so trust should mature over time rather
@@ -55,7 +55,7 @@ use crate::policies::signature::{PostureRank, ProvenancePosture, SigningPosture,
 /// age needs no extra durable state (we already persist `first_seen_ms`) and is monotonic —
 /// once established, a baseline never un-establishes on a later observation. A digest-count or
 /// distinct-day refinement is a future option; `established` + `first_seen` are exposed so
-/// JEF-262/JEF-264 can render/weigh the distinction however they choose.
+/// can render/weigh the distinction however they choose.
 const ESTABLISH_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Upper bound on distinct repositories tracked in memory. A safety cap for the pathological
@@ -65,7 +65,7 @@ const ESTABLISH_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// baseline is never dropped in favour of churn.
 pub const DEFAULT_MAX_REPOS: usize = 4096;
 
-/// One repository's learned signing baseline (JEF-263). Keyed elsewhere by the `registry/repo`
+/// One repository's learned signing baseline. Keyed elsewhere by the `registry/repo`
 /// string; this is the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningBaseline {
@@ -81,12 +81,12 @@ pub struct SigningBaseline {
     /// [`ESTABLISH_AGE_MS`]). `false` ⇒ a freshly-learned baseline: weaker evidence.
     pub established: bool,
     /// Whether the public Rekor transparency log corroborates this repo's signing history
-    /// (JEF-266, ADR-0020 §4). `true` ⇒ real provenance read from the append-only log, not just
+    /// (ADR-0020 §4). `true` ⇒ real provenance read from the append-only log, not just
     /// what we happened to observe first locally — a **stronger** baseline than local-only TOFU,
     /// which defeats the cold-start weakness. Set only by the opt-in Rekor lane; `false` when the
     /// lane is off or the log had no entry, which is the honest "new baseline (local only)" state.
     pub log_corroborated: bool,
-    /// The strongest signing-posture [`PostureRank`] ever learned under this repo (JEF-280) — the
+    /// The strongest signing-posture [`PostureRank`] ever learned under this repo — the
     /// yardstick a fresh posture's rank is compared against to define a *downgrade*. By construction
     /// this is [`PostureRank::Keyless`] (the store only learns from a keyless `Signed` posture), so
     /// serving a lesser-but-calm posture (key-based / unverifiable) against it is the
@@ -95,13 +95,13 @@ pub struct SigningBaseline {
     /// value — see [`PostureRank::default`]).
     pub rank: PostureRank,
     /// Every source repository observed in a VERIFIED SLSA build-provenance attestation under this
-    /// repo (JEF-275, ADR-0020 §5). The provenance continuity axis, TOFU-learned exactly like the
+    /// repo (ADR-0020 §5). The provenance continuity axis, TOFU-learned exactly like the
     /// signer identities: a verified provenance whose source is not in this set (on an established
     /// repo) is provenance drift. Empty until a verified provenance is observed. Deduped + sorted.
     /// UNTRUSTED predicate text — escape at render.
     pub provenance_sources: BTreeSet<String>,
     /// Every builder identity (SLSA `builder.id`) observed in a VERIFIED provenance attestation
-    /// under this repo (JEF-275). The second half of the provenance identity; a new builder on an
+    /// under this repo. The second half of the provenance identity; a new builder on an
     /// established repo is provenance drift. Deduped + sorted. UNTRUSTED — escape at render.
     pub provenance_builders: BTreeSet<String>,
     /// When this baseline was last updated (observed or replayed), Unix epoch millis. In-memory
@@ -136,7 +136,7 @@ impl SigningBaseline {
     }
 }
 
-/// The in-memory, per-repository signing-baseline store (JEF-263). Learns from observed
+/// The in-memory, per-repository signing-baseline store. Learns from observed
 /// `Signed` postures, persists each change to the durable journal as a full-state line, and
 /// is [`restore`](Self::restore)d from that journal on boot. Bounded by [`DEFAULT_MAX_REPOS`]
 /// with the eviction policy documented there.
@@ -180,14 +180,14 @@ impl SigningBaselineStore {
         self.baselines.is_empty()
     }
 
-    /// All learned `(repo, baseline)` pairs — what JEF-262/JEF-264 read. Order is unspecified.
+    /// All learned `(repo, baseline)` pairs — what read. Order is unspecified.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &SigningBaseline)> {
         self.baselines.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     /// Learn from one observed posture, keyed by the image's `registry/repo`. ONLY a `Signed`
     /// posture updates a baseline (a not-signed / invalid / checking posture is left to the
-    /// drift work, JEF-264, and never creates or mutates a baseline here). Returns the repo key
+    /// drift work, and never creates or mutates a baseline here). Returns the repo key
     /// when the baseline was created or changed (new identity/issuer, or `established` flipped),
     /// so the caller can persist just that change; `None` when nothing changed.
     ///
@@ -204,7 +204,7 @@ impl SigningBaselineStore {
 
         if let Some(existing) = self.baselines.get_mut(&repo) {
             let mut changed = false;
-            // Store the tag-agnostic continuity identity (JEF-325), not the raw per-version SAN, so
+            // Store the tag-agnostic continuity identity, not the raw per-version SAN, so
             // successive release tags of the same workflow fold to ONE baseline identity instead of
             // accreting one entry per version.
             changed |= existing.identities.insert(signer.canonical_identity());
@@ -217,7 +217,7 @@ impl SigningBaselineStore {
                 existing.established = established;
                 changed = true;
             }
-            // Raise the learned rank monotonically to the strongest posture ever seen (JEF-280).
+            // Raise the learned rank monotonically to the strongest posture ever seen.
             // Only a `Signed` posture reaches here (see `signer()?` above), so this is `Keyless`;
             // written generically so a future teaching path can't silently weaken the baseline.
             if let Some(rank) = posture.rank()
@@ -232,7 +232,7 @@ impl SigningBaselineStore {
 
         // First time we've seen this repo signed: establish the baseline (cold-start, weak).
         let mut identities = BTreeSet::new();
-        // The tag-agnostic continuity identity (JEF-325), not the raw per-version SAN.
+        // The tag-agnostic continuity identity, not the raw per-version SAN.
         identities.insert(signer.canonical_identity());
         let mut issuers = BTreeSet::new();
         if let Some(issuer) = signer.issuer.as_ref() {
@@ -248,12 +248,12 @@ impl SigningBaselineStore {
                 // First sight is always cold-start (first_seen == now): weakest evidence.
                 established: false,
                 // Local observation alone never corroborates against the log — that is the opt-in
-                // Rekor lane's job (JEF-266). A fresh baseline is local-only until it does.
+                // Rekor lane's job. A fresh baseline is local-only until it does.
                 log_corroborated: false,
-                // The rank of the posture that taught this baseline (JEF-280). Only a `Signed`
+                // The rank of the posture that taught this baseline. Only a `Signed`
                 // posture reaches here, so this is `Keyless` — the strongest rung.
                 rank: posture.rank().unwrap_or_default(),
-                // Provenance is a separate axis (JEF-275), learned by `observe_provenance`; a
+                // Provenance is a separate axis, learned by `observe_provenance`; a
                 // signature-only baseline starts with no provenance identity.
                 provenance_sources: BTreeSet::new(),
                 provenance_builders: BTreeSet::new(),
@@ -263,7 +263,7 @@ impl SigningBaselineStore {
         Some(repo)
     }
 
-    /// Learn from one observed build-provenance posture (JEF-275, ADR-0020 §5), keyed by the image's
+    /// Learn from one observed build-provenance posture (ADR-0020 §5), keyed by the image's
     /// `registry/repo`. Only a [`Verified`](ProvenancePosture::Verified) provenance updates a
     /// baseline (absent / unverifiable / checking never create or mutate one — that is drift
     /// territory, and absent provenance is calm, never learned). Returns the repo key when the
@@ -303,7 +303,7 @@ impl SigningBaselineStore {
         }
     }
 
-    /// Mark a repo's baseline as **log-corroborated** by the Rekor transparency log (JEF-266,
+    /// Mark a repo's baseline as **log-corroborated** by the Rekor transparency log (
     /// ADR-0020 §4): the public append-only log carries a signing entry for this repo, so its
     /// history is real provenance rather than local trust-on-first-sight. Returns `true` when the
     /// flag actually flipped (so the caller persists just that change); `false` if the repo is
@@ -373,10 +373,10 @@ impl SigningBaselineStore {
                         // Corroboration survives a restart — a repo the log vouched for stays
                         // log-corroborated (monotonic, never re-armed to local-only on replay).
                         log_corroborated,
-                        // The learned rank survives a restart (JEF-280), so downgrade detection is
-                        // defined against it post-boot; a pre-JEF-280 line defaults to `Keyless`.
+                        // The learned rank survives a restart, so downgrade detection is
+                        // defined against it post-boot; a line predating this field defaults to `Keyless`.
                         rank,
-                        // The learned provenance identity survives a restart (JEF-275); a line
+                        // The learned provenance identity survives a restart; a line
                         // written before this axis existed replays with empty sets (cold provenance).
                         provenance_sources: provenance_sources.into_iter().collect(),
                         provenance_builders: provenance_builders.into_iter().collect(),
@@ -426,7 +426,7 @@ impl SigningBaselineStore {
 }
 
 /// A read-only, cross-task snapshot handle onto the analysis engine's per-repo signing baseline
-/// (JEF-265, ADR-0020 Stage 3 ENFORCE).
+/// (ADR-0020 Stage 3 ENFORCE).
 ///
 /// The critical invariant it enforces: **the admission webhook consults the baseline but never
 /// writes/learns it.** The analysis engine's running-Pod sweep OWNS the authoritative

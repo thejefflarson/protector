@@ -33,7 +33,7 @@ fn cut(node: NodeKey) -> ChosenCut {
 // --- guard_containment_grounding ---
 
 /// `store` qualifies for the menu via `compromisable()`'s static CVE-*presence* bar
-/// (JEF-322) but the fixture's CVE is never tagged reachability `loaded-at-runtime`, and
+/// but the fixture's CVE is never tagged reachability `loaded-at-runtime`, and
 /// there is no exposed secret and no runtime behavior — its OWN evidence block would show
 /// nothing to cite. Containing it downgrades the whole decision.
 #[test]

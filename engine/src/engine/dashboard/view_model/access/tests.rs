@@ -1,4 +1,4 @@
-//! Tests for the "Access" view_model mapping (JEF-490): the TIER-AWARE redaction of the audit rows
+//! Tests for the "Access" view_model mapping: the TIER-AWARE redaction of the audit rows
 //! to the caller's OWN tier is the crux — a redacted-tier viewer never learns the target of a raw
 //! pull; a forensic/raw viewer does. Plus: the bulk-scope label is shown to everyone, the raw
 //! keyline flag tracks the pull's tier, and the durable flag / pull count flow through honestly.

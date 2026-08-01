@@ -1,4 +1,4 @@
-// Finding-level "runtime-blind on this node" caveat (JEF-424): a finding whose workload sits on a
+// Finding-level "runtime-blind on this node" caveat: a finding whose workload sits on a
 // blind node carries a server-derived caveat string; the detail panel renders it in the verdict
 // block as a `role="note"` (the existing `.verdict-caveat` precedent), with the node name — which is
 // UNTRUSTED-adjacent — auto-escaped by Preact, never as live HTML. The caveat is metadata only: the
@@ -19,7 +19,7 @@ function expand(container, id) {
   fireEvent.click(container.querySelector(`tr.row[data-finding="${id}"]`));
 }
 
-describe("finding-level runtime-blind caveat (JEF-424)", () => {
+describe("finding-level runtime-blind caveat", () => {
   it("renders the caveat as a role=note when the server ships one", () => {
     const f = finding("blind-1", {
       "blind-node-caveat": "runtime-blind on node-7 — no live sensor here, so absence of a signal is not evidence of safety",

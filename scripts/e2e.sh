@@ -66,7 +66,7 @@ IMAGE="${IMAGE:-protector:e2e}"
 NS=protector
 APP_NS=app
 CM_VERSION="${CM_VERSION:-v1.16.2}"
-# JEF-576: the :9999 behavioral ingest now REQUIRES a bearer token — no more
+# the :9999 behavioral ingest now REQUIRES a bearer token — no more
 # unauthenticated-but-warned fallback. Generated fresh per run (this cluster is
 # throwaway); provisioned to the pod as a Secret mounted at PROTECTOR_INGEST_TOKEN_FILE
 # (deploy_protector, below — mirrors the production chart's `ingestAuth` contract,
@@ -151,7 +151,7 @@ pf_reset() {
 # we assert what shadow/hard mode did about it (the actuation assertions below read the cluster's
 # NetworkPolicy state, which is the authoritative behavioral check).
 #
-# JEF-300: grep the FULL log (no --tail) for the SPECIFIC chain, not `--tail=400 | grep 'proven
+# grep the FULL log (no --tail) for the SPECIFIC chain, not `--tail=400 | grep 'proven
 # chains'`. The engine emits the "proven chains" summary once per structural pass, then FLOODS the
 # stream (one `proven chain` line per chain + per-pass behavior batches + the signing sweep), so
 # the single summary line scrolls out of a 400-line tail long before we poll — the assertion timed
@@ -168,7 +168,7 @@ post_alert() {
   # POST an `Alert` behavior on `web` to the tool-agnostic behavioral port
   # (`/behavior`, ADR-0003) — the same corroboration effect any sensor gets. An `Alert`
   # is the "something alarming, now" signal that flips a proven chain to corroborated.
-  # JEF-576: the ingest requires the same bearer token the pod was provisioned with.
+  # the ingest requires the same bearer token the pod was provisioned with.
   curl -fsS -XPOST localhost:9999/behavior \
     -H "Authorization: Bearer $INGEST_TOKEN" \
     -H 'content-type: application/json' -d '[{
@@ -201,7 +201,7 @@ mitigation_retired_for_web() {
     | grep 'mitigation retired' | grep -q 'workload/app/Pod/web'
 }
 
-# Hard mode can apply MORE than one managed policy at once (ADR-0022 / JEF-284), so an
+# Hard mode can apply MORE than one managed policy at once (ADR-0022), so an
 # assertion must name the workload ROLE it means, never assume a single policy or grab
 # "the first one" (that races). Two distinct controls exist on the web→store→secret
 # scenario:
@@ -213,7 +213,7 @@ mitigation_retired_for_web() {
 #   - the PIVOT quarantine (role=store): a *remotely-exploitable* pod — a non-entry
 #     workload reachable from the internet-exposed entry that runs a critical/KEV CVE —
 #     is still IDENTIFIED as a quarantine CANDIDATE deterministically at the proof layer
-#     (JEF-284: reachable + critical CVE, no model needed), but is no longer PROPOSED at
+#     (reachable + critical CVE, no model needed), but is no longer PROPOSED at
 #     all without the model naming it (ADR-0034 D6: the `containment_for` fallback is
 #     entry-only, never a downstream workload) — reachability + CVE presence, and even
 #     live corroboration, no longer surfaces it as a proposal, let alone auto-cuts it.
@@ -300,7 +300,7 @@ deploy_protector() {
 
   kubectl create ns "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # JEF-576: provision the ingest bearer token as a Secret (idempotent, like the
+  # provision the ingest bearer token as a Secret (idempotent, like the
   # namespace above) — the Deployment below mounts it and the :9999 listener refuses
   # to bind without it.
   kubectl -n "$NS" create secret generic protector-ingest-token \
@@ -648,7 +648,7 @@ spec:
 YAML
 # On the fresh pod the log is empty, so this is a genuine RE-PROVE assertion, not a match
 # of a stale line from an earlier step. Dump diagnostics on timeout (step 6 does; step 9
-# never did — an opaque timeout here is exactly what made JEF-300 undebuggable in CI).
+# never did — an opaque timeout here is exactly what made undebuggable in CI).
 wait_until "log4j foothold re-proven on the fresh pod (no model to judge it)" 300 chains_proven \
   || { diagnose_chain; fail "web→session-key never re-proved within 300s after the step-9 pod reset"; }
 pass "CVE present + exposed, foothold re-proven on a fresh, uncorroborated pod"
@@ -659,14 +659,14 @@ managed_np_for_absent web \
   || fail "engine auto-cut the web foothold on mere CVE presence with no model — the positive-gate is violated"
 pass "web foothold left uncut: the model, not a rule, must decide to promote+cut the entry"
 # The remotely-exploitable PIVOT (store) is IDENTIFIED as a candidate deterministically
-# (JEF-284: reachable + critical CVE), but with NO model and NO live signal its justifying
-# chain is uncorroborated/unadjudicated — so under JEF-566 / ADR-0032 it is PROPOSE-ONLY,
+# (reachable + critical CVE), but with NO model and NO live signal its justifying
+# chain is uncorroborated/unadjudicated — so under ADR-0032 it is PROPOSE-ONLY,
 # exactly like the entry. Reachability + CVE presence alone no longer auto-cuts the pivot;
 # the incident responder (a model verdict or live corroboration) must decide. Assert the
 # pivot is NOT auto-quarantined so a regression back to deterministic pivot-cutting is caught.
 managed_np_for_absent store \
-  || fail "engine auto-quarantined the pivot role=store on reachability + CVE presence alone, with no model or corroboration — JEF-566/ADR-0032 makes it propose-only"
-pass "pivot store left uncut: without a model verdict or live corroboration it stays propose-only, same bar as the entry (JEF-566)"
+  || fail "engine auto-quarantined the pivot role=store on reachability + CVE presence alone, with no model or corroboration — ADR-0032 makes it propose-only"
+pass "pivot store left uncut: without a model verdict or live corroboration it stays propose-only, same bar as the entry"
 
 if model_available; then
   step "10/11  LOG4J + MODEL: the model examines the proven path, judges log4shell EXPLOITABLE, and the engine cuts — the determination is the model's"

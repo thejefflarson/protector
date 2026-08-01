@@ -1,4 +1,4 @@
-//! The four READ-ONLY tools (ADR-0031 §1, JEF-488). There is NO fifth tool and NO actuation tool —
+//! The four READ-ONLY tools (ADR-0031 §1). There is NO fifth tool and NO actuation tool —
 //! not a permission withheld at runtime, but a surface that DOES NOT EXIST (§1: the view cannot
 //! become an actuation surface, ADR-0016 shadow-first). Every tool is a pure read over the SAME
 //! `state::` handles the dashboard serves, redacted PER ENTRY to the (already clamped) effective
@@ -41,7 +41,7 @@ pub const TOOL_NAMES: [&str; 4] = [
 ];
 
 /// The image-observation subject prefix on the admission-decision log (mirrors the signing sweep,
-/// JEF-261) — the rows the signing inventory is derived from.
+/// ) — the rows the signing inventory is derived from.
 const IMAGE_SUBJECT_PREFIX: &str = "Image/";
 
 /// Why a tool call could not be served — a routing/validation failure, never a redaction leak.
@@ -230,7 +230,7 @@ pub fn signing_inventory(state: &McpState, tier: EffectiveTier) -> Value {
     })
 }
 
-/// The set of runtime-blind node names (JEF-308) from the readiness runtime-corroboration row.
+/// The set of runtime-blind node names from the readiness runtime-corroboration row.
 fn blind_nodes(state: &McpState) -> std::collections::HashSet<String> {
     let readiness = state.readiness();
     readiness

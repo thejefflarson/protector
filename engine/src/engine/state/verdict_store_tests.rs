@@ -1,9 +1,9 @@
-//! Tests for the bounded per-entry LRU verdict cache (JEF-390) and its env knob. Extracted to a
+//! Tests for the bounded per-entry LRU verdict cache and its env knob. Extracted to a
 //! sibling file to keep `verdict_store.rs` well under the 1,000-line cap (CLAUDE.md).
 //!
 //! The LRU widens the old single verdict slot so a workload whose evidence oscillates between
 //! recently-judged states (A→B→A) HITS on the return instead of re-judging every flip, WITHOUT
-//! regressing the JEF-234 invariant that only decisive verdicts are cached and an `Uncertain`
+//! regressing the invariant that only decisive verdicts are cached and an `Uncertain`
 //! still arms exponential backoff.
 
 use std::time::Instant;
@@ -20,10 +20,10 @@ fn uncertain(tag: &str) -> Verdict {
     Verdict::Uncertain(tag.to_string())
 }
 
-/// JEF-371: the display carry-forward now lives entirely in `VerdictStore::resolve_display`.
+/// the display carry-forward now lives entirely in `VerdictStore::resolve_display`.
 /// This exercises the four cases the old split logic (engine publish phase + `set_display`)
 /// produced, asserting each yields the EXACT same displayed verdict — behaviour-neutrality is
-/// the hard requirement for this most-debugged, blank-dashboard-incident surface (JEF-157).
+/// the hard requirement for this most-debugged, blank-dashboard-incident surface.
 #[test]
 fn resolve_display_owns_the_full_carry_forward_precedence() {
     let store = VerdictStore::with_cache_slots(32);
@@ -68,7 +68,7 @@ fn resolve_display_owns_the_full_carry_forward_precedence() {
     );
     // An Uncertain first pass on a RESTORED entry does NOT carry the restored summary — there is
     // no prior *live decisive* display, so the Uncertain lands and supersedes the restored summary
-    // (identical to the pre-JEF-371 `set_display` clearing `restored` on any live write).
+    // (identical to `set_display`'s existing behavior of clearing `restored` on any live write).
     let boot_unc = uncertain("first live pass timed out");
     assert_eq!(store.resolve_display("boot", &boot_unc), boot_unc);
     assert_eq!(store.display_verdict("boot"), Some(boot_unc.clone()));
@@ -88,7 +88,7 @@ fn resolve_display_owns_the_full_carry_forward_precedence() {
         "the live decisive verdict supersedes the restored summary"
     );
 
-    // (d) JEF-234 backoff / Uncertain-never-cached is unchanged: resolving an Uncertain for
+    // (d) backoff / Uncertain-never-cached is unchanged: resolving an Uncertain for
     // display neither caches it nor establishes a baseline (the cache path is orthogonal).
     assert!(
         store.cached_for("fresh", "any-fp").is_none(),
@@ -101,7 +101,7 @@ fn resolve_display_owns_the_full_carry_forward_precedence() {
 }
 
 /// Model ONE judging pass for `entry` at fingerprint `fp`, mirroring the engine loop
-/// (`engine/src/engine/mod.rs`): serve the cache on a hit; on a miss, honour JEF-234 backoff,
+/// (`engine/src/engine/mod.rs`): serve the cache on a hit; on a miss, honour backoff,
 /// then "judge" — caching only a DECISIVE verdict and arming backoff on an `Uncertain`. Returns
 /// `true` iff a fresh (would-be model) call actually happened, so tests can count re-judges.
 fn judge_pass(
@@ -115,7 +115,7 @@ fn judge_pass(
         return false; // cache hit — no model call
     }
     if store.entry_backing_off(entry, now) {
-        return false; // JEF-234: in backoff after a recent inconclusive — skip the model
+        return false; // in backoff after a recent inconclusive — skip the model
     }
     match would_return {
         Verdict::Uncertain(_) => store.record_inconclusive(entry, now),
@@ -190,7 +190,7 @@ fn beyond_the_cap_lru_evicts_least_recently_used_and_re_judges_it() {
     );
 }
 
-/// ADR-0023 (JEF-391): the delta-aware baseline round-trips — absent until set, then stored and
+/// ADR-0023: the delta-aware baseline round-trips — absent until set, then stored and
 /// replaced by the most recent decisive verdict's surface.
 #[test]
 fn baseline_is_absent_then_set_and_replaced() {
@@ -227,7 +227,7 @@ fn uncertain_is_never_cached_and_the_entry_backs_off() {
     // A first pass makes a fresh call that comes back inconclusive.
     assert!(judge_pass(&store, "entry", "fpU", &unc, now));
 
-    // JEF-234: the Uncertain is NOT added to the LRU...
+    // the Uncertain is NOT added to the LRU...
     assert!(
         store.cached_for("entry", "fpU").is_none(),
         "an Uncertain verdict is never cached"
@@ -312,7 +312,7 @@ fn verdict_fresh_requires_a_recent_decisive_answer_and_a_closed_breaker() {
 
     // A fresh decisive answer that trips the GLOBAL breaker for an UNRELATED entry still
     // makes THIS entry's answer untrustworthy for actuation — the breaker is fleet-wide, by
-    // design mirroring the JEF-234 pass-wide skip (a fully-down model is untrustworthy for
+    // design mirroring the pass-wide skip (a fully-down model is untrustworthy for
     // every entry, not just the ones currently failing).
     store.record_decisive("entry", now);
     assert!(store.verdict_fresh("entry", now, bound));
@@ -328,7 +328,7 @@ fn verdict_fresh_requires_a_recent_decisive_answer_and_a_closed_breaker() {
         "an open breaker overrides even a just-landed decisive answer"
     );
 
-    // The first decisive success anywhere closes the breaker again (JEF-234) — freshness
+    // The first decisive success anywhere closes the breaker again — freshness
     // is restored for an entry whose OWN answer is still within the bound.
     store.record_decisive("entry", now);
     assert!(store.verdict_fresh("entry", now, bound));

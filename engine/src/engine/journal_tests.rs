@@ -1,7 +1,7 @@
 //! Journal / notifier / persistence tests for the engine orchestration core, split out of
 //! `tests.rs` purely to keep every file under the 1,000-line cap (repo CLAUDE.md). These cover
-//! JEF-141 (journal restore of findings + freshness), JEF-144 (breach notifier fires once per
-//! decision, redacts, zero-egress when unset), JEF-234 (backoff / global breaker), and JEF-301
+//! (journal restore of findings + freshness) (breach notifier fires once per
+//! decision, redacts, zero-egress when unset) (backoff / global breaker), and
 //! (decisive verdicts persist across a restart). `use super::*` resolves to the engine module,
 //! and the shared fixtures (`exposed_snapshot`, `engine_with*`, the counting/fixed adjudicators)
 //! come from `super::tests`, matching the sibling `*_tests.rs` pattern.
@@ -31,7 +31,7 @@ fn temp_journal_path(tag: &str) -> std::path::PathBuf {
     ))
 }
 
-/// JEF-141 acceptance: after a "restart", the findings snapshot shows the pre-restart breach
+/// acceptance: after a "restart", the findings snapshot shows the pre-restart breach
 /// verdict WITHOUT a fresh model pass, and the reversion log + last-pass freshness
 /// are seeded from the durable journal. We process once with a journal enabled (which
 /// appends the breach decision), then build a SECOND engine on the SAME journal path
@@ -103,7 +103,7 @@ async fn journal_restores_findings_and_freshness_without_a_fresh_pass() {
 
 /// A tiny local HTTP sink that counts the breach notifications POSTed to it and
 /// captures the bodies — the operator-configured target stand-in for the notifier
-/// integration tests (JEF-144). Returns the bound URL and the shared counters.
+/// integration tests. Returns the bound URL and the shared counters.
 async fn spawn_notify_sink() -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
     use axum::Router;
     use axum::routing::post;
@@ -132,7 +132,7 @@ async fn spawn_notify_sink() -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<
     (format!("http://{addr}/notify"), count, bodies)
 }
 
-/// JEF-144 acceptance: a URL set ⇒ a NEW breach decision produces EXACTLY ONE
+/// acceptance: a URL set ⇒ a NEW breach decision produces EXACTLY ONE
 /// notification, deduped on the decision identity (the journal's). Processing the same
 /// breach facts twice must POST once, not per pass. The payload is redacted (no secret
 /// name leaks).
@@ -174,7 +174,7 @@ async fn notifier_fires_once_per_decision_and_redacts() {
     );
 }
 
-/// JEF-144 acceptance: NO URL ⇒ zero outbound calls — byte-identical to today. We
+/// acceptance: NO URL ⇒ zero outbound calls — byte-identical to today. We
 /// run a sink to PROVE nothing is sent: a disabled notifier must not POST to it.
 #[tokio::test]
 async fn no_notify_url_makes_zero_outbound_calls() {
@@ -204,7 +204,7 @@ async fn no_notify_url_makes_zero_outbound_calls() {
     );
 }
 
-/// JEF-141 graceful degradation at the engine level: with no journal configured the
+/// graceful degradation at the engine level: with no journal configured the
 /// engine runs exactly as before (in-memory only) and never touches disk — the
 /// disabled-journal path is a no-op, not a crash.
 #[tokio::test]
@@ -248,7 +248,7 @@ impl reason::adjudicate::Adjudicator for AlwaysUncertain {
     }
 }
 
-/// JEF-234 — the core bug: an Uncertain (model-down) verdict is never cached, so without
+/// — the core bug: an Uncertain (model-down) verdict is never cached, so without
 /// backoff the entry is re-judged on EVERY pass, hammering the struggling model. With
 /// backoff, after the first Uncertain the entry is NOT re-judged on immediately-following
 /// passes (all within the BASE=30s window), so the model-call count is bounded by the
@@ -260,7 +260,8 @@ async fn an_uncertain_entry_is_not_re_judged_every_pass() {
     let mut engine = engine_with_adjudicator(Box::new(AlwaysUncertain(calls.clone())));
 
     // Drive many passes over IDENTICAL evidence (same fingerprint). Uncertain is never
-    // cached, so pre-JEF-234 every pass was a fresh model call. With backoff, only the
+    // cached, so before the breaker/backoff gate existed, every pass was a fresh model call.
+    // With backoff, only the
     // first pass calls the model; the rest fall inside the entry's backoff and are skipped.
     for _ in 0..10 {
         engine.process(&exposed_snapshot(true)).await;
@@ -299,11 +300,11 @@ impl reason::adjudicate::Adjudicator for RecoversAfter {
     }
 }
 
-/// JEF-445 — the model's own positive (`Exploitable`) is RE-VERIFIED every pass; it is never
+/// — the model's own positive (`Exploitable`) is RE-VERIFIED every pass; it is never
 /// served from the verdict cache, so a one-time temp-0 tail-flip can't freeze into a permanent
 /// false breach. With a model that keeps affirming the breach, every pass re-judges (one model
 /// call per pass, NOT one total) and the exploitable verdict stays shown — proving the re-verify
-/// is continuous, not a cache hit. (A NEGATIVE decisive verdict still caches — see the JEF-301
+/// is continuous, not a cache hit. (A NEGATIVE decisive verdict still caches — see the
 /// replay tests — this re-verify is scoped to the fabricable positive.)
 #[tokio::test]
 async fn exploitable_is_reverified_every_pass_not_cached() {
@@ -318,7 +319,7 @@ async fn exploitable_is_reverified_every_pass_not_cached() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         6,
-        "an Exploitable is re-verified every pass (JEF-445), never served from the cache"
+        "an Exploitable is re-verified every pass, never served from the cache"
     );
     assert!(
         engine
@@ -332,7 +333,7 @@ async fn exploitable_is_reverified_every_pass_not_cached() {
     );
 }
 
-/// JEF-234 global breaker — when the model is fully down, total model calls across the
+/// global breaker — when the model is fully down, total model calls across the
 /// whole fleet per cooldown are bounded regardless of entry count. We exercise the
 /// breaker's invariant directly on the store (the same handle `process()` drives), with an
 /// injected clock so it's deterministic and fast: BREAKER_TRIP consecutive failures open
@@ -382,9 +383,9 @@ fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
     );
 }
 
-/// JEF-301 + JEF-445: decisive verdicts persist across a restart and re-seed the verdict cache on
-/// boot with NO fresh model call (JEF-141) — the request-volume cut. BUT a persisted POSITIVE
-/// (`Exploitable`) is RE-VERIFIED on the first pass rather than replayed blind (JEF-445): if the
+/// Decisive verdicts persist across a restart and re-seed the verdict cache on
+/// boot with NO fresh model call — the request-volume cut. BUT a persisted POSITIVE
+/// (`Exploitable`) is RE-VERIFIED on the first pass rather than replayed blind: if the
 /// model now REFUTES it (the temp-0 tail-flip is gone), the display SELF-HEALS to refuted instead
 /// of freezing the stale breach. This is the fix for the frozen-false-exploitable — a persisted
 /// NEGATIVE would still serve from the cache (see `journal_restores_findings_and_freshness…`).
@@ -407,7 +408,7 @@ async fn a_persisted_exploitable_is_reverified_on_restart_and_self_heals() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut engine = engine_with(calls.clone()).with_journal(journal::DecisionJournal::open(&path));
 
-    // First pass over the SAME evidence: the replayed POSITIVE is RE-VERIFIED (JEF-445), so the
+    // First pass over the SAME evidence: the replayed POSITIVE is RE-VERIFIED, so the
     // model IS consulted (one fresh call — unlike a cached negative), and its fresh Refuted
     // supersedes the stale breach on the display. The frozen false-exploitable self-heals.
     engine.process(&exposed_snapshot(true)).await;
@@ -434,9 +435,9 @@ async fn a_persisted_exploitable_is_reverified_on_restart_and_self_heals() {
     let _ = std::fs::remove_file(&path);
 }
 
-// --- ADR-0034 D8 (JEF-639): the journal schema v2 cut-choice replay-lock ---
+// --- ADR-0034 D8: the journal schema v2 cut-choice replay-lock ---
 
-/// Back-compat: a journal holding only pre-JEF-639 `Breach` lines (no `Incident` line ever
+/// Back-compat: a journal holding only pre-schema-v2 `Breach` lines (no `Incident` line ever
 /// existed for the entry) restores NOTHING into the decision-restore state on boot — there is
 /// nothing to double-lock-verify, so the entry simply cold-re-judges for cuts on its first live
 /// pass (the documented ~20-min startup cost). The verdict TEXT still restores display-only,
@@ -459,7 +460,7 @@ fn a_pre_jef639_journal_restores_no_decision_state() {
     let engine = engine_with(calls).with_journal(journal::DecisionJournal::open(&path));
     assert!(
         engine.decisions.is_empty(),
-        "a pre-JEF-639 journal has no cut-choice decision to restore"
+        "a pre-schema-v2 journal has no cut-choice decision to restore"
     );
     assert!(
         engine.restored_decisions.is_empty(),
@@ -470,12 +471,12 @@ fn a_pre_jef639_journal_restores_no_decision_state() {
 }
 
 /// ADR-0034 D8 acceptance: a restart under ENFORCE mode preserves a STANDING model-chosen cut
-/// across the model's cold-start window — closing the gap JEF-570 left open (its Engine-local
+/// across the model's cold-start window — closing the gap left open (its Engine-local
 /// `decisions` map was in-memory only, so a restart dropped every standing cut to the
 /// `containment_for` human-proposal fallback until re-judged).
 ///
 /// Pre-restart: the model names the entry itself, `network`+`judgement` armed, so the cut
-/// auto-applies and is durably journaled (both the `Breach` line and, per JEF-639, the new
+/// auto-applies and is durably journaled (both the `Breach` line and, per the new
 /// `Incident` line carrying the resolved cut signature + fingerprint). Post-"restart": a FRESH
 /// engine (journal replayed) whose adjudicator is UNCERTAIN — standing in for the model's
 /// cold-start window, where it hasn't answered yet. The double replay-lock (fingerprint +
@@ -483,7 +484,7 @@ fn a_pre_jef639_journal_restores_no_decision_state() {
 /// decision on this first post-restart pass, so the ledger's active/desired set shows the
 /// model's OWN cut (`adjudicated: true`), not the weaker `containment_for` fallback
 /// (`adjudicated: false` by construction). Actual re-APPLICATION stays correctly gated by the
-/// existing, unrelated JEF-566 rails (`is_live_corroborated` requires THIS PASS's own
+/// existing, unrelated rails (`is_live_corroborated` requires THIS PASS's own
 /// corroboration/promotion, a deliberate Uncertain-vetoes-auto-action safety property this
 /// ticket does not change) — see the acceptance criteria's own "still gated by the existing
 /// arm/shadow rails".

@@ -22,9 +22,9 @@ use super::surface::{ChangesSince, JudgedSurface};
 use crate::engine::observe::asn::AsnDb;
 
 /// The empty containment-options section ("(none)") that every non-live-path prompt builder
-/// below renders (JEF-570): [`build_judgment_prompt`] and its siblings are kept for tests and
+/// below renders: [`build_judgment_prompt`] and its siblings are kept for tests and
 /// callers that only want the entry-scoped evidence prompt (mirrors the existing "no
-/// downstream nodes" precedent those same builders already document for JEF-565) — only the
+/// downstream nodes" precedent those same builders already document) — only the
 /// live engine's [`build_delta_prompt_with_menu_asn`] renders a REAL menu, built from the
 /// entry's actual proven chains.
 fn no_menu() -> String {
@@ -54,7 +54,7 @@ pub fn build_judgment_prompt(
     build_judgment_prompt_with_asn(entry, objectives, graph, &AsnDb::empty())
 }
 
-/// The per-section fingerprints of a built adjudication prompt (JEF-387). Each field is a
+/// The per-section fingerprints of a built adjudication prompt. Each field is a
 /// short, stable hash of ONE labeled section's rendered lines, computed HERE — where the
 /// sections are assembled — so the churn harness never re-parses or text-diffs the rendered
 /// prompt. Two passes whose section hashes match in every field but one changed in exactly
@@ -80,7 +80,7 @@ pub struct PromptSections {
     pub entry: String,
 }
 
-/// As [`build_judgment_prompt`], but with the offline ASN dataset (JEF-380) so INTERNET
+/// As [`build_judgment_prompt`], but with the offline ASN dataset so INTERNET
 /// egress peers render grouped by provider. The engine calls this with the live, hot-reloaded
 /// dataset; an EMPTY dataset degrades to `build_judgment_prompt`'s raw-IP rendering exactly.
 pub fn build_judgment_prompt_with_asn(
@@ -93,7 +93,7 @@ pub fn build_judgment_prompt_with_asn(
 }
 
 /// As [`build_judgment_prompt_with_asn`], but ALSO returns the per-section fingerprints of
-/// the rendered prompt ([`PromptSections`]) — the churn-attribution harness (JEF-387) logs
+/// the rendered prompt ([`PromptSections`]) — the churn-attribution harness logs
 /// them in the compact `ADJ-MISS-DIAG` line so every re-judge can be attributed to the EXACT
 /// prompt section that changed, with no rendered-string re-parsing / text-diffing. The
 /// prompt bytes returned are byte-identical to [`build_judgment_prompt_with_asn`]'s; the
@@ -130,12 +130,12 @@ pub(super) fn build_judgment_prompt_with(
     let ev = render_evidence(entry, objectives, graph, cves, behaviors, asn, &[]);
     // Empty `changes_block` ⇒ byte-identical to the pre-ADR-0023 full-state prompt (the
     // non-delta callers/tests). The delta path passes the rendered "Changes since…" section.
-    // No real menu (JEF-570, see `no_menu`): these callers don't have a proven chain to build
+    // No real menu (see `no_menu`): these callers don't have a proven chain to build
     // one from.
     assemble(entry, &ev, "", &no_menu())
 }
 
-/// The delta-aware prompt build (ADR-0023, JEF-391): the FULL-state prompt PLUS the "Changes
+/// The delta-aware prompt build (ADR-0023): the FULL-state prompt PLUS the "Changes
 /// since the last decisive verdict" section that names the ADDITIONS since `baseline` — the
 /// surface captured at this entry's last decisive verdict. The full state is ALWAYS present (the
 /// delta only directs attention, it never replaces the state); an empty/absent delta renders the
@@ -145,7 +145,7 @@ pub(super) fn build_judgment_prompt_with(
 /// subtractive / unchanged) delta means the prior decisive verdict still holds, no fresh call.
 ///
 /// `downstream` is the deduped, sorted set of workload [`NodeKey`]s on this entry's PROVEN
-/// paths (`ProvenChain::paths`), EXCLUDING the entry itself (JEF-565): the model finally sees
+/// paths (`ProvenChain::paths`), EXCLUDING the entry itself: the model finally sees
 /// the whole internet-facing path, not just the entry's own evidence — a popped pod two hops in
 /// is no longer invisible. Each gets its own fenced CVE/secret/behavior block (a clean node
 /// renders a one-line "no evidence observed" marker), under a per-incident aggregate free-text
@@ -158,7 +158,7 @@ pub fn build_delta_prompt_asn(
     baseline: Option<&JudgedSurface>,
     downstream: &[NodeKey],
 ) -> DeltaBuild {
-    // No real menu (JEF-570, see `no_menu`): kept for tests/callers that don't have a proven
+    // No real menu (see `no_menu`): kept for tests/callers that don't have a proven
     // chain (and so no containment options) to build one from. The live engine calls
     // [`build_delta_prompt_with_menu_asn`] instead.
     build_delta_prompt_inner(
@@ -173,7 +173,7 @@ pub fn build_delta_prompt_asn(
 }
 
 /// As [`build_delta_prompt_asn`], but with the deterministic cut-choice menu (ADR-0034 D4)
-/// spliced into the prompt (JEF-570) — the live engine's ONLY delta-prompt entry point.
+/// spliced into the prompt — the live engine's ONLY delta-prompt entry point.
 /// `menu` is built ONCE by the caller (from this entry's proven chains) and rendered via
 /// [`Menu::render`] into the SAME containment-options section [`incident::parse_incident_decision`]
 /// resolves `contain` against — the render is deterministic (sorted, deduped, same snapshot),
@@ -214,7 +214,7 @@ fn build_delta_prompt_inner(
     let ev = render_evidence(entry, objectives, graph, &cves, &behaviors, asn, downstream);
     // Project the surface from the SAME rendered lines the prompt carries — no second source of
     // truth (ADR-0023): a change the model would see is exactly a change the surface records.
-    // The downstream category (JEF-565) is projected from the SAME per-node lines the downstream
+    // The downstream category is projected from the SAME per-node lines the downstream
     // blocks render, so a downstream-only change (a new CVE two hops in) is a surface addition,
     // not just a prompt addition — closing the trap where the model sees new evidence but the
     // re-judge gate never fires on it.
@@ -235,9 +235,9 @@ fn build_delta_prompt_inner(
     // key is the hash of the FULL-STATE prompt ONLY — it EXCLUDES the "Changes since…" section.
     // The delta is delta-derived attention, not state; keying on it would make the SAME full state
     // hash differently as its baseline shifts (extra churn, and a needless re-judge per entry
-    // across a restart since the re-seeded baseline is empty). Excluding it keeps the JEF-390 LRU a
-    // true EXACT-STATE guard (an identical full state always HITS, restart-safe with JEF-301) and
-    // leaves the surface-delta gate as the sole ADDITIVE re-judge driver. `sections` (JEF-387) are
+    // across a restart since the re-seeded baseline is empty). Excluding it keeps the LRU a
+    // true EXACT-STATE guard (an identical full state always HITS, restart-safe) and
+    // leaves the surface-delta gate as the sole ADDITIVE re-judge driver. `sections` are
     // likewise full-state only, so they never depend on `changes`.
     let (state_prompt, sections) = assemble(entry, &ev, "", menu);
     let cache_key = prompt_cache_key(&state_prompt);
@@ -259,7 +259,7 @@ pub struct DeltaBuild {
     /// The verdict-cache key: the hash of the FULL-STATE prompt (WITHOUT the "Changes since…"
     /// section), so an identical full state always keys identically regardless of the delta.
     pub cache_key: String,
-    /// Per-section fingerprints of the full-state prompt (JEF-387) for the churn diagnostic.
+    /// Per-section fingerprints of the full-state prompt for the churn diagnostic.
     pub sections: PromptSections,
     /// This pass's projected surface — snapshotted as the entry's next baseline on a decisive
     /// verdict.
@@ -284,7 +284,7 @@ struct RenderedEvidence {
     secret_lines: Vec<String>,
     /// Static-posture (misconfig + RBAC) lines.
     posture_lines: Vec<String>,
-    /// The downstream-workload evidence (JEF-565) — per-node blocks + the flat surface lines
+    /// The downstream-workload evidence — per-node blocks + the flat surface lines
     /// behind them. See [`super::downstream::render_downstream`].
     downstream: DownstreamRendered,
 }
@@ -292,7 +292,7 @@ struct RenderedEvidence {
 /// Render an entry's evidence into the deterministic prompt lines ([`RenderedEvidence`]). Split
 /// out of [`build_judgment_prompt_with`] so the delta build reuses the exact same rendering (and
 /// projects the surface from it) without duplicating any logic. The whole rendered prompt is the
-/// verdict-cache key (JEF-350), so every list here is rendered deterministically — sorted +
+/// verdict-cache key, so every list here is rendered deterministically — sorted +
 /// deduped, no timestamps / pod-UIDs / HashMap iteration order — for a byte-identical cache key.
 fn render_evidence(
     entry: &NodeKey,
@@ -305,13 +305,13 @@ fn render_evidence(
 ) -> RenderedEvidence {
     let mut cves = cves.to_vec();
     // Render the observed behaviors into sorted, deduped prompt lines. Notable execs (shell /
-    // package-manager in container, JEF-55) are annotated via engine policy; INTERNET egress
-    // is collapsed to a deduped provider set via the offline ASN dataset (JEF-380). See
+    // package-manager in container) are annotated via engine policy; INTERNET egress
+    // is collapsed to a deduped provider set via the offline ASN dataset. See
     // [`render_behavior_lines`].
     let behavior_lines = render_behavior_lines(behaviors, asn);
     // No LINE cap: the model sees every observed behavior and every reachable CVE on the entry.
     // The untrusted third-party text WITHIN each line is fenced + sanitized AND hard
-    // length-capped — both per-field and against a per-entry aggregate budget (JEF-106, in
+    // length-capped — both per-field and against a per-entry aggregate budget (in
     // [`super::evidence::reachable_cve_lines`]) — so the prompt is bounded without hiding a
     // whole CVE from the judge. The `cves` passed in are already the loaded-at-runtime subset,
     // decided from the TYPED `Vulnerability::reachability` field — never a substring match over
@@ -322,7 +322,7 @@ fn render_evidence(
     // id; sort+dedup here is just for stable ordering.
     cves.sort();
     cves.dedup();
-    // Each objective line carries the JEF-79 reach tag and the ATT&CK outcome
+    // Each objective line carries the reach tag and the ATT&CK outcome
     // (tactic: technique) so the model can apply the procedure's authorization and
     // high-severity-outcome branches.
     let objective_lines: Vec<String> = objectives
@@ -339,7 +339,7 @@ fn render_evidence(
             } else {
                 String::new()
             };
-            // JEF-402: the ATT&CK outcome is rendered as what an attacker OBTAINS if this
+            // the ATT&CK outcome is rendered as what an attacker OBTAINS if this
             // workload were exploited — never a phrase (e.g. "Unsecured Credentials") that
             // reads as the target already being an exposed/baked-in credential. The reach
             // tag decides the CredentialAccess wording (authorized ⇒ outcome phrasing).
@@ -352,14 +352,14 @@ fn render_evidence(
             )
         })
         .collect();
-    // The other trivy-operator report kinds (JEF-244). Exposed secrets are EXPLOITATION
+    // The other trivy-operator report kinds. Exposed secrets are EXPLOITATION
     // evidence — a usable credential baked into the image is a real breach primitive — so they
     // join the CVE/runtime case in the breach definition. Misconfigs + RBAC findings are STATIC
     // POSTURE: severity/context on the same calibrated footing as reachability breadth, NEVER a
-    // breach on their own (the JEF-134 over-promotion guardrail). Both lists are already
+    // breach on their own (the over-promotion guardrail). Both lists are already
     // fenced/capped/budgeted lines from `entry_findings`.
     let (secret_lines, posture_lines) = entry_findings(graph, entry);
-    // JEF-565: every workload on this entry's PROVEN paths, not just the entry itself — the
+    // every workload on this entry's PROVEN paths, not just the entry itself — the
     // model finally sees the whole internet-facing path. See [`downstream::render_downstream`].
     let downstream = downstream::render_downstream(graph, downstream, asn);
     RenderedEvidence {
@@ -376,7 +376,7 @@ fn render_evidence(
 /// spliced in after the reachable-objectives list: empty (`""`) for the full-state prompt (the
 /// non-delta callers — byte-identical to the pre-ADR-0023 prompt), or the rendered "Changes
 /// since…" section for the delta build. `menu` is the deterministic cut-choice containment-
-/// options section (ADR-0034 D4/D9, JEF-570) — ALWAYS rendered, immediately before the output
+/// options section (ADR-0034 D4/D9) — ALWAYS rendered, immediately before the output
 /// instruction (recency maximizes copy fidelity); `"  (none)"` (see `no_menu`) for a caller with
 /// no proven chain to build one from.
 fn assemble(
@@ -391,7 +391,7 @@ fn assemble(
     // CPU Pi (~2 min for a ~110-objective entry) but that latency is amortized by the verdict
     // cache, and accuracy beats speed for the judgement.
     let objectives = ev.objective_lines.join("\n");
-    // JEF-387: fingerprint each section from the SAME rendered lines the prompt below
+    // fingerprint each section from the SAME rendered lines the prompt below
     // interpolates — no re-parsing the rendered string. `objectives` is already the joined
     // objective lines; every other field is hashed from its sorted+deduped line vec, so a
     // section hash changes iff that section's rendered content changes. The "Changes since…"
@@ -405,7 +405,7 @@ fn assemble(
         objectives: section_hash_str(&objectives),
         entry: section_hash_str(&entry.0),
     };
-    // JEF-134: the deterministic layer PROVES + ENRICHES; the model DECIDES breach. The prior
+    // the deterministic layer PROVES + ENRICHES; the model DECIDES breach. The prior
     // prompt encoded a rigid numbered procedure (step 4 → exploitable) plus six worked
     // examples; a small CPU model copied an example reason (Ex4's "another tenant's database
     // via [NETWORK][cross-ns]") onto a workload that had no such objective — pure confabulation
@@ -419,7 +419,7 @@ fn assemble(
     // can't inject. The anti-fabrication backstop (guard_fabricated_cve) still catches a cited
     // CVE absent from the evidence.
     //
-    // JEF-588: a DOWNSTREAM node's loaded-at-runtime CVE was previously framed as promoting
+    // a DOWNSTREAM node's loaded-at-runtime CVE was previously framed as promoting
     // "exactly as if it were on the entry" — that over-promotes. Network/RBAC/mount reachability
     // proves a PATH to a downstream node exists; it says nothing about whether attacker input
     // actually flows through that path to TRIGGER that node's vulnerable code (an application-
@@ -466,7 +466,7 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
-Downstream evidence on this entry's proven paths (JEF-565) — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
+Downstream evidence on this entry's proven paths — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
 {downstream}
 
 You are ALSO the incident responder (ADR-0032/0034): if this is a breach, decide which workloads on this proven path must be CONTAINED, at minimum scope. A workload is compromised only with EXPLOITATION EVIDENCE ON THAT WORKLOAD (the same three-anchor bar above, entry or downstream) — reaching it, however broadly, is never by itself a reason to contain it. A downstream workload's OWN loaded-at-runtime CVE is NEVER, by itself, exploitation evidence — it is that node's severity/context only, never a reason to contain it alone.
@@ -499,7 +499,7 @@ If "assessment" is "attack", "contain" MUST name at least the workload that carr
     (prompt, sections)
 }
 
-/// Render the "Changes since the last decisive verdict" prompt section (ADR-0023, JEF-391): the
+/// Render the "Changes since the last decisive verdict" prompt section (ADR-0023): the
 /// ADDITIONS since the entry's baseline, fenced like all other untrusted evidence (`fence_list`
 /// → `(none)` when nothing was added). The full current state above remains the CONTEXT — this
 /// section only DIRECTS attention to what is NEW; it never replaces the state. Always rendered on
@@ -519,7 +519,7 @@ fn render_changes_block(changes: &ChangesSince) -> String {
     )
 }
 
-/// The verdict-cache key for a built prompt (JEF-350): the SHA-256 of the prompt string,
+/// The verdict-cache key for a built prompt: the SHA-256 of the prompt string,
 /// hex-encoded. The prompt is the model's COMPLETE, deterministic input (built by
 /// [`build_judgment_prompt`]), so hashing it makes the cache invalidate exactly when — and
 /// only when — what the model sees changes. This replaces the old `entry_fingerprint`,
@@ -530,7 +530,7 @@ pub fn prompt_cache_key(prompt: &str) -> String {
     hex_digest(prompt.as_bytes(), 32)
 }
 
-/// Hash one prompt section's rendered lines (JEF-387). Lines are joined with `\n` and hashed;
+/// Hash one prompt section's rendered lines. Lines are joined with `\n` and hashed;
 /// the caller has already sorted + deduped them, so the same evidence hashes identically every
 /// pass. Truncated to 12 hex chars — compact for a 24h log stream, collision-resistant enough
 /// to attribute a change to a section.
@@ -544,7 +544,7 @@ fn section_hash_str(rendered: &str) -> String {
     hex_digest(rendered.as_bytes(), 6)
 }
 
-/// A stable hash of the entry's objective/technique SET — the "chain shape" (JEF-387). Hashed
+/// A stable hash of the entry's objective/technique SET — the "chain shape". Hashed
 /// over the SORTED, DEDUPED set of ATT&CK technique ids alone (not the entry-specific objective
 /// node keys), so entries whose reachable chains have the SAME shape share a `chain` value and
 /// group together in the churn harness ("these N entries all churn on `runtime`"). Order- and

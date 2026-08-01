@@ -1,4 +1,4 @@
-// The Action view (ADR-0025 / JEF-400) — a 1:1 Preact port of maud `action_view.rs`: the engine's
+// The Action view (ADR-0025) — a 1:1 Preact port of maud `action_view.rs`: the engine's
 // whole action story in LIFECYCLE order — the headline summary, then three stacked sections:
 // (1) PROPOSED CUTS (still-standing would-act proposals + the cuts that self-reverted), (2) LEFT
 // ALONE (proven paths the model cleared), (3) JUDGEMENT AUDIT (the verbatim prompt/reply behind
@@ -7,7 +7,7 @@
 // Reconcile keying (the only per-view variation): each row keys on its stable anchor — a would-act
 // / left-alone entry on its `entry` key, a reversion on `(cut, age)`, a judgement on its `entry`
 // (paired with index for stability). Preact patches each row in place across a poll, and the
-// judgement `<details>` is a NATIVE, UNCONTROLLED disclosure (JEF-411) so an operator reading a
+// judgement `<details>` is a NATIVE, UNCONTROLLED disclosure so an operator reading a
 // prompt keeps it open (the DOM owns the state). Every untrusted string (entry / verdict / cut /
 // reason / prompt / reply) renders via JSX text interpolation (Preact auto-escapes).
 

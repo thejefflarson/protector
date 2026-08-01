@@ -78,7 +78,7 @@ pub(crate) fn breach_finding() -> Finding {
         evidence,
         recency: None,
         node: None,
-        // A model-chosen cut-set (ADR-0034 / JEF-674): the entry front door plus the downstream
+        // A model-chosen cut-set (ADR-0034): the entry front door plus the downstream
         // workload it pivots through — demonstrates the finding detail's cut-set list.
         incident: Some(IncidentSummary {
             assessment: Assessment::Attack,
@@ -123,7 +123,7 @@ pub(crate) fn simple_finding(entry: &str, objective: &str) -> Finding {
     }
 }
 
-/// A wide, NO-CUT finding (JEF-281): an internet-facing front door reaching one secret via TWO
+/// A wide, NO-CUT finding: an internet-facing front door reaching one secret via TWO
 /// redundant backends, so no single edge severs the objective. Showcases the multi-path detail —
 /// both proven paths stacked, and the "reachable via N redundant paths" reason line.
 pub(crate) fn redundant_finding() -> Finding {

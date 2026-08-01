@@ -7,7 +7,7 @@
 //! reversible network cut.
 
 mod coalesce;
-// The linkage classifier (JEF-407) is called only from the ebpf observer's exec path (plus
+// The linkage classifier is called only from the ebpf observer's exec path (plus
 // its own unit tests), so gate it like `pod` — the default no-eBPF build doesn't carry it as
 // dead code (the repo treats warnings as errors).
 #[cfg(any(feature = "ebpf", test))]
@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use coalesce::Coalescer;
 use reporter::Reporter;
 
-/// Shared **probe-attach status** (JEF-308): the observer sets it once its eBPF probes attach, and
+/// Shared **probe-attach status**: the observer sets it once its eBPF probes attach, and
 /// the per-node liveness beacon reads it each window. The default no-eBPF build never sets it (stays
 /// `0/0`), so the agent honestly reports itself BLIND — signal-flow liveness, not pod-Ready.
 #[derive(Default)]
@@ -62,7 +62,7 @@ fn now_ms() -> Option<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
-/// Build a per-node liveness beacon (JEF-308) from the node, the probe-attach status, and the
+/// Build a per-node liveness beacon from the node, the probe-attach status, and the
 /// signals emitted this window. Pure over its inputs so it's unit-testable without the runtime.
 fn build_agent_report(node: &str, probes: (u32, u32), signals: u64) -> AgentReport {
     AgentReport {
@@ -74,17 +74,17 @@ fn build_agent_report(node: &str, probes: (u32, u32), signals: u64) -> AgentRepo
     }
 }
 
-/// Max distinct coalesced keys the debounce buffer holds before a forced flush (JEF-296).
+/// Max distinct coalesced keys the debounce buffer holds before a forced flush.
 /// Bounds memory and keeps a flushed batch well under the engine's 1024 per-batch cap, so
 /// the "behavior batch exceeds the per-batch cap" WARN stays quiet under normal load.
 const MAX_BATCH: usize = 512;
 
-/// How often the delivered/rejected heartbeat is logged (JEF-240 surfacing). Kept on its
+/// How often the delivered/rejected heartbeat is logged (surfacing). Kept on its
 /// own long cadence — decoupled from the (much shorter) debounce window so shrinking the
 /// window doesn't spam this operator line.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Default debounce/coalesce window (JEF-296). Conservative within the ticket's 2–5s band:
+/// Default debounce/coalesce window. Conservative within the ticket's 2–5s band:
 /// long enough to collapse high-frequency near-duplicate churn into one compact batch, short
 /// enough that a mundane signal's freshness lag stays trivial against the engine's 300s
 /// evidence TTL. Tunable via `PROTECTOR_AGENT_DEBOUNCE_MS`. Alerts never wait for it.
@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::var("PROTECTOR_AGENT_ENDPOINT")
         .unwrap_or_else(|_| "http://protector.protector.svc.cluster.local:9999".to_string());
     let debounce_window = parse_debounce_window(std::env::var("PROTECTOR_AGENT_DEBOUNCE_MS").ok());
-    // The node this agent runs on (JEF-308), from the downward API (`K8S_NODE = spec.nodeName`).
+    // The node this agent runs on, from the downward API (`K8S_NODE = spec.nodeName`).
     // Stamped onto every observation and onto the per-node liveness beacon. When unset (a dev run
     // outside k8s) we can't attribute per node — observations go out node-less and no beacon is
     // sent (an un-attributable beacon would be dishonest).
@@ -134,12 +134,12 @@ async fn main() -> anyhow::Result<()> {
         "protector-agent starting"
     );
     let mut reporter = Reporter::new(&endpoint)?;
-    // Probe-attach status the observer updates and the liveness beacon reads (JEF-308).
+    // Probe-attach status the observer updates and the liveness beacon reads.
     let probes = Arc::new(ProbeStatus::default());
 
     let (tx, mut rx) = mpsc::channel::<RuntimeObservation>(4096);
 
-    // Debouncing reporter task (JEF-296): coalesce mundane observations over a short window
+    // Debouncing reporter task: coalesce mundane observations over a short window
     // and flush one compact, deduped batch — collapsing the high-frequency near-duplicate
     // churn (repeated cluster egress, repeated execs) the engine would otherwise wake on and
     // dedup only after the fact. Alerts bypass the buffer and POST immediately (live
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 recv = rx.recv() => match recv {
                     Some(mut obs) => {
-                        // Stamp this agent's node (JEF-308) so the observation is node-attributed.
+                        // Stamp this agent's node so the observation is node-attributed.
                         obs.node = beacon_node.clone();
                         // `offer` returns anything to POST NOW: an alert (never debounced),
                         // or the drained buffer if this new distinct key hit the max-size cap.
@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 _ = heartbeat.tick() => {
-                    // JEF-240: surface cumulative delivered/rejected alongside the interval
+                    // surface cumulative delivered/rejected alongside the interval
                     // count so a wedged ingest (token skew → every batch 401'd) is visible
                     // here, not just in a per-batch WARN. A rising `rejected` against a flat
                     // `delivered` is the agent dropping 100% of signal.
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
                         "behavioral observations reported (last {}s)",
                         HEARTBEAT_INTERVAL.as_secs(),
                     );
-                    // Per-node liveness beacon (JEF-308): sent EVERY window even when quiet
+                    // Per-node liveness beacon: sent EVERY window even when quiet
                     // (reported_since_tick == 0) — a quiet node with probes loaded reads
                     // healthy-quiet, not blind. Skipped only when the node is unknown (an
                     // un-attributable beacon would be dishonest). probes==0/0 ⇒ blind (Ready
@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
                             beacon_probes.snapshot(),
                             reported_since_tick as u64,
                         );
-                        // Liveness rides the unified envelope (JEF-336): a quiet node still POSTs
+                        // Liveness rides the unified envelope: a quiet node still POSTs
                         // — empty observations, liveness present — so it reads HEALTHY-quiet, not
                         // blind, instead of the old single-beacon POST the engine 422-rejected.
                         reporter
@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Collection. Default build is a no-op; `--features ebpf` loads the real probes. The observer
-    // updates `probes` with how many eBPF probes attached (JEF-308) — the no-op build leaves it at
+    // updates `probes` with how many eBPF probes attached — the no-op build leaves it at
     // 0/0, honestly reporting itself blind.
     #[cfg(not(feature = "ebpf"))]
     observer::NoopObserver.run(tx, probes).await;
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn agent_report_carries_node_probes_and_window_signals() {
-        // JEF-308: a healthy window — probes loaded, some signals.
+        // a healthy window — probes loaded, some signals.
         let r = build_agent_report("node-a", (6, 6), 12);
         assert_eq!(r.node, "node-a");
         assert_eq!(r.probes_loaded, 6);

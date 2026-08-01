@@ -1,7 +1,7 @@
-// Readiness view tests (ADR-0025 / JEF-400 / JEF-411): the per-node `<details>` disclosure (NATIVE,
+// Readiness view tests (ADR-0025): the per-node `<details>` disclosure (NATIVE,
 // UNCONTROLLED) stays open across a poll, rows key on `id` (patched in place), a blind node is
 // surfaced loudly (server-derived state token), and an XSS node name renders inert. The view is
-// `view`-only now (no store — JEF-411); a poll is modelled by re-rendering with a new `view` prop.
+// `view`-only now (no store —); a poll is modelled by re-rendering with a new `view` prop.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/preact";
@@ -80,7 +80,7 @@ describe("Readiness honesty (blind nodes)", () => {
   });
 });
 
-describe("Readiness coverage-stall register (JEF-421)", () => {
+describe("Readiness coverage-stall register", () => {
   it("renders a STALLED runtime row loud + non-green: breach keyline, ⚠ glyph, stalled word", () => {
     const row = readinessRow("runtime-corroboration", {
       state: "stalled",

@@ -39,7 +39,7 @@ impl Adapter for VulnerabilityAdapter {
 ///
 /// Holds a [`PeerResolutionMemo`] so a connection peer that IS a known cluster endpoint
 /// renders the SAME token every pass even when the informer index transiently misses it
-/// (JEF-375). The adapter is long-lived (built once, reused each pass), so the memo
+/// . The adapter is long-lived (built once, reused each pass), so the memo
 /// persists across passes; it's behind a `Mutex` because [`Adapter::contribute`] takes
 /// `&self` and the engine holds the adapter set across `await` points (`Send + Sync`).
 #[derive(Default)]
@@ -72,7 +72,7 @@ impl Adapter for RuntimeAdapter {
         // do NOT do reverse DNS; cluster pod IPs aren't in external DNS and a PTR lookup
         // would leave the cluster).
         let ip_index = IpIndex::from_snapshot(snapshot);
-        // Stable peer rendering (JEF-375): resolve connection peers through the last-known
+        // Stable peer rendering: resolve connection peers through the last-known
         // resolution memo so a transient informer miss reuses the prior name instead of
         // flipping a known cluster peer back to a raw IP (which would churn the prompt hash
         // into a spurious verdict-cache re-judge). `now` is captured once for the whole pass
@@ -104,7 +104,7 @@ impl Adapter for RuntimeAdapter {
         };
 
         let (mut attached, mut unresolved, mut filtered) = (0usize, 0usize, 0usize);
-        // The static/dynamic linkage the agent reported per workload (JEF-407). Collected
+        // The static/dynamic linkage the agent reported per workload. Collected
         // here and applied to the workload's Images AFTER the event loop (a linkage signal
         // is a structural per-image fact, not runtime prompt evidence, so it does NOT land
         // on `w.runtime`). `false` overrides `true` for the same workload within a batch:
@@ -138,10 +138,10 @@ impl Adapter for RuntimeAdapter {
                     (namespace.clone(), pod.clone(), None)
                 }
             };
-            // JEF-407: a linkage report is a structural fact about the workload's image, not
+            // a linkage report is a structural fact about the workload's image, not
             // a runtime behavior for the prompt — divert it here (never push to `w.runtime`)
             // and apply it to the workload's Images after the loop. This is the byte source
-            // that populates `Image::static_binary` in prod so JEF-404's static-linkage
+            // that populates `Image::static_binary` in prod so 's static-linkage
             // reachability activates. A dynamic report wins ties (see the map's doc).
             if let Behavior::ImageLinkage { static_linkage } = &event.behavior {
                 let wl_key = NodeKey::workload(&ns, "Pod", &name).0;
@@ -153,7 +153,7 @@ impl Adapter for RuntimeAdapter {
             }
             // Refine a raw FileRead (a file open the wire-pure agent couldn't classify
             // itself) into a SecretRead — either a k8s-mounted Secret (the pod's
-            // volumeMounts) or a well-known ON-HOST credential path (JEF-320, e.g. the host
+            // volumeMounts) or a well-known ON-HOST credential path (e.g. the host
             // shadow file, an SSH private-key dir, a cloud-credential file — see
             // `host_credential_class`) — or drop it if neither classifier claims it (most
             // reads are neither). Other behaviors pass through unchanged.
@@ -192,7 +192,7 @@ impl Adapter for RuntimeAdapter {
                 },
                 // Resolve a connection peer's cluster IP to the workload/service it
                 // belongs to (JEF: resolve-connection-peers), stably across a transient
-                // informer miss (JEF-375). The memo keeps an internet/unknown/unresolvable
+                // informer miss. The memo keeps an internet/unknown/unresolvable
                 // peer exactly as the raw `IP:port`, so this only ever *enriches* a
                 // same-cluster pod/service peer — and a peer once resolved keeps the SAME
                 // name even if the index misses it this pass, so the resolved name flows
@@ -224,7 +224,7 @@ impl Adapter for RuntimeAdapter {
                 }
             });
         }
-        // Apply the reported linkage to each workload's Images (JEF-407). Walk the
+        // Apply the reported linkage to each workload's Images. Walk the
         // `RunsImage` edges of every workload that reported linkage and set
         // `Image::static_binary` — the field `CveReachabilityAdapter` (which runs after this
         // adapter) reads to tag a static image's unmatched CVEs `PresentStaticBinary`. Two
@@ -263,7 +263,7 @@ impl Adapter for RuntimeAdapter {
         // One line per pass so the behavioral pipeline is observable: signals attached,
         // UIDs that didn't resolve (a persistent nonzero means the agent's cgroup UIDs
         // aren't matching pod metadata.uid), FileReads dropped as non-secret tmpfs, and
-        // Images whose static/dynamic linkage was set from an agent ELF report (JEF-407).
+        // Images whose static/dynamic linkage was set from an agent ELF report.
         tracing::info!(
             attached,
             unresolved,
@@ -276,7 +276,7 @@ impl Adapter for RuntimeAdapter {
 }
 
 /// Correlates each Image's CVEs against the runtime libraries loaded by the workloads
-/// running it (JEF-51 v1 — *dynamic* reachability). It reads the `LibraryLoaded`
+/// running it (v1 — *dynamic* reachability). It reads the `LibraryLoaded`
 /// signals the [`RuntimeAdapter`] already attached, so it MUST run after both the
 /// [`VulnerabilityAdapter`] (which puts the CVEs on the Image) and the
 /// [`RuntimeAdapter`] (which puts the loads on the Workload).
@@ -287,7 +287,7 @@ impl Adapter for RuntimeAdapter {
 /// [`Reachability::Unknown`] — we can't correlate what the scanner didn't name. This
 /// is evidence for the model only; it never gates or suppresses anything in v1.
 ///
-/// One exception the library-load correlation structurally cannot cover (JEF-404): a
+/// One exception the library-load correlation structurally cannot cover: a
 /// **statically linked** image (`Image::static_binary == Some(true)`) has no per-`.so`
 /// loads — everything is compiled into one executable — so `LibraryLoaded` will never name
 /// the vulnerable package and `NotObserved` here would be a false "observed absent". For
@@ -352,7 +352,7 @@ impl Adapter for CveReachabilityAdapter {
             let loads = loads_by_image.get(&key.0).cloned().unwrap_or_default();
             graph.update_node(&key, |node| {
                 if let Node::Image(img) = node {
-                    // A statically linked image (JEF-404) can never emit a per-`.so` load, so
+                    // A statically linked image can never emit a per-`.so` load, so
                     // an unmatched CVE is indeterminate, not observed-absent. Captured before
                     // the borrow of `img.vulnerabilities` below.
                     let is_static = img.static_binary == Some(true);
@@ -375,7 +375,7 @@ impl Adapter for CveReachabilityAdapter {
             });
         }
 
-        // Prune library-load noise (JEF-75): a LibraryLoaded only matters if it's a
+        // Prune library-load noise: a LibraryLoaded only matters if it's a
         // *vulnerable* library — its name matches a CVE package on an image the workload
         // runs. Drop the rest (libc, libpthread, …) so they don't bloat the model prompt
         // or churn the verdict fingerprint (every process loads dozens of libraries, on a
@@ -592,7 +592,7 @@ fn under<'a>(path: &'a str, mount_path: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests;
-// JEF-320's on-host credential-path tests live in their own file rather than growing
+// 's on-host credential-path tests live in their own file rather than growing
 // `tests.rs` (already large) further, per the repo's file-size convention.
 #[cfg(test)]
 mod host_credential_tests;

@@ -55,7 +55,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
-      attestations: write # JEF-275: write the Sigstore-signed SLSA build-provenance attestation
+      attestations: write # write the Sigstore-signed SLSA build-provenance attestation
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,7 +114,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # sccache's R2 backend for the in-image cargo build (JEF-584, ADR-0020).
+          # sccache's R2 backend for the in-image cargo build (ADR-0020).
           # `secret-envs` (key=envname) reads these straight out of the RUNNER POD's env,
           # where the `sccache-r2` Secret is injected via envFrom (cluster repo:
           # charts/actions/runners/values-protector.yaml) — the repo has no Actions secret
@@ -150,7 +150,7 @@ jobs:
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "missing/invalid build digest: '$DIGEST'" >&2; exit 1; }
           echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
       # Sigstore-signed SLSA build-provenance attestation (keyless: Fulcio + Rekor) — what
-      # protector's provenance observer verifies to the "verified" posture (JEF-275). The buildx
+      # protector's provenance observer verifies to the "verified" posture. The buildx
       # `provenance: true` above is the unsigned variant the observer never reads.
       - name: Attest build provenance (Sigstore-signed SLSA)
         if: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v') }}

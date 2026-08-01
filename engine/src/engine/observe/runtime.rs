@@ -4,8 +4,8 @@
 //! behavioral port (ADR-0003), the single `/behavior` route the engine exposes; [`RuntimeEvents`]
 //! holds the recent observations.
 //!
-//! One envelope, one endpoint (JEF-336): the report carries the window's observations AND — when
-//! the sensor has one — its per-node liveness beacon (JEF-308), so liveness ALWAYS travels with the
+//! One envelope, one endpoint: the report carries the window's observations AND — when
+//! the sensor has one — its per-node liveness beacon, so liveness ALWAYS travels with the
 //! report. A quiet node still POSTs (empty observations, liveness present) and reads HEALTHY-quiet
 //! rather than blind. For backward compatibility the route also accepts a *bare* `[...]` array of
 //! observations (a legacy / third-party observations-only poster) — see [`BehaviorIngest`].
@@ -104,7 +104,7 @@ impl RuntimeEvents {
     }
 }
 
-/// The default runtime-signal observation window, in seconds (JEF-378). A runtime signal
+/// The default runtime-signal observation window, in seconds. A runtime signal
 /// (`w.runtime`) survives in [`RuntimeEvents`] for this long after it was last observed;
 /// past it the signal ages out and stops corroborating. Widened from the original 300s to
 /// 30 minutes so a workload's connection/behavior set has time to *saturate into a stable
@@ -144,10 +144,10 @@ fn same_signal(a: &RuntimeObservation, b: &RuntimeObservation) -> bool {
 }
 
 /// Shared state for the ingest handler: the event store, a wake channel, and the per-node
-/// agent-liveness store (JEF-308) the report envelope's `liveness` feeds.
+/// agent-liveness store the report envelope's `liveness` feeds.
 type IngestState = (Arc<RuntimeEvents>, Sender<()>, Arc<AgentLivenessStore>);
 
-/// What the `/behavior` route accepts (JEF-336). The first-party agent POSTs a
+/// What the `/behavior` route accepts. The first-party agent POSTs a
 /// [`RuntimeReport`] envelope (`{observations, liveness}`); a legacy or third-party sensor may
 /// still POST a *bare* `[...]` array of observations. Untagged, envelope-first: an object matches
 /// [`Self::Envelope`], a JSON array matches [`Self::Bare`], so the two wire forms never collide.
@@ -158,7 +158,7 @@ type IngestState = (Arc<RuntimeEvents>, Sender<()>, Arc<AgentLivenessStore>);
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum BehaviorIngest {
-    /// The JEF-336 envelope: observations plus optional per-node liveness.
+    /// The envelope: observations plus optional per-node liveness.
     Envelope(RuntimeReport),
     /// The legacy / third-party bare array of observations (no liveness).
     Bare(Vec<RuntimeObservation>),
@@ -243,7 +243,7 @@ fn record_batch(events: &RuntimeEvents, observations: Vec<RuntimeObservation>) -
 /// Serve the runtime-evidence ingest. The single `/behavior` route accepts a per-window
 /// [`RuntimeReport`] envelope (observations + optional per-node liveness) on the tool-agnostic
 /// behavioral port (ADR-0003) from the first-party eBPF agent or any sensor with a translation
-/// adapter — or a bare legacy `[...]` array of observations (JEF-336). This is the cluster-facing
+/// adapter — or a bare legacy `[...]` array of observations. This is the cluster-facing
 /// glue; the store it drives is what the tests cover.
 pub async fn serve_runtime(
     addr: SocketAddr,
@@ -251,7 +251,7 @@ pub async fn serve_runtime(
     notify: Sender<()>,
     liveness: Arc<AgentLivenessStore>,
 ) -> anyhow::Result<()> {
-    // App-layer authn (Fix A, hardened JEF-576): require `Authorization: Bearer <token>`
+    // App-layer authn (Fix A, hardened): require `Authorization: Bearer <token>`
     // matching a configured shared secret, rejected 401 BEFORE deserialization. Resolved
     // once at startup (mounted file only, ADR-0021). REQUIRED, not optional: an operator
     // who points `PROTECTOR_BEHAVIOR_ADDR` at a real listener without also provisioning
@@ -267,8 +267,8 @@ pub async fn serve_runtime(
     let limiter = RateLimit::new(DEFAULT_RATE_PER_SEC, DEFAULT_BURST);
 
     let app = Router::new()
-        // One endpoint (JEF-336): the report envelope carries observations AND the per-node
-        // agent-liveness beacon (JEF-308) — signal-flow liveness, not pod-Ready.
+        // One endpoint: the report envelope carries observations AND the per-node
+        // agent-liveness beacon — signal-flow liveness, not pod-Ready.
         .route("/behavior", post(ingest_behavior))
         // A real alert/batch is small; cap the body so a client can't OOM the engine
         // with a giant POST (mirrors the webhook server). The body cap, MAX_EVENTS, and
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn runtime_window_default_is_wider_than_the_original_300s() {
-        // JEF-378: an unset window must default to a window LARGER than the historical
+        // an unset window must default to a window LARGER than the historical
         // 300s so a workload's signal set saturates into a stable set.
         const {
             assert!(
@@ -453,7 +453,7 @@ mod tests {
         }
     }
 
-    /// JEF-336: both accepted wire forms deserialize — the `{observations, liveness}` envelope and
+    /// both accepted wire forms deserialize — the `{observations, liveness}` envelope and
     /// a bare legacy `[...]` array — and normalize to the same [`RuntimeReport`] shape.
     #[test]
     fn behavior_ingest_accepts_both_the_envelope_and_a_bare_array() {
@@ -505,7 +505,7 @@ mod tests {
         assert!(liveness.snapshot().is_empty());
     }
 
-    /// The engine records liveness carried in the envelope — the JEF-336 fix for the 422 bug.
+    /// The engine records liveness carried in the envelope — the fix for the 422 bug.
     #[test]
     fn ingest_report_records_liveness_from_the_envelope() {
         let events = RuntimeEvents::new(Duration::from_secs(300));

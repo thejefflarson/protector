@@ -38,7 +38,7 @@ pub(super) fn graph_with_vuln(vuln: Vulnerability) -> (SecurityGraph, NodeKey) {
 }
 
 /// As [`graph_with_vuln`], but the entry's image carries the whole `vulns` list — used to
-/// drive the per-entry aggregate free-text budget (JEF-106), where MANY CVEs together must
+/// drive the per-entry aggregate free-text budget, where MANY CVEs together must
 /// stay bounded even when each per-field cap holds.
 pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, NodeKey) {
     let mut g = SecurityGraph::new();
@@ -77,7 +77,7 @@ pub(super) fn graph_with_vulns(vulns: Vec<Vulnerability>) -> (SecurityGraph, Nod
 
 /// A minimal internet-facing workload carrying the given runtime `behaviors` (no CVEs) —
 /// drives the behavior side of `entry_evidence`/`build_judgment_prompt`. Used to verify the
-/// prompt re-applies the engine's notable-exec annotation (JEF-113) now that
+/// prompt re-applies the engine's notable-exec annotation now that
 /// `Behavior::summary` returns the bare path.
 pub(super) fn graph_with_behaviors(behaviors: Vec<Behavior>) -> (SecurityGraph, NodeKey) {
     use crate::engine::graph::RuntimeSignal;
@@ -107,7 +107,7 @@ pub(super) fn graph_with_behaviors(behaviors: Vec<Behavior>) -> (SecurityGraph, 
 }
 
 /// A critical CVE observed LOADING AT RUNTIME. Loaded-at-runtime is the ONLY reachability the
-/// JEF-453 filter keeps in the judge prompt (it is the only CVE category that is exploitation
+/// filter keeps in the judge prompt (it is the only CVE category that is exploitation
 /// evidence), so the shared fixture is loaded-at-runtime — a prompt-content test asserting a CVE
 /// line renders needs the CVE to survive the filter. A test that specifically wants a
 /// context/omitted CVE sets `.reachability` explicitly (see the not-observed / static-binary tests).

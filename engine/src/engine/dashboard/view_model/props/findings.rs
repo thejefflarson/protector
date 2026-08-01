@@ -205,14 +205,14 @@ pub struct HopProps {
     /// Whether the proposed cut severs at this hop.
     pub is_cut: bool,
     /// Whether this edge is SHARED across every proven path to the objective — a common
-    /// bottleneck (JEF-281). When several paths share an edge it is a single-edge-cut candidate;
+    /// bottleneck. When several paths share an edge it is a single-edge-cut candidate;
     /// when they share none, no single edge severs the objective. Only meaningful in the
     /// multi-path view; `false` for a lone path. Marked visually so redundancy is legible.
     pub shared: bool,
 }
 
 /// One node the model chose to contain (ADR-0034), for the finding detail's cut-set list
-/// (JEF-674). `node` is UNTRUSTED (a workload node key — escaped at render, ADR-0019); `mechanism`
+/// . `node` is UNTRUSTED (a workload node key — escaped at render, ADR-0019); `mechanism`
 /// and `blast_note` are FIXED-shape strings computed by determinism, never model text.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -228,7 +228,7 @@ pub struct CutRowProps {
 }
 
 /// The model's cut-choice decision for a finding's entry (ADR-0034), for the detail panel's
-/// cut-set list (JEF-674) — a REPLACEMENT for the old single opaque cut-signature string,
+/// cut-set list — a REPLACEMENT for the old single opaque cut-signature string,
 /// naming every contained node with its role and mechanism. Always present (never `Option`):
 /// `assessment == "awaiting"` with empty `rows` is itself the honest "not judged yet" state,
 /// mirroring [`Posture::Awaiting`]'s convention rather than introducing a second null channel.
@@ -337,29 +337,29 @@ pub struct FindingProps {
     /// The REPRESENTATIVE (shortest) proven path — kept for the row's one-line summary.
     pub path: Vec<HopProps>,
     /// EVERY proven path to the objective (bounded, shortest-first), each a hop-list — the
-    /// complete reachability picture the finding detail renders as stacked chains (JEF-281).
+    /// complete reachability picture the finding detail renders as stacked chains.
     /// Edges shared across all paths carry [`HopProps::shared`] so redundancy is visible; when
     /// several redundant paths exist and none is a single cut, that IS the no-cut explanation.
     pub paths: Vec<Vec<HopProps>>,
     /// `true` when more proven paths exist than the bounded set in [`paths`](Self::paths) — the
-    /// detail shows a "+N more" note rather than an unbounded wall (JEF-281).
+    /// detail shows a "+N more" note rather than an unbounded wall.
     pub paths_truncated: bool,
     /// The proposed/applied cut signature, if one exists — the deterministic `containment_for`
     /// fallback the chain-diagram's cut-hop marker ([`HopProps::is_cut`]) uses. Distinct from
     /// [`cuts`](Self::cuts): the MODEL's chosen cut-set (ADR-0034), which can name several nodes.
     pub cut: Option<String>,
     /// The model's cut-choice decision for this finding's entry (ADR-0034), for the detail
-    /// panel's cut-set list (JEF-674) — see [`CutSetProps`].
+    /// panel's cut-set list — see [`CutSetProps`].
     pub cuts: CutSetProps,
     pub evidence: EvidenceProps,
     pub judgement: JudgementProps,
-    /// The blind-node caveat (JEF-308): set when this finding sits on a node with NO live runtime
+    /// The blind-node caveat: set when this finding sits on a node with NO live runtime
     /// sensor and its disposition is latent / propose-only (uncorroborated). Its calm propose-only
     /// reading would be dishonest there — absence of a corroborating signal is not evidence of
     /// safety — so the detail renders this caveat. `None` when the node has a live sensor, the
     /// finding is corroborated, or the node isn't known.
     pub blind_node_caveat: Option<String>,
-    /// The live "alarming-now" signals observed on this chain's entry THIS pass (JEF-323) — each a
+    /// The live "alarming-now" signals observed on this chain's entry THIS pass — each a
     /// `"drop-and-execute on web (2m ago)"`-style annotation the detail panel renders under
     /// "alarming activity observed". EVIDENCE, not a verdict: an alarming signal never concludes a
     /// breach (ADR-0016), and this is deliberately NOT labelled "corroborated" (the engine reserves

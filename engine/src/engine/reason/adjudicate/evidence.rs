@@ -14,12 +14,12 @@ use crate::engine::observe::asn::AsnDb;
 // The engine's single "alarming-now" definition (an alert, a notable shell/package-manager
 // exec, or an alarming sensitive-path write) — see the tag below.
 use crate::engine::observe::alarm_class::is_alarming_now;
-// JEF-113: exec *classification* (shell / package-manager in container) moved out of the
+// exec *classification* (shell / package-manager in container) moved out of the
 // shared `Behavior` wire type into engine policy; annotate here so the model still sees
 // "executed /bin/bash (interactive shell in container)" rather than the bare path
 // `Behavior::summary` now returns.
 use crate::engine::observe::exec_class::annotated_summary;
-// JEF-380: for INTERNET egress render the deduped, sorted PROVIDER set via the offline ASN
+// for INTERNET egress render the deduped, sorted PROVIDER set via the offline ASN
 // dataset — cluster peers are untouched.
 use crate::engine::observe::peer_class::internet_egress_line;
 
@@ -88,14 +88,14 @@ fn collapse_whitespace_runs(text: &str) -> String {
 }
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
-/// prompt is the verdict-cache key (hashed, JEF-350), this cap must be DETERMINISTIC —
+/// prompt is the verdict-cache key (hashed), this cap must be DETERMINISTIC —
 /// which it is: the same title always yields the same capped string, so the cache key is
 /// stable across passes. Trivy's `title` is the only untrusted free-text that still reaches
-/// the prompt (the NVD advisory feed is retired, JEF-242); this cap stays to keep it fenced.
+/// the prompt (the NVD advisory feed is retired); this cap stays to keep it fenced.
 const TITLE_CAP: usize = 120;
 
 /// Per-entry AGGREGATE budget (chars) for ALL untrusted free-text surfaced across ONE
-/// category of an entry's evidence lines (JEF-106) — CVEs, findings (secrets+posture), and
+/// category of an entry's evidence lines — CVEs, findings (secrets+posture), and
 /// observed behavior each thread their OWN fresh instance of this budget (see
 /// [`entry_evidence_budgeted`], [`entry_findings_budgeted`], [`render_behavior_lines`]). Per-field
 /// caps bound any ONE field, but a CVE-heavy image (hundreds of CVEs, each at its per-field cap)
@@ -104,13 +104,13 @@ const TITLE_CAP: usize = 120;
 /// Once the running total of untrusted free-text in a category crosses this budget, later lines
 /// in that category drop their free prose and fall back to the STRUCTURED, low-cardinality
 /// fields only (id/severity/score/reachability/fix for a CVE; the behavior KIND alone for a
-/// behavior line) — the JEF-106 structural-first stance: the model never loses a CVE or a
+/// behavior line) — the structural-first stance: the model never loses a CVE or a
 /// behavior, only its unbounded prose. Deterministic (each category is sorted before rendering),
 /// so the same evidence always renders the same budgeted prompt and the verdict fingerprint
 /// stays stable across passes.
 pub(crate) const ENTRY_FREETEXT_BUDGET: usize = 1200;
 
-/// Char-safe truncate-then-sanitize for one untrusted free-text field (JEF-106). The
+/// Char-safe truncate-then-sanitize for one untrusted free-text field. The
 /// ORDER is load-bearing: cap FIRST (bound the length), then [`sanitize`] (strip the
 /// fence-closing / prompt-structure chars). Doing it in this order means a capped value
 /// can never reconstruct a `<<<`/`>>>` fence delimiter or smuggle structure — `sanitize`
@@ -122,15 +122,15 @@ fn cap_untrusted(value: &str, cap: usize) -> String {
     sanitize(&value.chars().take(cap).collect::<String>())
 }
 
-/// Build one CVE's evidence line for the prompt and the verdict fingerprint (JEF-66):
-/// id, severity, the CVSS score when trivy reported it (JEF-242), runtime reachability,
+/// Build one CVE's evidence line for the prompt and the verdict fingerprint:
+/// id, severity, the CVSS score when trivy reported it, runtime reachability,
 /// fix-availability, and the short trivy title when present. NOTHING volatile (no
 /// timestamps) — the whole list is fenced+sanitized by `fence_list` before it reaches the
-/// model, so the title (the only untrusted free-text) is data only. JEF-106: the
+/// model, so the title (the only untrusted free-text) is data only. the
 /// structured fields (severity/score/fix) lead; the free-prose title is hard-capped here
 /// at the prompt boundary. When `v.title` and `v.score` are both absent the rendered line
 /// is BYTE-IDENTICAL to the pre-advisory baseline (the NVD advisory feed is retired,
-/// JEF-242 — confirmed: with no advisory the line shape is unchanged from before it
+/// — confirmed: with no advisory the line shape is unchanged from before it
 /// existed, and that is now the baseline).
 ///
 /// Each line is rendered through [`cve_evidence_budgeted`] with a fresh, generous budget
@@ -148,7 +148,7 @@ pub(crate) fn cve_evidence(v: &Vulnerability) -> String {
 }
 
 /// As [`cve_evidence`], but draws the untrusted free-text title from a shared per-entry
-/// `budget` (JEF-106). The STRUCTURED, low-cardinality fields — id, severity, CVSS score,
+/// `budget`. The STRUCTURED, low-cardinality fields — id, severity, CVSS score,
 /// EPSS probability, reachability, and fix-availability — are ALWAYS rendered (they are bounded by
 /// construction and are the signal the model should weigh first). The free prose (title)
 /// is rendered ONLY while `budget` remains, decrementing it by what it contributes; once
@@ -156,7 +156,7 @@ pub(crate) fn cve_evidence(v: &Vulnerability) -> String {
 /// sanitized (`cap_untrusted`) before it reaches the line, so a capped value can never
 /// reconstruct the fence.
 fn cve_evidence_budgeted(v: &Vulnerability, budget: &mut usize) -> String {
-    // Fix availability is the exploitability signal JEF-66 is after: a fix existing
+    // Fix availability is the exploitability signal is after: a fix existing
     // while the workload is still on the vulnerable version is a different posture from
     // "no fix exists at all". `installed_version`/`fixed_version` are scanner-reported
     // (untrusted) version strings, so cap+sanitize them too — they are bounded structural
@@ -183,7 +183,7 @@ fn cve_evidence_budgeted(v: &Vulnerability, budget: &mut usize) -> String {
         v.reachability.label(),
         fix,
     );
-    // CVSS score (JEF-242): a STRUCTURED numeric severity signal from trivy — never
+    // CVSS score: a STRUCTURED numeric severity signal from trivy — never
     // untrusted free-text, so it is rendered deterministically and charged to NO budget.
     // Formatted to one decimal (`9.8`) so the same score always renders the same token and
     // the verdict fingerprint stays stable across passes. Absent ⇒ omitted entirely, so a
@@ -191,18 +191,18 @@ fn cve_evidence_budgeted(v: &Vulnerability, budget: &mut usize) -> String {
     if let Some(score) = v.score {
         line.push_str(&format!(" [cvss: {score:.1}]"));
     }
-    // EPSS exploit-prediction probability (JEF-243): the PREDICTIVE exploitation axis — a
+    // EPSS exploit-prediction probability: the PREDICTIVE exploitation axis — a
     // `[0, 1]` chance the CVE is exploited in the next 30 days, from the FIRST.org feed.
     // Like the CVSS score it is a STRUCTURED numeric (never untrusted free-text), charged
     // to NO budget, and formatted to two decimals (`0.94`) so the same probability always
     // renders the same token and the verdict fingerprint stays stable across passes. Absent
     // ⇒ omitted entirely, so an unscored CVE's line is unchanged. This is the slot the
-    // prompt reserved for `epss` (JEF-66); it only renders now that the feed populates it.
+    // prompt reserved for `epss`; it only renders now that the feed populates it.
     if let Some(epss) = v.epss {
         line.push_str(&format!(" [epss: {epss:.2}]"));
     }
     // Untrusted free prose (trivy's title) — the ONLY untrusted free-text that still
-    // reaches the prompt (the NVD advisory feed is retired, JEF-242). Charged to the
+    // reaches the prompt (the NVD advisory feed is retired). Charged to the
     // per-entry budget and capped+sanitized so it stays fenced data, never instructions.
     if let Some(title) = v.title.as_deref() {
         let title = cap_untrusted(title, TITLE_CAP);
@@ -214,7 +214,7 @@ fn cve_evidence_budgeted(v: &Vulnerability, budget: &mut usize) -> String {
     line
 }
 
-/// Charge a free-text field against the shared per-entry budget (JEF-106): if the whole
+/// Charge a free-text field against the shared per-entry budget: if the whole
 /// field fits, decrement the budget and return it; otherwise spend what remains and return
 /// `None` so the caller omits the field rather than splicing in a half-string. Returning
 /// all-or-nothing keeps every rendered field a complete, sensible value (a truncated
@@ -231,7 +231,7 @@ fn take_from_budget(field: String, budget: &mut usize) -> Option<String> {
 }
 
 /// Is vulnerability `a` the WORSE instance of a shared CVE id, the one to keep when
-/// trivy reported the same CVE against several affected packages (JEF-133 dedup)?
+/// trivy reported the same CVE against several affected packages (dedup)?
 /// Worst = highest severity, tie-broken by highest CVSS score; if those are equal,
 /// prefer the instance that carries the most exploitability signal — a fix-availability
 /// indication (the workload is on a vulnerable version a fix exists for) and/or an EPSS
@@ -262,10 +262,10 @@ fn worse_vuln(a: &Vulnerability, b: &Vulnerability) -> bool {
 /// observed on it — what the model needs to judge contextual realness. The raw evidence
 /// (structured `Vulnerability` + `Behavior`) comes from [`SecurityGraph::entry_evidence`],
 /// the single source of truth shared with the findings snapshot's per-finding evidence blocks
-/// (JEF-133), so the model and the operator can never see a different set of facts. Here
+/// so the model and the operator can never see a different set of facts. Here
 /// the CVEs are rendered into the prompt-string form:
 ///
-/// each line widens the CVE's evidence (JEF-51 + JEF-66 + JEF-242 + JEF-243): id, severity, the CVSS
+/// each line widens the CVE's evidence (+ + +): id, severity, the CVSS
 /// score (when trivy reported it), the EPSS exploit-prediction probability (when the FIRST.org
 /// feed scored it), reachability, and a fix-availability indication so the
 /// model can reason about exploitability — "a fix exists but the workload is still on the
@@ -283,7 +283,7 @@ pub(crate) fn entry_evidence(
 }
 
 /// As [`entry_evidence`], but draws the CVE free-text budget from a shared external `budget`
-/// rather than a fresh [`ENTRY_FREETEXT_BUDGET`] (JEF-565): the entry's own call still passes a
+/// rather than a fresh [`ENTRY_FREETEXT_BUDGET`]: the entry's own call still passes a
 /// fresh budget (unchanged behavior), while each downstream workload on the entry's proven
 /// paths (`downstream::render_downstream`) threads ONE shared incident-wide budget across every
 /// node, so a wide entry (argo, ~110 objectives) cannot multiply the per-node budget into an
@@ -294,7 +294,7 @@ pub(crate) fn entry_evidence_budgeted(
     budget: &mut usize,
 ) -> (Vec<String>, Vec<Behavior>) {
     let (vulns, behaviors) = sorted_deduped_vulns(graph, entry_key);
-    // Apply the AGGREGATE untrusted-free-text budget (JEF-106): a shared budget is threaded
+    // Apply the AGGREGATE untrusted-free-text budget: a shared budget is threaded
     // across the lines so a CVE-heavy image can't aggregate an unbounded prompt even when
     // every per-field cap holds. Early CVE lines keep their prose; once the budget is spent,
     // later lines fall back to the structured fields only.
@@ -320,7 +320,7 @@ fn sorted_deduped_vulns(
 /// evidence must always produce the same budgeted lines, both for the prompt and for the
 /// verdict fingerprint that keys on them; the budget only affects WHICH lines keep their free
 /// prose once it is exhausted, so the order it spends in must not depend on graph-traversal
-/// order), then collapse duplicate CVE ids to one representative (JEF-133 source of truth, so
+/// order), then collapse duplicate CVE ids to one representative (source of truth, so
 /// both the prompt and the dashboard's per-finding evidence agree). Trivy reports the same CVE
 /// once PER affected package, so the same id can arrive several times with different CVSS / fix
 /// ranges; the prior string-level `cves.dedup()` in `build_judgment_prompt_with` can't collapse
@@ -344,7 +344,7 @@ fn dedup_worst_per_id(mut vulns: Vec<Vulnerability>) -> Vec<Vulnerability> {
     vulns
 }
 
-/// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
+/// (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
 /// the ONLY CVE category that is exploitation evidence is a package OBSERVED loading at
 /// runtime (vulnerable code observed running on the reachable path). CVEs that are
 /// present-but-not-running (`not-observed`), static-binary-unknowable, or unknown-reachability
@@ -368,7 +368,7 @@ fn dedup_worst_per_id(mut vulns: Vec<Vulnerability>) -> Vec<Vulnerability> {
 /// influence this decision at all.
 ///
 /// Shared by the entry's own CVE field (`prompt::render_evidence`) and each downstream node's
-/// block (JEF-565, `downstream::render_downstream`) so both filter with the EXACT same rule —
+/// block (`downstream::render_downstream`) so both filter with the EXACT same rule —
 /// one source of truth for what counts as CVE exploitation evidence in the judge prompt.
 fn is_loaded_at_runtime(v: &Vulnerability) -> bool {
     v.reachability == Reachability::LoadedAtRuntime
@@ -385,7 +385,7 @@ pub(crate) fn reachable_cve_lines(
 }
 
 /// As [`reachable_cve_lines`], but draws the CVE free-text budget from a shared external
-/// `budget` (JEF-565) — the loaded-at-runtime-only counterpart of [`entry_evidence_budgeted`],
+/// `budget` — the loaded-at-runtime-only counterpart of [`entry_evidence_budgeted`],
 /// used wherever the full CVE list must be narrowed to just the exploitation-evidence subset
 /// before it reaches the judge.
 ///
@@ -418,14 +418,14 @@ pub(crate) fn reachable_cve_lines_budgeted(
 
 /// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed
 /// runtime behavior" field carries. Shared by the entry's own field and each downstream
-/// node's block (JEF-565) so both apply the SAME two engine policies:
+/// node's block so both apply the SAME two engine policies:
 ///
 /// - When the ASN dataset is EMPTY (no feed wired / unreadable file), every behavior —
 ///   including each internet connection — renders one line via [`annotated_summary`], exactly
 ///   as it did before the feed existed (the graceful-degrade contract).
 /// - When the dataset is present, INTERNET egress connections are pulled out and collapsed
 ///   into ONE deduped, sorted provider line ([`internet_egress_line`]); every other behavior
-///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
+///   (including CLUSTER connections, whose existing resolution is untouched) renders via
 ///   `annotated_summary` as before.
 ///
 /// A THIRD policy, applied to every line either way: a behavior the deterministic layer does
@@ -453,7 +453,7 @@ pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<
 }
 
 /// As [`render_behavior_lines`], but draws the free-text budget from a shared external
-/// `budget` — the behavior-line counterpart of [`entry_evidence_budgeted`] (JEF-565's
+/// `budget` — the behavior-line counterpart of [`entry_evidence_budgeted`] ('s
 /// security-review follow-up): `Behavior::summary` embeds attacker-influenced free-text (an
 /// exec'd path, a file path, a raw peer string) that is fenced+sanitized but was previously
 /// neither length-capped nor charged to any budget — harmless for a single entry, but this
@@ -462,7 +462,7 @@ pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<
 /// capped to [`TITLE_CAP`] and charged to `budget`; once exhausted, later lines fall back to
 /// the STRUCTURED, low-cardinality behavior KIND alone ([`Behavior::variant_label`]) — the
 /// model never loses that a behavior was observed, only its free-text detail (the same
-/// JEF-106 structural-first stance as a CVE/finding title). The entry's own call
+/// structural-first stance as a CVE/finding title). The entry's own call
 /// ([`render_behavior_lines`]) threads a fresh [`ENTRY_FREETEXT_BUDGET`], unchanged from
 /// before this budget existed for any evidence short of it; the downstream path
 /// (`downstream::render_downstream`) threads ONE shared incident-wide pool across every node.
@@ -530,7 +530,7 @@ pub(crate) fn render_behavior_lines_budgeted(
     out
 }
 
-/// Render one non-CVE scanner finding (JEF-244 — exposed secret / misconfig / RBAC) into a
+/// Render one non-CVE scanner finding (— exposed secret / misconfig / RBAC) into a
 /// prompt line: the structured, low-cardinality fields lead (id + severity), then the short
 /// untrusted title, capped+sanitized exactly as a CVE title is. Charged to the same shared
 /// per-entry free-text budget so a finding-heavy entry can't bloat the prompt. The whole list
@@ -547,7 +547,7 @@ fn finding_evidence_budgeted(f: &ScanFinding, budget: &mut usize) -> String {
     line
 }
 
-/// The non-CVE scanner findings behind an entry (JEF-244), rendered into prompt lines and
+/// The non-CVE scanner findings behind an entry, rendered into prompt lines and
 /// drawn from the SAME [`SecurityGraph::entry_findings`] the findings snapshot reads. Returns
 /// `(exposed_secrets, static_posture)`: exposed secrets are kept separate because they ARE
 /// exploitation evidence (a usable credential baked into the image), while the config-audit
@@ -564,7 +564,7 @@ pub(crate) fn entry_findings(
 }
 
 /// As [`entry_findings`], but draws the finding free-text budget from a shared external
-/// `budget` (JEF-565) — the downstream counterpart of [`entry_evidence_budgeted`]; see its
+/// `budget` — the downstream counterpart of [`entry_evidence_budgeted`]; see its
 /// doc for why (the per-incident aggregate budget across every downstream node on the entry's
 /// proven paths).
 pub(crate) fn entry_findings_budgeted(
@@ -592,7 +592,7 @@ pub(crate) fn entry_findings_budgeted(
 
 /// Render one reachable objective's ATT&CK OUTCOME suffix — what an attacker would OBTAIN
 /// *if this workload were exploited*, NOT a property asserting the target is already
-/// compromised (JEF-402). `reach` is the JEF-79 authorization tag (`MOUNTED`, `RBAC-GRANTED`,
+/// compromised. `reach` is the authorization tag (`MOUNTED`, `RBAC-GRANTED`,
 /// combinations, or `NETWORK`); it decides only the CredentialAccess wording below.
 ///
 /// The false-breach this fixes: a reachable secret objective used to render as
@@ -632,7 +632,7 @@ pub(crate) fn cve_ids_of(cves: &[String]) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// The structured enrichment-coverage behind an entry's breach decision (JEF-145): the
+/// The structured enrichment-coverage behind an entry's breach decision: the
 /// CVE ids and the behavioral-signal presence that went into the model's prompt, read
 /// from the SAME evidence (`entry_evidence`) the model was handed. The journal-append
 /// site records this so the would-have-acted report aggregation classifies a coverage gap from
@@ -650,7 +650,7 @@ pub fn entry_coverage(graph: &SecurityGraph, entry_key: &NodeKey) -> EntryCovera
     }
 }
 
-/// The enrichment a breach decision was made over (JEF-145): the matched CVE ids and
+/// The enrichment a breach decision was made over: the matched CVE ids and
 /// whether any behavioral signal was present. Mirrors the journal's `EnrichmentCoverage`
 /// without coupling this module to the journal type — the engine maps one to the other
 /// at the journal-append site.

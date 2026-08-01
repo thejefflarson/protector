@@ -3,20 +3,20 @@
 //! under the file-size cap (CLAUDE.md) and to hold the layered gate in one readable place.
 //!
 //! The gate layers, in order (first match wins):
-//! 1. **Exact-fingerprint LRU hit (JEF-390)** — the model's input is byte-identical to a
+//! 1. **Exact-fingerprint LRU hit** — the model's input is byte-identical to a
 //!    recently-judged state; serve that decisive verdict, no model call.
-//! 2. **Purely-subtractive delta hold (ADR-0023, JEF-391)** — a fingerprint miss but nothing was
+//! 2. **Purely-subtractive delta hold (ADR-0023)** — a fingerprint miss but nothing was
 //!    ADDED to the entry's surface since its last DECISIVE verdict (something was only removed —
 //!    a pod vanished, a peer aged out). The prior decisive verdict still holds (its surface only
 //!    shrank; removal can only reduce breach risk), so serve it without a fresh call. This is
 //!    what stops the ephemeral-churn ping-pong at its root. Fails toward re-judging: a
 //!    non-additive delta always has a baseline (a missing baseline is additive → first judgment),
 //!    so a stray absent baseline re-judges rather than skips.
-//! 3. **Breaker / backoff skip (JEF-234)** — the model looks down (global breaker) or this entry
+//! 3. **Breaker / backoff skip** — the model looks down (global breaker) or this entry
 //!    is in inconclusive-adjudication backoff; synthesize an Uncertain and send nothing.
 //! 4. Otherwise **re-judge** — a genuine cache miss with new (additive) surface.
 //!
-//! **Positive re-verify (JEF-445):** layers 1 and 2 do NOT apply to the model's own positive
+//! **Positive re-verify:** layers 1 and 2 do NOT apply to the model's own positive
 //! (`Exploitable`) — it is always re-verified against the live model (falling to layer 3/4). That
 //! verdict is the one the temp-0 judge occasionally fabricates (the argocd loaded-at-runtime
 //! tail-flip, accepted at the model layer per ADR-0029); serving it from cache would freeze a
@@ -31,14 +31,14 @@ use super::{Engine, PendingEntry, reason};
 /// The classification outcome for one entry this pass — decided WITHOUT calling the model.
 #[cfg_attr(test, derive(Debug))]
 pub(super) enum AdjGate {
-    /// Serve a decisive verdict with no model call: an exact-fingerprint LRU hit (JEF-390) or a
-    /// purely-subtractive delta hold (JEF-391). `held` is true only for the delta hold, so the
+    /// Serve a decisive verdict with no model call: an exact-fingerprint LRU hit or a
+    /// purely-subtractive delta hold. `held` is true only for the delta hold, so the
     /// pass log can show how much churn the delta gate absorbed.
     Resolved {
         verdict: reason::adjudicate::Verdict,
         held: bool,
     },
-    /// Skip the model this pass and carry the prior display forward (JEF-234 breaker / backoff).
+    /// Skip the model this pass and carry the prior display forward (breaker / backoff).
     Skipped(reason::adjudicate::Verdict),
     /// Queue for a fresh model call — a genuine re-judge.
     Judge,
@@ -47,13 +47,13 @@ pub(super) enum AdjGate {
 impl Engine {
     /// Build one breach-relevant entry's [`PendingEntry`] for this pass: read its delta-aware
     /// baseline (ADR-0023), build the model's complete prompt WITH the "Changes since…" delta
-    /// section, derive the verdict-cache key from that prompt (JEF-350) and the churn fingerprints
-    /// (JEF-387), and project this pass's surface (snapshotted as the next baseline on a decisive
+    /// section, derive the verdict-cache key from that prompt and the churn fingerprints
+    /// and project this pass's surface (snapshotted as the next baseline on a decisive
     /// verdict). Returns the pending record, whether the delta since the baseline is ADDITIVE
     /// (re-judge) vs subtractive (the prior verdict holds), and the baseline itself (the gate
     /// serves its verdict on a subtractive hold). Built before the cache lookup so the cached-on
     /// and sent prompt bytes can never drift.
-    // 9 args (JEF-570 added `menu`): each is a distinct, already-computed piece of this pass's
+    // 9 args (added `menu`): each is a distinct, already-computed piece of this pass's
     // per-entry state (no natural sub-grouping that wouldn't just be a wrapper struct for its
     // own sake — see the same call already made in `run_loop.rs`/`supply_chain/mod.rs`).
     #[allow(clippy::too_many_arguments)]
@@ -81,7 +81,7 @@ impl Engine {
         // The verdict-cache key is the FULL-STATE hash (excludes the "Changes since…" section) so
         // an identical full state always keys identically regardless of the delta — see
         // `build_delta_prompt_asn` for why (ADR-0023's fingerprint↔delta-gate resolution). The
-        // menu is part of that full state (JEF-570): a mapping change is a prompt change is a
+        // menu is part of that full state: a mapping change is a prompt change is a
         // re-judge (ADR-0034 D4).
         let fingerprint = delta.cache_key;
         let chain = reason::adjudicate::chain_shape_hash(&objectives);
@@ -107,7 +107,7 @@ impl Engine {
 /// [`state::VerdictStore`] — directly unit-testable without a full engine. `additive` and
 /// `baseline` come from the delta build (ADR-0023): `additive` is false only when a decisive
 /// baseline exists AND nothing was added since it. `now` is the pass's single injected clock
-/// (shared with the JEF-234 backoff). The subtractive-hold path warms the LRU under the current
+/// (shared with the backoff). The subtractive-hold path warms the LRU under the current
 /// fingerprint so the settled steady state HITS next pass.
 pub(super) fn classify_adjudication(
     verdicts: &state::VerdictStore,
@@ -118,7 +118,7 @@ pub(super) fn classify_adjudication(
 ) -> AdjGate {
     use reason::adjudicate::Verdict;
     // The model's OWN positive verdict — `Exploitable` — is never served from the cache or the
-    // subtractive hold: it is re-verified against the live model every pass (JEF-445). It is the
+    // subtractive hold: it is re-verified against the live model every pass. It is the
     // one verdict the temp-0 judge occasionally FABRICATES (the argocd loaded-at-runtime tail-flip,
     // accepted at the model layer per ADR-0029); replaying it from cache would FREEZE a one-time
     // flip into a permanent false breach, replayed every time the entry's oscillating surface
@@ -129,7 +129,7 @@ pub(super) fn classify_adjudication(
     // let a model `Refuted` veto a live attack.
     let must_reverify = |v: &Verdict| matches!(v, Verdict::Exploitable(_));
 
-    // 1. Exact-fingerprint LRU hit (JEF-390): byte-identical input, serve the cached verdict —
+    // 1. Exact-fingerprint LRU hit: byte-identical input, serve the cached verdict —
     //    unless it is a positive that must be re-verified (fall through to the re-judge path).
     if let Some(verdict) = verdicts.cached_for(&pending.entry_key, &pending.fingerprint)
         && !must_reverify(&verdict)
@@ -139,7 +139,7 @@ pub(super) fn classify_adjudication(
             held: false,
         };
     }
-    // 2. Purely-subtractive / unchanged delta since a decisive baseline (JEF-391): the prior
+    // 2. Purely-subtractive / unchanged delta since a decisive baseline: the prior
     //    verdict holds — again unless it is a positive that must be re-verified. `!additive`
     //    implies a baseline exists; a defensive absent baseline falls through to a re-judge (never
     //    suppress a judgment on possibly-new surface).
@@ -157,7 +157,7 @@ pub(super) fn classify_adjudication(
             held: true,
         };
     }
-    // 3. JEF-234 breaker / backoff: the model looks down — skip and carry the display forward.
+    // 3. breaker / backoff: the model looks down — skip and carry the display forward.
     if verdicts.breaker_open(now) {
         return AdjGate::Skipped(Verdict::Uncertain(
             "model unavailable (breaker open)".into(),

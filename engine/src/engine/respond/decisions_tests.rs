@@ -1,4 +1,4 @@
-//! ADR-0034 D6/D7 (JEF-570): `MitigationLedger::reconcile` consuming per-entry cut-choice
+//! ADR-0034 D6/D7: `MitigationLedger::reconcile` consuming per-entry cut-choice
 //! decisions end to end — the desired-set rules (model-chosen cuts / the `containment_for`
 //! fallback / a confident clear) and D5's non-member whole-decision degrade reaching the
 //! ledger. Split out of `tests.rs` purely to keep every file under the 1,000-line cap

@@ -16,7 +16,7 @@ fn would_act(entry: &str, open: bool, short_lived: bool, coverage_gap: bool) -> 
         coverage_gap,
         last_verdict: "exploitable — RCE reachable".into(),
         // One distinct node per entry — keeps `Report::would_act_count()`'s node-union headline
-        // (JEF-674) numerically equal to the row count in these fixtures.
+        // numerically equal to the row count in these fixtures.
         contained_nodes: vec![format!("workload/app/Pod/{entry}")],
     }
 }

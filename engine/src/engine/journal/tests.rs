@@ -57,7 +57,7 @@ fn round_trips_decisions_across_a_reopen() {
     let reopened = DecisionJournal::open(&path);
     let entries = reopened.replay();
     assert_eq!(entries.len(), 3, "all three decisions survive the reopen");
-    // JEF-301: the breach line carries the evidence fingerprint AND the TYPED decisive
+    // the breach line carries the evidence fingerprint AND the TYPED decisive
     // verdict across the reopen, so the post-restart engine can re-seed the verdict cache
     // (serve an unchanged entry with no model call) and replay the EXACT prior decision.
     match &entries[0].decision {
@@ -97,7 +97,7 @@ fn round_trips_decisions_across_a_reopen() {
     cleanup(&path);
 }
 
-/// ADR-0034 D8 (JEF-639) acceptance: an `Incident` line — the model's cut-choice decision,
+/// ADR-0034 D8 acceptance: an `Incident` line — the model's cut-choice decision,
 /// its resolved cut signature(s), and the full-prompt fingerprint it was judged against —
 /// round-trips a "restart" byte-for-byte. The replay-lock verification itself (fingerprint +
 /// cut-signature re-derivation) is the engine's job, not the journal's — this only proves the
@@ -205,7 +205,7 @@ fn cut_divergence_round_trips_across_a_reopen() {
     cleanup(&path);
 }
 
-/// Back-compat: a journal that predates JEF-639 holds ONLY `Breach` lines (no `Incident` line
+/// Back-compat: a journal that predates holds ONLY `Breach` lines (no `Incident` line
 /// ever existed for this entry) — replay must surface the breach text display-only, exactly as
 /// before, with no `Incident` decision to be found (there is nothing to re-arm a cut from; the
 /// engine cold-re-judges for cuts, per the `Decision::Incident` type docs).
@@ -357,7 +357,7 @@ fn rotation_bounds_the_journal_and_replay_spans_the_boundary() {
 
 #[test]
 fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
-    // Back-compat (JEF-145): a journal line written before the structured
+    // Back-compat: a journal line written before the structured
     // enrichment-coverage field existed has no `coverage` key. `#[serde(default)]`
     // must deserialize it to `None` ("unknown") — NOT a parse failure, and (per the
     // would-have-acted report aggregation) NOT a false coverage gap.
@@ -374,7 +374,7 @@ fn a_pre_jef145_breach_line_deserializes_with_unknown_coverage() {
                 coverage.is_none(),
                 "absent coverage degrades to unknown, not a gap"
             );
-            // JEF-301 back-compat: a line written before the fingerprint/typed-verdict
+            // back-compat: a line written before the fingerprint/typed-verdict
             // fields existed has neither key. `#[serde(default)]` must yield `None` for
             // both — the replay then restores it display-only (exactly today's behaviour)
             // and never treats a missing fingerprint as a cache hit against changed
@@ -422,7 +422,7 @@ fn enrichment_coverage_is_backed_when_a_cve_or_behavior_is_present() {
 
 #[test]
 fn admission_decisions_round_trip_across_a_reopen() {
-    // JEF-237 persistence: an admission record written before a "restart" replays after
+    // persistence: an admission record written before a "restart" replays after
     // it, with its dedup count + last-seen intact, so the admission decision log
     // repopulates on boot.
     use crate::engine::policy_log::PolicyDecisionRecord;

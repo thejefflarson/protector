@@ -1,7 +1,7 @@
-// Action view tests (ADR-0025 / JEF-400 / JEF-411): a judgement-audit `<details>` (NATIVE,
+// Action view tests (ADR-0025): a judgement-audit `<details>` (NATIVE,
 // UNCONTROLLED) stays open across a poll, entry rows key on their stable entry (patched in place),
 // the honest journal-empty state renders, and an XSS verdict/prompt renders inert. The view is
-// `view`-only now (no store — JEF-411); a poll is modelled by re-rendering with a new `view` prop.
+// `view`-only now (no store —); a poll is modelled by re-rendering with a new `view` prop.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/preact";

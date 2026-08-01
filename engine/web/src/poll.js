@@ -1,4 +1,4 @@
-// The dashboard v4 poll engine (ADR-0025 / JEF-397 / JEF-411). It fetches the active tab's
+// The dashboard v4 poll engine (ADR-0025). It fetches the active tab's
 // same-origin JSON snapshot every 5s and hands each result to callbacks the caller supplies. Two
 // rules ported verbatim from the v3 client:
 //
@@ -14,7 +14,7 @@
 // stays on screen under an honest "not updating — this is a connection problem, not an all-clear"
 // banner (never a stale green).
 //
-// The poll is decoupled from any state container (JEF-411): it takes plain `onSnapshot` / `onStale`
+// The poll is decoupled from any state container: it takes plain `onSnapshot` / `onStale`
 // callbacks, so `App` can wire them to its `useState` updaters without a store dependency.
 
 /** The poll cadence — 5s, matching the v3 client. */
@@ -55,7 +55,7 @@ export function hasLiveSelection(container) {
  * @param {() => void} opts.onStale called when a tick fails (non-ok response or transport error) so
  *   the caller can mark the connection stale (never a false green).
  * @param {(status: 401 | 403) => void} [opts.onAuthError] called when the snapshot route answers an
- *   AUTH failure (JEF-489, enforced once OIDC is configured): `401` (signed out / session expired) or
+ *   AUTH failure (enforced once OIDC is configured): `401` (signed out / session expired) or
  *   `403` (signed in, not allowed here). Distinct from {@link opts.onStale}: an auth failure is not a
  *   transient connection blip, so the caller shows the auth interstitial rather than the polite
  *   "stale" banner. Optional (defaults to a no-op) so a caller that predates OIDC still gets the old
@@ -66,7 +66,7 @@ export function hasLiveSelection(container) {
  *   as `(ms, fn)`. The default ADAPTS native `setInterval` (whose signature is `(fn, ms)` — args
  *   reversed) to this `(ms, fn)` shape. Passing native `setInterval` directly would silently never
  *   re-fire (it reads `POLL_MS` as the callback and `tick` as the delay), so only the initial
- *   `tick()` ran and a tab-swap blanked forever — the JEF-408 bug this default fixes (ADR-0027). DO
+ *   `tick()` ran and a tab-swap blanked forever — the bug this default fixes (ADR-0027). DO
  *   NOT "clean this up" to pass `setInterval` directly: a number-first handler is coerced to a
  *   string and eval'd, which the strict CSP (`script-src 'self'`, no `unsafe-eval`) blocks.
  * @param {(id: number) => void} [opts.clearIntervalImpl]
@@ -89,7 +89,7 @@ export function startPolling(opts) {
     try {
       const res = await fetchImpl(snapshotUrl(tab()), {
         headers: { accept: "application/json" },
-        // Belt-and-suspenders (JEF-489): if the server ever answers an /api route with a bare 302 to
+        // Belt-and-suspenders: if the server ever answers an /api route with a bare 302 to
         // the IdP (instead of a clean 401), `redirect: "manual"` surfaces it as an OPAQUE redirect
         // (`type === "opaqueredirect"`, `status === 0`, not-ok) rather than transparently following
         // it — the follow would be blocked by the CSP `connect-src 'self'` anyway. We read that as a

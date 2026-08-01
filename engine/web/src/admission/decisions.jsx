@@ -1,4 +1,4 @@
-// The deduped admission decision rows (ADR-0025 / JEF-400) — a 1:1 Preact port of maud
+// The deduped admission decision rows (ADR-0025) — a 1:1 Preact port of maud
 // `decision_rows`: a semantic `<table>` (columns align, `<th scope>`), one row per distinct
 // `(subject, image, decision)`. A `would-fail` mesh gate or a `would-deny` what-if is the attention
 // case (a denied keyline).

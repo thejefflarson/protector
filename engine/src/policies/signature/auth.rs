@@ -4,11 +4,11 @@
 //! must fetch their manifests with the SAME credentials the kubelet pulls with — otherwise the
 //! manifest fetch 401s ("Not authorized") and verification errors out. Both the admission webhook
 //! and the engine's running-Pod signing sweep resolve auth here, so the two can never drift
-//! (JEF-339): before this was unified, the sweep authenticated as `Anonymous` and every private
+//! : before this was unified, the sweep authenticated as `Anonymous` and every private
 //! image sat in perpetual "checking".
 //!
 //! Auth is resolved **per image** from the WHOLE mounted dockerconfigjson `auths` map, not one
-//! hardcoded registry (JEF-352). Before this, only `ghcr.io` authenticated — a private image on
+//! hardcoded registry. Before this, only `ghcr.io` authenticated — a private image on
 //! any other registry (Docker Hub, a private `host:port`) 401ed into perpetual "checking". The
 //! parsed config is loaded ONCE at construction ([`RegistryAuth::from_env`]); [`for_image`] then
 //! extracts the image's registry host and looks up its creds.
@@ -36,7 +36,7 @@ use sigstore::registry::Auth;
 /// of which a container runtime resolves to the same registry, so they must share one creds entry.
 const DOCKER_IO_KEY: &str = "docker.io";
 
-/// The shared per-image registry-auth resolver (JEF-339, JEF-352). Built ONCE from the process
+/// The shared per-image registry-auth resolver. Built ONCE from the process
 /// environment; `for_image` computes `Auth` for each image without re-reading any file.
 ///
 /// Deliberately NOT `Debug`/`Clone`: it holds plaintext registry credentials, so a derived `Debug`

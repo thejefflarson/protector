@@ -69,7 +69,7 @@ impl respond::actuator::Actuator for RecordingActuator {
 
 /// Computing the pre-arm scope-simulation preview NEVER applies, arms, or mutates
 /// anything (ADR-0016). Built with `judgement` promotion armed but the `network` action
-/// class NOT armed — a real, justified, would-otherwise-eligible cut stands (JEF-570-style
+/// class NOT armed — a real, justified, would-otherwise-eligible cut stands (-style
 /// model promotion), but the REAL engine never actually applies it (the ordinary
 /// `enforceScope`/arming-ladder gate this test does not touch). The preview is asked,
 /// against a candidate scope that WOULD cover the cut, over and over — the spy actuator +

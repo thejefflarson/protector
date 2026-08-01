@@ -7,7 +7,7 @@
 ## Context
 
 Surfacing today is **pull-only**: a breach decision is recorded in the findings
-snapshot and the judgement record, and the durable journal ([JEF-141](journal.rs))
+snapshot and the judgement record, and the durable journal ()
 replays it after a restart — but a solo operator never *learns* protector decided a
 breach unless they are watching the engine's output. The motivating pain is exactly
 that gap (the post-restart blind-window memo): the decision is made, recorded, and
@@ -127,11 +127,11 @@ Harder / accepted:
 - **An unbounded reqwest client.** Rejected: a hung sink would stall the single engine
   loop — the exact failure `model.rs` bounds against. Reuse the timeout-only client.
 
-## Extension — runtime-coverage collapse (JEF-427)
+## Extension — runtime-coverage collapse
 
 The breach notice fires only on breach *decisions*. But when protector's OWN runtime
 sensors go dark, a blind engine makes no breach decisions — so the one moment the
-operator most needs a push, the notifier stays silent. JEF-427 adds a second, narrow
+operator most needs a push, the notifier stays silent. adds a second, narrow
 event on this same sanctioned path: an edge-triggered **runtime-coverage** notice.
 
 - **Same posture, same plumbing.** Off unless `PROTECTOR_ENGINE_NOTIFY_URL` is set
@@ -139,8 +139,8 @@ event on this same sanctioned path: an edge-triggered **runtime-coverage** notic
   client; a failure is logged once and dropped. It never touches a verdict, an
   actuation, or the journal.
 - **Edge-triggered, not per-pass.** Fires exactly once when a was-covering fleet goes
-  fully dark past the JEF-421 stall debounce (`runtime_coverage_degraded`), and once
-  when it recovers (`runtime_coverage_restored`) — reusing JEF-421's hysteresis so a
+  fully dark past the stall debounce (`runtime_coverage_degraded`), and once
+  when it recovers (`runtime_coverage_restored`) — reusing 's hysteresis so a
   routine DaemonSet roll never strobes it.
 - **Counts-only, redacted by construction.** The payload carries the event tag, the
   feed label (`Runtime`, our own constant), and COUNTS — N of M sensor nodes blind —

@@ -31,7 +31,7 @@ fn armed_engine(adjudicator: Box<dyn reason::adjudicate::Adjudicator>) -> Engine
 }
 
 /// A reversible, additive network mitigation whose one justification is corroborated,
-/// adjudicated, and breach-relevant — i.e. it clears `is_live_corroborated` (JEF-566) on its
+/// adjudicated, and breach-relevant — i.e. it clears `is_live_corroborated` on its
 /// own, so `decide()` would return `AutoApply` before the freshness gate is even considered.
 fn live_corroborated_mitigation(entry: &str) -> Mitigation {
     Mitigation {
@@ -141,9 +141,9 @@ fn gate_holds_auto_apply_once_the_decisive_verdict_ages_out() {
 }
 
 /// A fresh decisive verdict for THIS entry does not help once the GLOBAL breaker is open — the
-/// "breaker closed" half of the gate is fleet-wide, mirroring JEF-234's own pass-wide skip:
+/// "breaker closed" half of the gate is fleet-wide, mirroring 's own pass-wide skip:
 /// this is exactly the gap `decide()`'s own `is_live_corroborated` check can't see, because a
-/// JEF-390 cache hit / JEF-391 subtractive hold resolves BEFORE the breaker check.
+/// cache hit subtractive hold resolves BEFORE the breaker check.
 #[test]
 fn gate_holds_auto_apply_when_the_global_breaker_is_open_even_with_a_fresh_local_verdict() {
     let engine = armed_engine(Box::new(super::tests::CountingAdjudicator(Arc::new(

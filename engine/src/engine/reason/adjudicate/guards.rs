@@ -2,9 +2,9 @@
 //! out of the adjudicate module root purely to keep every file under the 1,000-line cap
 //! (repo CLAUDE.md). These are pure helpers: `sanitize`/`fence` neutralize untrusted text,
 //! and the anti-fabrication backstops (`guard_fabricated_cve` for a fabricated CVE *id*,
-//! `guard_fabricated_reachability_tag` for a fabricated `loaded-at-runtime` *tag* — JEF-451)
+//! `guard_fabricated_reachability_tag` for a fabricated `loaded-at-runtime` *tag* —)
 //! are grounding/integrity checks that never decide breach. The cross-pass verdict cache no longer keys on a predicted-input
-//! fingerprint; it keys on a hash of the deterministic prompt (JEF-350, see
+//! fingerprint; it keys on a hash of the deterministic prompt (see
 //! `prompt::prompt_cache_key`).
 
 use crate::engine::graph::{Behavior, NodeKey, Relation, SecurityGraph};
@@ -78,7 +78,7 @@ fn guard_exploitable(verdict: Verdict, check: impl FnOnce(&str) -> Option<Verdic
     }
 }
 
-/// Hallucination guard (JEF-79): a small CPU model can copy a CVE id from the prompt's
+/// Hallucination guard: a small CPU model can copy a CVE id from the prompt's
 /// worked examples onto a workload that has none. If it PROMOTES (`Exploitable`) while
 /// citing a CVE absent from the entry's real evidence, the citation is fabricated — so
 /// downgrade to the skeptic verdict. A hallucinated CVE can then never promote an action;
@@ -107,7 +107,7 @@ pub(crate) fn guard_fabricated_cve(
     })
 }
 
-/// Tag-grounding guard (JEF-451 / G1): the sibling of [`guard_fabricated_cve`] one token deeper.
+/// Tag-grounding guard (G1): the sibling of [`guard_fabricated_cve`] one token deeper.
 /// A small CPU judge can cite a REAL CVE id (so the id guard passes) yet attribute the
 /// `[reachability: loaded-at-runtime]` tag to it — the single tag that IS exploitation evidence —
 /// when NO evidence line carries that tag (every CVE is `not-observed`). The two live protector
@@ -122,7 +122,7 @@ pub(crate) fn guard_fabricated_cve(
 /// [`super::evidence::reachable_cve_lines`] — which filters on that typed field before
 /// rendering — is non-empty), never by substring-matching the rendered CVE evidence lines
 /// this guard used to take directly. Those lines carry the untrusted trivy `title` appended
-/// last (JEF-106), so a `not-observed` CVE whose title is forged to read the literal tag
+/// last, so a `not-observed` CVE whose title is forged to read the literal tag
 /// text would satisfy a substring test even though nothing was ever observed loading — the
 /// same forgery the CVE-evidence filter itself had to close, one guard deeper.
 ///
@@ -157,8 +157,8 @@ pub(crate) fn guard_fabricated_reachability_tag(
 /// Whether a runtime behavior CORROBORATES an exploit — the engine's single shared
 /// "alarming-now" definition ([`crate::engine::observe::alarm_class::is_alarming_now`]), NOT a
 /// new one: an `Alert` ([`Behavior::is_alert`]), a notable shell/package-manager
-/// exec (JEF-117), OR an alarming file write (sensitive-path drop-and-execute / config tamper,
-/// JEF-309). Sharing that one predicate with the corroboration and quarantine paths keeps the
+/// exec, OR an alarming file write (sensitive-path drop-and-execute / config tamper,
+/// ). Sharing that one predicate with the corroboration and quarantine paths keeps the
 /// alarm sources from drifting apart. Benign
 /// `NetworkConnection`/`FileRead`/`LibraryLoaded`/`SecretRead` and benign writes (an app's own
 /// `/data`/`/tmp`/logs) — a workload's own observed activity — are NOT corroborating and so
@@ -230,7 +230,7 @@ pub(crate) fn fence_list(values: &[String]) -> String {
     }
 }
 
-/// JEF-79 — how the entry reaches an objective, derived from the objective node's
+/// — how the entry reaches an objective, derived from the objective node's
 /// incoming proof edges. This is the AUTHORIZATION signal that lets the model judge
 /// authorization rather than mere identity/breadth (fixing the ArgoCD false positive):
 /// `[RBAC-GRANTED]` and `[MOUNTED]` access is authorized-by-design and refuted however
@@ -240,7 +240,7 @@ pub(crate) fn fence_list(values: &[String]) -> String {
 /// objective is reached over the network. Unknown/structural ⇒ NETWORK (conservative: it
 /// is not an authorization grant).
 ///
-/// JEF-376 — the tag is DETERMINISTIC: a secret reachable BOTH by mount and by RBAC grant
+/// — the tag is DETERMINISTIC: a secret reachable BOTH by mount and by RBAC grant
 /// used to flip between `MOUNTED` and `RBAC-GRANTED` depending on which incoming edge the
 /// graph traversal happened to visit first (HashMap/insertion order), which churned the
 /// prompt hash and forced a bogus verdict-cache re-judge. We do NOT drop either signal
@@ -272,7 +272,7 @@ pub(crate) fn objective_reach(graph: &SecurityGraph, objective: &NodeKey) -> &'s
     }
 }
 
-/// JEF-79 — whether an objective sits in the SAME namespace as the entry. The model
+/// — whether an objective sits in the SAME namespace as the entry. The model
 /// cannot reliably infer namespace-equality from raw keys (granite4:1b-h misread a
 /// same-namespace DB as cross-tenant and falsely promoted it), so we state it explicitly:
 /// `same-ns` (the entry's own tenant — a [NETWORK] reach here is normal app topology) vs

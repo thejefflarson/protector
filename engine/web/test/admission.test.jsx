@@ -1,8 +1,8 @@
-// Admission view tests (ADR-0025 / JEF-400 / JEF-411): decision rows key on the
+// Admission view tests (ADR-0025): decision rows key on the
 // `(subject, image, decision)` TUPLE so the dedup `count` updates IN PLACE across a poll (no tear),
 // a signing-inventory row's expand-in-place detail (LOCAL useState) stays open across a poll, the
 // honest empty states render, and an XSS subject/image/signer renders inert. The view is `view`-only
-// now (no store — JEF-411); a poll is modelled by re-rendering with a new `view` prop.
+// now (no store —); a poll is modelled by re-rendering with a new `view` prop.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, fireEvent, cleanup } from "@testing-library/preact";

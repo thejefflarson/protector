@@ -9,7 +9,7 @@
 //!     `Authorization: Bearer <token>` matching a shared secret, rejecting a
 //!     missing/incorrect bearer with `401` BEFORE the body is deserialized. The
 //!     compare is constant-time so a wrong token leaks no timing signal. The token is
-//!     REQUIRED (JEF-576): a caller of [`serve_runtime`](super::runtime::serve_runtime) /
+//!     REQUIRED: a caller of [`serve_runtime`](super::runtime::serve_runtime) /
 //!     [`serve_audit`](super::audit::serve_audit) with no token configured gets a loud
 //!     startup error and the ingest port never binds — there is no
 //!     unauthenticated-but-warned fallback. Provision `PROTECTOR_INGEST_TOKEN_FILE`
@@ -39,7 +39,7 @@ use subtle::ConstantTimeEq;
 /// The shared secret the ingest requires on every request, read once at startup.
 ///
 /// `None` means no token is configured. Callers (`serve_runtime`/`serve_audit`) treat
-/// that as fatal for the affected listener (JEF-576): the token is required, not
+/// that as fatal for the affected listener: the token is required, not
 /// optional-with-a-warning, so a forged behavioral/audit observation can never reach
 /// the corroboration path unauthenticated.
 #[derive(Clone)]
@@ -128,7 +128,7 @@ fn unauthorized() -> Response {
         .expect("static 401 response is always valid")
 }
 
-/// Require a configured [`IngestToken`] before a listener may bind (JEF-576): the token
+/// Require a configured [`IngestToken`] before a listener may bind: the token
 /// is REQUIRED, not optional-with-a-warning, so `serve_runtime`/`serve_audit` call this
 /// before `TcpListener::bind` and propagate its `Err` straight out, refusing to serve
 /// `what` on `addr` at all rather than falling open unauthenticated. The message names

@@ -1,4 +1,4 @@
-//! Tests for the JEF-318 entry-scoped corroboration shape — kernel-module load on the
+//! Tests for the entry-scoped corroboration shape — kernel-module load on the
 //! foothold — kept in its own `*_tests.rs` file (repo CLAUDE.md: tests count toward the
 //! 1,000-line file cap). `super` resolves to the proof module, so these exercise the
 //! `pub(super)` `corroborate` seam directly.
@@ -48,7 +48,7 @@ fn ordinary_entry(ns: &str) -> EntryContext<'_> {
 }
 
 /// The objective for these tests: a PrivilegeEscalation-tactic chain (T1611 Escape to Host) —
-/// the same tactic `module_load_on_foothold` gates on (JEF-318: a kernel module load from
+/// the same tactic `module_load_on_foothold` gates on (a kernel module load from
 /// inside a container IS host compromise, see the predicate's doc comment).
 fn priv_esc_objective() -> AttackRef {
     ESCAPE_TO_HOST
@@ -115,7 +115,7 @@ fn module_load_on_the_foothold_does_not_corroborate_an_unrelated_objective() {
 
 #[test]
 fn other_behaviors_on_the_foothold_do_not_trigger_this_shape() {
-    // A PtraceAttach (JEF-318's OTHER new shape) and an ordinary ProcessExec on the same
+    // A PtraceAttach ('s OTHER new shape) and an ordinary ProcessExec on the same
     // foothold entry must not be mistaken for a module load.
     let runtime = [
         sig(Behavior::PtraceAttach, 0),

@@ -1,9 +1,9 @@
-//! Adjudicator unit tests, group 3: JEF-106 prompt-injection hardening beyond `sanitize`.
+//! Adjudicator unit tests, group 3: prompt-injection hardening beyond `sanitize`.
 //! Hostile, oversized, fence-laden evidence must leave the assembled prompt BOUNDED, the
 //! `<<< >>>` fence INTACT (no field can reconstruct it after capping), and the structural
 //! fields (id / severity / score / reachability / fix) present — while the free prose
-//! (trivy's `title`, the only untrusted free-text left after the advisory feed was retired
-//! in JEF-242) is a hard-capped, budgeted adjunct. Split from the other groups purely to
+//! (trivy's `title`, the only untrusted free-text left after the advisory feed was retired)
+//! is a hard-capped, budgeted adjunct. Split from the other groups purely to
 //! keep every file under the 1,000-line cap (repo CLAUDE.md).
 #![allow(unused_imports)]
 
@@ -33,7 +33,7 @@ fn fenced_cve_data(prompt: &str) -> String {
         .expect("CVE list is fenced <<< >>>")
 }
 
-/// JEF-106/JEF-242 — a SINGLE pathologically-oversized, fence-laden title (the only
+/// — a SINGLE pathologically-oversized, fence-laden title (the only
 /// untrusted free-text left after the advisory feed was retired) cannot bloat the prompt or
 /// reconstruct the fence. The cap holds and the dangerous chars are stripped, so the fenced
 /// data is bounded and the closing `>>>` survives only once (the real one), never spliced
@@ -53,7 +53,7 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
 
     // The whole prompt is small despite the megabyte input — the cap bounds it hard. The
     // bound is on the UNTRUSTED payload, not the static template (the floor here is the
-    // ~6 KB static prompt after the JEF-402 grounding-rule wording + the ADR-0034 cut-choice
+    // ~6 KB static prompt after the grounding-rule wording + the ADR-0034 cut-choice
     // instruction + an empty containment-options menu + the per-field-capped title); a
     // megabyte of title would blow past this by orders of magnitude if the cap failed, so the
     // assertion still proves the payload is capped, not the template.
@@ -80,7 +80,7 @@ fn oversized_fence_laden_title_stays_bounded_and_fence_intact() {
     assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
 }
 
-/// JEF-244 — the other trivy report kinds reach the prompt: an exposed secret is framed as
+/// — the other trivy report kinds reach the prompt: an exposed secret is framed as
 /// EXPLOITATION evidence (its own section + breach-definition bullet), while a misconfig is
 /// framed as STATIC POSTURE / severity context (never a breach on its own). Both untrusted
 /// titles are fenced and the secret value never appears.
@@ -163,7 +163,7 @@ fn exposed_secret_and_misconfig_reach_the_prompt_in_their_calibrated_roles() {
     assert_eq!(prompt.matches("<<<").count(), prompt.matches(">>>").count());
 }
 
-/// JEF-404 — a CVE in a statically linked binary renders `[reachability: present-static-binary]`,
+/// — a CVE in a statically linked binary renders `[reachability: present-static-binary]`,
 /// NOT `[reachability: not-observed]`, so the adjudicator sees "indeterminate" rather than
 /// "observed absent". The distinct tag is what stops absence-of-load reading as reassurance.
 #[test]
@@ -182,7 +182,7 @@ fn static_binary_cve_renders_present_static_binary_tag() {
     );
 }
 
-/// JEF-106 — the title cap holds at the PROMPT boundary (defense in depth): an oversized
+/// — the title cap holds at the PROMPT boundary (defense in depth): an oversized
 /// title is truncated well under the 10k input, never raw.
 #[test]
 fn title_is_hard_capped_at_the_prompt_boundary() {
@@ -196,7 +196,7 @@ fn title_is_hard_capped_at_the_prompt_boundary() {
     );
 }
 
-/// JEF-106 — the AGGREGATE per-entry budget bounds the prompt even when the per-title cap
+/// — the AGGREGATE per-entry budget bounds the prompt even when the per-title cap
 /// holds: a CVE-heavy image (hundreds of CVEs, each with a max-length title) must not
 /// aggregate an unbounded prompt. The structured fields (id/severity/score/fix) are kept
 /// for every CVE; only the free prose (title) is dropped once the budget is spent.
@@ -240,9 +240,9 @@ fn aggregate_free_text_budget_bounds_a_cve_heavy_image() {
     );
 }
 
-/// JEF-106 — the budget spends deterministically, so the SAME evidence always renders the
+/// — the budget spends deterministically, so the SAME evidence always renders the
 /// SAME prompt. This is what keeps the verdict cache fingerprint stable across passes: a
-/// non-deterministic budget would re-judge every pass and blow the JEF-63 model budget.
+/// non-deterministic budget would re-judge every pass and blow the model budget.
 #[test]
 fn budgeted_rendering_is_deterministic() {
     let vulns: Vec<Vulnerability> = (0..50)
@@ -262,7 +262,7 @@ fn budgeted_rendering_is_deterministic() {
     );
 }
 
-/// JEF-106/JEF-242 — the structural-first stance: the structured fields are surfaced even
+/// — the structural-first stance: the structured fields are surfaced even
 /// when the free prose is gone. Confirm severity / score / reachability survive on a line
 /// with no title, and that the structured tokens carry no fence chars.
 #[test]
@@ -279,12 +279,12 @@ fn structured_fields_are_present_independent_of_prose() {
     }
 }
 
-/// JEF-113 (behavior-preservation across the refactor + integration): the exec classifiers
+/// (behavior-preservation across the refactor + integration): the exec classifiers
 /// moved out of the `Behavior` wire type, so `Behavior::summary` now returns the bare path.
 /// The adjudication prompt must re-apply the engine's notable-exec annotation
 /// (`exec_class::annotated_summary`) so the model still sees "(interactive shell in
 /// container)" / "(package manager in container)" — losing it would silently weaken the
-/// judge's runtime evidence. This is the one-line `prompt.rs` swap the JEF-113/JEF-106
+/// judge's runtime evidence. This is the one-line `prompt.rs` swap the
 /// integration required; guard it.
 #[test]
 fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
@@ -322,7 +322,7 @@ fn prompt_keeps_the_notable_exec_annotation_after_the_classifier_move() {
     );
 }
 
-/// A network-connection behavior fixture (JEF-380 prompt-rendering tests).
+/// A network-connection behavior fixture (prompt-rendering tests).
 fn conn(peer: &str, internet: bool) -> Behavior {
     Behavior::NetworkConnection {
         peer: peer.into(),
@@ -339,7 +339,7 @@ fn asn_fixture() -> crate::engine::observe::asn::AsnDb {
     )
 }
 
-/// JEF-380: with the ASN dataset present, INTERNET egress renders as ONE deduped, sorted
+/// with the ASN dataset present, INTERNET egress renders as ONE deduped, sorted
 /// PROVIDER line (`INTERNET egress: Amazon [AS16509], GitHub [AS36459]`) — the salient
 /// provider signal — instead of one raw-IP line per connection. A CLUSTER peer is untouched.
 #[test]
@@ -359,14 +359,14 @@ fn prompt_groups_internet_egress_by_provider_with_the_asn_dataset() {
         !prompt.contains("140.82.121.3") && !prompt.contains("13.33.9.9"),
         "raw internet IPs must not appear once attributed:\n{prompt}"
     );
-    // A CLUSTER peer's JEF-131/375 resolution is NOT touched by ASN attribution.
+    // A CLUSTER peer's existing resolution is NOT touched by ASN attribution.
     assert!(
         prompt.contains("analytics/influxdb:8086 (10.42.1.159)"),
         "cluster peer rendering must be preserved:\n{prompt}"
     );
 }
 
-/// JEF-380 fingerprint stability (the churn fix): two DIFFERENT sets of internet IPs that
+/// fingerprint stability (the churn fix): two DIFFERENT sets of internet IPs that
 /// resolve to the SAME providers must produce a BYTE-IDENTICAL prompt, so a CDN rotating its
 /// IPs never busts the verdict cache / re-judges.
 #[test]
@@ -391,7 +391,7 @@ fn internet_egress_prompt_is_byte_identical_across_cdn_ip_rotation() {
     assert_eq!(prompt_cache_key(&p1), prompt_cache_key(&p2));
 }
 
-/// JEF-380 graceful degradation: with an EMPTY ASN dataset (no feed wired / unreadable file),
+/// graceful degradation: with an EMPTY ASN dataset (no feed wired / unreadable file),
 /// internet egress renders EXACTLY as before the feed — one raw `IP:port` line per
 /// connection via `Behavior::summary`. This is the same output `build_judgment_prompt`
 /// produces, so the no-dataset path is a strict no-op.
@@ -413,7 +413,7 @@ fn empty_asn_dataset_degrades_to_raw_ip_rendering() {
     assert_eq!(with_empty, build_judgment_prompt(&e2, &[], &g2));
 }
 
-/// JEF-380: an internet IP with NO ASN match (an unknown/unrouted range) is never dropped —
+/// an internet IP with NO ASN match (an unknown/unrouted range) is never dropped —
 /// it falls back to its raw `IP:port` inside the collapsed provider set, alongside the
 /// attributed providers.
 #[test]
@@ -613,8 +613,8 @@ fn an_alarming_write_cannot_forge_the_tag_via_sanitize_reconstruction() {
     );
 }
 
-/// JEF-453: any CVE in the "observed loading at runtime" list is exploitation evidence on its own.
-/// The prompt says so, and — unlike the old prompt (JEF-405) — it no longer needs the "a
+/// any CVE in the "observed loading at runtime" list is exploitation evidence on its own.
+/// The prompt says so, and — unlike the old prompt — it no longer needs the "a
 /// library-load runtime line can't cancel the CVE" caveat: the CVE field IS the loaded-at-runtime
 /// list, so a CVE's membership is itself the proof the vulnerable code runs. `critical_cve` is
 /// loaded-at-runtime, so it appears in the field.
@@ -633,7 +633,7 @@ fn prompt_states_a_loaded_at_runtime_cve_is_evidence_on_its_own() {
     );
 }
 
-/// The prompt carries the JEF-402 GROUNDING RULE: reaching a `secret/…` objective in the
+/// The prompt carries the GROUNDING RULE: reaching a `secret/…` objective in the
 /// reachable-objectives list is NEVER exposed-secret evidence, and exposed-secret evidence
 /// exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY (an
 /// empty "(none)" field means NO exposed-secret evidence). This is the language that lost
@@ -663,7 +663,7 @@ fn prompt_carries_the_grounding_rule_tying_exposed_secrets_to_a_non_empty_field(
     );
 }
 
-/// JEF-376: a secret reachable BOTH by a pod-spec mount (`CanRead`) and an RBAC grant
+/// a secret reachable BOTH by a pod-spec mount (`CanRead`) and an RBAC grant
 /// (`CanDo`) must yield the SAME reach tag every pass, regardless of which incoming edge
 /// the graph traversal visits first. The old early-return let the winner depend on
 /// HashMap/insertion order, so the tag flipped `MOUNTED` ↔ `RBAC-GRANTED` pass-to-pass,
@@ -725,7 +725,7 @@ fn objective_reach_is_deterministic_when_reachable_both_mounted_and_rbac() {
     assert_eq!(reach_for(&[Relation::CanRead]), "MOUNTED");
 }
 
-/// The stable `NodeKey` of the JEF-376 fixture secret.
+/// The stable `NodeKey` of the fixture secret.
 fn sec_key() -> crate::engine::graph::NodeKey {
     use crate::engine::graph::{Node, SecretRef};
     Node::Secret(SecretRef {
@@ -735,7 +735,7 @@ fn sec_key() -> crate::engine::graph::NodeKey {
     .key()
 }
 
-/// The argocd-server shape (JEF-402): an internet-facing entry whose ServiceAccount is
+/// The argocd-server shape: an internet-facing entry whose ServiceAccount is
 /// RBAC-granted a secret in another namespace. Returns `(graph, entry_key, objectives)`
 /// with the single Credential-Access secret objective — the exact input that mis-rendered
 /// as "(Credential Access: Unsecured Credentials)" and got hallucinated into an exposed
@@ -791,7 +791,7 @@ fn rbac_granted_secret_objective() -> (
     (g, entry_key, vec![(secret_key, CREDENTIAL_ACCESS)])
 }
 
-/// JEF-402 — the false-breach fix. An AUTHORIZED ([RBAC-GRANTED]) reachable secret objective
+/// — the false-breach fix. An AUTHORIZED ([RBAC-GRANTED]) reachable secret objective
 /// must NOT render the bare ATT&CK phrase "Unsecured Credentials": that reads as an
 /// already-exposed credential (the exposed-secret evidence category) and contradicts the
 /// authorization tag, which is exactly what tricked the judge into hallucinating an exposed
@@ -819,11 +819,11 @@ fn authorized_secret_objective_does_not_render_unsecured_credentials() {
     );
 }
 
-/// JEF-453 — a CVE tagged `[reachability: not-observed]` is present in the image but NOT observed
+/// — a CVE tagged `[reachability: not-observed]` is present in the image but NOT observed
 /// running: context, never exploitation evidence. It is OMITTED from the judge prompt entirely (it
 /// stays on the dashboard for operators). So there is no non-evidence CVE for a small model to
 /// fabricate a `loaded-at-runtime` tag onto — the root of the recurring false `exploitable`
-/// (JEF-451). An all-not-observed entry's CVE field reads `(none)`.
+/// . An all-not-observed entry's CVE field reads `(none)`.
 #[test]
 fn not_observed_cve_is_omitted_from_the_judge_prompt() {
     use crate::engine::graph::Reachability;
@@ -845,7 +845,7 @@ fn not_observed_cve_is_omitted_from_the_judge_prompt() {
     );
 }
 
-/// JEF-453 — a CVE in a statically linked binary (`[reachability: present-static-binary]`) has
+/// — a CVE in a statically linked binary (`[reachability: present-static-binary]`) has
 /// UNKNOWABLE reachability: it is not exploitation evidence (only `loaded-at-runtime` is), so like a
 /// not-observed CVE it is OMITTED from the judge prompt (kept on the dashboard). Same class as the
 /// not-observed omit — a context CVE the small model cannot relabel as running.

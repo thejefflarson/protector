@@ -41,7 +41,7 @@ impl Decision {
 }
 
 /// A gate's **counterfactual** verdict for a request — what it WOULD do if the request were in
-/// scope and enforced — decoupled from whether enforcement is actually on (JEF-246, the shadow
+/// scope and enforced — decoupled from whether enforcement is actually on (the shadow
 /// what-if of ADR-0016 applied to admission). Unlike [`evaluate`](Policy::evaluate), this is
 /// computed for EVERY request, even one [`applies`](Policy::applies) skips, so the operator can
 /// answer "if I turned enforcement on for this namespace, what would happen?".
@@ -207,7 +207,7 @@ pub trait Policy: Send + Sync {
     /// returned `true`.
     async fn evaluate(&self, req: &AdmissionRequest<DynamicObject>) -> Decision;
 
-    /// **Shadow** evaluation (JEF-246): the gate's counterfactual verdict for `req`, computed
+    /// **Shadow** evaluation: the gate's counterfactual verdict for `req`, computed
     /// regardless of [`applies`](Policy::applies) or enforced scope, so the admission-decision
     /// log can record what protector WOULD do if this request were in scope and enforced.
     /// Display-only — it never contributes to the API verdict (ADR-0016).
@@ -231,22 +231,22 @@ pub trait Policy: Send + Sync {
 pub struct Engine {
     policies: Vec<Box<dyn Policy>>,
     metrics: Arc<Metrics>,
-    /// The bounded, deduped admission-decision ring (JEF-226/237): the per-workload admission
+    /// The bounded, deduped admission-decision ring: the per-workload admission
     /// decision log. Optional so the webhook can run without it (and so the engine's existing
     /// tests construct without one). When present, EVERY resolved admission — clean admit,
-    /// audit, or deny — is mirrored here (JEF-237 records the good pods too, not only
+    /// audit, or deny — is mirrored here (records the good pods too, not only
     /// violations).
     decisions: Option<Arc<PolicyDecisionLog>>,
-    /// The durable decision journal (JEF-141/237). Optional. When present, each resolved
+    /// The durable decision journal. Optional. When present, each resolved
     /// admission is also persisted so the admission decision log survives a restart and
     /// repopulates on boot. Disabled (a no-op) when no writable volume is configured.
     journal: Option<Arc<DecisionJournal>>,
 }
 
 /// The holistic, engine-derived view of one request's resolved admission — the per-workload
-/// row JEF-237 records (one row per request, deduped, not one per policy).
+/// row records (one row per request, deduped, not one per policy).
 ///
-/// JEF-246 changed the signature/mesh statuses from a COARSE two-state ("passed the gate" vs
+/// changed the signature/mesh statuses from a COARSE two-state ("passed the gate" vs
 /// flagged, which conflated *verified* with *not-checked*) to the THREE-state shadow what-if,
 /// sourced from each gate's [`shadow_evaluate`](Policy::shadow_evaluate) (computed for EVERY
 /// request, even out of scope): `verified` (in scope, checked, passed) · `would-pass` (out of
@@ -280,7 +280,7 @@ impl Engine {
         }
     }
 
-    /// Attach the admission-decision ring (JEF-226/237) so EVERY resolved decision — clean
+    /// Attach the admission-decision ring so EVERY resolved decision — clean
     /// admit, audit, or deny — is recorded in the admission decision log in addition to the
     /// metric + log. Builder-style so `new` stays the minimal constructor the existing tests
     /// use.
@@ -289,7 +289,7 @@ impl Engine {
         self
     }
 
-    /// Attach the durable decision journal (JEF-237) so resolved admissions persist across a
+    /// Attach the durable decision journal so resolved admissions persist across a
     /// restart. Builder-style; a disabled journal is a safe no-op (in-memory only).
     pub fn with_journal(mut self, journal: Arc<DecisionJournal>) -> Self {
         self.journal = Some(journal);
@@ -309,7 +309,7 @@ impl Engine {
             would_admit: true,
         };
 
-        // Shadow what-if (JEF-246): compute every gate's counterfactual verdict — for ALL
+        // Shadow what-if: compute every gate's counterfactual verdict — for ALL
         // gates, regardless of `applies()`/scope — and fold it into the recorded row's
         // three-state signature/mesh status + net would-admit. This is display-only and runs
         // BEFORE the real decision loop so the status is present even on a deny short-circuit
@@ -371,7 +371,7 @@ impl Engine {
     }
 
     /// Mirror the request's resolved admission into the bounded, deduped admission decision
-    /// log (JEF-237) AND the durable journal (so it survives a restart). One row per
+    /// log AND the durable journal (so it survives a restart). One row per
     /// request — clean admits included — deduped by `(subject, image, decision)` so a
     /// Deployment's replicas or a CronJob's runs coalesce into a single counted row.
     /// Low-cardinality, no secret values.
@@ -403,7 +403,7 @@ impl Engine {
 
 impl Engine {
     /// Run every gate's [`shadow_evaluate`](Policy::shadow_evaluate) — regardless of `applies()`
-    /// or enforced scope (JEF-246) — and fold the verdicts into the summary's three-state
+    /// or enforced scope — and fold the verdicts into the summary's three-state
     /// signature/mesh status and net would-admit. Keyed on the stable gate NAME so the engine
     /// stays policy-agnostic. Display-only: this records the counterfactual; it never decides.
     async fn shadow_what_if(
@@ -427,7 +427,7 @@ impl Engine {
 }
 
 /// A single representative image ref for the request's `(subject, image, decision)` dedup key
-/// (JEF-237). For a Pod it's the FIRST workload container image (init/ephemeral and the
+/// . For a Pod it's the FIRST workload container image (init/ephemeral and the
 /// injected `linkerd-proxy` sidecar are skipped, so a meshed and an unmeshed copy of the same
 /// app dedup together). Empty for a non-Pod or an object with no container image — the row
 /// then dedups on `(subject, decision)` alone. Low-cardinality and operator-facing; UNTRUSTED
@@ -598,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_one_holistic_admission_row_with_signature_and_mesh_status() {
-        // JEF-237: a single per-request admission row carries the COARSE signature + mesh
+        // a single per-request admission row carries the COARSE signature + mesh
         // status derived from each gate's outcome, the resolved decision word, the subject,
         // image, namespace, and the actionable reason — not one row per policy.
         let log = Arc::new(PolicyDecisionLog::new());
@@ -651,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_clean_admit_as_an_allow_row() {
-        // JEF-237's headline: a good pod (signed + meshed) is RECORDED as a green admit row,
+        // 's headline: a good pod (signed + meshed) is RECORDED as a green admit row,
         // not dropped — so a healthy cluster's admission decision log isn't empty.
         let log = Arc::new(PolicyDecisionLog::new());
         let engine = Engine::new(
@@ -718,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn replica_churn_dedups_into_one_counted_admission_row() {
         // A Deployment's replicas (same subject + image + outcome) must coalesce into ONE
-        // counted row, not flood the ring — the bounding JEF-237 requires.
+        // counted row, not flood the ring — the bounding requires.
         let log = Arc::new(PolicyDecisionLog::new());
         let engine = Engine::new(
             vec![Box::new(Fixed {
@@ -741,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_admission_is_persisted_to_the_journal() {
-        // JEF-237 persistence: with a journal attached, the resolved admission is written as a
+        // persistence: with a journal attached, the resolved admission is written as a
         // durable Admission line so the admission decision log survives a restart.
         use crate::engine::journal::{Decision as JournalDecision, DecisionJournal};
         let path = std::env::temp_dir().join(format!(
@@ -805,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_scope_would_deny_is_recorded_but_admitted() {
-        // JEF-246 acceptance: an out-of-scope gate (here a `Fixed` that audits — the would-deny-
+        // acceptance: an out-of-scope gate (here a `Fixed` that audits — the would-deny-
         // but-allowed case) still ADMITS the request (the actual decision is `audit`, allowed),
         // yet the shadow what-if records `would-fail` + `would_admit = false` so the operator
         // sees what enforcement would do.
@@ -833,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_scope_would_admit_records_the_clean_counterfactual() {
-        // JEF-246 acceptance: an out-of-scope image that WOULD pass both gates is recorded with
+        // acceptance: an out-of-scope image that WOULD pass both gates is recorded with
         // a passing shadow status and `would_admit = true` — not empty/ambiguous. (`would-pass`
         // here because the gate, while passing, is modeled out of enforced scope via a separate
         // policy below; for `Fixed::Allow` the model reports `verified`, the in-scope pass.)

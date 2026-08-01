@@ -1,4 +1,4 @@
-//! Per-objective corroboration tests for the proof layer (JEF-49), split out of
+//! Per-objective corroboration tests for the proof layer, split out of
 //! `tests.rs` purely to keep every file under the 1,000-line cap (repo CLAUDE.md;
 //! tests count toward it). These exercise the `corroborates(behavior, attack)` seam
 //! directly (ADR-0014): each behavior corroborates only the objective class whose
@@ -19,7 +19,7 @@ fn pod(value: Value) -> k8s_openapi::api::core::v1::Pod {
     serde_json::from_value(value).expect("valid Pod fixture")
 }
 
-// ── JEF-49: per-objective corroboration from the agent's own behaviors ──
+// ── per-objective corroboration from the agent's own behaviors ──
 // These exercise the `corroborates(behavior, attack)` seam directly (ADR-0014):
 // each behavior corroborates only the objective class whose ATT&CK tactic it
 // evidences. The mapping is keyed on `attack.tactic`.
@@ -45,7 +45,7 @@ fn secret_read_corroborates_credential_access() {
         source: crate::engine::graph::SecretReadSource::Mounted,
     };
     assert!(corroborates(&behavior, &CREDENTIAL_ACCESS));
-    // An API secret read (JEF-269) corroborates the same objective — the tactic, not the
+    // An API secret read corroborates the same objective — the tactic, not the
     // read mechanism, is what corroborates a credential-access chain.
     assert!(corroborates(
         &Behavior::SecretRead {
@@ -56,7 +56,7 @@ fn secret_read_corroborates_credential_access() {
     ));
 }
 
-/// A library load corroborates a FOOTHOLD (Initial Access / T1190): post-JEF-75 the
+/// A library load corroborates a FOOTHOLD (Initial Access / T1190): post- the
 /// surviving LibraryLoaded is already pruned to a vulnerable library.
 #[test]
 fn library_load_corroborates_foothold() {
@@ -105,7 +105,7 @@ fn behavior_does_not_corroborate_unrelated_objective() {
     ));
 }
 
-// ── JEF-307: high-signal foothold peers corroborate a FOOTHOLD (Initial Access) ──
+// ── high-signal foothold peers corroborate a FOOTHOLD (Initial Access) ──
 // A connection to a cloud-metadata/IMDS endpoint or the Kubernetes API server is the
 // engine-side classification of a cloud-metadata / API-server contact — it
 // corroborates the entry foothold (T1190) and NOTHING else. Ordinary in-cluster and
@@ -124,7 +124,7 @@ fn imds_peer_corroborates_foothold() {
 /// A connection to the resolved Kubernetes API server corroborates a FOOTHOLD (T1190).
 #[test]
 fn api_server_peer_corroborates_foothold() {
-    // JEF-131 resolves the apiserver ClusterIP to the `default/kubernetes` label.
+    // resolves the apiserver ClusterIP to the `default/kubernetes` label.
     let apiserver = Behavior::NetworkConnection {
         peer: "default/kubernetes:443 (10.96.0.1)".into(),
         internet: false,
@@ -174,8 +174,8 @@ fn alert_still_corroborates_any_objective() {
     assert!(corroborates(&alert, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// A shell exec (JEF-55 interactive-shell) corroborates ANY objective like an alert
-/// (JEF-117): the "terminal shell in container" tamper-now signal.
+/// A shell exec (interactive-shell) corroborates ANY objective like an alert
+/// : the "terminal shell in container" tamper-now signal.
 #[test]
 fn shell_exec_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
@@ -191,7 +191,7 @@ fn shell_exec_corroborates_any_objective() {
     assert!(corroborates(&shell, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// A package-manager exec (JEF-55) corroborates ANY objective like an alert (JEF-117):
+/// A package-manager exec corroborates ANY objective like an alert:
 /// the "package management in container" tamper-now signal.
 #[test]
 fn package_manager_exec_corroborates_any_objective() {
@@ -206,7 +206,7 @@ fn package_manager_exec_corroborates_any_objective() {
     assert!(corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// NEGATIVE / REGRESSION GUARD (JEF-317): an anon-inode exec (`exe_anon_inode: true`) must
+/// NEGATIVE / REGRESSION GUARD: an anon-inode exec (`exe_anon_inode: true`) must
 /// NOT blanket-corroborate via the flat [`corroborates`] relation, even though it is a real
 /// Falco-parity signal — this is the exact shape a security review flagged in an earlier,
 /// withdrawn version (which routed a path-shape classification into this same blanket
@@ -230,7 +230,7 @@ fn anon_inode_exec_does_not_blanket_corroborate() {
 
 /// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating — legit
 /// entrypoints exec constantly (the ADR-0011 false positive). It is model evidence only,
-/// never the broad tamper-now gate (JEF-117).
+/// never the broad tamper-now gate.
 #[test]
 fn bare_exec_does_not_corroborate() {
     let bare = Behavior::ProcessExec {
@@ -245,7 +245,7 @@ fn bare_exec_does_not_corroborate() {
 }
 
 /// NEGATIVE: a PrivilegeChange stays non-corroborating — legit entrypoints escalate
-/// (the ADR-0011 false positive). JEF-117 promotes notable execs only, not privesc.
+/// (the ADR-0011 false positive). promotes notable execs only, not privesc.
 #[test]
 fn privilege_change_does_not_corroborate() {
     let priv_change = Behavior::PrivilegeChange {
@@ -325,7 +325,7 @@ fn secret_read_signal_corroborates_credential_chain_end_to_end() {
     );
 }
 
-/// JEF-77, the gap this issue closes: a `LibraryLoaded` (vuln-matched by JEF-75) on an
+/// The foothold-tactic gap this closes: a `LibraryLoaded` (already vuln-matched) on an
 /// internet-facing, exploitable entry corroborates the chain through the *foothold*
 /// tactic (INITIAL_ACCESS / T1190), even though the objective itself is tagged
 /// CREDENTIAL_ACCESS. Before the foothold-aware path this arm was dormant end-to-end.
@@ -365,7 +365,7 @@ fn library_load_signal_corroborates_through_foothold_end_to_end() {
                 severity: Severity::Critical,
                 exploited_in_wild: true,
                 epss: None,
-                // The loaded library below must match a CVE package so JEF-75 keeps it
+                // The loaded library below must match a CVE package so keeps it
                 // (`libssl.so.1.1` and `openssl` both normalize to `ssl`).
                 pkg_name: Some("openssl".into()),
                 sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
@@ -400,7 +400,7 @@ fn library_load_signal_corroborates_through_foothold_end_to_end() {
     );
 }
 
-/// NEGATIVE (JEF-77): a chain with **no** foothold — an internal, non-exploitable
+/// NEGATIVE: a chain with **no** foothold — an internal, non-exploitable
 /// entry, the assume-breach case — is unaffected by the foothold-aware path. A library
 /// load corroborates nothing, because the objective is CREDENTIAL_ACCESS and there is
 /// no INITIAL_ACCESS foothold tactic to match against.
@@ -464,7 +464,7 @@ fn library_load_does_not_corroborate_without_foothold() {
     );
 }
 
-/// JEF-298: the path enumeration runs on an explicit work-stack, so a very deep linear
+/// the path enumeration runs on an explicit work-stack, so a very deep linear
 /// chain enumerates correctly and cannot overflow the call stack. We build a single long
 /// path of ~20k proof-grade movement edges (well under the [`PATH_ENUM_BUDGET`] relaxation
 /// ceiling) between non-workload endpoint nodes — non-workloads bypass the compromise gate,
@@ -518,7 +518,7 @@ fn deep_chain_enumerates_on_explicit_stack() {
     }
 }
 
-/// JEF-284: the two quarantine-reason dispositions are distinct, fixed labels — the
+/// the two quarantine-reason dispositions are distinct, fixed labels — the
 /// dashboard names remotely-exploitable vs actively-exploited separately (and both apart
 /// from the entry-foothold quarantine).
 #[test]

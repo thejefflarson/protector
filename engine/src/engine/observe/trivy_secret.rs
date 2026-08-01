@@ -1,5 +1,5 @@
 //! trivy-operator `ExposedSecretReport` → exposed-secret [`ScanFinding`]s on an Image
-//! (a Vulnerability-port-adjacent adapter, ADR-0003; JEF-244).
+//! (a Vulnerability-port-adjacent adapter, ADR-0003;).
 //!
 //! Same trust boundary as the `VulnerabilityReport` adapter ([`super::trivy`]): a pure
 //! mapping from a `DynamicObject`'s `report` field into the graph's vocabulary, unit-tested
@@ -7,7 +7,7 @@
 //! key, a token committed into the layers) — a real breach primitive, so the findings land
 //! on the Image node alongside its CVEs and are shared by every workload on that digest.
 //!
-//! REDACTION GUARANTEE (JEF-244): only trivy's `ruleID`, `category`, `severity`, target
+//! REDACTION GUARANTEE: only trivy's `ruleID`, `category`, `severity`, target
 //! path, and the already-**redacted** `match` are read. The raw secret value is NEVER a
 //! field of trivy's report (trivy redacts before emitting the CR) and is never parsed,
 //! stored, or rendered here. The unit tests assert no plaintext secret reaches the output.

@@ -1,6 +1,6 @@
-//! The adjudicator (ADR-0013, refined by JEF-134): proof PROVES + ENRICHES, the
+//! The adjudicator (ADR-0013): proof PROVES + ENRICHES, the
 //! model DECIDES breach. Deterministic proof establishes the *facts* — reachability
-//! (the proven chain), how each objective is reached (the JEF-79 authorization tags),
+//! (the proven chain), how each objective is reached (the authorization tags),
 //! and the enrichment (CVEs, runtime behavior). The model makes the *breach* call a
 //! human analyst would over that whole picture — but it never *runs* an exploit (the
 //! named bound: it reasons about exploitability, it does not exercise it).
@@ -9,7 +9,7 @@
 //! only; the model decides breach holistically from the **conjunction** of
 //! reachability and evidence. Authorized access (`[RBAC-GRANTED]`/`[MOUNTED]`), however
 //! broad or high-severity, is NOT a breach without exploitation evidence; a CVE or
-//! behavioral signal on a reachable path is. JEF-134 deliberately removed the
+//! behavioral signal on a reachable path is. deliberately removed the
 //! deterministic pre-decision (the old "promotion grounds" pre-call filter and the
 //! high-severity-tactic / cross-ns backstop) that mis-gated ArgoCD: the engine no
 //! longer pre-decides, it hands EVERY breach-relevant entry's proven chain + enrichment
@@ -38,7 +38,7 @@ use crate::engine::graph::{NodeKey, SecurityGraph};
 
 /// The model's judgement on a proven chain.
 ///
-/// `Serialize`/`Deserialize` (JEF-301) let a DECISIVE verdict be persisted in the durable
+/// `Serialize`/`Deserialize` let a DECISIVE verdict be persisted in the durable
 /// decision journal and replayed on boot as the EXACT prior decision — an `Exploitable`
 /// replays as `Exploitable`, never downgraded — so an unchanged entry is served from the
 /// verdict cache without a fresh (slow, OOM-prone) model call after a restart.
@@ -102,13 +102,13 @@ pub trait Adjudicator: Send + Sync {
     /// risk? One call per entry, not per path — the model sees the whole subgraph
     /// anchored at that internet front door at once.
     ///
-    /// `prompt` is the ALREADY-BUILT deterministic prompt (JEF-350): the engine builds it
+    /// `prompt` is the ALREADY-BUILT deterministic prompt: the engine builds it
     /// once (before the cache lookup, to derive the cache key from its hash) and hands it in,
     /// so the model call reuses the exact same bytes the cache keyed on rather than rebuilding
     /// it — the cached-on input and the sent input can never drift. `entry`/`objectives`/
     /// `graph` are still supplied for the deterministic backstops and the judgement record.
     /// `downstream` is the same deduped, sorted set of workload [`NodeKey`]s on the entry's
-    /// proven paths that `prompt` renders a per-node evidence block for (JEF-565) — so an
+    /// proven paths that `prompt` renders a per-node evidence block for — so an
     /// implementation's own backstops can weigh downstream evidence exactly as the prompt does.
     /// `menu` is the deterministic cut-choice menu (ADR-0034 D4) the caller built for this exact
     /// entry — the SAME menu `prompt`'s containment-options section renders — so an
@@ -172,8 +172,8 @@ pub use prompt::{
 pub use surface::JudgedSurface;
 // The cross-module helpers the rest of the crate imports by the stable
 // `reason::adjudicate::` path. The verdict cache keys on `prompt_cache_key` (a hash of the
-// deterministic prompt, JEF-350). The prompt sanitizer now lives in the shared
-// `engine::redact` module (ADR-0031, JEF-486) — `guards` re-exports it for in-module use.
+// deterministic prompt). The prompt sanitizer now lives in the shared
+// `engine::redact` module (ADR-0031) — `guards` re-exports it for in-module use.
 // The remaining submodule helpers are internal to this module and are imported directly from
 // their submodule (including by the tests).
 

@@ -1,4 +1,4 @@
-//! The delta-aware adjudication surface (ADR-0023, JEF-391): "the state is the context, the
+//! The delta-aware adjudication surface (ADR-0023): "the state is the context, the
 //! delta is the question." A [`JudgedSurface`] is the projection of an entry's judged evidence
 //! into sorted key-sets — reachable objectives (with their reach tags), running CVEs, exposed
 //! secrets, static posture, and observed runtime behavior. It is derived from the SAME rendered
@@ -13,7 +13,7 @@
 //!   is a focused delta-judgment rather than a from-scratch re-derivation of the world;
 //! - a PURELY SUBTRACTIVE delta (elements only removed — a pod vanished, a peer aged out) ⇒ NO
 //!   fresh model call: the prior decisive verdict holds, its supporting surface only shrank, and
-//!   removal is de-escalated by the existing recency/reversion path (ADR-0009/JEF-141), never a
+//!   removal is de-escalated by the existing recency/reversion path (ADR-0009), never a
 //!   re-judge. This stops the ephemeral-churn ping-pong at its root.
 //!
 //! CORRECTNESS (non-negotiable, security-relevant): the full current state ALWAYS stays in the
@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 /// set holds the EXACT rendered evidence lines the prompt carries for that category, so the
 /// baseline↔current diff is over the same text the model reasons about (ADR-0023's "same proven
 /// graph" requirement). Bounded by the entry's proven surface — the same bound the prompt (and
-/// the JEF-390 LRU that already stores whole prompts) is under; one snapshot per entry, replaced
+/// the LRU that already stores whole prompts) is under; one snapshot per entry, replaced
 /// on each decisive verdict, so it never grows across passes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JudgedSurface {
@@ -38,7 +38,7 @@ pub struct JudgedSurface {
     secrets: BTreeSet<String>,
     posture: BTreeSet<String>,
     behaviors: BTreeSet<String>,
-    /// The downstream-workload evidence lines (JEF-565) — projected from the SAME node-prefixed
+    /// The downstream-workload evidence lines — projected from the SAME node-prefixed
     /// lines the downstream prompt blocks render (`downstream::render_downstream`). This is the
     /// category that closes the trap: without it, a downstream-only change (a new CVE two hops
     /// in) is visible to the model in the PROMPT but invisible to the re-judge gate, so the
@@ -107,7 +107,7 @@ pub struct ChangesSince {
     secrets: Vec<String>,
     posture: Vec<String>,
     behaviors: Vec<String>,
-    /// Downstream-workload evidence additions (JEF-565) — a newly-appeared CVE/secret/behavior
+    /// Downstream-workload evidence additions — a newly-appeared CVE/secret/behavior
     /// on a workload on the entry's proven paths, or a downstream node transitioning
     /// clean→evidence-bearing.
     downstream: Vec<String>,

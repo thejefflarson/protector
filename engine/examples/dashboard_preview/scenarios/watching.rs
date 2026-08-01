@@ -74,7 +74,7 @@ pub(super) fn build_watching() -> DashboardState {
         armed: false,
         tuf_cache_age_secs: Some(3 * 60 * 60),
         unverifiable_spike: false,
-        checking_images: 2, // degraded — two images stuck 'checking' (JEF-326).
+        checking_images: 2, // degraded — two images stuck 'checking'.
     });
     findings.set_model_health(ModelHealth::Ok);
     findings.mark_pass(SystemTime::now());

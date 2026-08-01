@@ -2,7 +2,7 @@
 //! determinism resolves each to its narrowest legal cut. This module is the PURE decision
 //! machinery only — types, the deterministic menu render + resolver, the tolerant parser,
 //! and the grounding guards. No engine wiring: `adj_pass.rs`, `respond::reconcile`, the
-//! journal, and the live prompt are untouched here (JEF-570's scope). Every helper this
+//! journal, and the live prompt are untouched here ('s scope). Every helper this
 //! module needs already exists elsewhere in the crate — `respond::containment_for`,
 //! `respond::{quarantine_link, quarantine_workload_link}`, `respond::actuator::
 //! predict_blast_radius`, and `adjudicate::guards::{guard_fabricated_cve,
@@ -31,7 +31,7 @@ use crate::engine::respond::ProposedAction;
 /// (`ProvenChain::corroborated`) into the model's vocabulary — that fact never needed the
 /// model to restate it, so fewer output values means fewer temp>0 boundary flips.
 ///
-/// `Serialize`/`Deserialize` (ADR-0034 D8, JEF-639) let a journaled decision's assessment
+/// `Serialize`/`Deserialize` (ADR-0034 D8) let a journaled decision's assessment
 /// round-trip through the durable journal's `Incident` line — see
 /// [`crate::engine::journal::Decision::Incident`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,11 +57,11 @@ pub struct ChosenCut {
     pub node: NodeKey,
     pub action: ProposedAction,
     /// The concrete edge/self-reference this cut severs — the SAME [`Link`] the menu itself
-    /// resolved (JEF-570), so a caller (the ledger's `reconcile`) can build the mitigation
+    /// resolved, so a caller (the ledger's `reconcile`) can build the mitigation
     /// directly rather than re-deriving a `Link` from the signature string.
     pub cut: Link,
     /// The stable cut identity ([`crate::engine::respond::cut_signature`]) — the ledger's
-    /// and journal's key for this cut (ADR-0034 D6/D8, JEF-570).
+    /// and journal's key for this cut (ADR-0034 D6/D8).
     pub cut_signature: String,
 }
 
@@ -88,7 +88,7 @@ impl IncidentDecision {
         }
     }
 
-    /// Bridge to the legacy 4-value [`super::Verdict`] (JEF-570), so the ADR-0023 verdict
+    /// Bridge to the legacy 4-value [`super::Verdict`], so the ADR-0023 verdict
     /// cache / re-judge gate / breaker+backoff / journal `Breach` line / dashboard / notifier —
     /// every rail this ticket must leave intact — keep consuming exactly the type they already
     /// do, unchanged. `Confirmed` is never produced here: it collapsed into `Attack`
@@ -98,7 +98,7 @@ impl IncidentDecision {
     /// logic reads — are preserved bit-for-bit: `is_confirmed()` is true for `Confirmed` OR
     /// `Exploitable`, and `promotes()` true only for `Exploitable`, so mapping every `Attack`
     /// uniformly to `Exploitable` changes neither. `Confirmed` remains a valid `Verdict` value
-    /// only for backward-reading an old journal line (JEF-301 replay) written before this
+    /// only for backward-reading an old journal line (replay) written before this
     /// ticket landed.
     pub fn to_verdict(&self) -> super::Verdict {
         match self.assessment {
@@ -118,7 +118,7 @@ pub use guards::{
 };
 pub(crate) use menu::normalize as normalize_menu;
 pub use menu::{Menu, MenuLine, build_menu};
-// The blast-radius resolver (JEF-674): re-exported so the finding detail's cut-set panel can
+// The blast-radius resolver: re-exported so the finding detail's cut-set panel can
 // recompute + render the SAME advisory note a `ChosenCut` would have shown on the model's menu,
 // rather than inventing its own wording.
 pub(crate) use menu::cut_blast_note;

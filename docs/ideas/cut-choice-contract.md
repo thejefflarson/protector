@@ -1,8 +1,8 @@
 # Idea — the incident-responder cut-choice contract
 
 **Status:** decided (2026-07-28). Realized by [ADR-0034](../adr/0034-cut-choice-contract.md);
-refines [ADR-0032](../adr/0032-model-is-incident-responder.md) §3. Sprint tickets: JEF-568
-(bench), JEF-570 (build), JEF-569 (shadow+arm), plus the new `incident/` module chunk.
+refines [ADR-0032](../adr/0032-model-is-incident-responder.md) §3. Sprint tickets:
+(bench) (build) (shadow+arm), plus the new `incident/` module chunk.
 
 ## Idea
 
@@ -14,10 +14,10 @@ keystone left open. Settle the "minimality fork" so T3 can build it and T2b can 
 
 ADR-0032 commits protector to "the model is the incident responder" but left the decision
 contract's exact shape open, sketched as a *menu of mechanisms* (Option A). The re-scoped
-constraint (JEF-568: **qwen3:1.7b-first**, escalate only on measured failure) invalidates the
+constraint (**qwen3:1.7b-first**, escalate only on measured failure) invalidates the
 parent idea's "plan of record: 4B." The contract must be one a **1.7B CPU judge can emit
 reliably**, or the refactor lands unarmed. Everything around it is settled: per-node
-downstream evidence in the prompt (JEF-565, live), the uniform auto-action gate (JEF-566,
+downstream evidence in the prompt (live), the uniform auto-action gate (
 live in `respond/mod.rs::is_live_corroborated`), the delta/cache gate (ADR-0023),
 grounding-guard doctrine (ADR-0029). Only the decision output and its consumers remain.
 
@@ -36,7 +36,7 @@ grounding-guard doctrine (ADR-0029). Only the decision output and its consumers 
    zero authority gained.
 3. **"1.7b can produce the cut contract" — shaky but shapeable.** It provably does the 4-value
    verdict (14/15 this session; ADR-0026 12/12). Its documented failures are n-gram parroting
-   of primed instruction phrases (JEF-134, JEF-451) and size-correlated tail-flips at temp>0
+   of primed instruction phrases and size-correlated tail-flips at temp>0
    (ADR-0029). Both hit an *opaque-id, mechanism-comparing* output (A) far harder than a
    *copy-the-node-key-you-just-analyzed* output (B). Choose the contract that sits inside what
    it provably does; T2b decides whether it holds.
@@ -98,6 +98,6 @@ deployed 1.7B; it is the honest gate on "does 1.7B hold or do we escalate."
 
 ## Handoff
 
-Tickets already exist (JEF-568/570/569) — this brief **reconciles** them to B rather than
+Tickets already exist for this work — this brief **reconciles** them to plan B rather than
 creating new ones; the one addition is the pure `incident/` module as the unblocked first
-chunk. JEF-570's Option-A description is superseded by ADR-0034.
+chunk. The original Option-A description is superseded by ADR-0034.

@@ -1,4 +1,4 @@
-//! The trust core (JEF-488): tier clamp → per-tool cap → tool → journaled disclosure. This is the
+//! The trust core: tier clamp → per-tool cap → tool → journaled disclosure. This is the
 //! layer that keeps EVERY trust decision in OUR code (ADR-0031 §6) — rmcp is only the transport that
 //! calls [`dispatch`]. It is deliberately rmcp-free (takes a `serde_json` argument map and a
 //! resolved ceiling), so the whole redaction/clamp/audit surface is unit-testable without the HTTP

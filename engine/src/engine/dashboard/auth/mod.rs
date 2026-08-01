@@ -10,13 +10,13 @@
 //! `Authorization: Bearer` token (incl. ID-JAG, `aud=protector`) — because the verifier only ever
 //! sees a JWT, not how it arrived (ADR-0030 §3/§6/§7).
 //!
-//! **Scope (JEF-485):** this module is the verifier primitive + a mountable middleware layer. The
+//! **Scope:** this module is the verifier primitive + a mountable middleware layer. The
 //! content-negotiating enforcement wiring that mounts it on the live [`super::router`] (login
-//! redirect vs JSON `401`, the loud unconfigured-mode passthrough) lives in [`enforce`] (JEF-487).
+//! redirect vs JSON `401`, the loud unconfigured-mode passthrough) lives in [`enforce`].
 //! [`OidcConfig::from_env`] models the UNCONFIGURED state (issuer absent) so that wiring can choose
 //! the passthrough behavior.
 //!
-//! **Env namespace (JEF-487).** The dashboard-auth env vars are `PROTECTOR_DASHBOARD_OIDC_*` — a
+//! **Env namespace.** The dashboard-auth env vars are `PROTECTOR_DASHBOARD_OIDC_*` — a
 //! namespace DISTINCT from the sigstore/cosign signature-verification `PROTECTOR_OIDC_ISSUER`
 //! (the Fulcio keyless *cert-identity* issuer, unrelated to who may VIEW the dashboard). The two
 //! would otherwise collide: the chart sets the signature issuer unconditionally, which — under a
@@ -59,7 +59,7 @@ const ENV_AUDIENCE: &str = "PROTECTOR_DASHBOARD_OIDC_AUDIENCE";
 const ENV_TIER_CLAIM: &str = "PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM";
 /// `PROTECTOR_DASHBOARD_OIDC_ALGORITHM` — the pinned asymmetric algorithm (`RS256` | `ES256`).
 const ENV_ALGORITHM: &str = "PROTECTOR_DASHBOARD_OIDC_ALGORITHM";
-/// `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` — operator identity→tier grants (JEF-501): resolves the
+/// `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` — operator identity→tier grants: resolves the
 /// ceiling from the VERIFIED `sub`/`email` when the IdP mints no `tier` claim at all (e.g.
 /// Cloudflare Access relaying GitHub). Format `tier=id1,id2;tier=id3`, e.g.
 /// `raw=alice@example.com;forensic=bob@example.com`. Unset/empty = no grants (unchanged behavior).
@@ -118,7 +118,7 @@ pub struct OidcConfig {
     pub tier_claim: String,
     /// The pinned asymmetric algorithm.
     pub algorithm: SigningAlgorithm,
-    /// Operator identity→tier grants (JEF-501): resolves the ceiling from the verified `sub`/
+    /// Operator identity→tier grants: resolves the ceiling from the verified `sub`/
     /// `email` when no `tier` claim is present. Empty (default) = no grants — current behavior.
     pub tier_grants: TierGrants,
 }
@@ -140,7 +140,7 @@ pub enum ConfigError {
     )]
     UnsupportedTier(String),
     /// A `PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS` entry names a tier that is not one of the
-    /// recognized tiers — a loud misconfiguration (JEF-501), never a silently-dropped grant.
+    /// recognized tiers — a loud misconfiguration, never a silently-dropped grant.
     #[error(
         "PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS names an unrecognized tier `{0}` \
          (redacted, forensic, raw)"
@@ -236,7 +236,7 @@ pub struct Identity {
     /// The resolved authorization tier — see [`Tier::from_claims_with_grants`] for the precedence
     /// (an explicit recognized `tier` claim, else an identity→tier grant, else the floor).
     pub tier: Tier,
-    /// The verified token's `email` claim, if present (JEF-501). Not an identity in its own
+    /// The verified token's `email` claim, if present. Not an identity in its own
     /// right — `subject` remains the principal — but threaded through so callers/logs that want it
     /// (and the tier-grant resolution above) can read it without re-decoding the token.
     pub email: Option<String>,
@@ -312,7 +312,7 @@ impl AuthError {
 
     /// The HTTP status this failure maps to as the fail-closed default. A JWKS-unreachable
     /// condition is a `503` (we could not verify); every other failure is a `401`. The finer
-    /// content negotiation (login redirect, JSON body) is JEF-487; this is only the safe default.
+    /// content negotiation (login redirect, JSON body) is ; this is only the safe default.
     pub fn status(&self) -> StatusCode {
         match self {
             AuthError::JwksUnreachable => StatusCode::SERVICE_UNAVAILABLE,
@@ -324,7 +324,7 @@ impl AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         // Return the status only — the specific variant is for logs/tests, never leaked to the
-        // caller (which check failed is not the caller's business). JEF-487 shapes the body.
+        // caller (which check failed is not the caller's business). shapes the body.
         self.status().into_response()
     }
 }
@@ -423,7 +423,7 @@ fn build_validation(config: &OidcConfig) -> Validation {
 ///
 /// This is the sibling shape to [`super::security_headers::set_csp`] — a mountable layer that emits
 /// a BARE status on failure (no content negotiation). The live [`super::router`] mounts the
-/// content-negotiating [`enforce`] layer instead (JEF-487, ADR-0030 §6), which reuses the shared
+/// content-negotiating [`enforce`] layer instead (ADR-0030 §6), which reuses the shared
 /// [`authenticate`] seam this layer also uses — so the verification logic lives in exactly one
 /// place. Mount this bare form with `axum::middleware::from_fn_with_state(Arc<Verifier>, require_oidc)`.
 pub async fn require_oidc(

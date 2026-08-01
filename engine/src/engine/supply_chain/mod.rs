@@ -11,7 +11,7 @@
 //!      TOFU baseline, and surface signing-regression drift ([`signing_drift`]).
 //!   2. [`signing_rekor::reconcile`] — opt-in: corroborate baselines against the public
 //!      transparency log and surface registry↔log divergence (OFF ⇒ zero egress).
-//!   3. [`provenance_sweep::sweep`] — default-on (JEF-410): observe each image's SLSA build
+//!   3. [`provenance_sweep::sweep`] — default-on: observe each image's SLSA build
 //!      provenance and fold the verified provenance identity into the SAME baseline
 //!      ([`provenance_drift`]). No `PROTECTOR_*_ENABLE` gate — it adds zero egress beyond the
 //!      signing sweep, so it stays on by default like every other detector.
@@ -33,17 +33,17 @@ use crate::policies::signature::{
     ProvenanceScanner, RekorLane, SigningExceptions, SigningObserver, SigningPosture,
 };
 
-// The per-pass signing-posture sweep (ADR-0020 Stage 1, JEF-261): observes the already-running
+// The per-pass signing-posture sweep (ADR-0020 Stage 1): observes the already-running
 // pods' images and records their posture into the shared admission-decision log, complementing the
 // webhook's admit-time observation.
 pub mod signing_sweep;
 
-// The pure signing-drift classifier (ADR-0020 §3, JEF-264): classifies a fresh posture against the
+// The pure signing-drift classifier (ADR-0020 §3): classifies a fresh posture against the
 // repo's learned baseline into continuous / regression / identity-change / new-repo, so the sweep
 // can surface an audit-only signing-regression finding on drift from the baseline.
 pub mod signing_drift;
 
-// The build-provenance drift classifier + sweep (ADR-0020 §5, JEF-275; default-on since JEF-410):
+// The build-provenance drift classifier + sweep (ADR-0020 §5; default-on since):
 // the provenance twin of signing_drift/signing_sweep — observes each image's SLSA provenance
 // posture, learns the per-repo provenance identity (TOFU), and surfaces an audit-only
 // provenance-change finding when an established repo is built by an unexpected builder/source.
@@ -51,17 +51,17 @@ pub mod signing_drift;
 pub mod provenance_drift;
 pub mod provenance_sweep;
 
-// TUF trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5, JEF-280): a stale
+// TUF trust-root freshness + fleet-wide unverifiable-spike signals (ADR-0020 §5): a stale
 // or starved trust root turns genuine signatures into `UnverifiableHere` and can mass-blind signing
 // detection, so its cache age + a fleet-wide unverifiable spike are surfaced (non-green) in
 // readiness. Pure/deterministic signals; never a gate.
 pub mod signing_trust;
 
-// The per-repo signing-baseline strength row (ADR-0020 §4, JEF-266): surfaces whether a repo's
+// The per-repo signing-baseline strength row (ADR-0020 §4): surfaces whether a repo's
 // baseline is log-corroborated (Rekor vouches for it) or local-only (weaker TOFU) in the inventory.
 pub mod signing_baseline_strength;
 
-// The opt-in Rekor transparency-log lane (ADR-0020 §4, JEF-266): after the sweep observes each
+// The opt-in Rekor transparency-log lane (ADR-0020 §4): after the sweep observes each
 // image, corroborates the repo baseline against the public signing history (marking it stronger
 // than local-only TOFU) and surfaces registry↔log divergence as a finding. OFF by default — zero
 // egress preserved unless the operator enables it.
@@ -71,13 +71,13 @@ pub mod signing_rekor;
 /// one's TTL + image/query cache persists across passes (a steady cluster re-sweeps for free). Any
 /// field may be `None`: a missing signing or provenance observer (misconfigured TUF cache)
 /// degrades to a no-op sweep, and the Rekor lane specifically is opt-in and absent by default
-/// (a genuine second egress destination — everything else here is default-on, JEF-410).
+/// (a genuine second egress destination — everything else here is default-on).
 pub struct SupplyChainSweeps<'a> {
     /// Signing-posture observer (ADR-0020 Stage 1). `None` ⇒ the signing sweep is a no-op.
     pub signing_observer: Option<&'a SigningObserver>,
     /// Opt-in Rekor transparency-log lane (ADR-0020 §4). `None` ⇒ reconcile is a no-op (zero egress).
     pub rekor_lane: Option<&'a RekorLane>,
-    /// Build-provenance scanner (ADR-0020 §5), default-on (JEF-410). `None` only if the shared
+    /// Build-provenance scanner (ADR-0020 §5), default-on. `None` only if the shared
     /// cosign observer itself failed to build (e.g. TUF cache dir); the provenance sweep is then a
     /// no-op, same degrade path as a missing `signing_observer`.
     pub provenance_scanner: Option<&'a ProvenanceScanner>,
@@ -88,13 +88,13 @@ pub struct SupplyChainSweeps<'a> {
 }
 
 /// Run the full supply-chain sweep sequence over one observed snapshot, in the SAME order with the
-/// SAME arguments the watch loop drove inline before JEF-369 — a behavior-neutral relocation of the
+/// SAME arguments the watch loop drove inline before — a behavior-neutral relocation of the
 /// call sequence behind one entry point.
 ///
 /// In order: observe signing posture ([`signing_sweep::sweep`]) → opt-in Rekor reconciliation
 /// ([`signing_rekor::reconcile`]) → default-on provenance observation ([`provenance_sweep::sweep`]).
 /// Then publishes the freshly-updated baseline to the webhook (the engine is the SOLE writer;
-/// JEF-265) — done after ALL baseline-mutating sweeps so the webhook always sees a consistent,
+/// ) — done after ALL baseline-mutating sweeps so the webhook always sees a consistent,
 /// whole-pass snapshot — and refreshes the LIVE signing-trust readiness signals ([`signing_trust`])
 /// off the resulting posture map, preserving the boot-captured static coverage fields.
 ///
@@ -114,7 +114,7 @@ pub async fn run_sweeps(
     readiness: ReadinessConfig,
 ) -> ReadinessConfig {
     // Observe the signing posture of every already-running image and record it into the shared
-    // admission-decision log (JEF-261). Bounded by the observer's cache + MAX_IMAGES; a no-op when
+    // admission-decision log. Bounded by the observer's cache + MAX_IMAGES; a no-op when
     // no observer is configured. Run before `process` so the inventory reflects the same snapshot
     // the engine just reasoned over.
     let signing_map = signing_sweep::sweep(
@@ -126,7 +126,7 @@ pub async fn run_sweeps(
         sweeps.exceptions,
     )
     .await;
-    // Opt-in Rekor reconciliation (JEF-266): corroborate baselines against the public log and
+    // Opt-in Rekor reconciliation: corroborate baselines against the public log and
     // surface registry↔log divergence. A no-op (zero egress) when the lane is off.
     signing_rekor::reconcile(
         sweeps.rekor_lane,
@@ -136,7 +136,7 @@ pub async fn run_sweeps(
         journal.as_ref(),
     )
     .await;
-    // Observe each running image's SLSA build provenance (JEF-275, ADR-0020 §5) and fold the
+    // Observe each running image's SLSA build provenance (ADR-0020 §5) and fold the
     // verified provenance identity into the SAME per-repo baseline. A no-op (zero extra egress)
     // when the scanner is off. Runs AFTER the signing sweep so the baseline it augments already
     // exists (provenance is augment-only).
@@ -149,14 +149,14 @@ pub async fn run_sweeps(
     )
     .await;
 
-    // Publish the freshly-updated baseline snapshot for the admission webhook (JEF-265). The engine
+    // Publish the freshly-updated baseline snapshot for the admission webhook. The engine
     // is the SOLE writer; this is the ONLY path baselines reach the webhook, and it is read-only
     // there — so admission can consult signature continuity without ever being able to teach
     // (poison) it. Done after ALL baseline-mutating sweeps this pass so the webhook always sees a
     // consistent, whole-pass snapshot.
     shared_baseline.publish(baselines);
 
-    // Refresh the LIVE signing-trust readiness signals (JEF-280): the TUF-root cache age (it ages
+    // Refresh the LIVE signing-trust readiness signals: the TUF-root cache age (it ages
     // between passes, and a successful verify this pass may have just refreshed it) and a fleet-wide
     // spike in `UnverifiableHere` postures (a hint the trust root drifted or is being starved). Only
     // the three live fields are updated; the boot-captured static coverage fields are preserved. A
@@ -175,7 +175,7 @@ pub async fn run_sweeps(
     readiness.tuf_cache_age_secs =
         signing_trust::tuf_cache_age_secs(sweeps.tuf_cache_dir, std::time::SystemTime::now());
     readiness.unverifiable_spike = signing_trust::is_unverifiable_spike(unverifiable, total);
-    // How many images this sweep couldn't resolve (JEF-326): stuck in the transient `Checking`
+    // How many images this sweep couldn't resolve: stuck in the transient `Checking`
     // state, so their posture is unknown — surfaced non-green in readiness.
     readiness.checking_images = signing_map.summary().checking;
 

@@ -1,4 +1,4 @@
-//! Tests for the TUF trust-root freshness + fleet-wide unverifiable-spike signals (JEF-280).
+//! Tests for the TUF trust-root freshness + fleet-wide unverifiable-spike signals.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};

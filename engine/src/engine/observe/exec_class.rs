@@ -1,4 +1,4 @@
-//! Exec-classification policy (JEF-55 / JEF-113): is a process-exec a *notable* runtime
+//! Exec-classification policy: is a process-exec a *notable* runtime
 //! signal — an interactive shell, or a package manager, run inside a container?
 //!
 //! This is **engine policy**, not part of the wire type. The shared [`Behavior`] crate is
@@ -13,7 +13,7 @@
 //! "package management launched" — both classic container-tamper signals, classified
 //! ENGINE-SIDE from the path the agent already emits (no wire change).
 //!
-//! **JEF-317 (fileless / anon-inode exec) deliberately does NOT live here.** An earlier
+//! ** (fileless / anon-inode exec) deliberately does NOT live here.** An earlier
 //! version classified the exec *path's shape* (`/dev/fd/<n>` etc.) as fileless and fed it
 //! into this module's blanket "notable exec" gate — withdrawn by security review, because
 //! the kernel synthesizes that identical path for a benign `fexecve()` of an on-disk file
@@ -29,7 +29,7 @@ use crate::engine::graph::Behavior;
 
 /// Interactive shells a process-exec might be (matched on the binary's basename).
 /// An exec of one of these inside a container is the classic "terminal shell in
-/// container" runtime signal (JEF-55). Kept deliberately small and conservative —
+/// container" runtime signal. Kept deliberately small and conservative —
 /// well-known shell *interpreters*, not every program that can run a script — because a
 /// false "shell" annotation is misleading model evidence.
 const INTERACTIVE_SHELLS: &[&str] = &[
@@ -42,7 +42,7 @@ const INTERACTIVE_SHELLS: &[&str] = &[
 
 /// Package managers a process-exec might be (matched on the binary's basename). An exec
 /// of one inside a running container is the classic "package management launched"
-/// runtime signal (JEF-55): images are meant to be immutable, so installing software at
+/// runtime signal: images are meant to be immutable, so installing software at
 /// runtime is a strong tamper indicator. Small and explicit on purpose.
 const PACKAGE_MANAGERS: &[&str] = &[
     "apt",     // Debian/Ubuntu
@@ -65,7 +65,7 @@ fn basename(path: &str) -> &str {
 
 /// Whether `behavior` is a [`Behavior::ProcessExec`] of an interactive **shell**
 /// (sh/bash/zsh/ash/dash) — the "terminal shell in container" signal, classified
-/// ENGINE-SIDE from the path the agent already emits (JEF-55), so no wire change. The
+/// ENGINE-SIDE from the path the agent already emits, so no wire change. The
 /// match is on the binary's basename, so `/bin/bash` and `bash` both count. Always
 /// `false` for any other behavior.
 pub fn is_interactive_shell(behavior: &Behavior) -> bool {
@@ -77,7 +77,7 @@ pub fn is_interactive_shell(behavior: &Behavior) -> bool {
 
 /// Whether `behavior` is a [`Behavior::ProcessExec`] of a **package manager**
 /// (apt/apt-get/apk/yum/dnf/pip/pip3/gem/npm) — the "package management launched"
-/// signal, classified ENGINE-SIDE from the emitted path (JEF-55), no wire change. Matched
+/// signal, classified ENGINE-SIDE from the emitted path, no wire change. Matched
 /// on the binary's basename. Always `false` for any other behavior.
 pub fn is_package_manager(behavior: &Behavior) -> bool {
     match behavior {
@@ -87,15 +87,15 @@ pub fn is_package_manager(behavior: &Behavior) -> bool {
 }
 
 /// A short, human label for a *notable* runtime exec — a shell, or a package manager, run
-/// inside the container (JEF-55) — or `None` for an unremarkable behavior. Used to
+/// inside the container — or `None` for an unremarkable behavior. Used to
 /// annotate the adjudication prompt ("executed /bin/bash (interactive shell in
 /// container)") and as the corroboration predicate (a notable exec corroborates like an
-/// alert, JEF-117). This is a classification, NOT an `is_alert`: it does not by itself
+/// alert). This is a classification, NOT an `is_alert`: it does not by itself
 /// corroborate the action bar from the wire type's view — the engine decides what it
 /// means. The label is a fixed internal string (never untrusted input), safe to embed in
 /// the prompt.
 ///
-/// Deliberately does NOT include the JEF-317 anon-inode-exec fact — see the module doc for
+/// Deliberately does NOT include the anon-inode-exec fact — see the module doc for
 /// why: that signal is scoped MORE narrowly than this blanket gate, not folded into it.
 pub fn notable_exec(behavior: &Behavior) -> Option<&'static str> {
     if is_interactive_shell(behavior) {
@@ -108,10 +108,10 @@ pub fn notable_exec(behavior: &Behavior) -> Option<&'static str> {
 }
 
 /// The human one-line summary for a behavior **with** the engine's notable-exec
-/// annotation applied (JEF-55) — `executed /bin/bash (interactive shell in container)` for
+/// annotation applied — `executed /bin/bash (interactive shell in container)` for
 /// a notable exec, the plain [`Behavior::summary`] otherwise. This is the engine-side
 /// replacement for the annotation that used to live on `Behavior::summary` before the
-/// classifier moved out of the shared wire type (JEF-113). Prompt- and evidence-building
+/// classifier moved out of the shared wire type. Prompt- and evidence-building
 /// code that wants the annotated line calls this instead of `Behavior::summary` directly.
 ///
 /// The label is a fixed internal string (never untrusted input), so it can't inject prompt
@@ -211,7 +211,7 @@ mod tests {
     fn annotated_summary_appends_the_notable_label() {
         // A notable exec gets the engine annotation appended to the bare wire summary; an
         // unremarkable behavior is unchanged. This reproduces the exact line the prompt and
-        // the evidence blocks saw before the classifier moved out of the wire type (JEF-113).
+        // the evidence blocks saw before the classifier moved out of the wire type.
         let shell = Behavior::ProcessExec {
             path: "/bin/bash".into(),
             exe_anon_inode: false,
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(notable_exec(&normal), None);
     }
 
-    /// JEF-317 regression guard: `exe_anon_inode` — the real (inode) fileless-exec fact —
+    /// regression guard: `exe_anon_inode` — the real (inode) fileless-exec fact —
     /// must NOT feed this module's blanket "notable exec" gate on its own. The withdrawn
     /// v1 approach classified path *shape* into this same gate; Route A deliberately keeps
     /// the two separate (see the module doc and

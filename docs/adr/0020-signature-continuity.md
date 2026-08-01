@@ -159,7 +159,7 @@ What becomes harder / the downsides we accept:
   and can over-trust a repo that legitimately serves a mix; the staged rollout starts
   at repo granularity and revisits if observation shows it is too coarse.
 
-## Addenda (JEF-263 — durable TOFU baseline implementation)
+## Addenda (— durable TOFU baseline implementation)
 
 These ratify the two implementation decisions the durable baseline (Decision §2)
 required but did not pin. Both preserve the invariant that the *established* signed
@@ -184,7 +184,7 @@ history — the security-bearing state — is the thing that must never be silen
    state (`first_seen_ms` is already persisted) and is monotonic — once established, a
    later observation never un-establishes. A digest-count or distinct-day refinement
    remains a future option; `established` + `first_seen` are exposed so the render
-   (JEF-262) and drift (JEF-264) work can weigh the distinction as they choose.
+    and drift work can weigh the distinction as they choose.
 
 Follow-up to monitor (not a blocker): per-pass full compaction shares the single
 decision journal with breach/admission lines, so it raises write volume and
@@ -192,9 +192,9 @@ accelerates rotation of those other line kinds. Bounded by `DEFAULT_MAX_REPOS` a
 acceptable at current scale; revisit change-only or a segmented journal if a large
 cluster shows rotation pressure on breach/admission history.
 
-## Addenda (JEF-280 — drift is baseline-relative; downgrade is a first-class regression)
+## Addenda (— drift is baseline-relative; downgrade is a first-class regression)
 
-The honest-posture split (JEF-276) added two *calm* signing postures — `SignedKeyBased`
+The honest-posture split added two *calm* signing postures — `SignedKeyBased`
 (a real key-based cosign signature: verified Rekor bundle, no Fulcio identity) and
 `UnverifiableHere` (a signature present but unverifiable against our trust root, a
 Rekor/TUF variance) — so a legitimately key-based repo (e.g. cert-manager) stops
@@ -208,7 +208,7 @@ audit mode). `unsigned→NotSigned` and `keyless→new-identity` were already ca
 key-based / unverifiable *downgrade* was not.
 
 These addenda ratify the fix. They change **drift classification only** — the per-image
-posture and the trust/admit semantics (JEF-276) are untouched: the calm postures still
+posture and the trust/admit semantics are untouched: the calm postures still
 confer no trusted identity and still `would_admit() == false`.
 
 1. **Drift is baseline-RELATIVE, ranked.** Each signing posture has a trust-strength
@@ -223,11 +223,11 @@ confer no trusted identity and still `would_admit() == false`.
 2. **Signing downgrade is a first-class regression class.** An established **keyless**
    baseline now serving a lesser-but-calm posture (`SignedKeyBased` / `UnverifiableHere`)
    fires a new `SigningDowngrade` regression — the registry-substitution signal. It rides
-   JEF-264's admission-finding path (audit-only, shadow; ADR-0016) and feeds the honesty
+   's admission-finding path (audit-only, shadow; ADR-0016) and feeds the honesty
    model exactly as other regressions do: an **established** baseline → breach/non-green;
    a **cold / freshly-learned** one → uncertain/non-green (never silent). A repo that was
    **always** key-based (no keyless baseline was ever learned) serving key-based stays
-   `Continuous` — the JEF-276 false-alarm fix is preserved, because there is no stronger
+   `Continuous` — the false-alarm fix is preserved, because there is no stronger
    baseline rank to drop from.
 
 3. **TUF-staleness is surfaced, never silent.** `UnverifiableHere` is caused by a
@@ -241,7 +241,7 @@ confer no trusted identity and still `would_admit() == false`.
    small floor) are deliberately simple; parsing the TUF expiry and tracking a historical
    unverifiable-rate delta are future refinements.
 
-## Addenda (JEF-275 — provenance is a second continuity axis)
+## Addenda (— provenance is a second continuity axis)
 
 A cosign signature proves *who* signed an image; SLSA **build provenance** proves *how it
 was built* — the source repository and the builder/workflow (a GitHub Actions OIDC
@@ -274,17 +274,17 @@ new egress path.
    untouched. A repo with no signing baseline therefore has a **cold** provenance axis —
    its provenance drift is a weak lead, never a silent miss.
 
-3. **Provenance change is a drift class on JEF-264's audit channel.** A verified
+3. **Provenance change is a drift class on 's audit channel.** A verified
    provenance whose source or builder is **not** in an established repo's learned set fires
    a **provenance-change** finding — the "built by an unexpected workflow / from an
    unexpected source" signal — distinct in reason from a signing regression (a repo can
    carry both). It rides the same admission-finding path (audit-only, shadow; ADR-0016):
    an **established** baseline → strong signal; a **cold** one → a weak lead, never silent
-   — exactly the baseline-relative semantics JEF-280 established. Absent / unverifiable /
+   — exactly the baseline-relative semantics established. Absent / unverifiable /
    checking never fire a change.
 
 4. **Degrades cleanly.** An image with no provenance (today's norm) simply reads `Absent` —
-   calm, never an alarm. *(Superseded by the JEF-410 addendum below: the sweep is now
+   calm, never an alarm. *(Superseded by the addendum below: the sweep is now
    default-on, not opt-in — it was never a new egress destination, so gating it behind a
    flag was detection proliferation, not an egress control.)*
 
@@ -300,15 +300,15 @@ honest degradation. Closing the gap (compose sigstore's lower-level DSSE + Fulci
 primitives, or an upgraded `sigstore` release) is a follow-up that does not change this
 addendum's contract.
 
-## Addenda (JEF-297 — the rendered "if enforced" is CONTINUITY, not keyless-identity)
+## Addenda (— the rendered "if enforced" is CONTINUITY, not keyless-identity)
 
 The signing inventory's **"if enforced"** column is a counterfactual: *what would a
 signature gate do to this image?* Its first implementation read that column off the raw
 posture — `would_admit ⇔ keyless-Fulcio Signed`, every other posture would-block. That is
 the **pre-ADR-0020 single-identity gate**, and it directly contradicts the continuity
-thesis of this ADR and the honest-posture split (JEF-276): the *entire* key-based-signed
+thesis of this ADR and the honest-posture split: the *entire* key-based-signed
 homegrown fleet (and cert-manager) rendered **would-block**, even though such a repo is
-perfectly calm and continuous. The JEF-280 addendum's aside that the calm postures "still
+perfectly calm and continuous. The addendum's aside that the calm postures "still
 `would_admit() == false`" was itself this bug — it conflated the *inventory trust
 semantic* ("this posture confers no trusted keyless identity", which is true) with the
 *enforcement counterfactual* ("a continuity gate would reject this image", which is
@@ -318,9 +318,9 @@ This addendum corrects the render. It changes **presentation only** — no obser
 drift classification, no enforcement, no egress changes.
 
 1. **would-admit is the negation of a REGRESSION, not a posture test.** The counterfactual
-   a signature-continuity gate (JEF-265) applies is: *block on a genuine regression from
+   a signature-continuity gate applies is: *block on a genuine regression from
    the repo's established baseline; admit everything continuous.* So the column is derived
-   from the baseline-relative drift verdict (JEF-264/280), NOT the raw posture:
+   from the baseline-relative drift verdict, NOT the raw posture:
    * **would-admit** — any calm posture with no regression: keyless-verified `Signed`,
      consistent `SignedKeyBased` / `UnverifiableHere` (no keyless baseline to drop from),
      and `NotSigned` where the repo was never signed (TOFU). This is `block == regression`
@@ -330,14 +330,14 @@ drift classification, no enforcement, no egress changes.
      genuinely `InvalidSignature` (the reserved loud channel — a broken signature is never
      admissible independent of any baseline).
    * **uncertain** — a regression against a **cold / freshly-learned** baseline: a weak
-     lead (JEF-280 cold=uncertain), non-green but never a hard block. This keeps the
+     lead (cold=uncertain), non-green but never a hard block. This keeps the
      cold-baseline honesty invariant on the enforcement column too.
 
 2. **Single source of truth = the recorded drift verdict.** The render reads the SAME
    `SigningRegression/<repo>` rows the sweep already recorded (one per regressing image),
    keyed per image — it never re-classifies against the baseline, so the "if enforced"
    column and the recorded regression a gate enforces are the same fact. The old per-posture
-   `SigningPosture::would_admit()` is retired as the render input (superseding the JEF-280
+   `SigningPosture::would_admit()` is retired as the render input (superseding the
    addendum's `would_admit() == false` note); the inventory trust semantic it expressed
    (`Signed` is the only *keyless-verified* posture) is unchanged and still drives the
    posture chip.
@@ -347,7 +347,7 @@ drift classification, no enforcement, no egress changes.
    the repo's baseline cold. Cold-baseline regressions read *uncertain* (non-green), never
    silent and never a fabricated green admit.
 
-## Addenda (JEF-265 — Stage 3 ENFORCE: deny on regression in enforced scope; "exception accepted")
+## Addenda (— Stage 3 ENFORCE: deny on regression in enforced scope; "exception accepted")
 
 Stages 1–2 (and the addenda above) observe, learn, and *surface* signing drift — audit-only, the
 shadow invariant (ADR-0016). This addendum ratifies Stage 3: the FIRST code that makes protector
@@ -359,11 +359,11 @@ scope only; observation, learning, drift classification, and the render are unch
    ADR-0021 — namespace or Pod label; `mode: enforce`), a signing **regression** against a repo's
    **established** baseline is a `Deny`; out of scope it is an `Audit` (recorded, still admitted).
    The block predicate is the DOMAIN verdict `SigningDrift::would_block` — the exact semantic
-   JEF-297's presentation `SigningEnforcement::WouldBlock` projects, so the inventory's "would block"
+   's presentation `SigningEnforcement::WouldBlock` projects, so the inventory's "would block"
    column and what admission actually blocks are the same fact. The audit-everywhere default is
    unchanged: with no `enforceScope`, **nothing is denied** — byte-identical shadow.
 
-2. **Cold-start never denies.** A freshly-learned / not-yet-`established` baseline (JEF-263's 24h
+2. **Cold-start never denies.** A freshly-learned / not-yet-`established` baseline ('s 24h
    maturation) is the weakest evidence (TOFU). `would_block` returns `false` for a cold-baseline
    regression → admit (audit). Only an established-baseline regression, or a genuinely-`InvalidSignature`
    posture (the loud channel, inadmissible independent of any baseline so it can't be dodged by keeping
@@ -404,9 +404,9 @@ scope only; observation, learning, drift classification, and the render are unch
    pin regexp, an unavailable observer, or an empty/poisoned baseline snapshot all degrade in the safe
    direction: MORE enforced or NOT denying — never a silent widen of what is admitted.
 
-## Addenda (JEF-410 — build provenance is default-ON: retire `PROTECTOR_PROVENANCE_ENABLE`)
+## Addenda (— build provenance is default-ON: retire `PROTECTOR_PROVENANCE_ENABLE`)
 
-The JEF-275 addendum shipped the provenance sweep opt-in behind `PROTECTOR_PROVENANCE_ENABLE`,
+The addendum shipped the provenance sweep opt-in behind `PROTECTOR_PROVENANCE_ENABLE`,
 "mirroring the Rekor lane." That mirroring was a mistake: the Rekor lane's flag
 (`PROTECTOR_REKOR_ENABLE`) is a genuine **egress** gate — Rekor is a separate outbound
 destination from the registry the cluster already pulls from, and ADR-0015's zero-egress default

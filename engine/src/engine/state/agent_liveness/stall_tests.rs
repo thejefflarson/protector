@@ -1,4 +1,4 @@
-//! Tests for the coverage-stall edge (JEF-421): the loud `Stalled` register fires only on a
+//! Tests for the coverage-stall edge: the loud `Stalled` register fires only on a
 //! WAS-COVERING → now-fully-blind transition held past the debounce; a never-enabled fleet stays
 //! honestly `Absent`; a DaemonSet roll (a pass or two of blindness that recovers) never trips it.
 

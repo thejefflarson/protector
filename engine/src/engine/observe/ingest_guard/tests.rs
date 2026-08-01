@@ -158,7 +158,7 @@ fn rate_limit_is_per_peer() {
 
 #[test]
 fn require_token_accepts_a_configured_token() {
-    // JEF-576: a configured token is returned unchanged so the caller can install it.
+    // a configured token is returned unchanged so the caller can install it.
     let token = IngestToken::from_literal("s3cr3t");
     let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();
     let resolved = require_token(Some(token.clone()), "runtime-evidence ingest", addr)
@@ -168,7 +168,7 @@ fn require_token_accepts_a_configured_token() {
 
 #[test]
 fn require_token_refuses_to_start_when_unconfigured() {
-    // JEF-576: the token is REQUIRED — no token configured must be a hard `Err` (the
+    // the token is REQUIRED — no token configured must be a hard `Err` (the
     // caller propagates it out of `serve_runtime`/`serve_audit` and never binds the
     // port), not a warn-and-continue-unauthenticated fallback.
     let addr: SocketAddr = "0.0.0.0:9999".parse().unwrap();

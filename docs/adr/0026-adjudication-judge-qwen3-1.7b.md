@@ -4,7 +4,7 @@
 - Date: 2026-07-11
 - Refines: [0013](0013-proof-winnows-model-decides.md) (the model makes the
   exploitability call), [0023](0023-delta-aware-adjudication.md) (delta-aware prompt)
-- Relates: JEF-405 (the prompt this bakeoff was run against), JEF-402 (the
+- Relates: (the prompt this bakeoff was run against) (the
   exposed-secret / reachable-secret distinction one of the cases exercises)
 
 ## Context
@@ -31,15 +31,15 @@ repeatedly been the deciding factor:
   image" field as exploitation evidence. That is one of the three evidence types
   ADR-0013 requires the model to recognize.
 
-`scripts/judge_bakeoff.py` benches candidate judges on the JEF-405-fixed prompt (the same
+`scripts/judge_bakeoff.py` benches candidate judges on the -fixed prompt (the same
 `build_judgment_prompt` the engine runs) across cluster-representative cases: the three
 exploitation-evidence types that MUST be `exploitable`, and the refute cases (broad RBAC,
 cross-tenant network paths, not-observed CVEs, reachable-but-not-exposed secrets — the
-JEF-402 false breach — the ArgoCD cluster-admin false positive) that MUST be `refuted`.
+ false breach — the ArgoCD cluster-admin false positive) that MUST be `refuted`.
 
 ## Bakeoff result
 
-Dev box, temperature 0, current JEF-405 prompt, single-shot per case:
+Dev box, temperature 0, current prompt, single-shot per case:
 
 | model | score | notes |
 |---|---|---|

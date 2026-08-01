@@ -1,4 +1,4 @@
-//! Tests for the JEF-318 entry-scoped corroboration shape — ptrace-attach on the foothold —
+//! Tests for the entry-scoped corroboration shape — ptrace-attach on the foothold —
 //! kept in its own `*_tests.rs` file (repo CLAUDE.md: tests count toward the 1,000-line file
 //! cap). `super` resolves to the proof module, so these exercise the `pub(super)`
 //! `corroborate` seam directly.
@@ -48,7 +48,7 @@ fn ordinary_entry(ns: &str) -> EntryContext<'_> {
 }
 
 /// The objective for these tests: a PrivilegeEscalation-tactic chain (T1611 Escape to Host) —
-/// the same tactic `ptrace_attach_on_foothold` gates on (JEF-318: no dedicated
+/// the same tactic `ptrace_attach_on_foothold` gates on (no dedicated
 /// `DefenseEvasion` tactic exists in this repo's enum, see the predicate's doc comment).
 fn priv_esc_objective() -> AttackRef {
     ESCAPE_TO_HOST
@@ -116,7 +116,7 @@ fn ptrace_attach_on_the_foothold_does_not_corroborate_an_unrelated_objective() {
 
 #[test]
 fn other_behaviors_on_the_foothold_do_not_trigger_this_shape() {
-    // A ModuleLoad (JEF-318's OTHER new shape) and an ordinary ProcessExec on the same
+    // A ModuleLoad ('s OTHER new shape) and an ordinary ProcessExec on the same
     // foothold entry must not be mistaken for a ptrace attach.
     let runtime = [
         sig(Behavior::ModuleLoad, 0),

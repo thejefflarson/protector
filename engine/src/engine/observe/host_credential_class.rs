@@ -1,4 +1,4 @@
-//! On-host credential-path classification policy (JEF-320, Retire-Falco G3).
+//! On-host credential-path classification policy (Retire-Falco G3).
 //!
 //! The agent's `SecretRead` (via `security_file_open`) started out scoped to the tmpfs
 //! superblock — the k8s Secret/ConfigMap/projected-volume mount point — so a read of a
@@ -13,17 +13,17 @@
 //! retirement commit but preserved in history — `git show a2c7620:docs/falco-parity-audit.md`,
 //! landed in PR #169) plus the well-known on-disk conventions for the AWS/GCP/Azure CLIs.
 //!
-//! ENGINE-SIDE policy, not wire data (JEF-113, mirroring `exec_class`): the shared
+//! ENGINE-SIDE policy, not wire data (mirroring `exec_class`): the shared
 //! [`crate::engine::graph::Behavior`] type stays pure — the agent emits a
 //! `FileRead { path }` for a file it can't classify itself, unchanged wire shape. The
-//! probe was minimally widened (JEF-320) to also emit a `FileRead` for a small, fixed
+//! probe was minimally widened to also emit a `FileRead` for a small, fixed
 //! allowlist of on-host credential-file BASENAMES outside tmpfs (a cheap in-kernel volume
 //! gate — see `is_sensitive_credential_basename` in
 //! `agent/protector-agent-ebpf/src/main.rs` — NOT the security decision). This module makes
 //! the actual "is this path a known on-host credential path" call, from the full path
 //! alone, exactly like `adapter::enrich::secret_for_path` does for k8s Secret mounts.
 //!
-//! **Security rework (JEF-320 follow-up, four fixes from a HELD security review):**
+//! **Security rework (follow-up, four fixes from a HELD security review):**
 //! 1. `/etc/passwd` and `~/.ssh/known_hosts` are dropped from the allowlist — both are
 //!    world-readable / hold no secret material (`passwd` has no password hashes since
 //!    shadow passwords; `known_hosts` holds OTHER hosts' PUBLIC keys), and both are read
@@ -170,7 +170,7 @@ fn cloud_credential_path(components: &[&str]) -> bool {
 }
 
 /// Classify `path` (a container-relative path the agent observed, from a `FileRead`) as a
-/// well-known **on-host** sensitive credential path (JEF-320). Returns the NORMALIZED path
+/// well-known **on-host** sensitive credential path. Returns the NORMALIZED path
 /// (see [`normalized_components`]) — used as the [`crate::engine::graph::Behavior::SecretRead`]
 /// `secret` identifier (mirrors how a k8s-mounted secret is named by
 /// `adapter::enrich::secret_for_path`) — or `None` for anything else, including deliberate

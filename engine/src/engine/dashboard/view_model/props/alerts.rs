@@ -1,4 +1,4 @@
-//! The Alerts-view presentation props (JEF-323) — the live "alarming-now" activity surface. A
+//! The Alerts-view presentation props — the live "alarming-now" activity surface. A
 //! CURRENT-WINDOW view of the runtime signals alarming THIS pass (runtime signals live one pass
 //! then clear — this is NOT a persisted audit log), each attributed to its (informer-resolved)
 //! workload, with recency and the proven chain it is alarming ON. An alarming signal is EVIDENCE,
@@ -15,7 +15,7 @@
 
 use super::status::StatusStripProps;
 
-/// One alarming-now activity event for the Alerts tab (JEF-323). Pure presentation data — no
+/// One alarming-now activity event for the Alerts tab. Pure presentation data — no
 /// engine domain type leaks in. Every string is UNTRUSTED at render (the signal can carry an
 /// attacker-chosen path, the rule an attacker-chosen name, the workload an attacker-influenced
 /// pod name): the component auto-escapes them (maud `{}`, never `PreEscaped`). No stable id by
@@ -45,18 +45,18 @@ pub struct AlertProps {
     pub on_chain: Option<String>,
 }
 
-/// The whole Alerts view's props (JEF-323): the persistent strip + the current-window alarming-now
+/// The whole Alerts view's props: the persistent strip + the current-window alarming-now
 /// events + the honest calm/blind empty framing. When `alerts` is empty the view renders a CALM
 /// "no alarming activity right now" state (reassuring, not an alarm) — UNLESS a node is blind, in
 /// which case the caveat replaces the reassurance ("absence of a signal is not evidence of safety",
-/// JEF-308). `blind_caveat` is `Some` exactly when at least one expected node has no live sensor.
+/// ). `blind_caveat` is `Some` exactly when at least one expected node has no live sensor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct AlertsViewProps {
     pub strip: StatusStripProps,
     /// The alarming-now events this pass, most-recent-first. A CURRENT-WINDOW view, not history.
     pub alerts: Vec<AlertProps>,
-    /// The blind-node caveat (JEF-308) shown on the empty/quiet state, or `None` when every expected
+    /// The blind-node caveat shown on the empty/quiet state, or `None` when every expected
     /// node has a live sensor. A quiet Alerts view must NOT read "all clear" while we are blind.
     pub blind_caveat: Option<String>,
 }

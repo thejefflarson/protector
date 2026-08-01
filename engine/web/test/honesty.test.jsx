@@ -1,4 +1,4 @@
-// Client honesty tests (ADR-0025 / JEF-397): the empty-state must NEVER read as a generic
+// Client honesty tests (ADR-0025): the empty-state must NEVER read as a generic
 // "no findings" / false all-clear. GREEN "all clear" renders ONLY when the SERVER token
 // `all-clear` is true; blind/warming/watching render the matching non-green register. The client
 // performs ZERO honesty derivation — it SELECTS the honest copy from server-decided tokens.

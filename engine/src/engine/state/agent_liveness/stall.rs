@@ -1,4 +1,4 @@
-//! The **coverage-stall** edge (JEF-421): the cross-pass tracker that turns the per-pass
+//! The **coverage-stall** edge: the cross-pass tracker that turns the per-pass
 //! [`RuntimeCoverage`] into a loud, server-derived **stalled** signal when protector's OWN runtime
 //! sensors go dark — a fleet that WAS corroborating (at least one expected node healthy) and has now
 //! gone FULLY blind, held across a debounce window so a normal DaemonSet roll never strobes.
@@ -21,7 +21,7 @@ use super::RuntimeCoverage;
 /// already itself far past a single-node blip; the hold guards the last-pod-rescheduling window.
 pub const STALL_HOLD_PASSES: u32 = 3;
 
-/// The coarse, server-derived coverage register the STRIP chip renders (JEF-421). Distinct rungs so
+/// The coarse, server-derived coverage register the STRIP chip renders. Distinct rungs so
 /// the loud `Stalled` (was-covering → now-silent) never collapses into the muted, honest `Absent`
 /// (coverage was never enabled) nor the partial `Degraded`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,7 +39,7 @@ pub enum CoverageState {
     Stalled(CoverageAlert),
 }
 
-/// The strip-level **coverage-alert** payload (JEF-421), present ONLY when a covering feed stalled.
+/// The strip-level **coverage-alert** payload, present ONLY when a covering feed stalled.
 /// Additive on the wire; the client renders it verbatim (no honesty derivation) and never
 /// synthesizes it. Every string is UNTRUSTED at render (escaped by the client).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub struct CoverageAlert {
     pub message: String,
 }
 
-/// The cross-pass **stall tracker** (JEF-421): remembers whether the fleet was ever corroborating,
+/// The cross-pass **stall tracker**: remembers whether the fleet was ever corroborating,
 /// stamps the last-healthy wall-clock time, and counts consecutive fully-blind passes so the loud
 /// stall edge only fires after the debounce. One instance per engine, updated each pass in
 /// `Findings::stamp_runtime_coverage`. Pure over its `(coverage, now)` input given its held state.

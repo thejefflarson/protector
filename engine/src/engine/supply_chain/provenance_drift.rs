@@ -1,8 +1,8 @@
-//! The pure, deterministic build-**provenance drift** classifier (JEF-275, ADR-0020 §5).
+//! The pure, deterministic build-**provenance drift** classifier (ADR-0020 §5).
 //!
-//! This is the provenance twin of [`signing_drift`](super::signing_drift): observation (JEF-275)
-//! reads a *snapshot* — "this image was built by X from Y right now"; the baseline (JEF-263,
-//! extended by JEF-275) remembers a repo's learned provenance identity — the source repos + builder
+//! This is the provenance twin of [`signing_drift`](super::signing_drift): observation
+//! reads a *snapshot* — "this image was built by X from Y right now"; the baseline
+//! remembers a repo's learned provenance identity — the source repos + builder
 //! identities seen in VERIFIED attestations under it. This module joins the two: it classifies a
 //! **fresh provenance posture** against a repo's **learned provenance baseline** into one of three
 //! resting classes, so the sweep can surface a **provenance-change** finding when an established
@@ -44,7 +44,7 @@ use crate::engine::state::SigningBaseline;
 use crate::policies::signature::ProvenancePosture;
 
 /// The resting drift classification of a fresh [`ProvenancePosture`] against a repo's learned
-/// provenance baseline (JEF-275). Total: every `(baseline, posture)` maps to exactly one variant.
+/// provenance baseline. Total: every `(baseline, posture)` maps to exactly one variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceDrift {
     /// No drift: verified provenance by a known source+builder (a normal rebuild), or a calm
@@ -61,7 +61,7 @@ pub enum ProvenanceDrift {
         new_source: String,
         /// The new builder identity (SLSA `builder.id`, UNTRUSTED — escape at render).
         new_builder: String,
-        /// Whether the deviating baseline had matured (JEF-263). An established change is a strong
+        /// Whether the deviating baseline had matured. An established change is a strong
         /// supply-chain signal; a cold one is a weak lead ("weak baseline, treat as a lead").
         established: bool,
     },
@@ -74,7 +74,7 @@ impl ProvenanceDrift {
     }
 }
 
-/// Classify a fresh provenance `posture` against the repo's learned `baseline` (JEF-275). PURE +
+/// Classify a fresh provenance `posture` against the repo's learned `baseline`. PURE +
 /// deterministic — see the module docs for the full rule table.
 ///
 /// `baseline` MUST be the repo's entry as it stands BEFORE this observation is folded in, so a new

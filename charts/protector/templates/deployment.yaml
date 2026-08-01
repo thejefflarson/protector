@@ -13,18 +13,18 @@
 {{- fail (printf "enforceRung must be 'edge-cut' or 'quarantine', got %q" .Values.enforceRung) }}
 {{- end }}
 {{- /*
-Feed-fetcher sidecar wiring (JEF-238, JEF-243). When feedSync is ON (the default), a native
+Feed-fetcher sidecar wiring. When feedSync is ON (the default), a native
 sidecar (an initContainer with restartPolicy: Always) fetches TWO public read-only feeds
 into a shared emptyDir, and the engine reads those files from the SAME volume — no ConfigMap,
 no CronJob (those hit the 1 MiB ConfigMap limit; raw CISA KEV is ~1.5 MiB):
   * the FULL public CISA KEV catalogue (kev.json) — known-exploited-NOW intel; and
   * the FIRST.org EPSS scores (epss.csv, fetched gzipped and gunzipped in place) — the
-    PREDICTIVE exploitation probability per CVE (JEF-243).
+    PREDICTIVE exploitation probability per CVE.
 The emptyDir has no size limit, so both feeds are fetched in FULL. The engine itself stays
 zero-egress (ADR-0015): only the sidecar egresses, to public read-only feeds. With
 feedSync OFF, no sidecar and no shared volume render, and the feed env is dropped — the
 air-gapped / manual-mount path (mount your own kev.json / epss.csv at the same paths if you
-want enrichment offline). The NVD advisory feed was retired (JEF-242, redundant with Trivy's
+want enrichment offline). The NVD advisory feed was retired (redundant with Trivy's
 CVE metadata); KEV + EPSS are the two distinct exploitation axes alongside Trivy's CVSS.
 */}}
 {{- $feeds := and .Values.engine.enabled .Values.feedSync.enabled }}
@@ -68,7 +68,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- if $feeds }}
-      # --- feed-fetcher sidecar (JEF-238) -------------------------------------------------
+      # --- feed-fetcher sidecar -------------------------------------------------
       # A NATIVE SIDECAR: an initContainer with restartPolicy: Always (k8s 1.29+ / the
       # cluster's k3s 1.36). Because it is a native sidecar it (a) starts and is given a
       # head start BEFORE the engine container, so the feed files usually exist by the time
@@ -77,7 +77,7 @@ spec:
       # EGRESS BOUNDARY. This is the ONLY container the chart gives network egress to. It
       # GETs ONE public, READ-ONLY feed URL (feedSync.kevUrl) and writes it to the shared
       # `feeds` emptyDir. It makes NO apiserver call (unlike the
-      # retired JEF-228 CronJob — no RBAC, no ServiceAccount grant) and never reads or
+      # retired CronJob — no RBAC, no ServiceAccount grant) and never reads or
       # transmits any cluster data. The engine stays ZERO-EGRESS (ADR-0015): it only reads
       # the resulting files. A curl-only image is used because bitnami/kubectl was pulled
       # from Docker Hub (cluster fork) and no apiserver client is needed here anymore.
@@ -125,9 +125,9 @@ spec:
             # retries next tick.
             #
             # Two feeds, both fetched in FULL (no ConfigMap size limit): KEV (plain JSON,
-            # known-exploited-NOW) and EPSS (gzipped CSV, the PREDICTIVE per-CVE probability —
-            # JEF-243). NO `jq` / NO transform / NO extra image — `gunzip` is busybox-builtin in
-            # the curl image. The NVD advisory feed was retired (JEF-242, redundant with Trivy's
+            # known-exploited-NOW) and EPSS (gzipped CSV, the PREDICTIVE per-CVE probability).
+            # NO `jq` / NO transform / NO extra image — `gunzip` is busybox-builtin in
+            # the curl image. The NVD advisory feed was retired (redundant with Trivy's
             # CVE metadata). The engine never fetches anything itself (zero egress, ADR-0015);
             # it only reads these files.
             - |
@@ -222,7 +222,7 @@ spec:
             - name: PROTECTOR_TLS_KEY
               value: /etc/protector/tls/tls.key
             # sigstore TUF cache — must be writable under readOnlyRootFilesystem, so it points
-            # into the dedicated `tuf-cache` emptyDir below. Kept OFF /tmp (JEF-377): the engine
+            # into the dedicated `tuf-cache` emptyDir below. Kept OFF /tmp: the engine
             # pins $TMPDIR to this dir at startup so the tough TUF client's atomic temp writes
             # (latest_known_time.json + refreshed metadata) land here — a stable, attributable,
             # protector-owned path — instead of a `/tmp/.tmp<rand>/` dir that both churns the
@@ -316,7 +316,7 @@ spec:
               value: {{ .Values.engine.dashboard.clusterLabel | quote }}
             {{- with .Values.engine.dashboard.oidc }}
             {{- if .issuer }}
-            # App-level OIDC verification (ADR-0030 / JEF-487) — fail-closed when the issuer is set.
+            # App-level OIDC verification (ADR-0030) — fail-closed when the issuer is set.
             # Namespaced PROTECTOR_DASHBOARD_OIDC_* so it never collides with the cosign
             # signature-verification PROTECTOR_OIDC_ISSUER (a different, cert-identity concern).
             # Absent issuer = edge-trust-only (the engine logs a loud startup warning, §6).
@@ -327,7 +327,7 @@ spec:
             - name: PROTECTOR_DASHBOARD_OIDC_TIER_CLAIM
               value: {{ .tierClaim | quote }}
             {{- if .tierGrants }}
-            # Identity→tier grants (JEF-501): resolves the forensic/raw ceiling from the VERIFIED
+            # Identity→tier grants: resolves the forensic/raw ceiling from the VERIFIED
             # sub/email when the IdP mints no `tier` claim (e.g. Cloudflare Access over GitHub).
             # An explicit `tier` claim, when present, still takes precedence over a grant.
             - name: PROTECTOR_DASHBOARD_OIDC_TIER_GRANTS
@@ -337,14 +337,14 @@ spec:
             {{- end }}
             {{- end }}
             {{- if $feeds }}
-            # KEV catalogue file the feed-fetcher sidecar writes into the shared emptyDir
-            # (JEF-238). FULL CISA KEV JSON — KevCatalog parses the canonical
+            # KEV catalogue file the feed-fetcher sidecar writes into the shared emptyDir.
+            # FULL CISA KEV JSON — KevCatalog parses the canonical
             # {"vulnerabilities":[…]} shape. The engine never fetches KEV itself (zero
             # egress); it only reads this file, and degrades to "nothing known-exploited"
             # if it is missing/empty (the first-boot race before the sidecar's first fetch).
             - name: PROTECTOR_KEV_FILE
               value: {{ printf "%s/kev.json" $feedsDir | quote }}
-            # EPSS scores file the same sidecar writes into the shared emptyDir (JEF-243).
+            # EPSS scores file the same sidecar writes into the shared emptyDir.
             # The FIRST.org CSV (gunzipped in place) — EpssStore parses `cve,epss,percentile`
             # rows. The engine never fetches EPSS itself (zero egress); it only reads this
             # file, and degrades to "no exploit-prediction evidence" if it is missing/empty
@@ -367,11 +367,11 @@ spec:
               value: {{ $.Values.engine.notify.verbose | quote }}
             {{- end }}
             {{- if .Values.engine.journal.enabled }}
-            # Persistent decision journal (JEF-141) — survives restarts; the path is on
+            # Persistent decision journal — survives restarts; the path is on
             # the journal PVC mounted below. Unset = in-memory only (graceful fallback).
             - name: PROTECTOR_ENGINE_JOURNAL_PATH
               value: {{ .Values.engine.journal.path | quote }}
-            # Durable forensic/raw MCP disclosure audit (JEF-490, ADR-0031 §4) — a DISTINCT
+            # Durable forensic/raw MCP disclosure audit (ADR-0031 §4) — a DISTINCT
             # append-only file on the SAME journal PVC (never overloaded onto the decision
             # journal). The "Access" tab reads it; durable-on-PVC so an empty log honestly reads
             # "nobody pulled" rather than "resets on restart". Unset = in-memory only (graceful).
@@ -385,7 +385,7 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
-            # Writable sigstore TUF cache, kept OFF /tmp (JEF-377) so the tough client's atomic
+            # Writable sigstore TUF cache, kept OFF /tmp so the tough client's atomic
             # temp writes are attributable to protector, not IOC-shaped /tmp/.tmp<rand>/ paths.
             - name: tuf-cache
               mountPath: /var/lib/protector/tuf
@@ -399,7 +399,7 @@ spec:
               mountPath: {{ dir .Values.engine.journal.path | quote }}
             {{- end }}
             {{- if $feeds }}
-            # The shared feeds emptyDir the sidecar writes (JEF-238, JEF-243), mounted
+            # The shared feeds emptyDir the sidecar writes, mounted
             # READ-ONLY in the engine — the engine only reads kev.json / epss.csv, never writes.
             - name: feeds
               mountPath: {{ $feedsDir | quote }}
@@ -417,8 +417,8 @@ spec:
         - name: tmp
           emptyDir: {}
         # Dedicated writable scratch for the sigstore TUF cache, deliberately separate from the
-        # /tmp emptyDir so protector's own TUF metadata writes never look like a /tmp drop IOC
-        # (JEF-377). Ephemeral per pod — tough deletes its datastore after each load, and the
+        # /tmp emptyDir so protector's own TUF metadata writes never look like a /tmp drop IOC.
+        # Ephemeral per pod — tough deletes its datastore after each load, and the
         # trusted_root.json checkout is cheap to re-fetch.
         - name: tuf-cache
           emptyDir: {}
@@ -438,7 +438,7 @@ spec:
         {{- end }}
         {{- if $feeds }}
         # Shared scratch volume between the feed-fetcher sidecar (writer) and the engine
-        # (reader) — JEF-238, JEF-243. emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA
+        # (reader). emptyDir has no 1 MiB ConfigMap limit, so the FULL CISA
         # KEV JSON (~1.5 MiB) and the FIRST.org EPSS CSV both fit. Lives for the pod's lifetime;
         # the sidecar re-fetches on its interval and on restart.
         - name: feeds

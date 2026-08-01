@@ -10,7 +10,7 @@ left its **decision output** sketched as a *menu of mechanisms* (§3: the model 
 `cuts:[menu-id…]` selecting `QuarantineEntry` / `QuarantineWorkload` / `DenyNetworkPath`
 edge-cut lines). Two things force that open question closed and, on examination, redirect it:
 
-1. **The judge is a 1.7B CPU model, first (JEF-568 re-scope).** The parent plan assumed a 4B
+1. **The judge is a 1.7B CPU model, first (re-scope).** The parent plan assumed a 4B
    judge ("do not assume 1.7b"). Re-scoped: qwen3:1.7b is the deployed judge and passes the
    current 4-value verdict (14/15 this session, the miss a mislabeled fixture; ADR-0026 12/12).
    The contract must be one **1.7b can emit reliably** — strict JSON, correct ids, correct
@@ -87,7 +87,7 @@ ladder, and entry-exclusion all survive as the resolver + fallback.)
 
 6. **Ledger consumption (strengthened Q5).** `MitigationLedger::reconcile` takes per-entry
    decisions as input. Desired set = model-chosen cuts whose entry still has a proven
-   justifying chain (they clear the JEF-566 auto-action gate), **plus** `containment_for`
+   justifying chain (they clear the auto-action gate), **plus** `containment_for`
    fallback proposals for every breach-relevant entry with *no current decisive decision*
    (model unavailable / uncertain / parse-degraded), stamped `adjudicated=false` so they can
    never auto-apply. The deterministic `quarantine_targets` desired-set insertion in
@@ -108,22 +108,22 @@ ladder, and entry-exclusion all survive as the resolver + fallback.)
    cold-re-judges). Old `Breach` lines replay display-only; entries cold-re-judge for cuts
    (accepted ~20-min startup cost).
 
-9. **Prompt shape.** Holistic single document, **no few-shot, no numbered procedure** (JEF-134).
+9. **Prompt shape.** Holistic single document, **no few-shot, no numbered procedure**.
    The containment-options section goes **last, immediately before the output instruction**
    (recency maximizes copy fidelity). The word "quarantine" appears only inside fixed mechanism
-   strings, never in the instructions (JEF-451 — don't make the cut words the most-primed
+   strings, never in the instructions (— don't make the cut words the most-primed
    n-grams). `incident/` module dir keeps every file < 1000 lines.
 
 10. **Transport unchanged; constrained decoding is escalation step 1, not a dependency.** Keep
     the current call + tolerant parser. If T2b's failing bar is *JSON validity* (not content),
     the first escalation is Ollama grammar-constrained structured output (native `format`
     schema), A/B'd like any prompt change. Only if *content* fails does the model tier escalate
-    (4B → 8B), per JEF-568 → recorded in ADR-0033.
+    (4B → 8B), → recorded in ADR-0033.
 
 ## Consequences
 
-- **T3 (JEF-570)** builds against a fixed target (D1–D9); its Option-A description is
-  superseded. **T2b (JEF-568)** extends the bakeoff to score assessment (ground truth remapped
+- **T3** builds against a fixed target (D1–D9); its Option-A description is
+  superseded. **T2b** extends the bakeoff to score assessment (ground truth remapped
   4→3), cut-set (exact-set primary), the refute traps (incl. downstream-CVE-only must not
   appear in `contain`), minimality, and **temp-0.8 over-cut mass** (the one metric guards
   can't backstop), and gates the judge on the deployed 1.7B before wiring.

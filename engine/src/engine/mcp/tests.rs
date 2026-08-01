@@ -1,4 +1,4 @@
-//! Tests for the read-only MCP server (ADR-0031 / JEF-488): the tier clamp, the per-entry tiered
+//! Tests for the read-only MCP server (ADR-0031): the tier clamp, the per-entry tiered
 //! redaction (redacted/forensic/raw), the withheld-not-omitted contract, the audit seam, the
 //! exactly-four tool surface, and the rmcp-behind-the-verifier compose spike (unauthenticated →
 //! 401 on the same path as `/api`; a verified identity reaches the handler via a request extension).
@@ -441,7 +441,7 @@ fn explain_verdict_clamps_a_redacted_token_that_asks_for_raw() {
 
 #[test]
 fn the_durable_access_sink_records_exactly_one_line_for_a_raw_pull_and_none_for_redacted() {
-    // JEF-490: the same subject·entry·tool·tier·time contract, proven through the DURABLE sink the
+    // the same subject·entry·tool·tier·time contract, proven through the DURABLE sink the
     // "Access" tab reads (not just the test RecordingAuditSink) — a raw pull appends one line, a
     // redacted pull appends none.
     use crate::engine::mcp::access_audit::AccessAuditSink;

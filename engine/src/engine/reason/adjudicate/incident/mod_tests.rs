@@ -1,5 +1,5 @@
 //! Type-level tests plus one end-to-end pipeline test wiring menu → parse → guards
-//! together exactly as JEF-570 will (build the menu, parse a model reply against it, run
+//! together exactly as will (build the menu, parse a model reply against it, run
 //! the grounding guards in sequence) — without touching any engine wiring itself.
 
 use super::fixtures::{

@@ -1,7 +1,7 @@
 # 0015. Advisory evidence is mounted-snapshot-only (zero egress); injection-safe by construction
 
-- Status: Superseded in part by the JEF-242 amendment below — the advisory feed is RETIRED; only the KEV feed remains. The zero-egress + injection-safety rules this ADR established still govern every mounted feed (KEV today).
-- Date: 2026-06-22 (amended 2026-06-28: advisory feed retired, JEF-242)
+- Status: Superseded in part by the amendment below — the advisory feed is RETIRED; only the KEV feed remains. The zero-egress + injection-safety rules this ADR established still govern every mounted feed (KEV today).
+- Date: 2026-06-22 (amended 2026-06-28: advisory feed retired)
 - Relates to: [0013](0013-proof-winnows-model-decides.md) (the model is promote-capable, so its inputs are a security boundary), [0014](0014-behavioral-telemetry-ebpf.md) (same "in-cluster, no egress of cluster data" posture), [0016](0016-severity-vs-urgency.md) (KEV's `exploited_in_wild` is a distinct exploitation signal kept by this amendment), [0020](0020-signature-continuity.md) (the ADR-0020 amendment below carves out Rekor transparency-log reads as a sanctioned outbound lane for signature continuity)
 
 ## Context
@@ -10,7 +10,7 @@ The model is the analyst that decides exploitability on a proven foothold
 ([ADR-0013](0013-proof-winnows-model-decides.md)). It would judge better with
 **advisory evidence** for a CVE — a CWE class, whether a fix exists, and a short
 summary — so it can reason "a fix exists but the workload is still on the vulnerable
-version" vs "no fix at all" (the JEF-52 payoff). The question is *where that evidence
+version" vs "no fix at all" (the payoff). The question is *where that evidence
 comes from* and *how it reaches the prompt safely*, given two hard constraints:
 
 1. **Egress.** The platform's posture is in-cluster, local-first: the cluster graph
@@ -22,7 +22,7 @@ comes from* and *how it reaches the prompt safely*, given two hard constraints:
    feeds is **promote-capable** (ADR-0013) — a successful prompt injection here could
    drive an auto-cut. `sanitize`/`fence` (strip fence/structure chars, wrap as data)
    is adequate for short structured tokens but weak for long free prose and impossible
-   for patch diffs (JEF-106).
+   for patch diffs.
 
 We need the evidence without the egress and without handing the promote-capable model
 an injection surface.
@@ -38,7 +38,7 @@ rendered prompt is **byte-identical to today** — the feature is invisible unti
 snapshot is mounted. This is the same "no egress of cluster data" rule ADR-0014 holds
 for telemetry, applied to enrichment.
 
-### 2. Opt-in live OSV fetch is DEFERRED, not built (JEF-110)
+### 2. Opt-in live OSV fetch is DEFERRED, not built
 
 A future opt-in live fetch was considered and is explicitly **deferred**. It is not a
 default and is out of scope for this work; nothing in the codebase reaches the network
@@ -48,11 +48,11 @@ own decision — never the default posture this ADR sets.
 ### 3. Fix-diffs are out of scope for the local model
 
 Patch text / fix diffs are **not** surfaced to the local promote-capable model. They
-are unbounded free text that `sanitize` cannot make safe (JEF-106), and they buy
+are unbounded free text that `sanitize` cannot make safe, and they buy
 little for the exploitability call. If diffs are ever used, it is in a human or
 frontier-model lane with a different trust model — never the local auto-promote path.
 
-### 4. Structural extraction + hard caps for injection safety (JEF-106 folded in)
+### 4. Structural extraction + hard caps for injection safety (folded in)
 
 Advisory text reaches the model as **structured, length-capped, fenced data**:
 
@@ -63,7 +63,7 @@ Advisory text reaches the model as **structured, length-capped, fenced data**:
   the stored summary, the `fix_ref`, each CWE string, and the CWE count, so an oversized
   snapshot entry can never enter the system) and again at the prompt boundary (independent
   per-field caps in `cve_evidence` for the title, summary, and `fix_ref`), so the bound
-  holds regardless of how the advisory arrived — including a future live-OSV lane (JEF-110)
+  holds regardless of how the advisory arrived — including a future live-OSV lane
   that would bypass the parse-time cap.
 - **A per-entry AGGREGATE budget bounds the whole prompt.** Per-field caps bound any one
   field, but a CVE-heavy image (hundreds of CVEs, each at its per-field cap) could still
@@ -84,12 +84,12 @@ Advisory text reaches the model as **structured, length-capped, fenced data**:
 
 The verdict cache keys on `entry_fingerprint`, which is the budget guard against
 re-judging on every watch event (ADR-0013; one CPU-only model call is dear on a Pi —
-JEF-63). The advisory contributes only its **stable** fields — summary, CWE, fix
+). The advisory contributes only its **stable** fields — summary, CWE, fix
 reference — and **no timestamps**. So a freshly-synced snapshot busts the cache
 **once** (the entry is re-judged with the new evidence) and is then stable across
 passes; it does not thrash per pass.
 
-## Amendment (JEF-238): a co-located feed-fetcher sidecar is the approved live-enrichment mechanism
+## Amendment: a co-located feed-fetcher sidecar is the approved live-enrichment mechanism
 
 The core rule above is unchanged: **the engine (and the security graph) make no outbound
 advisory/KEV call and never transmit cluster data — they only READ mounted files.** What
@@ -114,10 +114,10 @@ It is sanctioned as the single approved live-enrichment lane:
 - **Full data, no ConfigMap limit.** An `emptyDir` has no size cap, so the **full** CISA
   KEV JSON (~1.5 MiB) and advisory data are fetched and read in full.
 
-**Supersedes.** This replaces the **JEF-228** feed-sync CronJob+ConfigMap path: raw CISA
+**Supersedes.** This replaces the **** feed-sync CronJob+ConfigMap path: raw CISA
 KEV (~1.5 MiB) exceeds Kubernetes' 1 MiB ConfigMap limit (forcing a lossy CVE-IDs-only
 extraction) and advisory data does not fit at all. It also definitively closes the
-cancelled **JEF-110** engine-fetch option (§2): the engine never fetches; only the
+cancelled **** engine-fetch option (§2): the engine never fetches; only the
 co-located, no-cluster-access sidecar does. The advisory file the sidecar fetches must
 already be in the `AdvisoryStore` CVE-keyed shape (§4) — a transform from a raw OSV/GHSA
 bulk feed is a documented follow-up, not part of this lane today.
@@ -127,7 +127,7 @@ sidecar entirely (nothing in the chart egresses); an operator can still mount th
 snapshot files into the engine for fully-offline enrichment — the §1 mounted-snapshot
 posture, verbatim.
 
-## Amendment (JEF-242): the advisory feed is RETIRED — the engine leans on Trivy for CVE metadata
+## Amendment: the advisory feed is RETIRED — the engine leans on Trivy for CVE metadata
 
 The advisory enrichment lane this ADR established is **removed**. The engine no longer
 consumes any advisory feed: `AdvisoryStore`, the `Advisory` type, the `Vulnerability.advisory`
@@ -135,7 +135,7 @@ field, the `PROTECTOR_ADVISORY_FILE` wiring, the advisory branches in the prompt
 (`cve_evidence`), and the chart's `feedSync.advisoryUrl` + the sidecar's advisory fetch all
 go away. **The only feed egress is now the CISA KEV catalogue.**
 
-**Why it was added then retired (kept honest).** The advisory lane was built (JEF-52/JEF-103,
+**Why it was added then retired (kept honest).** The advisory lane was built (
 this ADR) to give the model a CWE class, a fix reference, and a short summary so it could
 reason "a fix exists but the workload is still on the vulnerable version". In practice that
 evidence proved **redundant with Trivy** (the Vulnerability port, ADR-0003), which already
@@ -144,7 +144,7 @@ advisory `summary` ≈ Trivy's `title`, the advisory `fix_ref` ≈ Trivy's `fixe
 only net-new advisory field was `cwe[]`, which trivy-operator omits anyway, so it was empty
 in practice. The default NVD "recent" feed (~8.5 MiB) also had a poor hit-rate against the
 old base-image CVEs Trivy actually finds. The cost (a second feed, a gzipped 8.5 MiB
-download every cycle, the whole JEF-106 injection surface of untrusted advisory free-text)
+download every cycle, the whole injection surface of untrusted advisory free-text)
 no longer bought anything Trivy didn't already give.
 
 **What replaces it.** Trivy's per-vulnerability CVSS **`score`** (a float, e.g. `9.8`; often
@@ -157,7 +157,7 @@ Trivy; it loses only the redundant advisory adjunct.
 signal, `exploit_intel.rs`) is a **distinct** exploitation signal that drives the breach
 model (ADR-0016) — it is NOT advisory enrichment and is explicitly kept. The KEV mounted-feed
 lane, its zero-egress posture, and its feed-fetcher sidecar are exactly as this ADR and the
-JEF-238 amendment describe them.
+ amendment describe them.
 
 **What still holds from this ADR.** Every rule above about *mounted feeds* — zero engine
 egress (the engine only READS files; only the co-located, no-cluster-access sidecar
@@ -166,7 +166,7 @@ discipline (only stable fields ride the verdict cache; the CVSS `score` is one s
 field) — governs the KEV feed unchanged. The injection-safety machinery is now smaller
 because the only untrusted free-text reaching the promote-capable model is Trivy's `title`,
 which is still capped → sanitized → fenced and charged to the per-entry aggregate budget
-(JEF-106). The advisory-only caps (`summary`/`fix_ref`/CWE) are removed with the field they
+. The advisory-only caps (`summary`/`fix_ref`/CWE) are removed with the field they
 guarded; the caps that also guard `title` stay.
 
 ## Amendment (ADR-0020): Rekor transparency-log reads are a sanctioned outbound lane for signature continuity
@@ -223,10 +223,10 @@ Harder / accepted:
 
 - **Live OSV/NVD fetch as the default.** Rejected: outbound calls keyed on the
   cluster's own CVEs leak the cluster's vulnerability profile to a third party, against
-  the in-cluster posture. Deferred to an opt-in lane (JEF-110), not built here.
+  the in-cluster posture. Deferred to an opt-in lane, not built here.
 - **Surface the raw advisory description / patch diff verbatim.** Rejected: unbounded
-  untrusted free text into a promote-capable model is exactly the JEF-106 injection
+  untrusted free text into a promote-capable model is exactly the injection
   surface `sanitize` cannot close. Structural extraction + hard caps instead.
 - **Put advisory timestamps in the fingerprint.** Rejected: volatile fields would
-  thrash the verdict cache every pass and starve the slow CPU model (the JEF-63
+  thrash the verdict cache every pass and starve the slow CPU model (the
   budget). Stable fields only.

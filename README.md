@@ -156,8 +156,8 @@ like Cilium/Calico).
 
 `/metrics` exposes the engine's OTLP instruments (no-op unless an OTLP endpoint is
 configured). Among them, the **runtime-corroboration coverage** gauges mirror the same
-per-node liveness classification the dashboard readiness row reads (JEF-308 →
-[JEF-422]), so an operator watching only `/metrics` sees the same blind count the UI
+per-node liveness classification the dashboard readiness row reads (→
+), so an operator watching only `/metrics` sees the same blind count the UI
 does. They are **counts only — no per-node label dimension** (node names are
 attacker-influenceable, so a per-node series would be a cardinality/DoS vector), and
 they exclude out-of-scope reporters (nodes the agent isn't scheduled on):

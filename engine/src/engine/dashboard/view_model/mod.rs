@@ -48,7 +48,7 @@ fn strip_from_findings(
     readiness: &Readiness,
     last_pass: Option<SystemTime>,
 ) -> (StatusStripProps, Vec<FindingProps>) {
-    // Blind nodes (JEF-308) come from the readiness runtime-corroboration breakdown, so a finding
+    // Blind nodes come from the readiness runtime-corroboration breakdown, so a finding
     // on a node with no live sensor carries its caveat.
     let blind_nodes = findings::blind_nodes_of(readiness);
     let rows = findings::map_findings(findings, judgements, &blind_nodes);
@@ -105,7 +105,7 @@ pub fn build_status_strip(
     strip_from_findings(cluster, findings, judgements, readiness, last_pass).0
 }
 
-/// Build the whole Alerts view's props (JEF-323): the persistent strip + the current-window
+/// Build the whole Alerts view's props: the persistent strip + the current-window
 /// "alarming-now" activity events across every finding's entry this pass, plus the calm
 /// blind-node caveat for the quiet state. A CURRENT-WINDOW view (runtime signals live one pass),
 /// NOT a persisted audit log. Derived from the SAME per-pass findings snapshot the Findings view
@@ -138,8 +138,8 @@ pub fn build_action_view(
 }
 
 /// Build the whole Admission/policy (webhook floor) view's props (brief §6): the persistent strip +
-/// the decision tallies header (so a healthy view is never blank) + the per-image signing inventory
-/// (JEF-262) + the deduped decision rows. The tallies are derived from the webhook DECISION rows
+/// the decision tallies header (so a healthy view is never blank) + the per-image signing
+/// inventory + the deduped decision rows. The tallies are derived from the webhook DECISION rows
 /// alone — the signing sweep's observation rows (`Image/<ref>`) feed the inventory, never the
 /// admitted/audited/denied counts — so pure observation can't inflate the decision totals. Pure
 /// given its inputs.
@@ -150,7 +150,7 @@ pub fn build_admission_view(
     admission::build(strip, rows)
 }
 
-/// Build the whole "Access" view's props (JEF-490): the persistent strip + the caller's OWN tier
+/// Build the whole "Access" view's props: the persistent strip + the caller's OWN tier
 /// chip + the per-tier reveal list + the newest-first forensic/raw disclosure pulls, each redacted
 /// to the CALLER's own tier (a lower-tier viewer never sees a higher-tier pull's target). `records`
 /// are newest-first; `durable` selects the honest empty-state caveat. Pure given its inputs.
@@ -176,7 +176,7 @@ pub fn build_scope_preview_view(
 }
 
 /// The standing signing-regression counts `(established, cold)` derived from the admission-decision
-/// log's regression rows (`SigningRegression/<repo>`, JEF-264) — established-baseline regressions
+/// log's regression rows (`SigningRegression/<repo>`) — established-baseline regressions
 /// count toward breach, cold-baseline ones toward uncertain. The caller folds these into the
 /// persistent strip (via [`StatusStripProps::with_signing_regressions`]) so a standing regression
 /// keeps the strip non-green on EVERY tab, WITHOUT routing through the reachability findings
@@ -185,7 +185,7 @@ pub fn signing_regression_counts(rows: &[PolicyDecisionRecord]) -> (usize, usize
     signing_inventory::counts(rows)
 }
 
-/// Map the server-derived coverage-stall register (JEF-421) into the strip-level `coverage-alert`
+/// Map the server-derived coverage-stall register into the strip-level `coverage-alert`
 /// banner payload — `Some` ONLY for [`CoverageState::Stalled`] (a covering feed went dark past the
 /// debounce). Every other register (`Covered`/`Degraded`/`Absent`) yields `None`: the stall banner
 /// is exclusively the loud was-covering → now-silent edge, never the honest known-absence. The caller

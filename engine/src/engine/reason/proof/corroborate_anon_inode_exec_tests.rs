@@ -1,4 +1,4 @@
-//! Tests for the JEF-317 (Route A) entry-scoped corroboration shape — anon-inode exec on
+//! Tests for the (Route A) entry-scoped corroboration shape — anon-inode exec on
 //! the foothold — kept in its own `*_tests.rs` file (repo CLAUDE.md: tests count toward the
 //! 1,000-line cap). `super` resolves to the proof module, so these exercise the
 //! `pub(super)` `corroborate` seam directly, mirroring `corroborate_privesc_tests.rs`.
@@ -72,7 +72,7 @@ fn execution_objective() -> AttackRef {
 #[test]
 fn anon_inode_exec_on_the_foothold_entry_corroborates_execution() {
     // A memfd/unlinked-backed exec on the proven internet-facing foothold IS the
-    // Falco-parity signal (JEF-317): the attacker who owns the front door running a
+    // Falco-parity signal: the attacker who owns the front door running a
     // fileless payload on that same workload.
     let runtime = [exec("/tmp/payload", true, 0)];
     assert!(corroborated_for(

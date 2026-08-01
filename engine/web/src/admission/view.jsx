@@ -1,6 +1,6 @@
-// The Admission/policy view (ADR-0025 / JEF-400) — a 1:1 Preact port of maud `admission_view.rs`:
+// The Admission/policy view (ADR-0025) — a 1:1 Preact port of maud `admission_view.rs`:
 // the decision-tallies header (admitted / audited / denied, so a healthy cluster is never blank —
-// counts honest at zero), the per-image signing inventory (JEF-262 / ADR-0020), and the deduped
+// counts honest at zero), the per-image signing inventory (ADR-0020), and the deduped
 // decision rows.
 //
 // Reconcile keying (the only per-view variation): decision rows have NO id → keyed on their

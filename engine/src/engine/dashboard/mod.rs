@@ -2,8 +2,8 @@
 //! for the engine's read-only output state. Zero-egress, same-origin only — the security graph and
 //! evidence never leave the cluster. Presentation is a VIEW, never a decision gate (ADR-0016).
 //!
-//! Under the v4 cutover (ADR-0025 / JEF-398) the engine is **Preact-only**: the maud *body*
-//! renderers and the per-tab flag are gone. Under JEF-408 (superseding ADR-0025 / see ADR-0027)
+//! Under the v4 cutover (ADR-0025) the engine is **Preact-only**: the maud *body*
+//! renderers and the per-tab flag are gone. Under (superseding ADR-0025 / see ADR-0027)
 //! the LAST server-rendered body parts — the status strip and the tab nav — moved to the client
 //! too: the server now emits a ROOT-ONLY document shell (`<head>` + the `#dash-root` mount), and the
 //! bundled Preact client renders ALL body HTML (strip, nav, and every view body) reconciling from
@@ -79,23 +79,23 @@ pub struct DashboardState {
     /// report. Named `decision_journal` (not `journal`) so it never collides with the
     /// `JudgementLog` the run-loop binds as `journal`.
     pub decision_journal: Arc<DecisionJournal>,
-    /// The webhook's admission-decision log (JEF-226/237) — the bounded, deduped ring of policy
+    /// The webhook's admission-decision log — the bounded, deduped ring of policy
     /// decisions read by the Admission tab (the webhook floor). Read-only here.
     pub policy_log: Arc<PolicyDecisionLog>,
     /// The cluster label shown in the strip.
     pub cluster: String,
-    /// The SERVER-derived app-level auth mode (ADR-0030 / JEF-487): `Oidc` when the dashboard mounts
+    /// The SERVER-derived app-level auth mode (ADR-0030): `Oidc` when the dashboard mounts
     /// the enforcing verifier (an issuer is configured), `EdgeOnly` when unconfigured (the loud
-    /// bypass, §6). Folded into the persistent strip so the client renders the honest pill (JEF-489)
+    /// bypass, §6). Folded into the persistent strip so the client renders the honest pill
     /// and derives nothing. Set by the caller (`run_loop`) from the same config it uses to build the
     /// [`auth::enforce::Enforcer`], so the pill can never disagree with what is actually enforced.
     pub auth_mode: AuthMode,
-    /// The durable forensic/raw MCP disclosure audit sink (ADR-0031 §4, JEF-490) — the SAME `Arc`
+    /// The durable forensic/raw MCP disclosure audit sink (ADR-0031 §4) — the SAME `Arc`
     /// the MCP server appends to. The "Access" tab reads its records (redacted to the caller's own
     /// tier); read-only here, like every other handle. Present even when the MCP server isn't served
     /// (then it simply holds no records — an honest empty log, not a hidden tab).
     pub mcp_audit: Arc<AccessAuditSink>,
-    /// The shadow-bake divergence log (ADR-0035's bake step, JEF-569 rescope): the bounded ring
+    /// The shadow-bake divergence log (ADR-0035's bake step rescope): the bounded ring
     /// of recent model-vs-deterministic cut-choice classifications the engine appends each pass.
     /// Read-only here, like every other handle — served RAW (no `strip`/props envelope; it is a
     /// diagnostic bake feed for the human arm-readiness review, not a navigable tab) at
@@ -120,7 +120,7 @@ impl DashboardState {
         let health: ModelHealth = self.findings.model_health();
         let last_pass: Option<SystemTime> = self.findings.last_pass();
         let runtime = self.findings.runtime_coverage();
-        // Overlay the cross-pass coverage-stall register (JEF-421): a covering runtime feed that has
+        // Overlay the cross-pass coverage-stall register: a covering runtime feed that has
         // gone dark past the debounce escalates the runtime row to `stalled`. Per-pass derivation
         // can't see the edge, so it's folded in here from the stall tracker's decided state.
         derive_readiness(&config, health, last_pass, &runtime)
@@ -143,7 +143,7 @@ impl DashboardState {
             self.findings.last_pass(),
         );
         let (breach, uncertain) = self.signing_regression_counts();
-        // Overlay the cross-pass coverage-stall register (JEF-421) so a stalled runtime feed reads
+        // Overlay the cross-pass coverage-stall register so a stalled runtime feed reads
         // loud (and forbids green) on EVERY tab, exactly like a standing signing regression.
         let alert = view_model::coverage_stall_alert(&self.findings.coverage_state());
         strip
@@ -153,7 +153,7 @@ impl DashboardState {
     }
 
     /// The standing signing-regression counts `(established, cold)` from the admission-decision log
-    /// (JEF-264) — folded into the persistent strip so a standing regression keeps it non-green on
+    /// — folded into the persistent strip so a standing regression keeps it non-green on
     /// EVERY tab, without routing through the reachability findings pipeline.
     fn signing_regression_counts(&self) -> (usize, usize) {
         view_model::signing_regression_counts(&self.policy_log.snapshot())
@@ -184,7 +184,7 @@ impl DashboardState {
         view
     }
 
-    /// Build the Alerts view props (JEF-323): the persistent strip + the live "alarming-now"
+    /// Build the Alerts view props: the persistent strip + the live "alarming-now"
     /// activity events derived from the SAME per-pass findings snapshot the Findings view
     /// reads (a current-window view — runtime signals live one pass — not a persisted log) + the
     /// calm blind-node caveat for the quiet state. The strip carries the real findings counts (and
@@ -225,7 +225,7 @@ impl DashboardState {
         view_model::build_admission_view(self.status_strip(), &rows)
     }
 
-    /// Build the "Access" view props (JEF-490): the persistent strip + the CALLER's own tier chip +
+    /// Build the "Access" view props: the persistent strip + the CALLER's own tier chip +
     /// the newest-first forensic/raw MCP disclosure pulls, each redacted to the caller's own tier.
     /// `caller_tier` comes from the verified [`Identity`] the OIDC layer inserted (or the
     /// most-restricted [`Tier::Redacted`] default when unauthenticated/edge-only), so a lower-tier
@@ -307,7 +307,7 @@ impl ScopePreviewQuery {
 }
 
 /// `GET /` — the ROOT-ONLY document shell for the requested tab (default Findings): the `<head>`
-/// (cluster-labelled title + css) + the Preact `#dash-root` mount point (JEF-408, superseding
+/// (cluster-labelled title + css) + the Preact `#dash-root` mount point (superseding
 /// ADR-0025's server-rendered strip/nav). The client renders ALL body HTML — the status strip, the
 /// tab nav, and the view body — reconciling from `/api/{tab}.json`. The honesty tokens (all-clear /
 /// watching / judging-state) stay server-derived in that JSON; a blank before the first fetch is
@@ -326,7 +326,7 @@ async fn index(State(state): State<DashboardState>, Query(q): Query<TabQuery>) -
 /// server-derived honesty tokens (`all-clear`/`watching`, per-row `posture`, `is-cleared`, the
 /// blind caveat) are already decided in the props and serialize as decided values — the client
 /// performs zero honesty derivation. `Cache-Control: no-store` mirrors the CSS/JS routes: this is
-/// a per-session-gated, zero-egress snapshot that must never sit in a shared edge cache (JEF-283).
+/// a per-session-gated, zero-egress snapshot that must never sit in a shared edge cache.
 fn view_json<T: Serialize>(view: T) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
 }
@@ -357,7 +357,7 @@ async fn admission_json(State(state): State<DashboardState>) -> Response {
     view_json(state.admission_view())
 }
 
-/// `GET /api/access.json` — the read-only "Access" view-model snapshot (JEF-490): the forensic/raw
+/// `GET /api/access.json` — the read-only "Access" view-model snapshot: the forensic/raw
 /// MCP disclosure audit, redacted to the CALLER's own tier. GET-only, `no-store`, inherits the OIDC
 /// gate from the router-wide enforce layer (a 401 fires there before this handler runs — no second
 /// gate). The caller's tier is read from the verified [`Identity`] the enforce layer inserted; when
@@ -399,7 +399,7 @@ async fn scope_preview_json(
 
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
 ///
-/// `Cache-Control: no-store` is load-bearing behind Cloudflare Access (JEF-283): Cloudflare
+/// `Cache-Control: no-store` is load-bearing behind Cloudflare Access: Cloudflare
 /// caches `.css`/`.js` by file extension even with no origin directive, and it caches 302s —
 /// so an unauthenticated edge hit gets Access's 302→login cached against this URL and then
 /// served (as HTML) to authenticated users, leaving the dashboard unstyled. no-store keeps this
@@ -416,7 +416,7 @@ async fn dashboard_css() -> Response {
 }
 
 /// `GET /assets/dashboard.js` — the zero-dep client script, same-origin.
-/// `Cache-Control: no-store` for the same Access/edge-cache reason as the stylesheet (JEF-283).
+/// `Cache-Control: no-store` for the same Access/edge-cache reason as the stylesheet.
 async fn dashboard_js() -> Response {
     (
         [
@@ -429,7 +429,7 @@ async fn dashboard_js() -> Response {
 }
 
 /// Build the dashboard router with the read-only state and, when configured, the app-level OIDC
-/// enforcement gate (ADR-0030 / JEF-487).
+/// enforcement gate (ADR-0030).
 ///
 /// Every response carries the strict same-origin CSP (ADR-0025) via a single
 /// [`security_headers::set_csp`] layer — the layer covers all routes, so a route added
@@ -489,15 +489,15 @@ pub async fn serve_dashboard(addr: SocketAddr, state: DashboardState, auth: Opti
     }
 }
 
-// JEF-395: HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025) — same-view-model,
+// HTTP-level tests for the read-only per-view JSON endpoints (ADR-0025) — same-view-model,
 // GET-only, no-store, strict CSP, and the never-a-false-green honesty guard at the JSON boundary.
-// These are the retained honesty proof after the v4 cutover (JEF-398): the maud-render honesty
+// These are the retained honesty proof after the v4 cutover: the maud-render honesty
 // tests are gone because their view-model is unchanged and its guarantee is now asserted here (the
 // serialized props the client consumes) + in the client `vitest` suite.
 #[cfg(test)]
 mod api_json_tests;
 
-// JEF-398: page-shell tests — the Preact-only page emits, for every tab, the server-rendered strip
+// page-shell tests — the Preact-only page emits, for every tab, the server-rendered strip
 // + nav + the `#dash-root` mount point (calm-when-blind first paint stays server-side).
 #[cfg(test)]
 mod page_tests;

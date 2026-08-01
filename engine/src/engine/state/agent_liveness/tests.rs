@@ -1,4 +1,4 @@
-//! Tests for the per-node agent-liveness honesty core (JEF-308): the expected-node set from the
+//! Tests for the per-node agent-liveness honesty core: the expected-node set from the
 //! informer, and the healthy / degraded / blind / out-of-scope / quiet≠blind classification.
 
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ fn report(node: &str, probes_loaded: u32, probes_total: u32, signals: u64) -> Ag
 
 #[test]
 fn expected_set_is_where_the_agent_is_scheduled_only() {
-    // The scheduler already honoured the agent's nodeSelector/tolerations (JEF-295 arm64), so the
+    // The scheduler already honoured the agent's nodeSelector/tolerations (arm64), so the
     // expected set is exactly the agent pods' nodes. A node running only a non-agent workload
     // (an amd64 node the agent isn't scheduled on) is NOT expected — out-of-scope, not blind.
     let pods = vec![

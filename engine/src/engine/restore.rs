@@ -26,7 +26,7 @@ impl Engine {
         let mut restored_decisions = 0usize;
         let mut restored_divergence = 0usize;
         // The boot instant the recency tracker stamps as a restored entry's synthetic
-        // `first_seen` (JEF-201) — a past instant relative to any later pass, so a restored
+        // `first_seen` — a past instant relative to any later pass, so a restored
         // entry is never mislabeled NEW. (Restored ages are suppressed regardless.)
         let restored_at = std::time::Instant::now();
         for entry in &entries {
@@ -45,13 +45,13 @@ impl Engine {
                     // per entry wins. Display-only: the action logic still uses the live
                     // verdict, never this restored string.
                     //
-                    // JEF-201: a restored entry existed BEFORE this run, so it must never read
+                    // a restored entry existed BEFORE this run, so it must never read
                     // as NEW in the Δ column. `restored_at` (boot `Instant`) seeds its
                     // `first_seen` in the past and flags it `restored`; the recency cell shows
                     // `Restored`, not NEW, until a live pass re-judges it.
                     self.verdicts
                         .seed_restored(key, verdict.clone(), restored_at);
-                    // JEF-301: re-seed the verdict CACHE so an UNCHANGED entry skips a fresh
+                    // re-seed the verdict CACHE so an UNCHANGED entry skips a fresh
                     // (slow, OOM-prone) model call across a restart — the big request-volume cut.
                     // Restores the EXACT prior decision (a persisted `Exploitable` stays one);
                     // `cached_for` serves it only while the fingerprint matches, so changed
@@ -69,7 +69,7 @@ impl Engine {
                     });
                     restored_reversions += 1;
                 }
-                // ADR-0034 D8 (JEF-639): stage this entry's cut-choice decision for the double
+                // ADR-0034 D8: stage this entry's cut-choice decision for the double
                 // replay-lock — held in `restored_decisions`, NEVER written straight into the
                 // live `decisions` map here (there is no current menu/fingerprint to check it
                 // against yet; that only exists once a real pass runs). Chronological replay
@@ -116,12 +116,12 @@ impl Engine {
                 // Applies are durable for the audit trail but don't seed output state directly
                 // (the live ledger re-derives the active set from current proof each pass).
                 journal::Decision::Apply { .. } => {}
-                // Admission decisions (JEF-237) restore into the webhook's admission-decision
+                // Admission decisions restore into the webhook's admission-decision
                 // log, not the engine's findings or reversion state — `run_watch` does that
                 // restore from the same journal, since it (not the engine) holds the shared
                 // decision ring.
                 journal::Decision::Admission { .. } => {}
-                // Per-repo signing baselines (JEF-263) restore into the dedicated
+                // Per-repo signing baselines restore into the dedicated
                 // `SigningBaselineStore`, not the engine's findings/reversion state —
                 // `run_watch` does that restore from the same journal, since it (not the engine
                 // core) owns the baseline store the sweep feeds each pass.

@@ -1,4 +1,4 @@
-//! Unit tests for the OIDC verifier (JEF-485 / ADR-0030).
+//! Unit tests for the OIDC verifier (ADR-0030).
 //!
 //! Keys and the in-memory (zero-egress) JWKS fetcher live in [`super::test_support`] — the whole
 //! suite mints valid/invalid/rotated tokens through that shared seam without a network fetch.

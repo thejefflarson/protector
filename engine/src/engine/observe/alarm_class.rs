@@ -1,13 +1,13 @@
-//! The engine-side **"alarming-now"** classifier (JEF-309): which agent-observed
+//! The engine-side **"alarming-now"** classifier: which agent-observed
 //! behaviors are a *tamper-now* signal that evidences active intrusion.
 //!
 //! This generalizes [`super::exec_class::notable_exec`] (an interactive shell / package
-//! manager run in a container, JEF-55/JEF-117) into the single predicate the corroboration
+//! manager run in a container) into the single predicate the corroboration
 //! and quarantine paths key on. Its new arm is [`alarming_write`]: a
 //! [`Behavior::FileWrite`] to a **sensitive path** — the container-drift / drop-and-execute
-//! / config-tamper subset of the F2 write signal (JEF-306), classified engine-side.
+//! / config-tamper subset of the F2 write signal, classified engine-side.
 //!
-//! ## Why here (JEF-113 pattern)
+//! ## Why here (pattern)
 //! The shared [`Behavior`] wire type stays **pure data**: the agent emits the written path,
 //! the engine decides whether it is *sensitive*. Keeping the path lists here — alongside the
 //! other engine classification thresholds (`exec_class`, `peer_class`) — means a policy change
@@ -22,7 +22,7 @@
 //! ## Consistency (hard)
 //! A "tamper-now" signal that some code paths see and others don't is a bug. [`is_alarming_now`]
 //! is the ONE predicate the blanket-corroboration consumers share — `reason::proof::corroborate`
-//! (the FileWrite arm), `reason::proof::chain::actively_exploited` (JEF-284 condition-2
+//! (the FileWrite arm), `reason::proof::chain::actively_exploited` (condition-2
 //! quarantine), and `reason::adjudicate::guards` (the zero-anchor backstop) — so alert / notable
 //! exec / alarming write can never drift apart between them.
 
@@ -97,7 +97,7 @@ fn is_ssh_key_path(path: &str) -> bool {
 }
 
 /// A short, human label for an *alarming* file write — a sensitive-path / drop-and-execute /
-/// config-tamper write (JEF-309) — or `None` for a benign write (an app writing its own
+/// config-tamper write — or `None` for a benign write (an app writing its own
 /// `/data`, `/tmp`, or logs). Mirrors [`super::exec_class::notable_exec`]: it promotes a
 /// [`Behavior::FileWrite`] to **blanket** corroboration (any objective) in
 /// `reason::proof::corroborate`, exactly as an `Alert` or a notable exec does. Always
@@ -122,14 +122,14 @@ pub fn alarming_write(behavior: &Behavior) -> Option<&'static str> {
     }
 }
 
-/// The single **"alarming-now"** predicate (JEF-309) shared by every blanket-corroboration
+/// The single **"alarming-now"** predicate shared by every blanket-corroboration
 /// consumer: whether `behavior` is a tamper-now signal that evidences active intrusion —
 ///   * an [`Alert`](Behavior::Alert) (a sensor rule fired),
 ///   * a *notable* exec — an interactive shell / package manager in a container
-///     ([`super::exec_class::notable_exec`], JEF-55/JEF-117), or
+///     ([`super::exec_class::notable_exec`]), or
 ///   * an *alarming* file write — a sensitive-path / drop-and-execute drift ([`alarming_write`]).
 ///
-/// This is the ONE definition `reason::proof::chain::actively_exploited` (JEF-284 condition-2
+/// This is the ONE definition `reason::proof::chain::actively_exploited` (condition-2
 /// quarantine) and `reason::adjudicate::guards` (the zero-anchor backstop) both call, so a new
 /// alarm source can't be seen by one path and missed by another. It is deliberately NOT the
 /// per-objective corroboration seam (a benign connection / secret-read still corroborates only

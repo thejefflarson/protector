@@ -18,7 +18,7 @@ specifically so "the judge went quiet" and "the engine cut something" are never 
 
 These sit alongside the existing model-health instruments, useful for the SAME
 alert group: `protector.engine.model_calls{result="unavailable"}` (a model call came back
-inconclusive), `protector.engine.skipped` (a re-judge was skipped for breaker/backoff — JEF-234),
+inconclusive), `protector.engine.skipped` (a re-judge was skipped for breaker/backoff —),
 and `protector.engine.model_latency_ms` (the model's response-time tail).
 
 ## Example PromQL rules

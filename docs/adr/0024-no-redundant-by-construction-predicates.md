@@ -6,20 +6,20 @@
 
 ## Context
 
-JEF-319 (retire-Falco G4) proposed two entry-scoped corroboration shapes on
+ (retire-Falco G4) proposed two entry-scoped corroboration shapes on
 `corroborated_for`: **cross-tenant lateral** and **reverse-shell**. The corroboration
 predicate is not cosmetic — flipping `corroborated` can gate a quarantine (ADR-0009 /
 ADR-0011) — so what it admits is load-bearing and what it *cannot* admit is dead weight.
 
 The reverse-shell shape (`notable exec → outbound egress within 60s`) was
-**redundant-by-construction**: the existing blanket notable-exec arm (JEF-117) already
+**redundant-by-construction**: the existing blanket notable-exec arm already
 returns `true` for ANY objective whenever a notable exec is present. A shape that fires
 only when a notable exec is present is therefore strictly narrower than a condition that
 already holds — it could not independently change the `corroborated_for` boolean. It was
 proposed as documented, unit-tested-in-isolation code kept "for when the blanket exec arm
 is later narrowed."
 
-This is exactly the shape the Fable audit (JEF-363/364/367…) was called to excise: a
+This is exactly the shape the Fable audit was called to excise: a
 tidy, well-tested, in-code-documented construct whose output was already determined by
 another arm, which survived review *because* it was tidy and tested. Redundant-by-
 construction code that "works" is still a defect (Hickey: incidental complexity;
@@ -34,13 +34,13 @@ current predicate.** A shape whose value is contingent on a *future* narrowing o
 arm lands **with** that narrowing — so it arrives load-bearing, with a test that can
 actually fail — not ahead of it on the promise of future need.
 
-Concretely for JEF-319:
+Concretely for
 - **Cross-tenant lateral is merged.** A bare in-cluster `NetworkConnection` does not
   blanket-corroborate, so `is_cross_tenant` is the only thing that can flip
   `corroborated_for` for that shape; it is genuinely load-bearing and tested end-to-end
   through `corroborated_for` (positive; same-ns negative; non-foothold negative).
 - **Reverse-shell is stripped**, along with its isolated predicate tests. A follow-up
-  ticket tracks implementing it **when** the blanket notable-exec arm (JEF-117) is
+  ticket tracks implementing it **when** the blanket notable-exec arm is
   narrowed as part of retiring Falco; at that point the exec+egress-timing correlation
   becomes the load-bearing reverse-shell signal and lands with a test that can fail.
 

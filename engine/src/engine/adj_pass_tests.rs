@@ -1,4 +1,4 @@
-//! Unit tests for [`rearm_restored_decision`] — the ADR-0034 D8 double replay-lock (JEF-639),
+//! Unit tests for [`rearm_restored_decision`] — the ADR-0034 D8 double replay-lock,
 //! pure and directly testable without spinning up a whole `Engine`. The end-to-end restart
 //! behavior (journal write → boot restore → live re-arm, including the enforce-mode standing-
 //! cut acceptance case) is covered by the `engine::journal_tests` integration tests instead —

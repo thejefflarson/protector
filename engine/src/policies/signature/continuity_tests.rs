@@ -1,4 +1,4 @@
-//! Tests for the ADR-0020 Stage-3 signing-continuity gate (JEF-265): the block predicate, the
+//! Tests for the ADR-0020 Stage-3 signing-continuity gate: the block predicate, the
 //! scoped "exception accepted" opt-out, the back-compat pin, and the read-only-baseline guarantee.
 
 use std::collections::HashMap;

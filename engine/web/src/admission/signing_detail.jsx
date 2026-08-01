@@ -1,4 +1,4 @@
-// The expand-in-place detail panels for the signing inventory rows (ADR-0025 / JEF-400) — 1:1
+// The expand-in-place detail panels for the signing inventory rows (ADR-0025) — 1:1
 // Preact ports of the maud `signing_detail` / `signing_regression_detail` / `provenance_change_detail`
 // / `signing_exception_detail`. Each shows the FULL untrusted identities (image ref, Fulcio SAN,
 // issuer, builder, source) so the operator sees EXACTLY what stands / changed. Every such string is

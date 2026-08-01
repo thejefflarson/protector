@@ -1,5 +1,5 @@
-//! Tests for the would-have-acted report aggregation (JEF-143), split into its own file to keep
-//! `report.rs` under the repo's 1,000-line cap (CLAUDE.md). JEF-674's realignment to the typed
+//! Tests for the would-have-acted report aggregation, split into its own file to keep
+//! `report.rs` under the repo's 1,000-line cap (CLAUDE.md). 's realignment to the typed
 //! ADR-0034 contract is the focus: would-act classification now reads `Decision::Incident`'s
 //! `assessment` + `cuts`, never the legacy `Decision::Breach` verdict prose.
 
@@ -21,7 +21,7 @@ fn breach(at_ms: u64, entry: &str, verdict: &str) -> JournalEntry {
     }
 }
 
-/// A typed cut-choice decision (ADR-0034 D8) — the classification source JEF-674 realigns to.
+/// A typed cut-choice decision (ADR-0034 D8) — the classification source realigns to.
 fn incident(
     at_ms: u64,
     entry: &str,
@@ -82,7 +82,7 @@ fn aggregate_would_acts_only_when_the_typed_decision_is_attack_with_a_nonempty_c
     assert_eq!(w.last_verdict, "RCE reaches the objective");
 }
 
-/// The bug JEF-674 fixes: a Breach line whose verdict PROSE starts with "exploitable" must NOT
+/// The bug fixes: a Breach line whose verdict PROSE starts with "exploitable" must NOT
 /// count as a would-act when no typed `Incident` line ever backed it (a pre-ADR-0034 journal, or
 /// an entry the model never re-judged after the upgrade) — it replays display-only.
 #[test]

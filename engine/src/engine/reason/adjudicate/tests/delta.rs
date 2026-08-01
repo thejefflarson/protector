@@ -1,4 +1,4 @@
-//! Delta-aware adjudication tests (ADR-0023, JEF-391): the "Changes since the last decisive
+//! Delta-aware adjudication tests (ADR-0023): the "Changes since the last decisive
 //! verdict" prompt section, the additive-vs-subtractive delta flag that drives the re-judge gate,
 //! and the non-negotiable correctness guard — the FULL current state is always present in the
 //! prompt, the delta only DIRECTS attention. Kept in its own submodule (like `sections`) purely
