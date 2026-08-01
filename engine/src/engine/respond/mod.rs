@@ -200,9 +200,21 @@ impl Mitigation {
     /// unconditional-`true` special case — it can only move a mitigation from
     /// AutoApply to Propose, never the reverse.
     pub fn is_live_corroborated(&self) -> bool {
+        self.live_corroborating_entries().next().is_some()
+    }
+
+    /// The internet-facing entries whose justification clears the SAME bar
+    /// [`is_live_corroborated`](Self::is_live_corroborated) checks — corroborated or
+    /// promoted, adjudicated, and breach-relevant — yielding the entry keys rather than a
+    /// bool. Exposed separately so the engine's actuation-freshness gate can check THOSE
+    /// SPECIFIC entries' verdict age against the verdict store, without `respond`/`actuator`
+    /// taking a dependency on `state::VerdictStore` (this module stays pure over its own
+    /// types). The one predicate lives here; `is_live_corroborated` is just "any at all".
+    pub fn live_corroborating_entries(&self) -> impl Iterator<Item = &str> {
         self.justifications
             .iter()
-            .any(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
+            .filter(|j| (j.corroborated || j.promoted) && j.adjudicated && j.breach_relevant)
+            .map(|j| j.entry.as_str())
     }
 }
 

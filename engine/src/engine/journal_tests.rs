@@ -375,7 +375,7 @@ fn global_breaker_bounds_calls_when_the_model_is_fully_down() {
         store.record_inconclusive(&format!("entry-{i}"), now);
     }
     assert!(store.breaker_open(now), "tripped again");
-    store.record_decisive("entry-0");
+    store.record_decisive("entry-0", now);
     assert!(
         !store.breaker_open(now),
         "the first decisive success closes the breaker"
