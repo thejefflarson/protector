@@ -59,12 +59,18 @@ internet-facing entry's. The two things it adjudicates:
 2. **On-box behavior suggesting compromise** of the critical path — on an internet-facing
    pod *or* a downstream pod.
 
-**Honest current state (JEF-547 fact-check, `origin/main`):** the code does not yet meet
-this. The model governs only the *entry*; every downstream/pivot decision is made
-deterministically (reachability + CVE presence, or a live on-box signal) with the model out
-of the loop, the model is never shown downstream evidence, and it chooses no containment
-scope (all quarantine is pod-level; no node-level option). Closing that gap is a deliberate
-refactor tracked from JEF-547 — this section is the target it refactors toward.
+**Honest current state (`origin/main`, v0.7.0):** the *decision* half of this is now real.
+The model is shown per-node downstream evidence and names the compromised on-path nodes to
+contain; determinism resolves each named node to its narrowest reversible cut (the cut-choice
+contract, [ADR-0034](adr/0034-cut-choice-contract.md)), wired live through the ledger — in
+**shadow** (it proposes, it does not act). What genuinely remains: containment *scope* is
+still pod-level only (node-level containment is deferred), and downstream-CVE *exploitability
+enrichment* is unbuilt — proving that attacker input actually reaches a downstream node's
+vulnerable code is an application-dataflow question determinism can't yet answer, so a
+downstream CVE stays context/severity, never a breach driver on its own. Those two residuals
+are the target this section still refactors toward; arming `enforce` (acting, not proposing)
+is a separate, deliberate operator decision gated per [ADR-0021](adr/0021-two-setting-operating-posture.md)
+and [ADR-0035](adr/0035-per-cut-class-arming-ladder.md).
 
 ## The superpower, and the discipline that earns it
 
