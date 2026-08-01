@@ -99,5 +99,6 @@ pub(super) fn build_clear() -> DashboardState {
         cluster: "prod-us-east-1 (PREVIEW — clear)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
         mcp_audit: Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
+        divergence: Arc::new(protector::engine::state::DivergenceLog::new()),
     }
 }

@@ -12,6 +12,7 @@
 //! sink (the zero-egress invariant: this state never leaves the cluster).
 
 mod agent_liveness;
+mod divergence;
 mod evidence;
 mod findings;
 mod judgement;
@@ -26,6 +27,7 @@ pub use agent_liveness::{
     AgentLivenessStore, BlindReason, CoverageAlert, CoverageState, LiveNode, NodeCoverage,
     NodeState, RuntimeCoverage, derive_runtime_coverage, expected_agent_nodes,
 };
+pub use divergence::{DivergenceCounts, DivergenceLog, DivergenceRow};
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 pub use findings::{CoverageEdge, Finding, Findings, PathStep};
 pub use judgement::{Judgement, JudgementLog};

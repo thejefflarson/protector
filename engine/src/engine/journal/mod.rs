@@ -182,6 +182,26 @@ pub enum Decision {
         /// first lock (see the variant docs above).
         fingerprint: String,
     },
+    /// One entry's shadow-bake divergence classification (the model-vs-deterministic cut
+    /// comparator, `super::cut_divergence`): how the model's chosen cut-set for this entry, this
+    /// pass, compared against the deterministic fallback set `respond::containment_for` +
+    /// `respond::quarantine_workload_link` would have proposed for the same chains. Durable so
+    /// the bake history survives a restart rather than resetting the arm-readiness window (see
+    /// `docs/adr/0037-shadow-bake-arm-readiness.md`). Audit only — a consumer reads this to decide
+    /// whether the bake has cleared the
+    /// exit criterion; nothing re-arms or auto-applies from it (ADR-0016).
+    CutDivergence {
+        /// The internet-facing entry this classification was computed for.
+        entry: String,
+        /// How the model's cut-set compared to the deterministic fallback set.
+        class: crate::engine::cut_divergence::DivergenceClass,
+        /// Node keys the model named this pass (sorted, deduped) — empty for a decisive
+        /// `NoAttack`.
+        model_cuts: Vec<String>,
+        /// Node keys determinism alone would have proposed for the same chains (sorted,
+        /// deduped).
+        deterministic_cuts: Vec<String>,
+    },
     /// A mitigation applied (a cut went live), keyed by its cut signature.
     Apply {
         /// The cut's stable signature (`from -[relation]-> to`).

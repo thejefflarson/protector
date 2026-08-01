@@ -67,6 +67,13 @@ pub mod state;
 mod metrics;
 use metrics::EngineMetrics;
 
+// The shadow-bake divergence comparator (ADR-0035's "bake a model-vs-deterministic cut
+// comparator in shadow" step): compares each entry's model-chosen cut-set against the
+// deterministic fallback `respond::containment_for`/`quarantine_workload_link` would have
+// proposed for the same chains. View only — see the module docs. `pub` so `state::divergence`
+// and the dashboard's read-only view can share its record/class types.
+pub mod cut_divergence;
+
 // The ADJ-MISS-DIAG re-judge diagnostic (JEF-387), extracted to keep this orchestrator under
 // the file-size cap (CLAUDE.md). Emits the compact, per-section-fingerprinted line the churn
 // harness ingests.
@@ -178,6 +185,12 @@ pub struct Engine {
     /// The reversion log (JEF-141): recent lifted cuts + why. Seeded from the journal on boot
     /// so a self-revert survives a restart.
     reversions: std::sync::Arc<state::ReversionLog>,
+    /// The shadow-bake divergence log (ADR-0035's bake step): the bounded ring of recent
+    /// model-vs-deterministic [`cut_divergence::DivergenceRecord`]s, read-only input to the
+    /// human arm-readiness review (see `docs/adr/0037-shadow-bake-arm-readiness.md`). Written every pass alongside the durable
+    /// journal's own `CutDivergence` lines; never read back by the engine itself (a view, never
+    /// a gate, ADR-0016).
+    divergence: std::sync::Arc<state::DivergenceLog>,
     /// The durable decision journal (JEF-141): each pass's breach decisions and ledger
     /// apply/revert deltas are appended here so a restart replays them. Disabled (a
     /// no-op) when no `PROTECTOR_ENGINE_JOURNAL_PATH` volume is configured — the engine
@@ -292,6 +305,7 @@ impl Engine {
             adjudicator,
             findings,
             reversions: std::sync::Arc::new(state::ReversionLog::new()),
+            divergence: std::sync::Arc::new(state::DivergenceLog::new()),
             // Disabled by default — durability is opt-in via a mounted volume. The watch
             // path enables it from the env (see [`with_journal`]); tests run in-memory.
             journal: std::sync::Arc::new(journal::DecisionJournal::disabled()),
@@ -384,6 +398,7 @@ impl Engine {
         let mut restored_verdicts = 0usize;
         let mut restored_reversions = 0usize;
         let mut restored_decisions = 0usize;
+        let mut restored_divergence = 0usize;
         // The boot instant the recency tracker stamps as a restored entry's synthetic
         // `first_seen` (JEF-201) — a past instant relative to any later pass, so a restored
         // entry is never mislabeled NEW. (Restored ages are suppressed regardless.)
@@ -453,6 +468,25 @@ impl Engine {
                     );
                     restored_decisions += 1;
                 }
+                // Shadow-bake divergence lines (the model-vs-deterministic cut comparator)
+                // restore into the divergence ring exactly like a reversion restores into the
+                // reversion ring above, so the bake history survives a restart instead of
+                // resetting the arm-readiness window.
+                journal::Decision::CutDivergence {
+                    entry: key,
+                    class,
+                    model_cuts,
+                    deterministic_cuts,
+                } => {
+                    self.divergence.record(state::DivergenceRow {
+                        entry: key.clone(),
+                        class: *class,
+                        model_cuts: model_cuts.clone(),
+                        deterministic_cuts: deterministic_cuts.clone(),
+                        at_ms: entry.at_ms,
+                    });
+                    restored_divergence += 1;
+                }
                 // Applies are durable for the audit trail but don't seed output state directly
                 // (the live ledger re-derives the active set from current proof each pass).
                 journal::Decision::Apply { .. } => {}
@@ -476,6 +510,7 @@ impl Engine {
             restored_verdicts,
             restored_reversions,
             restored_decisions,
+            restored_divergence,
             "replayed decision journal on boot (output state populated from durable history)"
         );
     }
@@ -488,6 +523,13 @@ impl Engine {
     /// A handle to the reversion log (JEF-141): the recent lifted-cuts ring.
     pub fn reversions(&self) -> std::sync::Arc<state::ReversionLog> {
         self.reversions.clone()
+    }
+
+    /// A handle to the shadow-bake divergence log, for the dashboard's read-only view (and any
+    /// future arm-readiness aggregation) to snapshot. Shares the same `Arc` the engine writes
+    /// through each pass.
+    pub fn divergence(&self) -> std::sync::Arc<state::DivergenceLog> {
+        self.divergence.clone()
     }
 
     /// This pass's effective armed classes (ADR-0021's enforcement gate, fast disarm path):
@@ -690,6 +732,23 @@ impl Engine {
                     );
                 }
             }
+        }
+
+        // Shadow-bake divergence comparator (ADR-0035's bake step): for every entry with a
+        // decisive cut-choice decision this pass, compare the model's chosen cut-set against the
+        // deterministic fallback `containment_for`/`quarantine_workload_link` would have proposed
+        // for the SAME chains. VIEW ONLY — reads `chains`/`decisions`, never feeds back into the
+        // reconcile below or anything else that arms/mutates state; it is the read-only signal the
+        // human arm-readiness review reads (`docs/adr/0037-shadow-bake-arm-readiness.md`), never an auto-arm.
+        for record in cut_divergence::compute(&chains, &decisions) {
+            let row = state::DivergenceRow::now(record);
+            self.journal.record(journal::Decision::CutDivergence {
+                entry: row.entry.clone(),
+                class: row.class,
+                model_cuts: row.model_cuts.clone(),
+                deterministic_cuts: row.deterministic_cuts.clone(),
+            });
+            self.divergence.record(row);
         }
 
         // Reconcile proposed mitigations against the current chains AND this pass's model
