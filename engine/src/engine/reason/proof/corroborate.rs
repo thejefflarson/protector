@@ -149,6 +149,15 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // (only `LoadedAtRuntime` is CVE evidence — a static-linkage fact must never read as
         // exploitation or reassurance).
         Behavior::ImageLinkage { .. } => false,
+        // PtraceAttach / ModuleLoad (JEF-318) are NON-corroborating here, mirroring
+        // PrivilegeChange: a debugger, strace, a supervisor ptrace-attaching its own child,
+        // or a legitimate driver load (e.g. a CNI/CSI DaemonSet, a kernel-module operator)
+        // are all ordinary on SOME pods, so blanket-corroborating either here would repeat
+        // the ADR-0011 on-call-engineer false positive. Both get the SAME entry-scoped
+        // treatment `PrivilegeChange` does — see [`ptrace_attach_on_foothold`] /
+        // [`module_load_on_foothold`] below.
+        Behavior::PtraceAttach => false,
+        Behavior::ModuleLoad => false,
     }
 }
 
@@ -175,15 +184,18 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// `ProcessExec` of a path a RECENT `FileWrite` dropped ([`drop_then_execute`]) — **an
 /// on-host credential read on the foothold** (JEF-320 security rework) — a `SecretRead` with
 /// [`SecretReadSource::HostPath`] on the entry itself
-/// ([`host_credential_read_on_foothold`]) — or **anon-inode exec on the foothold** (JEF-317,
+/// ([`host_credential_read_on_foothold`]) — **anon-inode exec on the foothold** (JEF-317,
 /// Route A) — an Execution-tactic objective with an `exe_anon_inode` exec on the entry
-/// ([`anon_inode_exec_on_foothold`]). All five are scoped to a proven foothold entry.
+/// ([`anon_inode_exec_on_foothold`]) — **ptrace-attach on the foothold** (JEF-318) — a
+/// `PtraceAttach` on the entry itself ([`ptrace_attach_on_foothold`]) — or **kernel-module
+/// load on the foothold** (JEF-318) — a `ModuleLoad` on the entry itself
+/// ([`module_load_on_foothold`]). All seven are scoped to a proven foothold entry.
 ///
 /// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
 /// ordinary in-cluster traffic, an ordinary setuid, an ordinary write-then-run of a benign
-/// path, and an ordinary in-container process reading a host credential path off a
-/// non-foothold pod all still corroborate nothing (ADR-0011). Like every arm here this only
-/// sets `corroborated`; it never actuates
+/// path, an ordinary in-container process reading a host credential path, and an ordinary
+/// ptrace-attach or driver load off a non-foothold pod all still corroborate nothing
+/// (ADR-0011). Like every arm here this only sets `corroborated`; it never actuates
 /// (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
     runtime: &[RuntimeSignal],
@@ -198,6 +210,8 @@ pub(super) fn corroborated_for(
         || drop_then_execute(runtime, entry)
         || host_credential_read_on_foothold(runtime, attack, entry)
         || anon_inode_exec_on_foothold(runtime, attack, entry)
+        || ptrace_attach_on_foothold(runtime, attack, entry)
+        || module_load_on_foothold(runtime, attack, entry)
 }
 
 /// The cross-tenant lateral-movement shape (JEF-319): a `NetworkConnection` from the entry to
@@ -381,6 +395,67 @@ pub(super) fn anon_inode_exec_on_foothold(
         Behavior::ProcessExec { exe_anon_inode, .. } => *exe_anon_inode,
         _ => false,
     })
+}
+
+/// The ptrace-attach-on-foothold shape (JEF-318, Retire-Falco G2): a `Behavior::PtraceAttach`
+/// on the entry itself corroborates a PrivilegeEscalation-tactic objective — the ptrace
+/// ATTACH (process injection: debugger-attach, code injection, credential/memory scraping)
+/// Falco fires critical on, here scoped to close the parity gap without the false positive
+/// Falco doesn't guard against (a debugger, `strace`, or a supervisor ptrace-attaching its
+/// own child is ordinary operational behavior on plenty of pods).
+///
+/// **Tactic note:** ATT&CK's T1055 Process Injection is dual-tagged Defense Evasion /
+/// Privilege Escalation; this repo's [`Tactic`](crate::engine::graph::attack::Tactic) enum
+/// has no `DefenseEvasion` variant, so — like [`privilege_escalation_on_foothold`]'s own
+/// T1611/T1098.006 precedent — this lands on `PrivilegeEscalation`. Widening the enum with a
+/// dedicated `DefenseEvasion` variant is a follow-up if a future shape needs the distinction
+/// (JEF-318 flags it, doesn't resolve it).
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`privilege_escalation_on_foothold`]:
+/// corroborates ONLY when the entry is a proven internet-facing foothold (`entry.is_foothold`)
+/// AND `attack.tactic` is `PrivilegeEscalation`.
+pub(super) fn ptrace_attach_on_foothold(
+    runtime: &[RuntimeSignal],
+    attack: &AttackRef,
+    entry: EntryContext<'_>,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    if !entry.is_foothold || attack.tactic != Tactic::PrivilegeEscalation {
+        return false;
+    }
+    runtime
+        .iter()
+        .any(|s| matches!(s.behavior, Behavior::PtraceAttach))
+}
+
+/// The module-load-on-foothold shape (JEF-318, Retire-Falco G2): a `Behavior::ModuleLoad` on
+/// the entry itself corroborates a PrivilegeEscalation-tactic objective — a container loading
+/// arbitrary code into the HOST kernel (T1547.006 Kernel Modules and Extensions / effectively
+/// T1611 Escape to Host — loading a kernel module from inside a container IS host
+/// compromise), the module-load parity signal Falco fires critical on.
+///
+/// Same tactic-mapping note as [`ptrace_attach_on_foothold`]: no dedicated tactic exists for
+/// this repo's enum beyond `PrivilegeEscalation`, which — for a signal this severe (full
+/// kernel-mode code execution) — is at least as defensible a home as the T1611 precedent
+/// [`privilege_escalation_on_foothold`] already established.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`ptrace_attach_on_foothold`]:
+/// corroborates ONLY when the entry is a proven internet-facing foothold (`entry.is_foothold`)
+/// AND `attack.tactic` is `PrivilegeEscalation` — a legitimate driver-loading DaemonSet (a
+/// CNI/CSI plugin, a kernel-module operator) on an ordinary, non-foothold pod never
+/// corroborates.
+pub(super) fn module_load_on_foothold(
+    runtime: &[RuntimeSignal],
+    attack: &AttackRef,
+    entry: EntryContext<'_>,
+) -> bool {
+    use crate::engine::graph::attack::Tactic;
+    if !entry.is_foothold || attack.tactic != Tactic::PrivilegeEscalation {
+        return false;
+    }
+    runtime
+        .iter()
+        .any(|s| matches!(s.behavior, Behavior::ModuleLoad))
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
