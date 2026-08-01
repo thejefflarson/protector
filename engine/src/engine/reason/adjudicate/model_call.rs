@@ -8,7 +8,7 @@
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 
-use super::evidence::{entry_evidence, entry_findings, retain_reachable_cves};
+use super::evidence::{entry_evidence, entry_findings, reachable_cve_lines};
 use super::guards::guard_unsupported_exploitable;
 use super::incident::{
     Assessment, IncidentDecision, Menu, guard_assessment_cuts_consistency,
@@ -19,7 +19,7 @@ use super::{Adjudicator, Verdict};
 /// The downstream counterpart of the entry's own evidence fetch below (JEF-565): every
 /// downstream node on the entry's proven paths is real, structural evidence — same standing as
 /// the entry's own — so the anti-fabrication and zero-anchor backstops must ground against it
-/// too, exactly as the prompt shows it (same per-node fetch + [`retain_reachable_cves`] filter
+/// too, exactly as the prompt shows it (same per-node fetch + [`reachable_cve_lines`] filter
 /// the downstream prompt blocks use).
 fn downstream_backstop_evidence(
     graph: &SecurityGraph,
@@ -29,8 +29,7 @@ fn downstream_backstop_evidence(
     let mut has_secret = false;
     let mut behaviors = Vec::new();
     for node in downstream {
-        let (mut node_cves, node_behaviors) = entry_evidence(graph, node);
-        retain_reachable_cves(&mut node_cves);
+        let (node_cves, node_behaviors) = reachable_cve_lines(graph, node);
         cves.extend(node_cves);
         behaviors.extend(node_behaviors);
         let (secret_lines, _posture) = entry_findings(graph, node);

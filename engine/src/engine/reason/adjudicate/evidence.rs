@@ -7,7 +7,9 @@
 
 use super::guards::sanitize;
 use crate::engine::graph::attack::{AttackRef, Tactic};
-use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
+use crate::engine::graph::{
+    Behavior, NodeKey, Reachability, ScanFinding, SecurityGraph, Vulnerability,
+};
 use crate::engine::observe::asn::AsnDb;
 // The engine's single "alarming-now" definition (an alert, a notable shell/package-manager
 // exec, or an alarming sensitive-path write) — see the tag below.
@@ -291,23 +293,42 @@ pub(crate) fn entry_evidence_budgeted(
     entry_key: &NodeKey,
     budget: &mut usize,
 ) -> (Vec<String>, Vec<Behavior>) {
-    let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
-    // Render in a STABLE order so the per-entry free-text budget (below) is deterministic:
-    // the same evidence must always produce the same budgeted lines, both for the prompt
-    // and for the verdict fingerprint that keys on them. Sort by CVE id (the budget only
-    // affects WHICH lines keep their free prose once it is exhausted, so the order it spends
-    // in must not depend on graph-traversal order). The prompt re-sorts the rendered lines
-    // anyway; sorting here just fixes the order the budget is consumed in.
+    let (vulns, behaviors) = sorted_deduped_vulns(graph, entry_key);
+    // Apply the AGGREGATE untrusted-free-text budget (JEF-106): a shared budget is threaded
+    // across the lines so a CVE-heavy image can't aggregate an unbounded prompt even when
+    // every per-field cap holds. Early CVE lines keep their prose; once the budget is spent,
+    // later lines fall back to the structured fields only.
+    let cves = vulns
+        .iter()
+        .map(|v| cve_evidence_budgeted(v, budget))
+        .collect();
+    (cves, behaviors)
+}
+
+/// Fetch an entry's typed CVE evidence in the STABLE, deduped order [`entry_evidence_budgeted`]
+/// (the full CVE list) needs. [`reachable_cve_lines_budgeted`] does NOT share this: it dedups
+/// its own, separately-filtered subset (see that function's doc for why the order matters).
+fn sorted_deduped_vulns(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+) -> (Vec<Vulnerability>, Vec<Behavior>) {
+    let (vulns, behaviors) = graph.entry_evidence(entry_key);
+    (dedup_worst_per_id(vulns), behaviors)
+}
+
+/// Sort by id (STABLE order — the per-entry free-text budget is deterministic: the same
+/// evidence must always produce the same budgeted lines, both for the prompt and for the
+/// verdict fingerprint that keys on them; the budget only affects WHICH lines keep their free
+/// prose once it is exhausted, so the order it spends in must not depend on graph-traversal
+/// order), then collapse duplicate CVE ids to one representative (JEF-133 source of truth, so
+/// both the prompt and the dashboard's per-finding evidence agree). Trivy reports the same CVE
+/// once PER affected package, so the same id can arrive several times with different CVSS / fix
+/// ranges; the prior string-level `cves.dedup()` in `build_judgment_prompt_with` can't collapse
+/// them (the trailing metadata differs), so the judge saw a noisy triplicate list. Keep the
+/// WORST instance per id so no signal is lost — see `worse_vuln`. Sorting first makes equal ids
+/// adjacent, so deduping keeps id order and is therefore deterministic.
+fn dedup_worst_per_id(mut vulns: Vec<Vulnerability>) -> Vec<Vulnerability> {
     vulns.sort_by(|a, b| a.id.cmp(&b.id));
-    // Collapse duplicate CVE ids to one representative BEFORE rendering (JEF-133 source of
-    // truth, so both the prompt and the dashboard's per-finding evidence agree). Trivy
-    // reports the same CVE once PER affected package, so the same id can arrive several
-    // times with different CVSS / fix ranges; the prior string-level `cves.dedup()` in
-    // `build_judgment_prompt_with` can't collapse them (the trailing metadata differs), so
-    // the judge saw a noisy triplicate list. Keep the WORST instance per id so no signal is
-    // lost — see `worse_vuln`. `vulns` is already sorted by id, so equal ids are adjacent;
-    // deduping keeps id order and is therefore deterministic (the prompt re-sorts the
-    // rendered lines anyway, but the budget below must spend in a stable order).
     vulns.dedup_by(|a, b| {
         if a.id != b.id {
             return false;
@@ -320,38 +341,79 @@ pub(crate) fn entry_evidence_budgeted(
         }
         true
     });
-    // Apply the AGGREGATE untrusted-free-text budget (JEF-106): a shared budget is threaded
-    // across the lines so a CVE-heavy image can't aggregate an unbounded prompt even when
-    // every per-field cap holds. Early CVE lines keep their prose; once the budget is spent,
-    // later lines fall back to the structured fields only.
+    vulns
+}
+
+/// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
+/// the ONLY CVE category that is exploitation evidence is a package OBSERVED loading at
+/// runtime (vulnerable code observed running on the reachable path). CVEs that are
+/// present-but-not-running (`not-observed`), static-binary-unknowable, or unknown-reachability
+/// are CONTEXT — "how bad IF exploited" — never a breach on their own, and they stay on the
+/// dashboard for operators. Sending them to the JUDGE only hands a small model a non-evidence
+/// CVE to fabricate a "loaded at runtime" tag onto (the recurring false `exploitable`). So the
+/// judge's CVE field carries only the reachable (running) CVEs; `(none)` otherwise. This is
+/// enrichment/filtering of NON-evidence, not the objective-breadth capping ADR-0029 forbids (a
+/// not-observed CVE can never change a correct verdict). Measured on the deployed qwen3:1.7b:
+/// it collapses the temp-0.8 flip mass 15%→0% with no false negatives. The anti-fabrication
+/// guards read the FULL list separately (`model_call`), so their behaviour is unchanged. NOTE:
+/// `objective_reach` is not this — this is the CVE image-reach.
+///
+/// The reachability decision is made against the TYPED [`Vulnerability::reachability`] field,
+/// BEFORE the CVE is rendered to a string — never a substring match over the rendered line.
+/// The rendered line also carries the untrusted trivy `title` (appended after every structured
+/// field); a naive `line.contains("loaded-at-runtime")` would match that marker text wherever
+/// it appeared in the line, including inside a crafted title on a CVE whose real reachability
+/// is `not-observed` — forging non-evidence into the judge's loaded-at-runtime evidence.
+/// Filtering the typed `Vulnerability` list first means the untrusted title can never
+/// influence this decision at all.
+///
+/// Shared by the entry's own CVE field (`prompt::render_evidence`) and each downstream node's
+/// block (JEF-565, `downstream::render_downstream`) so both filter with the EXACT same rule —
+/// one source of truth for what counts as CVE exploitation evidence in the judge prompt.
+fn is_loaded_at_runtime(v: &Vulnerability) -> bool {
+    v.reachability == Reachability::LoadedAtRuntime
+}
+
+/// As [`entry_evidence`], but rendering only the loaded-at-runtime CVE subset — the judge's
+/// "CVEs observed loading at runtime" evidence field (see [`is_loaded_at_runtime`]).
+pub(crate) fn reachable_cve_lines(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+) -> (Vec<String>, Vec<Behavior>) {
+    let mut budget = ENTRY_FREETEXT_BUDGET;
+    reachable_cve_lines_budgeted(graph, entry_key, &mut budget)
+}
+
+/// As [`reachable_cve_lines`], but draws the CVE free-text budget from a shared external
+/// `budget` (JEF-565) — the loaded-at-runtime-only counterpart of [`entry_evidence_budgeted`],
+/// used wherever the full CVE list must be narrowed to just the exploitation-evidence subset
+/// before it reaches the judge.
+///
+/// Filters to [`is_loaded_at_runtime`] BEFORE deduping by id — NOT [`sorted_deduped_vulns`]'s
+/// dedup-then-filter order. `worse_vuln`'s tie-break weighs only severity/CVSS/fix/EPSS, never
+/// reachability, so when trivy reports the SAME id against two packages — one genuinely
+/// loaded-at-runtime, one not-observed, at equal severity/CVSS (the common case for a shared
+/// id, since both instances usually carry the same advisory's CVSS) — a dedup-first order could
+/// let the not-observed instance win the tie and survive, after which filtering would drop the
+/// id ENTIRELY: a genuinely running vulnerable package hidden from the judge. Filtering first
+/// means a loaded-at-runtime instance can never be discarded in favor of a not-observed sibling
+/// of the same id.
+pub(crate) fn reachable_cve_lines_budgeted(
+    graph: &SecurityGraph,
+    entry_key: &NodeKey,
+    budget: &mut usize,
+) -> (Vec<String>, Vec<Behavior>) {
+    let (mut vulns, behaviors) = graph.entry_evidence(entry_key);
+    // Filter on the TYPED field BEFORE rendering (see `is_loaded_at_runtime`'s doc for why this
+    // must not be a substring match over the rendered, title-bearing line) AND before dedup
+    // (see this function's own doc for why the order matters there too).
+    vulns.retain(is_loaded_at_runtime);
+    let vulns = dedup_worst_per_id(vulns);
     let cves = vulns
         .iter()
         .map(|v| cve_evidence_budgeted(v, budget))
         .collect();
     (cves, behaviors)
-}
-
-/// JEF-453 (skip non-reachable CVEs): the judge decides breach from EXPLOITATION EVIDENCE, and
-/// the ONLY CVE category that is exploitation evidence is `[reachability: loaded-at-runtime]`
-/// (vulnerable code observed running on the reachable path). CVEs that are present-but-not-running
-/// (`not-observed`), static-binary-unknowable, or unknown-reachability are CONTEXT — "how bad IF
-/// exploited" — never a breach on their own, and they stay on the dashboard for operators. Sending
-/// them to the JUDGE only hands a small model a non-evidence CVE to fabricate a `loaded-at-runtime`
-/// tag onto (JEF-451, the recurring false `exploitable`). So the judge's CVE field carries only the
-/// reachable (running) CVEs; `(none)` otherwise. This is enrichment/filtering of NON-evidence, not
-/// the objective-breadth capping ADR-0029 forbids (a not-observed CVE can never change a correct
-/// verdict). Measured on the deployed qwen3:1.7b: it collapses the temp-0.8 flip mass 15%→0% with
-/// no false negatives. The anti-fabrication guards read the FULL list separately (`model_call`), so
-/// their behaviour is unchanged. NOTE: `objective_reach` is not this — this is the CVE image-reach.
-///
-/// Shared by the entry's own CVE field (`prompt::render_evidence`) and each downstream node's
-/// block (JEF-565, `downstream::render_downstream`) so both filter with the EXACT same rule —
-/// one source of truth for what counts as CVE exploitation evidence in the judge prompt.
-const LOADED_AT_RUNTIME: &str = "[reachability: loaded-at-runtime]";
-
-/// Retain only the CVE lines that are exploitation evidence (see [`LOADED_AT_RUNTIME`]).
-pub(crate) fn retain_reachable_cves(cves: &mut Vec<String>) {
-    cves.retain(|line| line.contains(LOADED_AT_RUNTIME));
 }
 
 /// Render the observed behaviors into the sorted, deduped lines the prompt's "Observed

@@ -21,7 +21,7 @@
 use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 
 use super::super::Verdict;
-use super::super::evidence::{cve_ids_of, entry_evidence, entry_findings, retain_reachable_cves};
+use super::super::evidence::{cve_ids_of, entry_evidence, entry_findings, reachable_cve_lines};
 use super::super::guards::{guard_fabricated_cve, guard_fabricated_reachability_tag};
 use super::{Assessment, IncidentDecision};
 
@@ -72,12 +72,13 @@ pub fn guard_containment_grounding(
 
 /// Whether `node`'s own evidence block would show the model anything to cite: a CVE
 /// observed loading at runtime (the JEF-453 exploitation-evidence filter,
-/// [`retain_reachable_cves`]), an exposed secret, or any observed runtime behavior — the
-/// SAME "evidenced" predicate the JEF-565 downstream prompt blocks use to choose between a
-/// fenced evidence block and the "no evidence observed" one-liner.
+/// [`reachable_cve_lines`] — decided from the TYPED reachability field, never a substring
+/// match over the rendered, title-bearing line), an exposed secret, or any observed runtime
+/// behavior — the SAME "evidenced" predicate the JEF-565 downstream prompt blocks use to
+/// choose between a fenced evidence block and the "no evidence observed" one-liner.
 fn node_has_grounding(graph: &SecurityGraph, node: &NodeKey) -> bool {
-    let (mut cves, behaviors, has_secret) = node_evidence(graph, node);
-    retain_reachable_cves(&mut cves);
+    let (cves, _behaviors) = reachable_cve_lines(graph, node);
+    let (_full_cves, behaviors, has_secret) = node_evidence(graph, node);
     !cves.is_empty() || has_secret || !behaviors.is_empty()
 }
 
