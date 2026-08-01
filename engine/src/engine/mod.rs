@@ -33,6 +33,11 @@
 // the engine's output state (zero-egress, light theme). view_model → components → page → routes;
 // wired into the watch loop behind PROTECTOR_DASHBOARD_ADDR.
 pub mod dashboard;
+// The GitOps-independent disarm kill switch (ADR-0021's enforcement gate, fast path): a
+// mounted flag file, polled every pass, that narrows the running posture to dry-run and
+// drives standing cuts to revert with no restart. See the module doc for why a file over a
+// local admin endpoint.
+pub mod break_glass;
 pub mod graph;
 pub mod journal;
 pub mod model;
@@ -226,6 +231,19 @@ pub struct Engine {
     /// Defaults to an empty dataset (every internet peer falls back to its raw `IP:port`,
     /// exactly today's behavior) until the watch loop attaches the file-backed feed.
     asn: observe::feed_reload::ReloadableFeed<observe::asn::AsnDb>,
+    /// The GitOps-independent kill switch (ADR-0021's enforcement gate, fast path):
+    /// checked every pass. Its presence clamps this pass's armed classes to none, for
+    /// both the auto-apply decision and the self-revert check, so a standing cut starts
+    /// reverting the very next pass with no restart. Defaults to
+    /// [`break_glass::BreakGlass::disabled`] (never engaged), so every engine built
+    /// without [`Self::with_break_glass`] — every existing test, and any embedding that
+    /// doesn't opt in — is unaffected by this module's existence.
+    break_glass: break_glass::BreakGlass,
+    /// Whether break-glass was engaged as of the previous pass, so the engage/clear
+    /// transition is logged and metered exactly ONCE (an edge), not every pass —
+    /// mirroring the collapse/recovery edge-detection already used above for runtime-
+    /// coverage.
+    break_glass_was_engaged: bool,
     /// OTLP instruments (no-op when no collector is configured).
     metrics: EngineMetrics,
 }
@@ -278,6 +296,8 @@ impl Engine {
             // Empty until the watch loop attaches the file-backed feed (JEF-380): internet
             // peers then render as raw `IP:port`, exactly today's pre-feed behavior.
             asn: observe::feed_reload::ReloadableFeed::from_store(observe::asn::AsnDb::empty()),
+            break_glass: break_glass::BreakGlass::disabled(),
+            break_glass_was_engaged: false,
             metrics: EngineMetrics::new(),
         }
     }
@@ -327,6 +347,15 @@ impl Engine {
     /// Builder-style; called once on boot.
     pub fn with_notifier(mut self, notifier: notify::BreachNotifier) -> Self {
         self.notifier = notifier;
+        self
+    }
+
+    /// Attach the break-glass kill switch (ADR-0021's enforcement gate, fast path):
+    /// watched every pass thereafter. Builder-style; called once on boot by
+    /// [`run_watch`]. Tests that don't call this get [`break_glass::BreakGlass::disabled`]
+    /// (never engaged) from [`Self::new`] — behavior is unaffected.
+    pub fn with_break_glass(mut self, break_glass: break_glass::BreakGlass) -> Self {
+        self.break_glass = break_glass;
         self
     }
 
@@ -447,6 +476,36 @@ impl Engine {
     /// A handle to the reversion log (JEF-141): the recent lifted-cuts ring.
     pub fn reversions(&self) -> std::sync::Arc<state::ReversionLog> {
         self.reversions.clone()
+    }
+
+    /// This pass's effective armed classes (ADR-0021's enforcement gate, fast disarm path):
+    /// a single local file-existence check, fresh every pass. Break-glass engaged narrows
+    /// `self.active` (the mode/enforceScope the process booted with, never mutated) down to
+    /// `EnabledActions::none()` for this pass alone — feeding both the auto-apply decision and
+    /// the self-revert check, so a standing cut starts reverting the very next pass with no
+    /// restart. Logs and meters ONLY the engage/clear EDGE, not every pass.
+    fn poll_break_glass(&mut self) -> EnabledActions {
+        let engaged = self.break_glass.engaged();
+        if engaged != self.break_glass_was_engaged {
+            self.break_glass_was_engaged = engaged;
+            if engaged {
+                tracing::warn!(
+                    "BREAK-GLASS ENGAGED: actuation clamped to dry-run; standing cuts begin \
+                     reverting this pass"
+                );
+            } else {
+                tracing::info!(
+                    "break-glass CLEARED: posture restored to the configured mode/enforceScope"
+                );
+            }
+            self.metrics.record_break_glass_transition(engaged);
+        }
+        self.metrics.record_break_glass(engaged);
+        if engaged {
+            EnabledActions::none()
+        } else {
+            self.active.clone()
+        }
     }
 
     /// Run the five-question pipeline against one observed snapshot.
@@ -633,6 +692,11 @@ impl Engine {
             .map(|m| m.cut_signature())
             .collect();
 
+        // The break-glass kill switch (ADR-0021's enforcement gate, fast path): checked fresh
+        // every pass, narrowing `self.active` down for THIS pass alone when engaged. See
+        // `poll_break_glass`.
+        let effective_active = self.poll_break_glass();
+
         // Decide over *all* active mitigations (Q4 hard mode), not just the
         // newly-proposed ones — so a corroboration flip on an existing proposal is
         // acted on. AutoApply is deduped by the action log; propose/forbid is logged
@@ -643,7 +707,7 @@ impl Engine {
             .record(active_mitigations.len() as u64, &[]);
         for mitigation in &active_mitigations {
             let blast = predict_blast_radius(mitigation, &graph, &health);
-            match decide(mitigation, &self.active, &self.scope, &blast) {
+            match decide(mitigation, &effective_active, &self.scope, &blast) {
                 Decision::AutoApply => {
                     if !self.actions.is_active(mitigation) {
                         self.actuator.apply(mitigation).await;
@@ -674,10 +738,15 @@ impl Engine {
         }
 
         // Self-reverting closed loop, every pass: revert any applied action whose
-        // protected workload went down (health divergence) or whose justifying
-        // chain is no longer proven (posture improved).
+        // protected workload went down (health divergence), whose justifying chain is
+        // no longer proven (posture improved), or whose action class is no longer
+        // armed — a mode/enforceScope narrow to audit, or break-glass engaging, must
+        // drive every standing cut to revert exactly like any other retirement.
         let justified: HashSet<String> = self.ledger.active().map(|m| m.cut_signature()).collect();
-        for reversion in self.actions.reconcile(&health, &justified) {
+        for reversion in self
+            .actions
+            .reconcile(&health, &justified, &effective_active)
+        {
             tracing::info!(reason = %reversion.reason, "reverting applied mitigation");
             self.actuator.revert(&reversion.mitigation).await;
             self.metrics
@@ -733,3 +802,8 @@ mod tests;
 // file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod journal_tests;
+
+// The break-glass disarm tests (enforce→audit self-revert + the fast, GitOps-independent kill
+// switch), split out of `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod break_glass_tests;
