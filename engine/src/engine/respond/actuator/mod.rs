@@ -40,6 +40,8 @@ use crate::engine::graph::{Node, Relation, SecurityGraph};
 use crate::engine::observe::health::{Health, HealthReport};
 use render::workload_namespace;
 
+pub mod arming_ladder;
+
 /// Map an operator-facing enable name to the action class(es) it arms. Only `network`
 /// is accepted, because only a network deny is **live-actuatable**: an additive,
 /// engine-owned `NetworkPolicy`/`AuthorizationPolicy` the engine can apply and
@@ -52,6 +54,12 @@ use render::workload_namespace;
 /// forbids live actuation of them regardless; and `escape` is irreversible. Accepting
 /// those names here would be a lie: the engine still *proposes* those cuts (routed to a
 /// human / durable-fix PR), you just can't "enable" them.
+///
+/// This is a generic name→class(es) grouping, kept for [`EnabledActions::from_names`]
+/// (test convenience). It is **not** what derives production arming from `enforce`:
+/// that is [`arming_ladder`]'s ordered [`ArmingRung`](arming_ladder::ArmingRung)
+/// (ADR-0035), which arms the two network classes one rung at a time instead of both
+/// at once.
 ///
 /// [`DenyNetworkPath`]: ProposedAction::DenyNetworkPath
 /// [`QuarantineEntry`]: ProposedAction::QuarantineEntry
