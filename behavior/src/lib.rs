@@ -105,6 +105,28 @@ pub enum Behavior {
     /// holds — the agent already sees `/proc/<pid>/exe`). PURE DATA: the agent classifies
     /// the bytes; the *reachability* consequence is engine policy (JEF-404).
     ImageLinkage { static_linkage: bool },
+    /// A ptrace ATTACH access check (JEF-318, Retire-Falco G2): the eBPF agent's
+    /// `security_ptrace_access_check` probe, filtered in-kernel to `mode &
+    /// PTRACE_MODE_ATTACH` so the read-only `PTRACE_MODE_READ` checks `/proc/<pid>/…` makes
+    /// constantly never reach the wire. The classic process-injection primitive Falco fires
+    /// critical on (debugger-attach, code injection, credential/memory scraping via
+    /// `process_vm_readv`). No fields: unlike a struct-offset read, this is a PURE
+    /// occurrence fact — the attacking workload is already carried by
+    /// [`RuntimeObservation::attribution`], and the target process's pid is deliberately not
+    /// read by the agent (a `struct task_struct` offset read judged too fragile for this
+    /// signal — see the agent's probe doc). PURE DATA (JEF-113): whether an attach on this
+    /// entry is alarming is engine policy (`engine::reason::proof::corroborate`),
+    /// conservatively foothold-scoped, not decided here.
+    PtraceAttach,
+    /// A kernel module load (JEF-318, Retire-Falco G2): the eBPF agent's
+    /// `security_kernel_load_data` probe, filtered in-kernel to `id == LOADING_MODULE` so
+    /// firmware/kexec/policy/x509 loads on the SAME hook never reach the wire. Covers BOTH
+    /// `init_module` and `finit_module` — `load_module()` reaches this hook on either path.
+    /// The module-load parity signal Falco fires critical on: a container loading arbitrary
+    /// code into the HOST kernel. No fields — the occurrence, attributed by
+    /// [`RuntimeObservation::attribution`], is the whole fact. PURE DATA (JEF-113): engine
+    /// policy decides whether it's alarming, conservatively foothold-scoped, not this crate.
+    ModuleLoad,
 }
 
 /// How a [`Behavior::SecretRead`] was observed — a type distinction, not a string
@@ -199,6 +221,8 @@ impl Behavior {
             Behavior::ProcessExec { .. } => "exec",
             Behavior::FileWrite { .. } => "file-write",
             Behavior::ImageLinkage { .. } => "image-linkage",
+            Behavior::PtraceAttach => "ptrace-attach",
+            Behavior::ModuleLoad => "module-load",
         }
     }
 
@@ -258,6 +282,10 @@ impl Behavior {
                     "entrypoint is a dynamically linked binary".to_string()
                 }
             }
+            // No fields to render — the occurrence, attributed by the observation's
+            // workload, is the whole fact (JEF-318).
+            Behavior::PtraceAttach => "ptrace attach (process injection primitive)".to_string(),
+            Behavior::ModuleLoad => "loaded a kernel module".to_string(),
         }
     }
 
@@ -318,6 +346,10 @@ impl Behavior {
             // bool verbatim — the two states are genuinely distinct facts, and it's
             // low-cardinality by construction (exactly two values).
             Behavior::ImageLinkage { static_linkage } => format!("linkage:{static_linkage}"),
+            // No varying fields, so a fixed token is already maximally coarse (JEF-318) —
+            // mirrors how a fieldless fact would key regardless of source.
+            Behavior::PtraceAttach => "ptrace-attach".to_string(),
+            Behavior::ModuleLoad => "module-load".to_string(),
         }
     }
 }

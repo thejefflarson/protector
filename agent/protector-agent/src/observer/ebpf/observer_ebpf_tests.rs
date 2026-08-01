@@ -270,3 +270,65 @@ fn decode_file_write_parses_path_and_maps_to_file_write() {
         other => panic!("expected FileWrite, got {other:?}"),
     }
 }
+
+#[test]
+fn decode_ptrace_attach_parses_with_no_body_beyond_the_header() {
+    // JEF-318: a KIND_PTRACE_ATTACH event IS an EventHeader — no extra bytes, unlike every
+    // other kind's body. Decode must still succeed on exactly `size_of::<EventHeader>()`
+    // bytes and attribute + map it to Behavior::PtraceAttach.
+    let header = EventHeader {
+        kind: KIND_PTRACE_ATTACH,
+        pid: 4321,
+        cgroup_id: 999,
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&header as *const EventHeader).cast::<u8>(),
+            std::mem::size_of::<EventHeader>(),
+        )
+    };
+    let raw = EbpfObserver::decode(bytes).expect("KIND_PTRACE_ATTACH should decode");
+    match &raw {
+        RawEvent::PtraceAttach { attr } => {
+            assert_eq!(attr.pid, 4321);
+            assert_eq!(attr.cgroup_id, 999);
+        }
+        _ => panic!("expected RawEvent::PtraceAttach"),
+    }
+    assert_eq!(raw.attr().pid, 4321);
+    assert_eq!(raw.into_behavior(), Behavior::PtraceAttach);
+}
+
+#[test]
+fn decode_module_load_parses_with_no_body_beyond_the_header() {
+    // JEF-318: same header-only shape as KIND_PTRACE_ATTACH, distinct kind + behavior.
+    let header = EventHeader {
+        kind: KIND_MODULE_LOAD,
+        pid: 555,
+        cgroup_id: 4242,
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&header as *const EventHeader).cast::<u8>(),
+            std::mem::size_of::<EventHeader>(),
+        )
+    };
+    let raw = EbpfObserver::decode(bytes).expect("KIND_MODULE_LOAD should decode");
+    match &raw {
+        RawEvent::ModuleLoad { attr } => {
+            assert_eq!(attr.pid, 555);
+            assert_eq!(attr.cgroup_id, 4242);
+        }
+        _ => panic!("expected RawEvent::ModuleLoad"),
+    }
+    assert_eq!(raw.attr().cgroup_id, 4242);
+    assert_eq!(raw.into_behavior(), Behavior::ModuleLoad);
+}
+
+#[test]
+fn decode_drops_a_truncated_event_shorter_than_the_header() {
+    // A byte slice shorter than EventHeader itself must never be parsed — regardless of
+    // kind, since decode() reads the header before it can even dispatch.
+    let too_short = [0u8; 4];
+    assert!(EbpfObserver::decode(&too_short).is_none());
+}

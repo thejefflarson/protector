@@ -359,9 +359,13 @@ mod corroborate_drop_exec_tests;
 #[cfg(test)]
 mod corroborate_host_credential_tests;
 #[cfg(test)]
+mod corroborate_module_load_tests;
+#[cfg(test)]
 mod corroborate_objective_tests;
 #[cfg(test)]
 mod corroborate_privesc_tests;
+#[cfg(test)]
+mod corroborate_ptrace_tests;
 #[cfg(test)]
 mod corroborate_tests;
 #[cfg(test)]
