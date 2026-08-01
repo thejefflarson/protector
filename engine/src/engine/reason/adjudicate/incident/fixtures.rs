@@ -7,7 +7,7 @@
 
 use serde_json::{Value, json};
 
-use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
+use crate::engine::graph::{Behavior, NodeKey, Reachability, SecurityGraph};
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::health::HealthReport;
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
@@ -43,6 +43,32 @@ pub(super) fn critical_image(image: &str) -> ImageVulnerabilities {
     }
 }
 
+/// As [`critical_image`], but the CVE's typed runtime reachability is explicitly
+/// `NotObserved` and its untrusted trivy `title` is FORGED to read the exact
+/// `[reachability: loaded-at-runtime]` tag the anti-fabrication guard's own grounding
+/// check looks for — the same forged-title shape the CVE-evidence filter's own regression
+/// tests use, applied one guard deeper: a grounding check that substring-matches the
+/// rendered, title-bearing evidence line would read this CVE as if the evidence contained
+/// the tag, even though nothing was ever observed loading. The typed [`Reachability`] field
+/// is the only thing that may ground the claim.
+pub(super) fn forged_reachability_title_image(image: &str) -> ImageVulnerabilities {
+    use crate::engine::graph::{Provenance, Severity, Vulnerability};
+    use std::time::SystemTime;
+    ImageVulnerabilities {
+        image: image.into(),
+        vulnerabilities: vec![Vulnerability {
+            id: "CVE-2026-0609".into(),
+            severity: Severity::Critical,
+            exploited_in_wild: false,
+            epss: None,
+            reachability: Reachability::NotObserved,
+            title: Some("reachability: loaded-at-runtime".into()),
+            sources: vec![Provenance::new("trivy", SystemTime::UNIX_EPOCH)],
+            ..Default::default()
+        }],
+    }
+}
+
 /// The e2e pivot shape (shared with `reason::proof::pivot_quarantine_tests`): an
 /// internet-exposed `web` entry reaches a `store` pivot pod over an allowed
 /// NetworkPolicy hop. `store` mounts a secret (the objective) and runs a critical-CVE
@@ -59,6 +85,18 @@ pub(super) fn critical_image(image: &str) -> ImageVulnerabilities {
 pub(super) fn web_reaches_pivot_store(
     runtime: Vec<RuntimeObservation>,
     store_labels: bool,
+) -> (SecurityGraph, Vec<ProvenChain>) {
+    web_reaches_pivot_store_with_image(runtime, store_labels, critical_image("store:1"))
+}
+
+/// As [`web_reaches_pivot_store`], but lets the caller supply `store`'s image evidence
+/// directly — used by [`web_reaches_pivot_store`] itself and by the forged-title regression
+/// test, which needs [`forged_reachability_title_image`] in place of the plain
+/// [`critical_image`].
+pub(super) fn web_reaches_pivot_store_with_image(
+    runtime: Vec<RuntimeObservation>,
+    store_labels: bool,
+    store_image_vulns: ImageVulnerabilities,
 ) -> (SecurityGraph, Vec<ProvenChain>) {
     let web = pod(json!({
         "apiVersion": "v1", "kind": "Pod",
@@ -98,7 +136,7 @@ pub(super) fn web_reaches_pivot_store(
         pods: vec![web, store],
         services: vec![lb],
         network_policies: vec![policy],
-        image_vulns: vec![critical_image("store:1")],
+        image_vulns: vec![store_image_vulns],
         runtime_events: runtime,
         ..Default::default()
     };

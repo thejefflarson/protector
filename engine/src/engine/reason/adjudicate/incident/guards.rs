@@ -11,8 +11,10 @@
 //! - [`guard_containment_grounding`] — a contained DOWNSTREAM node whose own evidence
 //!   block carries no exploitation evidence downgrades (the entry is exempt, ADR-0022).
 //! - [`guard_fabrication`] — reuses the existing anti-fabrication backstops
-//!   ([`guard_fabricated_cve`], [`guard_fabricated_reachability_tag`]) over the
-//!   entry+downstream union, unchanged from the 4-value verdict path.
+//!   ([`guard_fabricated_cve`], [`guard_fabricated_reachability_tag`]), unchanged, over the
+//!   entry+downstream union — same as the 4-value verdict path, except the
+//!   loaded-at-runtime grounding signal is threaded as a TYPED bool, never a substring test
+//!   over the untrusted title-bearing evidence lines.
 //! - [`guard_assessment_cuts_consistency`] — a non-`Attack` assessment naming cuts is
 //!   internally contradictory (also enforced earlier, in the parser, per ADR-0034 D3; this
 //!   is the same check as a standalone, idempotent guard over the final decision, for a
@@ -88,6 +90,15 @@ fn node_has_grounding(graph: &SecurityGraph, node: &NodeKey) -> bool {
 /// Only ever acts on `Assessment::Attack` (the `Verdict::Exploitable` analogue); every
 /// other assessment passes through untouched, since neither backstop has anything to
 /// check without a promoting call and a reason to cite from.
+///
+/// `guard_fabricated_cve`'s ground truth (`real_ids`, from the FULL, unfiltered
+/// `cves` this function builds via `node_evidence`) is CVE-id presence, which is correctly
+/// reachability-agnostic — any real id, even `not-observed`, is a real citation. But
+/// `guard_fabricated_reachability_tag`'s ground truth is narrower: whether the evidence
+/// genuinely carries a loaded-at-runtime CVE. That must be decided from the TYPED
+/// `Vulnerability::reachability` field ([`reachable_cve_lines`]) rather than a substring test
+/// over `cves`' rendered, title-bearing lines — passing `cves` there would let a `not-observed`
+/// CVE's forged trivy title ground a fabricated loaded-at-runtime claim.
 pub fn guard_fabrication(
     decision: IncidentDecision,
     graph: &SecurityGraph,
@@ -98,13 +109,15 @@ pub fn guard_fabrication(
         return decision;
     }
     let mut cves = Vec::new();
+    let mut evidence_has_loaded = false;
     for node in std::iter::once(entry).chain(downstream.iter()) {
         let (node_cves, _behaviors, _secret) = node_evidence(graph, node);
         cves.extend(node_cves);
+        evidence_has_loaded |= !reachable_cve_lines(graph, node).0.is_empty();
     }
     let real_ids = cve_ids_of(&cves);
     let verdict = guard_fabricated_cve(Verdict::Exploitable(decision.reason.clone()), &real_ids);
-    let verdict = guard_fabricated_reachability_tag(verdict, &cves);
+    let verdict = guard_fabricated_reachability_tag(verdict, evidence_has_loaded);
     match verdict {
         Verdict::Uncertain(reason) => IncidentDecision::uncertain(reason),
         // `guard_fabricated_cve`/`guard_fabricated_reachability_tag` only ever return the
