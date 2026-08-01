@@ -39,7 +39,7 @@ use super::journal::DecisionJournal;
 use super::policy_log::PolicyDecisionLog;
 use super::state::{
     DivergenceLog, Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
-    default_window_report, derive_readiness,
+    ScopePreviewStore, default_window_report, derive_readiness,
 };
 use crate::engine::mcp::AccessAuditSink;
 use auth::Identity;
@@ -47,7 +47,7 @@ use auth::claims::Tier;
 use auth::enforce::Enforcer;
 use view_model::props::{
     AccessViewProps, ActionViewProps, AdmissionViewProps, AlertsViewProps, FindingsViewProps,
-    ReadinessViewProps, StatusStripProps, Tab,
+    ReadinessViewProps, ScopePreviewViewProps, StatusStripProps, Tab,
 };
 
 pub use view_model::props::AuthMode;
@@ -101,6 +101,11 @@ pub struct DashboardState {
     /// diagnostic bake feed for the human arm-readiness review, not a navigable tab) at
     /// `/api/divergence.json`.
     pub divergence: Arc<DivergenceLog>,
+    /// This pass's standing-cut snapshot (ADR-0021, ADR-0016) — the SAME `Arc` the engine
+    /// writes each pass. The scope-preview panel reads it read-only and classifies it
+    /// against a caller-supplied CANDIDATE scope; it is never armed, applied, or mutated
+    /// here (a pure projection — presentation is a view, never a decision gate).
+    pub scope_preview: Arc<ScopePreviewStore>,
 }
 
 impl DashboardState {
@@ -230,6 +235,19 @@ impl DashboardState {
         let durable = self.mcp_audit.is_durable();
         view_model::build_access_view(self.status_strip(), caller_tier, &records, durable)
     }
+
+    /// Build the scope-preview panel's props (ADR-0021, ADR-0016): the persistent strip + the
+    /// CANDIDATE `enforceScope` (`namespaces`/`labels`, already parsed from the request query)
+    /// classified against this pass's standing-cut snapshot. Pure read of the shared handle —
+    /// applies, arms, and mutates nothing.
+    fn scope_preview_view(
+        &self,
+        namespaces: &[String],
+        labels: &[(String, String)],
+    ) -> ScopePreviewViewProps {
+        let standing = self.scope_preview.snapshot();
+        view_model::build_scope_preview_view(self.status_strip(), &standing, namespaces, labels)
+    }
 }
 
 /// The tab query parameter (`?tab=action`). Defaults to Findings. The legacy `trust`/`activity`
@@ -251,6 +269,40 @@ impl TabQuery {
             Some("access") => Tab::Access,
             _ => Tab::Findings,
         }
+    }
+}
+
+/// The candidate `enforceScope` query (`?namespaces=a,b&labels=k=v,k2=v2`) — the operator-facing
+/// vocabulary mirrors `PROTECTOR_ENFORCE_SCOPE_NAMESPACES`/`_LABELS` (ADR-0021) so the panel's
+/// inputs read the same as the env vars an operator would actually set. Absent/blank on either
+/// axis parses to empty, which the preview reads honestly as "nothing standing would fire" —
+/// never as "unscoped, matches everything" (see [`crate::engine::respond::actuator::ActuationScope::endpoints_within`]).
+#[derive(serde::Deserialize, Default)]
+struct ScopePreviewQuery {
+    namespaces: Option<String>,
+    labels: Option<String>,
+}
+
+impl ScopePreviewQuery {
+    fn namespaces(&self) -> Vec<String> {
+        self.namespaces
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    fn labels(&self) -> Vec<(String, String)> {
+        self.labels
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|s| s.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+            .collect()
     }
 }
 
@@ -332,6 +384,19 @@ async fn divergence_json(State(state): State<DashboardState>) -> Response {
     view_json(state.divergence.snapshot())
 }
 
+/// `GET /api/scope_preview.json?namespaces=…&labels=…` — the read-only pre-arm scope-simulation
+/// preview (ADR-0021, ADR-0016): "what fires, and what it severs, if `enforceScope` were this
+/// CANDIDATE scope right now". GET-only, `no-store`, same authz as every other `/api/*.json`
+/// route. Unlike the other snapshot routes this one takes a query — the candidate scope an
+/// operator is trying out — but it is still a pure read: computing it applies, arms, and mutates
+/// nothing (the whole point is to answer the question BEFORE flipping `mode: enforce`).
+async fn scope_preview_json(
+    State(state): State<DashboardState>,
+    Query(q): Query<ScopePreviewQuery>,
+) -> Response {
+    view_json(state.scope_preview_view(&q.namespaces(), &q.labels()))
+}
+
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
 ///
 /// `Cache-Control: no-store` is load-bearing behind Cloudflare Access (JEF-283): Cloudflare
@@ -390,6 +455,7 @@ pub fn router(state: DashboardState, auth: Option<Arc<Enforcer>>) -> Router {
         .route("/api/admission.json", get(admission_json))
         .route("/api/access.json", get(access_json))
         .route("/api/divergence.json", get(divergence_json))
+        .route("/api/scope_preview.json", get(scope_preview_json))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js));
     // Mount the enforcement gate FIRST (so CSP, added next, is the outer layer wrapping its denials).

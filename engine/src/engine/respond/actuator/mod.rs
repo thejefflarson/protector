@@ -41,6 +41,12 @@ use crate::engine::observe::health::{Health, HealthReport};
 use render::workload_namespace;
 
 pub mod arming_ladder;
+// The read-only pre-arm scope-simulation projection (ADR-0021/ADR-0016): "what fires and
+// what it severs if `enforceScope` were this scope, right now" — a pure view over the SAME
+// per-mitigation blast data this module's own `decide`/`predict_blast_radius` compute.
+// Standalone module so it stays reviewable on its own and can never entangle with the live
+// decision path it only reads from.
+pub mod scope_preview;
 
 /// Map an operator-facing enable name to the action class(es) it arms. Only `network`
 /// is accepted, because only a network deny is **live-actuatable**: an additive,
@@ -199,6 +205,19 @@ impl ActuationScope {
         if self.namespaces.is_empty() && self.labels.is_empty() {
             return true;
         }
+        self.endpoints_within(mitigation)
+    }
+
+    /// The endpoint-level scope match `in_scope` runs once the "empty scope is unscoped"
+    /// shortcut is ruled out — **no such shortcut here**: an empty (both axes) scope
+    /// matches no endpoint. `in_scope` applies this behind its unscoped short-circuit (the
+    /// real actuation posture, where an empty scope means "no `enforceScope` configured, so
+    /// don't restrict"). The read-only scope-simulation projection ([`scope_preview`]) calls
+    /// this directly instead, because a *candidate* scope an operator is trying out has no
+    /// such standing meaning — reading its empty case as "matches everything" would be
+    /// exactly the enforce-everywhere wildcard ADR-0021 refuses to start with, so the
+    /// preview must report an empty candidate as zero armed cuts, honestly, never as unscoped.
+    pub fn endpoints_within(&self, mitigation: &Mitigation) -> bool {
         let endpoints = [
             (&mitigation.cut.from, &mitigation.cut.from_labels),
             (&mitigation.cut.to, &mitigation.cut.to_labels),

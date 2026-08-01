@@ -20,7 +20,9 @@ use super::test_support::{
 use crate::engine::dashboard::{AuthMode, DashboardState, router};
 use crate::engine::journal::DecisionJournal;
 use crate::engine::policy_log::PolicyDecisionLog;
-use crate::engine::state::{DivergenceLog, Findings, JudgementLog, ReversionLog};
+use crate::engine::state::{
+    DivergenceLog, Findings, JudgementLog, ReversionLog, ScopePreviewStore,
+};
 
 const LOGIN_URL: &str = "https://login.example/authorize";
 
@@ -36,6 +38,7 @@ fn empty_state(auth_mode: AuthMode) -> DashboardState {
         auth_mode,
         mcp_audit: Arc::new(crate::engine::mcp::AccessAuditSink::in_memory()),
         divergence: Arc::new(DivergenceLog::new()),
+        scope_preview: Arc::new(ScopePreviewStore::new()),
     }
 }
 

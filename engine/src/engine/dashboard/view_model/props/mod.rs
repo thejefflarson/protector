@@ -23,9 +23,9 @@
 //! ## Module layout (CLAUDE.md 1,000-line cap)
 //!
 //! The props tree is split into one focused submodule per view — [`findings`], [`alerts`],
-//! [`readiness`], [`action`], [`admission`] — plus the shared [`status`] strip/tab spine and the
-//! pre-existing [`signing`] inventory. Everything is re-exported FLAT here so every consumer's
-//! `props::TypeName` path resolves unchanged.
+//! [`readiness`], [`action`], [`admission`], [`scope_preview`] — plus the shared [`status`]
+//! strip/tab spine and the pre-existing [`signing`] inventory. Everything is re-exported FLAT
+//! here so every consumer's `props::TypeName` path resolves unchanged.
 
 mod access;
 mod action;
@@ -33,6 +33,7 @@ mod admission;
 mod alerts;
 mod findings;
 mod readiness;
+mod scope_preview;
 mod signing;
 mod status;
 
@@ -49,6 +50,7 @@ pub use findings::{
 pub use readiness::{
     InputStateProps, NodeCoverageStateProps, NodeRowProps, ReadinessRowProps, ReadinessViewProps,
 };
+pub use scope_preview::{FiringCutProps, HeldCutProps, ScopePreviewViewProps};
 pub use signing::{
     ExceptionAcceptedProps, ProvenanceChangeProps, ProvenancePosture, ProvenanceProps,
     RegressionKind, RepoStrength, SignerProps, SigningEnforcement, SigningPosture,

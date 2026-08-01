@@ -14,7 +14,9 @@ use tower::ServiceExt;
 use super::DashboardState;
 use crate::engine::journal::DecisionJournal;
 use crate::engine::policy_log::PolicyDecisionLog;
-use crate::engine::state::{DivergenceLog, Findings, JudgementLog, ReversionLog};
+use crate::engine::state::{
+    DivergenceLog, Findings, JudgementLog, ReversionLog, ScopePreviewStore,
+};
 
 /// A minimal, empty-but-honest dashboard state — enough to exercise the routes end-to-end. The
 /// findings handle has no completed pass, so the strip reads warming/blind (never a false green),
@@ -30,6 +32,7 @@ fn empty_state() -> DashboardState {
         auth_mode: super::AuthMode::EdgeOnly,
         mcp_audit: Arc::new(crate::engine::mcp::AccessAuditSink::in_memory()),
         divergence: Arc::new(DivergenceLog::new()),
+        scope_preview: Arc::new(ScopePreviewStore::new()),
     }
 }
 
@@ -76,6 +79,7 @@ async fn every_endpoint_is_get_only_json_and_no_store() {
         "/api/readiness.json",
         "/api/admission.json",
         "/api/access.json",
+        "/api/scope_preview.json",
     ] {
         let (status, no_store, body) = get(path).await;
         assert_eq!(status, StatusCode::OK, "{path} should 200");
@@ -118,7 +122,7 @@ async fn each_endpoint_returns_the_same_view_model_its_tab_renders() {
     // `Serialize` (the wire is one-directional server→client), so compare on the JSON `Value`.
     let state = empty_state();
 
-    let cases: [(&str, serde_json::Value); 6] = [
+    let cases: [(&str, serde_json::Value); 7] = [
         (
             "/api/findings.json",
             serde_json::to_value(state.findings_view()).unwrap(),
@@ -146,6 +150,11 @@ async fn each_endpoint_returns_the_same_view_model_its_tab_renders() {
                 state.access_view(crate::engine::dashboard::auth::claims::Tier::Redacted),
             )
             .unwrap(),
+        ),
+        (
+            // A bare request (no candidate scope query) mirrors the default GET handler.
+            "/api/scope_preview.json",
+            serde_json::to_value(state.scope_preview_view(&[], &[])).unwrap(),
         ),
     ];
 

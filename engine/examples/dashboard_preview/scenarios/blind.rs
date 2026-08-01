@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime};
 
 use protector::engine::dashboard::DashboardState;
 use protector::engine::policy_log::PolicyDecisionLog;
-use protector::engine::state::{Finding, ModelHealth, StoredPosture};
+use protector::engine::state::{Finding, ModelHealth, ScopePreviewStore, StoredPosture};
 
 use crate::fixtures::{breach_finding, simple_finding};
 use crate::sample_data::{covered_bake, covered_config, fresh_handles};
@@ -65,5 +65,7 @@ pub(super) fn build_blind() -> DashboardState {
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
         mcp_audit: Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
         divergence: Arc::new(protector::engine::state::DivergenceLog::new()),
+        // No standing cuts in the preview scenarios — the panel's own empty state.
+        scope_preview: Arc::new(ScopePreviewStore::new()),
     }
 }

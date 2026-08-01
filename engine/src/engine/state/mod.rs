@@ -2,8 +2,9 @@
 //! writes each pass and the metrics mirror reads — the proven-chain [`Finding`] row and its
 //! evidence, the single per-entry [`VerdictStore`], the [`Findings`] / [`JudgementLog`] /
 //! [`ReversionLog`] handles, the [`BakeStats`] / [`ModelHealth`] / [`ReadinessConfig`] coverage
-//! shapes, the per-entry recency / Δ facts, and the would-have-acted [`Report`] +
-//! [`Readiness`] aggregations that feed the OTLP mirror.
+//! shapes, the per-entry recency / Δ facts, the would-have-acted [`Report`] +
+//! [`Readiness`] aggregations that feed the OTLP mirror, and the [`ScopePreviewStore`]
+//! standing-cut snapshot the pre-arm scope-simulation preview reads.
 //!
 //! This is pure DATA: it holds no rendering and no HTTP serving. The engine core, journal,
 //! metrics, and adjudicator write and read these handles; nothing here knows how the state is
@@ -20,6 +21,7 @@ mod readiness;
 mod recency;
 mod report;
 mod reversion;
+mod scope_preview;
 mod signing_baseline;
 mod verdict_store;
 
@@ -38,6 +40,7 @@ pub(crate) use readiness::derive_readiness;
 pub use recency::{Delta, RecencyInfo, StoredPosture};
 pub use report::{LeftAloneEntry, Report, WouldActEntry, default_window_report};
 pub use reversion::{ReversionLog, ReversionRecord};
+pub use scope_preview::ScopePreviewStore;
 pub use signing_baseline::{
     DEFAULT_MAX_REPOS, SharedSigningBaseline, SigningBaseline, SigningBaselineStore,
 };
