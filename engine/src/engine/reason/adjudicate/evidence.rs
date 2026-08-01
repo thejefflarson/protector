@@ -38,19 +38,51 @@ use crate::engine::observe::peer_class::internet_egress_line;
 /// appending the real one — see [`defang_tag_lookalike`].
 pub(crate) const BENIGN_OWN_ACTIVITY_TAG: &str = "[benign observed — not a signal]";
 
-/// Defang an exact, attacker-supplied lookalike of [`BENIGN_OWN_ACTIVITY_TAG`] embedded in an
-/// untrusted behavior line's own free text (a chosen file path, peer string, or secret name)
-/// BEFORE [`render_behavior_lines_budgeted`] decides whether to append the real tag. The tag
-/// DECREASES suspicion — unlike the existing notable-exec annotation, which only ever makes an
-/// attacker's OWN activity look MORE alarming — so a forged copy on a genuinely alarming write
-/// (e.g. a drop into `/etc/cron.d/` whose path is crafted to literally contain this tag's text)
-/// would suppress real evidence from the judge; that is the one direction worth defending. A
-/// plain exact-string replace, not a character-class strip (the delimiter itself can't be
-/// stripped without breaking every other bracketed tag this prompt renders — see the constant's
-/// doc): after this pass the tag's exact text can appear in a rendered line ONLY when this
-/// module itself appended it.
-fn defang_tag_lookalike(line: &str) -> String {
-    line.replace(BENIGN_OWN_ACTIVITY_TAG, "[attempted tag forgery, ignored]")
+/// Defang an exact, attacker-supplied lookalike of [`BENIGN_OWN_ACTIVITY_TAG`] found in a
+/// behavior line's own free text (a chosen file path, peer string, or secret name), so the tag
+/// text can appear in a rendered line ONLY when [`render_behavior_lines_budgeted`] itself
+/// appended it. The tag DECREASES suspicion — unlike the existing notable-exec annotation,
+/// which only ever makes an attacker's OWN activity look MORE alarming — so a forged copy on a
+/// genuinely alarming write (e.g. a drop into `/etc/cron.d/` whose path is crafted to contain
+/// this tag's text) would suppress real evidence from the judge; that is the one direction
+/// worth defending.
+///
+/// MUST run on the FINAL rendered text — after [`cap_untrusted`] (cap THEN [`sanitize`]) and
+/// the free-text-budget fallback, immediately before the caller decides whether to append the
+/// real tag. Order is load-bearing: `sanitize` REPLACES `<>{}` and the backtick with a SPACE
+/// rather than deleting them, so an attacker who spells the tag's spaces as one of those chars
+/// (e.g. a path containing `benign<observed<—<not<a<signal`) produces no literal-space match if
+/// defanged on the RAW, pre-sanitize text — sanitize reconstructs the exact tag right
+/// afterward. Defanging AFTER `cap_untrusted` closes that: nothing transforms the text again
+/// past this point, so whatever survives here is exactly what the judge sees.
+///
+/// Also collapses runs of whitespace before matching (defense-in-depth): an attacker could
+/// otherwise widen the gaps between the tag's words to dodge the exact match while still
+/// reading, to a small model, as the same tag. A behavior line's free text has no legitimate
+/// reason to carry a run of internal whitespace, so collapsing is harmless to any real path/
+/// peer/secret name.
+fn defang_tag_lookalike(text: &str) -> String {
+    collapse_whitespace_runs(text)
+        .replace(BENIGN_OWN_ACTIVITY_TAG, "[attempted tag forgery, ignored]")
+}
+
+/// Collapse any run of whitespace in `text` to a single ASCII space — see
+/// [`defang_tag_lookalike`]'s doc for why.
+fn collapse_whitespace_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_was_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !prev_was_space {
+                out.push(' ');
+            }
+            prev_was_space = true;
+        } else {
+            out.push(ch);
+            prev_was_space = false;
+        }
+    }
+    out
 }
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
@@ -385,15 +417,11 @@ pub(crate) fn render_behavior_lines_budgeted(
     let mut lines: Vec<(String, &str, bool)> = Vec::with_capacity(behaviors.len());
     if asn.is_empty() {
         // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
-        // `defang_tag_lookalike` runs on the raw summary BEFORE any decision to append the
-        // real tag, so an attacker-chosen path/peer/secret name can never forge it.
-        lines.extend(behaviors.iter().map(|b| {
-            (
-                defang_tag_lookalike(&annotated_summary(b)),
-                b.variant_label(),
-                !is_alarming_now(b),
-            )
-        }));
+        lines.extend(
+            behaviors
+                .iter()
+                .map(|b| (annotated_summary(b), b.variant_label(), !is_alarming_now(b))),
+        );
     } else {
         // Collapse INTERNET egress to a provider set; everything else renders as before.
         let mut internet_peers: Vec<&str> = Vec::new();
@@ -404,7 +432,7 @@ pub(crate) fn render_behavior_lines_budgeted(
                     internet: true,
                 } => internet_peers.push(peer),
                 other => lines.push((
-                    defang_tag_lookalike(&annotated_summary(other)),
+                    annotated_summary(other),
                     other.variant_label(),
                     !is_alarming_now(other),
                 )),
@@ -415,7 +443,7 @@ pub(crate) fn render_behavior_lines_budgeted(
             // connections) — `"connection"` matches `Behavior::NetworkConnection`'s own
             // `variant_label()`, the kind every one of those N behaviors shares. A
             // `NetworkConnection` is never `is_alarming_now`, so this is always benign.
-            lines.push((defang_tag_lookalike(&line), "connection", true));
+            lines.push((line, "connection", true));
         }
     }
     let mut out: Vec<String> = lines
@@ -424,6 +452,10 @@ pub(crate) fn render_behavior_lines_budgeted(
             let capped = cap_untrusted(&line, TITLE_CAP);
             let text = take_from_budget(capped, budget)
                 .unwrap_or_else(|| format!("{kind} (free-text budget exhausted)"));
+            // Defang AFTER cap+sanitize+budget resolve — nothing transforms `text` again past
+            // this point, so a lookalike reconstructed BY `sanitize` (see the function's doc)
+            // is still caught here, immediately before the real tag might be appended below.
+            let text = defang_tag_lookalike(&text);
             if benign {
                 format!("{text} {BENIGN_OWN_ACTIVITY_TAG}")
             } else {
