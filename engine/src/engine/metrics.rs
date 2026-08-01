@@ -97,6 +97,14 @@ pub(super) struct EngineMetrics {
     /// Total agent signals emitted across healthy nodes this pass — the shadow view of live
     /// corroboration volume, summed (no per-node dimension).
     pub(super) coverage_signals: opentelemetry::metrics::Gauge<u64>,
+    /// Whether the break-glass kill switch (ADR-0021's enforcement gate, fast path) is
+    /// engaged as of this pass (0/1) — a gauge, mirrored every pass so it's always current
+    /// even across a long-quiet cluster.
+    pub(super) break_glass_engaged: opentelemetry::metrics::Gauge<u64>,
+    /// Break-glass engage/clear transitions, by `state` (`engaged`/`cleared`) — a
+    /// cumulative, alert-able counter recorded ONCE per edge (never per pass), so an
+    /// operator can page on "this fired at all" rather than poll the gauge.
+    pub(super) break_glass_transitions: opentelemetry::metrics::Counter<u64>,
 }
 
 impl EngineMetrics {
@@ -210,7 +218,27 @@ impl EngineMetrics {
                 .u64_gauge("protector.engine.agent_signals_this_pass")
                 .with_description("Runtime coverage: agent signals across healthy nodes this pass.")
                 .build(),
+            break_glass_engaged: m
+                .u64_gauge("protector.engine.break_glass_engaged")
+                .with_description("Whether the break-glass kill switch is engaged this pass (0/1).")
+                .build(),
+            break_glass_transitions: m
+                .u64_counter("protector.engine.break_glass_transitions")
+                .with_description("Break-glass engage/clear transitions, by state.")
+                .build(),
         }
+    }
+
+    /// Mirror this pass's break-glass state into the gauge (called every pass).
+    pub(super) fn record_break_glass(&self, engaged: bool) {
+        self.break_glass_engaged.record(u64::from(engaged), &[]);
+    }
+
+    /// Record ONE engage/clear transition (called only on the edge, never per pass).
+    pub(super) fn record_break_glass_transition(&self, engaged: bool) {
+        let state = if engaged { "engaged" } else { "cleared" };
+        self.break_glass_transitions
+            .add(1, &[opentelemetry::KeyValue::new("state", state)]);
     }
 
     /// Mirror this pass's runtime-corroboration coverage (JEF-422) into the OTLP gauges. A pure

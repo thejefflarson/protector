@@ -137,6 +137,7 @@ async fn wake_channel_survives_many_passes_and_only_closes_when_every_sender_dro
     let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(64);
     let (_runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
     let (_audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_breakglass_tx, mut breakglass_rx) = tokio::sync::mpsc::channel::<()>(64);
 
     // Mirror `run_watch`'s reflector tasks: each holds its OWN clone, independent of the
     // driving loop's retained `change_tx`, and sends one tick per simulated cluster change.
@@ -149,7 +150,13 @@ async fn wake_channel_survives_many_passes_and_only_closes_when_every_sender_dro
             .await
             .expect("reflector clone can still send");
         assert!(
-            super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+            super::wait_for_wake(
+                &mut change_rx,
+                &mut runtime_rx,
+                &mut audit_rx,
+                &mut breakglass_rx
+            )
+            .await,
             "pass {pass}: the loop must keep running while a Sender clone is alive — a \
              run-to-completion regression would return false after the very first pass"
         );
@@ -160,7 +167,13 @@ async fn wake_channel_survives_many_passes_and_only_closes_when_every_sender_dro
     drop(reflector_tx);
     drop(change_tx);
     assert!(
-        !super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+        !super::wait_for_wake(
+            &mut change_rx,
+            &mut runtime_rx,
+            &mut audit_rx,
+            &mut breakglass_rx
+        )
+        .await,
         "once every Sender clone is dropped, the loop must be told to stop"
     );
 }
@@ -173,12 +186,19 @@ async fn queued_burst_coalesces_into_one_wake() {
     let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<()>(64);
     let (_runtime_tx, mut runtime_rx) = tokio::sync::mpsc::channel::<()>(64);
     let (_audit_tx, mut audit_rx) = tokio::sync::mpsc::channel::<()>(64);
+    let (_breakglass_tx, mut breakglass_rx) = tokio::sync::mpsc::channel::<()>(64);
 
     for _ in 0..4 {
         change_tx.send(()).await.expect("send queues fine");
     }
     assert!(
-        super::wait_for_wake(&mut change_rx, &mut runtime_rx, &mut audit_rx).await,
+        super::wait_for_wake(
+            &mut change_rx,
+            &mut runtime_rx,
+            &mut audit_rx,
+            &mut breakglass_rx
+        )
+        .await,
         "a queued burst still wakes the loop"
     );
     // The burst was fully drained by that one call — nothing left queued for a second wake
