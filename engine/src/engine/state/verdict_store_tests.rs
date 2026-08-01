@@ -121,7 +121,7 @@ fn judge_pass(
         Verdict::Uncertain(_) => store.record_inconclusive(entry, now),
         d => {
             store.cache_decisive(entry, fp.to_string(), d.clone());
-            store.record_decisive(entry);
+            store.record_decisive(entry, now);
         }
     }
     true
@@ -283,4 +283,53 @@ fn env_slots_parse_defaults_on_invalid_or_zero_and_floors_small_values() {
         parse_verdict_cache_slots(Some("1")),
         MIN_VERDICT_CACHE_SLOTS
     );
+}
+
+/// The actuation-trust freshness gate: `verdict_fresh` is the primitive
+/// `engine::gate_on_judge_freshness` reads before letting a NEW cut auto-apply. Never true
+/// before ANY decisive answer has landed for the entry (cold start fails safe), true right
+/// after one lands, false once the global breaker opens (even for an entry whose own last
+/// answer was fine), and false again once the answer ages past the caller's bound.
+#[test]
+fn verdict_fresh_requires_a_recent_decisive_answer_and_a_closed_breaker() {
+    use std::time::Duration;
+
+    let store = VerdictStore::with_cache_slots(4);
+    let now = Instant::now();
+    let bound = Duration::from_secs(60);
+
+    // Cold start: never judged this entry ⇒ not fresh, regardless of the breaker.
+    assert!(!store.verdict_fresh("entry", now, bound));
+
+    // A decisive answer lands ⇒ fresh immediately, breaker closed.
+    store.record_decisive("entry", now);
+    assert!(store.verdict_fresh("entry", now, bound));
+
+    // Still fresh just inside the bound...
+    assert!(store.verdict_fresh("entry", now + bound, bound));
+    // ...but not once it ages past it.
+    assert!(!store.verdict_fresh("entry", now + bound + Duration::from_secs(1), bound));
+
+    // A fresh decisive answer that trips the GLOBAL breaker for an UNRELATED entry still
+    // makes THIS entry's answer untrustworthy for actuation — the breaker is fleet-wide, by
+    // design mirroring the JEF-234 pass-wide skip (a fully-down model is untrustworthy for
+    // every entry, not just the ones currently failing).
+    store.record_decisive("entry", now);
+    assert!(store.verdict_fresh("entry", now, bound));
+    for i in 0..crate::engine::reason::backoff::BREAKER_TRIP {
+        store.record_inconclusive(&format!("other-{i}"), now);
+    }
+    assert!(
+        store.breaker_open(now),
+        "test setup: the breaker must actually be open"
+    );
+    assert!(
+        !store.verdict_fresh("entry", now, bound),
+        "an open breaker overrides even a just-landed decisive answer"
+    );
+
+    // The first decisive success anywhere closes the breaker again (JEF-234) — freshness
+    // is restored for an entry whose OWN answer is still within the bound.
+    store.record_decisive("entry", now);
+    assert!(store.verdict_fresh("entry", now, bound));
 }

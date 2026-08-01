@@ -79,11 +79,23 @@ use graph::delta::GraphSnapshot;
 use observe::Snapshot;
 use observe::adapter::Adapter;
 use observe::health::{Health, PodStatusHealth};
+use respond::Mitigation;
 use respond::MitigationLedger;
 use respond::actuator::{
     ActionLog, ActuationScope, Actuator, Decision, EnabledActions, decide, predict_blast_radius,
 };
 use std::collections::HashSet;
+
+/// How long a mitigation's justifying entry may trust its last DECISIVE model verdict for a
+/// **brand-new** auto-actuation, once the global judge breaker is closed again (see
+/// [`Engine::gate_on_judge_freshness`]). Chosen well inside the documented model cold-start
+/// window (tens of minutes on a cold local CPU model) so a judge that never comes back up is
+/// caught well before an operator would notice on their own, while comfortably above the
+/// breaker cooldown and the per-entry backoff ceiling (`reason::backoff::CAP`, 10 minutes) so
+/// ordinary retry cadence never trips it. A code default, not an operator toggle — CLAUDE.md's
+/// "detection on by default" rule reads across to actuation trust: there is nothing to turn
+/// off, only a bound tuned once here.
+const JUDGE_FRESHNESS_BOUND: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// One breach-relevant ENTRY queued for adjudication this pass: its identity, the
 /// (objective, technique) set the model judges it over, the DETERMINISTIC prompt the model
@@ -641,9 +653,17 @@ impl Engine {
         self.metrics
             .active_mitigations
             .record(active_mitigations.len() as u64, &[]);
+        // The actuation-trust signal for this pass (JUDGE FRESHNESS): mirror the global
+        // breaker's CURRENT state so an operator watching only `/metrics` sees a degraded
+        // judge at a glance, independent of whether anything was actually held this pass.
+        self.metrics
+            .judge_degraded
+            .record(u64::from(self.verdicts.breaker_open(pass_now)), &[]);
         for mitigation in &active_mitigations {
             let blast = predict_blast_radius(mitigation, &graph, &health);
-            match decide(mitigation, &self.active, &self.scope, &blast) {
+            let decision = decide(mitigation, &self.active, &self.scope, &blast);
+            let decision = self.gate_on_judge_freshness(mitigation, decision, pass_now);
+            match decision {
                 Decision::AutoApply => {
                     if !self.actions.is_active(mitigation) {
                         self.actuator.apply(mitigation).await;
@@ -709,6 +729,59 @@ impl Engine {
 
         self.previous = current;
     }
+
+    /// Gate a `decide()` verdict on JUDGE FRESHNESS before it can newly actuate: an
+    /// `AutoApply` is downgraded to a degraded-judge `Propose` unless at least one entry
+    /// granting this mitigation's live-corroboration
+    /// ([`Mitigation::live_corroborating_entries`]) has a decisive verdict from the model
+    /// within [`JUDGE_FRESHNESS_BOUND`], with the global breaker currently CLOSED
+    /// ([`state::VerdictStore::verdict_fresh`]).
+    ///
+    /// This closes the one gap `decide()`'s own checks (`is_live_corroborated`) don't: the
+    /// JEF-390 verdict-cache hit and the JEF-391 subtractive-delta hold both resolve BEFORE
+    /// the breaker check (`adj_gate`), by design — an unchanged evidence fingerprint is
+    /// exactly as valid to DISPLAY as when it was judged (ADR-0023) — so a fingerprint that
+    /// happens to replay while the judge is CURRENTLY down can otherwise still read as
+    /// decisively confirmed or promoted for actuation purposes too. Gating once, here, at the
+    /// single actuation choke point leaves that display/cache correctness untouched; it only
+    /// refuses to let a not-currently-verifiable judge arm a NEW cut.
+    ///
+    /// `Propose`/`Forbidden` pass through unchanged. An `AutoApply` for a mitigation that is
+    /// ALREADY applied costs nothing extra either way — the `AutoApply` arm only acts on a
+    /// mitigation that isn't active yet — and a REVERT runs on the wholly separate
+    /// `ActionLog::reconcile` path below, which this gate never touches: a degraded judge
+    /// still LIFTS a cut whose health or justification no longer holds. The fail-safe
+    /// asymmetry stays toward lifting, never toward cutting.
+    fn gate_on_judge_freshness(
+        &self,
+        mitigation: &Mitigation,
+        decision: Decision,
+        now: std::time::Instant,
+    ) -> Decision {
+        if decision != Decision::AutoApply {
+            return decision;
+        }
+        let fresh = mitigation.live_corroborating_entries().any(|entry| {
+            self.verdicts
+                .verdict_fresh(entry, now, JUDGE_FRESHNESS_BOUND)
+        });
+        if fresh {
+            return decision;
+        }
+        self.metrics.mitigations.add(
+            1,
+            &[opentelemetry::KeyValue::new("action", "held_degraded")],
+        );
+        tracing::info!(
+            cut = %mitigation.cut_signature(),
+            "auto-actuation held: judge is degraded (breaker open or no fresh decisive verdict)"
+        );
+        Decision::Propose(
+            "judge is degraded (breaker open, or no fresh decisive verdict within the trust \
+             window); held as a proposal until the model verifiably answers again"
+                .to_string(),
+        )
+    }
 }
 
 // The engine's driver (`run_watch`) and its env-driven builders live in a sibling
@@ -733,3 +806,8 @@ mod tests;
 // file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod journal_tests;
+
+// The judge-freshness actuation gate's tests, split out of `tests.rs` to keep every file under
+// the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod judge_freshness_tests;

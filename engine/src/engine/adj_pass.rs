@@ -293,7 +293,8 @@ impl Engine {
                     );
                     // JEF-234: a decisive answer means the model is alive — clear this entry's
                     // backoff and close the global breaker so judging resumes for the fleet.
-                    self.verdicts.record_decisive(&pending.entry_key);
+                    // Also stamps the actuation-trust clock (`decisive_at`) `pass_now` reads.
+                    self.verdicts.record_decisive(&pending.entry_key, pass_now);
                     "ok"
                 }
             };
