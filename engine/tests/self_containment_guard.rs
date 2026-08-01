@@ -37,18 +37,11 @@ fn is_checked_extension(path: &Path) -> bool {
     )
 }
 
-/// A handful of files/lines that are exempt from this guard, each with a durable, in-repo
-/// reason (never a ticket ID — that would be the exact thing this guard forbids elsewhere):
-///
-/// - `scripts/judge_bakeoff_cutchoice.py` is mid-edit on a concurrent branch as this guard
-///   lands; it carries pre-existing ticket breadcrumbs this guard hasn't swept yet and is
-///   excluded here ONLY until that branch lands and a follow-up sweep clears it.
-/// - This test's own file names the `JEF-` prefix and the `linear.app` string literally to
-///   implement the check — the same self-reference CLAUDE.md's guardrail text is allowed.
-const EXEMPT_FILES: &[&str] = &[
-    "scripts/judge_bakeoff_cutchoice.py",
-    "engine/tests/self_containment_guard.rs",
-];
+/// The one structural file-level exemption: this test's own file names the `JEF-` prefix and
+/// the `linear.app` string literally to implement the check — the same self-reference
+/// CLAUDE.md's guardrail text is allowed. No ticket-ID exemptions exist (that would be the
+/// exact thing this guard forbids elsewhere).
+const EXEMPT_FILES: &[&str] = &["engine/tests/self_containment_guard.rs"];
 
 /// The one line allowed to contain the otherwise-forbidden `linear.app` substring, because it
 /// NAMES the pattern this guard enforces (CLAUDE.md's own guardrail text) rather than citing a

@@ -178,10 +178,10 @@ const _: () = {
     assert!(offset_of!(qstr, name) == 8);
     assert!(offset_of!(inode, i_sb) == 40);
     assert!(offset_of!(inode, i_ino) == 64);
-    assert!(offset_of!(inode, i_nlink) == 72); /, ON-NODE PENDING
+    assert!(offset_of!(inode, i_nlink) == 72); // ON-NODE PENDING
     assert!(offset_of!(super_block, s_magic) == 96);
     assert!(offset_of!(cred, uid) == 8);
     assert!(offset_of!(kuid_t, val) == 0);
-    assert!(offset_of!(linux_binprm, file) == 64); /, ON-NODE PENDING
+    assert!(offset_of!(linux_binprm, file) == 64); // ON-NODE PENDING
     assert!(offset_of!(linux_binprm, filename) == 96);
 };
