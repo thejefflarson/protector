@@ -91,12 +91,25 @@ CACHE_LINE = f"  - <<<{CACHE}>>>: quarantine this workload — default-deny Netw
 OBJS = (f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
         f"  - {CACHE} [NETWORK] [same-ns] (Collection: Data from Information Repositories)")
 
+# A distinct node identity for the route-forwarded-backend fixture below (never has its own
+# entry status confused with the direct-exposure ENTRY/CACHE pair above).
+ROUTE_ENTRY = "workload/public/Pod/checkout-api-7f9d4c8b6d-x2p9k"
+ROUTE_ENTRY_LINE = f"  - <<<{ROUTE_ENTRY}>>>: isolate the internet-facing entry — deny all ingress + egress except proven-benign peers (reversible NetworkPolicy) [blast radius: drops the route-forwarded backend; 1 alive peer isolated]"
+
 CASES = [
     # entry-only breach: log4j loaded on the ENTRY -> attack, contain ONLY the entry.
     ("entry_only_log4j", "attack", {ENTRY},
      ENTRY, "<<<CVE-2021-44228 [reachability: loaded-at-runtime]>>>", "(none)",
      "<<<loaded library log4j-core-2.14.jar>>> <<<connects to 203.0.113.9:443 (INTERNET egress)>>>",
      OBJS, f"  - <<<{CACHE}>>>: no evidence observed.", menu(ENTRY_LINE, CACHE_LINE)),
+    # route-forwarded backend (no Service directly exposed; reached only via an Ingress route)
+    # rendered in the ENTRY position with its own loaded-at-runtime CVE -> attack, contain ONLY
+    # that backend. Validates the Ingress observer's Exposure::Internet promotion feeds this
+    # prompt through the same edge-CVE lane as a directly-exposed entry (ADR-0033).
+    ("route_forwarded_entry_cve", "attack", {ROUTE_ENTRY},
+     ROUTE_ENTRY, "<<<CVE-2024-45519 [reachability: loaded-at-runtime]>>>", "(none)",
+     "<<<loaded library apache-ofbiz-18.12.jar>>> <<<connects to 203.0.113.14:443 (INTERNET egress)>>>",
+     OBJS, f"  - <<<{CACHE}>>>: no evidence observed.", menu(ROUTE_ENTRY_LINE, CACHE_LINE)),
     # downstream behavioral compromise, CLEAN entry -> attack, contain ONLY the downstream (the
     # minimality centerpiece: the entry must be LEFT running).
     ("downstream_behavioral", "attack", {CACHE},
