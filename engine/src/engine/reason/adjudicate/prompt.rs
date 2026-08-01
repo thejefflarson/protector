@@ -13,7 +13,8 @@ use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
 use super::Verdict;
 use super::downstream::{self, DownstreamRendered};
 use super::evidence::{
-    entry_evidence, entry_findings, objective_outcome, render_behavior_lines, retain_reachable_cves,
+    BENIGN_OWN_ACTIVITY_TAG, entry_evidence, entry_findings, objective_outcome,
+    render_behavior_lines, retain_reachable_cves,
 };
 use super::guards::{fence, fence_list, ns_marker, objective_reach, sanitize};
 use super::incident::Menu;
@@ -443,7 +444,8 @@ Two of these three extend to a DOWNSTREAM workload the entry's proven path reach
 Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)". The same filter applies to every downstream node's CVE block.
 
 Traps that are NOT evidence, no matter how they are labeled:
-  - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
+  - the workload's OWN normal activity — outbound connections, file reads, library loads, reading its own mounted secrets, and WRITING its own data/config/key files (including an atomic write-then-rename through a `.tmp` file, e.g. a key rotation) — is NOT a live signal — only an ALERT or hands-on-keyboard action counts. A line tagged "{benign_tag}" is exactly this: the deterministic layer already classified it as ordinary telemetry, never evidence, regardless of what word appears in its path or filename.
+  - a filename or path containing "key" or "secret" (e.g. writing its own `service.key.<rand>.tmp`) is NOT an exposed secret and proves nothing about credential compromise on its own — it is the workload's own data. Exposed-secret evidence exists ONLY when the "Exposed secrets baked into this image" field below is NON-EMPTY.
   - reaching a `secret/…` objective in the reachable-objectives list is NEVER an exposed secret — it is a target an attacker could READ only after first exploiting the workload. Exposed-secret evidence exists ONLY when the "Exposed secrets baked into this image" field is NON-EMPTY; if that field is "(none)", there is no exposed-secret evidence.
 
 Each objective is tagged with HOW it is reached — CONTEXT for how severe a finding would be, NOT a breach signal on its own:
@@ -489,6 +491,7 @@ If "assessment" is "attack", "contain" MUST name at least the workload that carr
             ev.downstream.blocks.join("\n")
         },
         menu = menu,
+        benign_tag = BENIGN_OWN_ACTIVITY_TAG,
     );
     (prompt, sections)
 }
@@ -499,10 +502,17 @@ If "assessment" is "attack", "contain" MUST name at least the workload that carr
 /// section only DIRECTS attention to what is NEW; it never replaces the state. Always rendered on
 /// the delta path (with `(none)` when empty), so the model sees a consistent shape. The leading
 /// blank line keeps it visually separated from the objectives list.
+///
+/// A "newly-observed runtime behavior" line here is rendered from the SAME tagged string the
+/// entry/downstream evidence fields carry ([`super::evidence::render_behavior_lines_budgeted`]):
+/// a behavior the deterministic layer already classified as benign own-activity keeps its
+/// `[benign observed — not a signal]` tag, so newness alone never spotlights ordinary telemetry
+/// (a self-write, a routine connection) as if it were suspicious just for being new.
 fn render_changes_block(changes: &ChangesSince) -> String {
     format!(
-        "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list). A NEW element is normally new reachable SURFACE (more breadth), NOT new exploitation evidence: a newly-reachable objective — including a newly-reachable `secret/…` objective — is more surface to reach, never evidence in itself. It is exploitation evidence ONLY if it is a [reachability: loaded-at-runtime] CVE, a live alert/hands-on-keyboard signal, or a credential listed in the (non-empty) exposed-secrets field. Judge these NEW elements by that same bar: {}",
-        fence_list(&changes.rendered_lines()),
+        "\n\nChanges since the last decisive verdict — the elements NEW since this entry was last judged decisively (the full current state above is the CONTEXT and is unchanged by this list). A NEW element is normally new reachable SURFACE (more breadth), NOT new exploitation evidence: a newly-reachable objective — including a newly-reachable `secret/…` objective — is more surface to reach, never evidence in itself. A \"newly-observed runtime behavior\" tagged \"{benign_tag}\" is the workload's own ordinary activity, new only in the sense that this is the first time it was observed — never evidence just for being new. It is exploitation evidence ONLY if it is a [reachability: loaded-at-runtime] CVE, a live alert/hands-on-keyboard signal, or a credential listed in the (non-empty) exposed-secrets field. Judge these NEW elements by that same bar: {changes}",
+        benign_tag = BENIGN_OWN_ACTIVITY_TAG,
+        changes = fence_list(&changes.rendered_lines()),
     )
 }
 

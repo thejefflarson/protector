@@ -9,6 +9,9 @@ use super::guards::sanitize;
 use crate::engine::graph::attack::{AttackRef, Tactic};
 use crate::engine::graph::{Behavior, NodeKey, ScanFinding, SecurityGraph, Vulnerability};
 use crate::engine::observe::asn::AsnDb;
+// The engine's single "alarming-now" definition (an alert, a notable shell/package-manager
+// exec, or an alarming sensitive-path write) — see the tag below.
+use crate::engine::observe::alarm_class::is_alarming_now;
 // JEF-113: exec *classification* (shell / package-manager in container) moved out of the
 // shared `Behavior` wire type into engine policy; annotate here so the model still sees
 // "executed /bin/bash (interactive shell in container)" rather than the bare path
@@ -17,6 +20,38 @@ use crate::engine::observe::exec_class::annotated_summary;
 // JEF-380: for INTERNET egress render the deduped, sorted PROVIDER set via the offline ASN
 // dataset — cluster peers are untouched.
 use crate::engine::observe::peer_class::internet_egress_line;
+
+/// The fixed, non-untrusted tag appended to a behavior line the deterministic layer has
+/// already classified as ordinary telemetry, never a live signal — see
+/// [`render_behavior_lines_budgeted`]'s doc for why this is done at the SOURCE rather than
+/// left for the judge to sort out from prose. A fixed internal string (never untrusted
+/// input), safe to embed in the prompt/output.
+///
+/// `[square]`-bracketed, matching this codebase's other structured tags (`[MOUNTED]`,
+/// `[severity: ...]`) — NOT `{curly}`/`<angle>`-bracketed: [`fence_list`](super::guards::fence_list)
+/// re-applies [`sanitize`] to the WHOLE joined behavior-line string at prompt-assembly time,
+/// and `sanitize` strips `<>{}` + backtick (never `[]`, which is why every existing bracketed
+/// tag in this prompt uses square brackets) — a `{`/`<`-delimited tag would be stripped right
+/// back out at that second pass. Because a bracket delimiter therefore can NOT be made
+/// unforgeable by character-class stripping, [`render_behavior_lines_budgeted`] additionally
+/// defangs any attacker-supplied lookalike of this EXACT tag text before conditionally
+/// appending the real one — see [`defang_tag_lookalike`].
+pub(crate) const BENIGN_OWN_ACTIVITY_TAG: &str = "[benign observed — not a signal]";
+
+/// Defang an exact, attacker-supplied lookalike of [`BENIGN_OWN_ACTIVITY_TAG`] embedded in an
+/// untrusted behavior line's own free text (a chosen file path, peer string, or secret name)
+/// BEFORE [`render_behavior_lines_budgeted`] decides whether to append the real tag. The tag
+/// DECREASES suspicion — unlike the existing notable-exec annotation, which only ever makes an
+/// attacker's OWN activity look MORE alarming — so a forged copy on a genuinely alarming write
+/// (e.g. a drop into `/etc/cron.d/` whose path is crafted to literally contain this tag's text)
+/// would suppress real evidence from the judge; that is the one direction worth defending. A
+/// plain exact-string replace, not a character-class strip (the delimiter itself can't be
+/// stripped without breaking every other bracketed tag this prompt renders — see the constant's
+/// doc): after this pass the tag's exact text can appear in a rendered line ONLY when this
+/// module itself appended it.
+fn defang_tag_lookalike(line: &str) -> String {
+    line.replace(BENIGN_OWN_ACTIVITY_TAG, "[attempted tag forgery, ignored]")
+}
 
 /// Cap untrusted free-text to keep the prompt small for the CPU-only model. Since the
 /// prompt is the verdict-cache key (hashed, JEF-350), this cap must be DETERMINISTIC —
@@ -299,6 +334,23 @@ pub(crate) fn retain_reachable_cves(cves: &mut Vec<String>) {
 ///   (including CLUSTER connections, whose JEF-131/375 resolution is untouched) renders via
 ///   `annotated_summary` as before.
 ///
+/// A THIRD policy, applied to every line either way: a behavior the deterministic layer does
+/// NOT classify as [`is_alarming_now`] (own connections, own reads/writes/loads — the
+/// workload's ordinary telemetry) is tagged with [`BENIGN_OWN_ACTIVITY_TAG`]. This is done HERE,
+/// at the single source both the entry's own field and every downstream block render from — and
+/// (via [`super::surface::JudgedSurface`], which projects its "behaviors" category from these
+/// exact strings) the "Changes since the last decisive verdict" section too, so a benign write
+/// that just became newly-observed carries the SAME tag there rather than being spotlighted as
+/// a bare "newly-observed runtime behavior" the judge has to independently discount. Tagging
+/// (never omitting) matches this module's existing structural-first stance: the judge never
+/// loses a behavior, only gets it correctly labeled — the same discipline the free-text budget
+/// applies to prose. The fixed tag string carries no untrusted content and is charged to no
+/// budget, mirroring the CVSS/EPSS structured suffixes above. Only [`Behavior::Alert`], a
+/// notable shell/package-manager exec, and an alarming sensitive-path write are exempt — the
+/// SAME "alarming-now" boundary the corroboration/quarantine paths already key on
+/// ([`crate::engine::observe::alarm_class`]), so this tag can never disagree with what actually
+/// corroborates.
+///
 /// Either way the result is sorted + deduped so behavior order (HashMap/traversal) never
 /// changes the prompt or its verdict-cache hash.
 pub(crate) fn render_behavior_lines(behaviors: &[Behavior], asn: &AsnDb) -> Vec<String> {
@@ -327,15 +379,21 @@ pub(crate) fn render_behavior_lines_budgeted(
 ) -> Vec<String> {
     // Kept alongside each rendered line so a budget-exhausted line still falls back to its
     // KIND rather than being dropped outright; the grouped INTERNET-egress line has no single
-    // behavior behind it, so it falls back to the generic "connection" kind.
-    let mut lines: Vec<(String, &str)> = Vec::with_capacity(behaviors.len());
+    // behavior behind it, so it falls back to the generic "connection" kind. The third element
+    // is whether the SOURCE behavior is benign (not `is_alarming_now`) — carried alongside the
+    // line so the tag survives the budget fallback too.
+    let mut lines: Vec<(String, &str, bool)> = Vec::with_capacity(behaviors.len());
     if asn.is_empty() {
         // Degrade to pre-feed behavior: one line per behavior, internet peers as raw IPs.
-        lines.extend(
-            behaviors
-                .iter()
-                .map(|b| (annotated_summary(b), b.variant_label())),
-        );
+        // `defang_tag_lookalike` runs on the raw summary BEFORE any decision to append the
+        // real tag, so an attacker-chosen path/peer/secret name can never forge it.
+        lines.extend(behaviors.iter().map(|b| {
+            (
+                defang_tag_lookalike(&annotated_summary(b)),
+                b.variant_label(),
+                !is_alarming_now(b),
+            )
+        }));
     } else {
         // Collapse INTERNET egress to a provider set; everything else renders as before.
         let mut internet_peers: Vec<&str> = Vec::new();
@@ -345,22 +403,32 @@ pub(crate) fn render_behavior_lines_budgeted(
                     peer,
                     internet: true,
                 } => internet_peers.push(peer),
-                other => lines.push((annotated_summary(other), other.variant_label())),
+                other => lines.push((
+                    defang_tag_lookalike(&annotated_summary(other)),
+                    other.variant_label(),
+                    !is_alarming_now(other),
+                )),
             }
         }
         if let Some(line) = internet_egress_line(internet_peers.iter().copied(), asn) {
             // No single `Behavior` behind the grouped provider line (it summarizes N internet
             // connections) — `"connection"` matches `Behavior::NetworkConnection`'s own
-            // `variant_label()`, the kind every one of those N behaviors shares.
-            lines.push((line, "connection"));
+            // `variant_label()`, the kind every one of those N behaviors shares. A
+            // `NetworkConnection` is never `is_alarming_now`, so this is always benign.
+            lines.push((defang_tag_lookalike(&line), "connection", true));
         }
     }
     let mut out: Vec<String> = lines
         .into_iter()
-        .map(|(line, kind)| {
+        .map(|(line, kind, benign)| {
             let capped = cap_untrusted(&line, TITLE_CAP);
-            take_from_budget(capped, budget)
-                .unwrap_or_else(|| format!("{kind} (free-text budget exhausted)"))
+            let text = take_from_budget(capped, budget)
+                .unwrap_or_else(|| format!("{kind} (free-text budget exhausted)"));
+            if benign {
+                format!("{text} {BENIGN_OWN_ACTIVITY_TAG}")
+            } else {
+                text
+            }
         })
         .collect();
     out.sort();
