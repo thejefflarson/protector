@@ -28,6 +28,32 @@ fn restore_admission_log(
     restored
 }
 
+/// Whether `run_watch` should start a persistent watch for `K` (ADR-0038's
+/// Ingress/IngressClass preflight — see the call site). A single LIST decides it: a
+/// Forbidden/absent-API response logs once and answers `false` (never watched, so
+/// the store stays permanently empty rather than retry-storming a permission that
+/// isn't coming back without a restart); any other error is treated as transient and
+/// answers `true`, same as every always-granted type.
+async fn ingress_rbac_available<K>(client: &kube::Client) -> bool
+where
+    K: kube::Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+{
+    match kube::Api::<K>::all(client.clone())
+        .list(&kube::api::ListParams::default())
+        .await
+    {
+        Ok(_) => true,
+        Err(error) if observe::ingress_availability::ingress_api_unavailable(&error) => {
+            observe::ingress_availability::warn_ingress_unavailable_once();
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "initial Ingress/IngressClass list failed; watching anyway");
+            true
+        }
+    }
+}
+
 /// Build the dashboard's app-level OIDC gate from the environment (ADR-0030 / JEF-487): the
 /// fail-closed access control that closes the port-forward hole. Returns the `(enforcer, auth-mode)`
 /// to thread into the dashboard:
@@ -746,8 +772,21 @@ pub async fn run_watch(
     spawn_reflector!(rolebindings_w, RoleBinding);
     spawn_reflector!(clusterroles_w, ClusterRole);
     spawn_reflector!(clusterrolebindings_w, ClusterRoleBinding);
-    spawn_reflector!(ingresses_w, Ingress);
-    spawn_reflector!(ingress_classes_w, IngressClass);
+    // ADR-0038: unlike every type above (always granted), the Ingress/IngressClass
+    // RBAC can legitimately be missing (an older chart render, or the forked cluster
+    // chart before its RBAC hand-port lands — see the ADR's rollout note). Preflight
+    // with a single LIST before committing to a persistent watch: a Forbidden/
+    // absent-API response degrades to "no route-transitive exposure" (the store
+    // stays empty forever) instead of entering kube-runtime's default retry-forever
+    // loop against a permission that isn't coming back without a restart — that
+    // retry loop is what starved the rest of the engine loop. Any other error (a
+    // transient blip) still starts the watch, exactly like every other type.
+    if ingress_rbac_available::<Ingress>(&client).await {
+        spawn_reflector!(ingresses_w, Ingress);
+    }
+    if ingress_rbac_available::<IngressClass>(&client).await {
+        spawn_reflector!(ingress_classes_w, IngressClass);
+    }
 
     tracing::info!("engine: watching cluster (event-driven)");
     loop {

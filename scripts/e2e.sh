@@ -353,6 +353,12 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch"]
+  # ADR-0038: the IngressExposureAdapter's raw material — mirrors
+  # charts/protector/templates/clusterrole.yaml so the observer actually functions
+  # (not just degrades) in e2e.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
     verbs: ["get", "list", "watch"]

@@ -327,3 +327,46 @@ fn cloudflared_annotation_still_wins_with_no_in_cluster_ingress() {
         Exposure::Internet
     );
 }
+
+/// A regression for the RBAC/API gap `observe::ingress_availability` degrades
+/// through: when the Ingress/IngressClass watch is Forbidden or the API is absent,
+/// `run_watch`/`Snapshot::observe` degrade to an empty `ingresses`/`ingress_classes`
+/// pair (never abort the snapshot). At the graph layer that's indistinguishable from
+/// a cluster with no Ingress objects at all — this proves an entirely unrelated,
+/// pre-existing structural chain (a plain workload mounting a secret directly, no
+/// exposure/Ingress involved whatsoever) still proves cleanly through `build_graph`
+/// + `prove` with that empty pair, exactly the assertion the e2e regression checked.
+#[test]
+fn degraded_ingress_availability_does_not_disturb_an_unrelated_structural_chain() {
+    let web_pod = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"app": "web"}},
+        "spec": {
+            "containers": [{
+                "name": "web", "image": "web:1",
+                "envFrom": [{"secretRef": {"name": "session-key"}}]
+            }]
+        }
+    }));
+    let snap = Snapshot {
+        pods: vec![web_pod],
+        secrets: vec![crate::engine::observe::SecretMeta {
+            namespace: "app".into(),
+            name: "session-key".into(),
+        }],
+        // The exact state degraded observation produces: no Ingress data at all.
+        ingresses: Vec::new(),
+        ingress_classes: Vec::new(),
+        ..Default::default()
+    };
+
+    let graph = build_graph(&snap, &default_adapters());
+    let chains = prove(&graph);
+    assert!(
+        chains
+            .iter()
+            .any(|c| c.entry.0 == "workload/app/Pod/web"
+                && c.objective.0 == "secret/app/session-key"),
+        "web → session-key must still prove with a degraded/empty Ingress snapshot"
+    );
+}
