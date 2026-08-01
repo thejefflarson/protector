@@ -44,8 +44,8 @@ pub use action::{
 pub use admission::{AdmissionDecision, AdmissionViewProps, DecisionRowProps, GateStatus};
 pub use alerts::{AlertProps, AlertsViewProps};
 pub use findings::{
-    BehaviorProps, CveProps, DeltaProps, EvidenceProps, EvidenceSummary, FindingProps,
-    FindingsViewProps, HopProps, JudgementProps, LiveTag, Posture, ScanProps,
+    BehaviorProps, CutRowProps, CutSetProps, CveProps, DeltaProps, EvidenceProps, EvidenceSummary,
+    FindingProps, FindingsViewProps, HopProps, JudgementProps, LiveTag, Posture, ScanProps,
 };
 pub use readiness::{
     InputStateProps, NodeCoverageStateProps, NodeRowProps, ReadinessRowProps, ReadinessViewProps,

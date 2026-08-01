@@ -184,10 +184,7 @@ pub(crate) fn normalize(selectable: &mut Vec<MenuLine>, uncontainable: &mut Vec<
     uncontainable.retain(|n| !selectable.iter().any(|l| &l.node == n));
 }
 
-/// Resolve one menu line: the cut signature and the advisory blast-radius note, built the
-/// same way [`crate::engine::respond::MitigationLedger::reconcile`] would build the
-/// mitigation for this exact cut — empty `justifications` is fine here, `predict_blast_radius`
-/// never reads them.
+/// Resolve one menu line: the cut signature and the advisory blast-radius note.
 fn menu_line(
     node: NodeKey,
     cut: Link,
@@ -195,19 +192,33 @@ fn menu_line(
     graph: &SecurityGraph,
     health: &HealthReport,
 ) -> MenuLine {
+    let blast_note = cut_blast_note(&cut, action, graph, health);
+    MenuLine {
+        node,
+        action,
+        cut_signature: crate::engine::respond::cut_signature(&cut),
+        cut,
+        blast_note,
+    }
+}
+
+/// The advisory blast-radius note for a cut+action pair, built the same way
+/// [`crate::engine::respond::MitigationLedger::reconcile`] would build the mitigation for this
+/// exact cut — empty `justifications` is fine here, `predict_blast_radius` never reads them.
+/// `pub(crate)` (not private): the finding detail's cut-set panel (JEF-674) reuses this to
+/// render a model-chosen cut's note identically to how its own menu line resolved it.
+pub(crate) fn cut_blast_note(
+    cut: &Link,
+    action: ProposedAction,
+    graph: &SecurityGraph,
+    health: &HealthReport,
+) -> String {
     let mitigation = Mitigation {
         cut: cut.clone(),
         action,
         justifications: Vec::new(),
     };
-    let blast = predict_blast_radius(&mitigation, graph, health);
-    MenuLine {
-        node,
-        action,
-        cut_signature: mitigation.cut_signature(),
-        cut: mitigation.cut,
-        blast_note: blast_note(&blast),
-    }
+    blast_note(&predict_blast_radius(&mitigation, graph, health))
 }
 
 /// A fixed-shape, no-untrusted-text advisory note on a menu line's predicted blast

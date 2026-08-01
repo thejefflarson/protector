@@ -118,6 +118,10 @@ pub use guards::{
 };
 pub(crate) use menu::normalize as normalize_menu;
 pub use menu::{Menu, MenuLine, build_menu};
+// The blast-radius resolver (JEF-674): re-exported so the finding detail's cut-set panel can
+// recompute + render the SAME advisory note a `ChosenCut` would have shown on the model's menu,
+// rather than inventing its own wording.
+pub(crate) use menu::cut_blast_note;
 pub use parse::parse_incident_decision;
 
 #[cfg(test)]
