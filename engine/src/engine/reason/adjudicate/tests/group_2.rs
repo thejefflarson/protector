@@ -396,27 +396,25 @@ async fn real_model_judges_toxic_vs_unevidenced() {
 
 /// JEF-451 (G1): the model cites a REAL CVE id but fabricates its `[reachability: loaded-at-runtime]`
 /// TAG — the exact protector flip. `guard_fabricated_cve` passes (the id is real); the tag guard
-/// downgrades the promotion to the skeptic `Uncertain` because no evidence line carries that tag.
+/// downgrades the promotion to the skeptic `Uncertain` because the caller-supplied typed
+/// grounding signal says no evidence carries that tag.
 #[test]
 fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
-    // Evidence with all CVEs `not-observed` — the protector shape. The guard reads the rendered
-    // CVE strings (which carry the tag), exactly as the model_call site passes them.
-    let not_observed = vec![
-        "CVE-2023-45853 [severity: critical] [reachability: not-observed] [cvss: 9.8]".to_string(),
-        "CVE-2026-13221 [severity: critical] [reachability: not-observed] [cvss: 9.1]".to_string(),
-    ];
-    let has_loaded =
-        vec!["CVE-2021-44228 [severity: critical] [reachability: loaded-at-runtime]".to_string()];
-    let none: Vec<String> = vec![];
+    // The guard takes the caller's TYPED grounding bool directly — no rendered CVE lines, so
+    // a forged trivy title can never reach this test (or the guard itself). Callers derive
+    // the bool from `Vulnerability::reachability`, never from a substring test.
+    let evidence_has_loaded = false;
+    let evidence_has_no_cves = false;
 
-    // The live flip: Exploitable claiming loaded-at-runtime over all-not-observed evidence → skeptic.
+    // The live flip: Exploitable claiming loaded-at-runtime with no genuinely-loaded CVE in
+    // the typed evidence → skeptic.
     let v = guard_fabricated_reachability_tag(
         Verdict::Exploitable(
             "Critical CVEs with [reachability: loaded-at-runtime] tags (CVE-2023-45853) indicate \
              exploitation evidence despite not being observed running."
                 .into(),
         ),
-        &not_observed,
+        evidence_has_loaded,
     );
     assert!(matches!(v, Verdict::Uncertain(_)) && !v.promotes());
 
@@ -424,7 +422,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("the vulnerable code is loaded at runtime".into()),
-            &not_observed,
+            evidence_has_loaded,
         ),
         Verdict::Uncertain(_)
     ));
@@ -433,7 +431,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("CVE-2021-44228 [reachability: loaded-at-runtime] runs".into()),
-            &has_loaded,
+            true,
         ),
         Verdict::Exploitable(_)
     ));
@@ -443,7 +441,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Exploitable("AWS key baked into the image is an immediate primitive".into()),
-            &none,
+            evidence_has_no_cves,
         ),
         Verdict::Exploitable(_)
     ));
@@ -452,7 +450,7 @@ fn tag_grounding_guard_downgrades_fabricated_loaded_at_runtime() {
     assert!(matches!(
         guard_fabricated_reachability_tag(
             Verdict::Refuted("no loaded-at-runtime CVE, so not a breach".into()),
-            &not_observed,
+            evidence_has_loaded,
         ),
         Verdict::Refuted(_)
     ));

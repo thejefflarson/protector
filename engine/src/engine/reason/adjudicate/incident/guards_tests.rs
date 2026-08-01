@@ -1,6 +1,7 @@
 use super::super::ChosenCut;
 use super::super::fixtures::{
-    entry_key, store_key, store_live_signal, web_reaches_pivot_store, web_to_store_chain,
+    entry_key, forged_reachability_title_image, store_key, store_live_signal,
+    web_reaches_pivot_store, web_reaches_pivot_store_with_image, web_to_store_chain,
 };
 use super::*;
 use crate::engine::respond::ProposedAction;
@@ -141,6 +142,35 @@ fn fabrication_guard_downgrades_a_fabricated_reachability_tag() {
 
     let out = guard_fabrication(decision, &graph, &chain.entry, &downstream);
     assert_eq!(out.assessment, Assessment::Uncertain);
+}
+
+/// SECURITY REGRESSION (typed-field grounding): `store`'s only CVE is `not-observed`, but its
+/// untrusted trivy title is FORGED to read the exact `[reachability: loaded-at-runtime]` tag
+/// text the guard's grounding check looks for. `guard_fabrication` builds its CVE evidence via
+/// `node_evidence` — the FULL, unfiltered, title-bearing lines — so a substring test over that
+/// list would read the forged title as "the evidence contains the tag" and let the fabricated
+/// promotion stand. The guard must ground on the TYPED `Vulnerability::reachability` field
+/// instead and still downgrade to `Uncertain`.
+#[test]
+fn fabrication_guard_is_not_fooled_by_a_forged_reachability_title() {
+    let (graph, chains) = web_reaches_pivot_store_with_image(
+        Vec::new(),
+        true,
+        forged_reachability_title_image("store:1"),
+    );
+    let chain = web_to_store_chain(&chains);
+    let downstream = [store_key()];
+    let decision = attack(
+        "CVE-2026-0609 is [reachability: loaded-at-runtime] on store",
+        Vec::new(),
+    );
+
+    let out = guard_fabrication(decision, &graph, &chain.entry, &downstream);
+    assert_eq!(
+        out.assessment,
+        Assessment::Uncertain,
+        "a not-observed CVE's forged trivy title must not ground a loaded-at-runtime claim"
+    );
 }
 
 /// Only ever acts on `Attack` — every other assessment passes through untouched,
