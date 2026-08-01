@@ -38,7 +38,7 @@ use serde::Serialize;
 use super::journal::DecisionJournal;
 use super::policy_log::PolicyDecisionLog;
 use super::state::{
-    Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
+    DivergenceLog, Findings, JudgementLog, ModelHealth, Readiness, ReadinessConfig, ReversionLog,
     default_window_report, derive_readiness,
 };
 use crate::engine::mcp::AccessAuditSink;
@@ -95,6 +95,12 @@ pub struct DashboardState {
     /// tier); read-only here, like every other handle. Present even when the MCP server isn't served
     /// (then it simply holds no records — an honest empty log, not a hidden tab).
     pub mcp_audit: Arc<AccessAuditSink>,
+    /// The shadow-bake divergence log (ADR-0035's bake step, JEF-569 rescope): the bounded ring
+    /// of recent model-vs-deterministic cut-choice classifications the engine appends each pass.
+    /// Read-only here, like every other handle — served RAW (no `strip`/props envelope; it is a
+    /// diagnostic bake feed for the human arm-readiness review, not a navigable tab) at
+    /// `/api/divergence.json`.
+    pub divergence: Arc<DivergenceLog>,
 }
 
 impl DashboardState {
@@ -315,6 +321,17 @@ async fn access_json(
     view_json(state.access_view(caller_tier))
 }
 
+/// `GET /api/divergence.json` — the read-only shadow-bake divergence feed (ADR-0035's bake step):
+/// the recent model-vs-deterministic cut-choice classifications, newest-first. GET-only,
+/// `no-store`, inherits the SAME router-wide auth/CSP layers as every other `/api/*.json` route
+/// (no second gate). Served as a raw array — this is a diagnostic bake feed for the human
+/// arm-readiness review (`docs/adr/0037-shadow-bake-arm-readiness.md`), not a navigable tab, so
+/// it carries no `strip` envelope. A
+/// view only: this handler cannot arm or mutate anything (ADR-0016).
+async fn divergence_json(State(state): State<DashboardState>) -> Response {
+    view_json(state.divergence.snapshot())
+}
+
 /// `GET /assets/dashboard.css` — the light-theme stylesheet, same-origin.
 ///
 /// `Cache-Control: no-store` is load-bearing behind Cloudflare Access (JEF-283): Cloudflare
@@ -372,6 +389,7 @@ pub fn router(state: DashboardState, auth: Option<Arc<Enforcer>>) -> Router {
         .route("/api/readiness.json", get(readiness_json))
         .route("/api/admission.json", get(admission_json))
         .route("/api/access.json", get(access_json))
+        .route("/api/divergence.json", get(divergence_json))
         .route("/assets/dashboard.css", get(dashboard_css))
         .route("/assets/dashboard.js", get(dashboard_js));
     // Mount the enforcement gate FIRST (so CSP, added next, is the outer layer wrapping its denials).

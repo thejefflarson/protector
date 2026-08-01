@@ -505,6 +505,9 @@ pub async fn run_watch(
                         // The SAME durable audit sink the MCP server appends to (JEF-490) — the
                         // "Access" tab reads its records, redacted to the caller's own tier.
                         mcp_audit: mcp_audit.clone(),
+                        // The shadow-bake divergence log (ADR-0035's bake step) — the SAME `Arc`
+                        // the engine appends a classification to each pass.
+                        divergence: engine.divergence(),
                     };
                     tokio::spawn(dashboard::serve_dashboard(addr, state, auth));
                 }

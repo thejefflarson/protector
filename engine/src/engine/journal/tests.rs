@@ -158,6 +158,53 @@ fn incident_decision_round_trips_across_a_reopen() {
     cleanup(&path);
 }
 
+/// ADR-0035's shadow-bake step: a `CutDivergence` line — the model-vs-deterministic cut
+/// comparator's classification for one entry — round-trips a "restart" byte-for-byte, so the
+/// bake history a human reads for the arm-readiness review survives across a restart instead of
+/// resetting the window.
+#[test]
+fn cut_divergence_round_trips_across_a_reopen() {
+    let path = temp_path("divergence-roundtrip");
+    {
+        let journal = DecisionJournal::open(&path);
+        journal.record(Decision::CutDivergence {
+            entry: "workload/shop/Pod/web".into(),
+            class: crate::engine::cut_divergence::DivergenceClass::ModelUnderCut,
+            model_cuts: vec!["workload/shop/Pod/web".into()],
+            deterministic_cuts: vec![
+                "workload/shop/Pod/ledger".into(),
+                "workload/shop/Pod/payments".into(),
+                "workload/shop/Pod/web".into(),
+            ],
+        });
+    }
+    let reopened = DecisionJournal::open(&path);
+    let entries = reopened.replay();
+    assert_eq!(entries.len(), 1);
+    match &entries[0].decision {
+        Decision::CutDivergence {
+            entry,
+            class,
+            model_cuts,
+            deterministic_cuts,
+        } => {
+            assert_eq!(entry, "workload/shop/Pod/web");
+            assert_eq!(
+                *class,
+                crate::engine::cut_divergence::DivergenceClass::ModelUnderCut
+            );
+            assert_eq!(model_cuts, &vec!["workload/shop/Pod/web".to_string()]);
+            assert_eq!(
+                deterministic_cuts.len(),
+                3,
+                "all three nodes survive the reopen"
+            );
+        }
+        other => panic!("expected a CutDivergence, got {other:?}"),
+    }
+    cleanup(&path);
+}
+
 /// Back-compat: a journal that predates JEF-639 holds ONLY `Breach` lines (no `Incident` line
 /// ever existed for this entry) — replay must surface the breach text display-only, exactly as
 /// before, with no `Incident` decision to be found (there is nothing to re-arm a cut from; the

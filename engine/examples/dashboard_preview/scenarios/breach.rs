@@ -172,5 +172,6 @@ pub(super) fn build_breach() -> DashboardState {
         cluster: "prod-us-east-1 (PREVIEW — breach)".into(),
         auth_mode: protector::engine::dashboard::AuthMode::EdgeOnly,
         mcp_audit: Arc::new(protector::engine::mcp::AccessAuditSink::in_memory()),
+        divergence: Arc::new(protector::engine::state::DivergenceLog::new()),
     }
 }
