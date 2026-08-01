@@ -21,6 +21,7 @@ pub mod feed_reload;
 pub mod health;
 pub mod host_credential_class;
 pub mod ingest_guard;
+pub(crate) mod ingress_availability;
 pub mod ip_index;
 pub mod linkerd;
 pub mod peer_class;
@@ -31,7 +32,7 @@ pub mod trivy_rbac;
 pub mod trivy_secret;
 
 use k8s_openapi::api::core::v1::{Pod, Secret, Service};
-use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::networking::v1::{Ingress, IngressClass, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
 use kube::Api;
 use kube::api::ListParams;
@@ -239,6 +240,14 @@ pub struct Snapshot {
     pub role_bindings: Vec<RoleBinding>,
     pub cluster_roles: Vec<ClusterRole>,
     pub cluster_role_bindings: Vec<ClusterRoleBinding>,
+    /// L7 routes (ADR-0038): the declared host/path→backend-Service rules the
+    /// [`adapter::IngressExposureAdapter`] walks to make internet-exposure follow
+    /// declared routing rather than stopping at the controller.
+    pub ingresses: Vec<Ingress>,
+    /// The `IngressClass` objects `ingresses` reference by `spec.ingressClassName`
+    /// (ADR-0038) — resolving the class is how the adapter confirms a route names a
+    /// real, live controller rather than an orphaned/typo'd class.
+    pub ingress_classes: Vec<IngressClass>,
     /// Vulnerability findings per image (Vulnerability port). Populated from a
     /// scanner; see `observe`'s note on the live source.
     pub image_vulns: Vec<ImageVulnerabilities>,
@@ -286,6 +295,7 @@ impl Snapshot {
             role_bindings,
             cluster_roles,
             cluster_role_bindings,
+            ingress_routes,
             image_vulns,
             trivy_findings,
             linkerd,
@@ -346,6 +356,11 @@ impl Snapshot {
                         .items,
                 )
             },
+            // ADR-0038: the declared L7 routes and the classes they name, the
+            // IngressExposureAdapter's raw material — degrades to empty rather than
+            // failing the whole observe() when the RBAC/API isn't there (see
+            // `list_ingress_routes`).
+            async { list_ingress_routes(&client, &lp).await },
             async {
                 anyhow::Ok(
                     list_parsed(
@@ -363,6 +378,7 @@ impl Snapshot {
         )?;
         let (image_secrets, config_audits, rbac_assessments) = trivy_findings;
         let (linkerd_servers, linkerd_authz_policies, linkerd_mtls_auths) = linkerd;
+        let (ingresses, ingress_classes) = ingress_routes;
 
         // Runtime events come from a runtime sensor (the first-party eBPF agent, or any
         // sensor via the behavioral port) — typically a stream, not a list. Wiring that
@@ -386,6 +402,8 @@ impl Snapshot {
             role_bindings,
             cluster_roles,
             cluster_role_bindings,
+            ingresses,
+            ingress_classes,
             image_vulns,
             image_secrets,
             config_audits,
@@ -397,6 +415,36 @@ impl Snapshot {
             linkerd_mtls_auths,
         })
     }
+}
+
+/// Lists Ingress + IngressClass objects (ADR-0038). A Forbidden/absent-API response
+/// (the RBAC gap [`ingress_availability`] documents — e.g. the forked cluster
+/// chart's RBAC hand-port not having landed yet) degrades to an empty pair, logged
+/// once, rather than failing the whole [`Snapshot::observe`] call: every other list
+/// here is always-granted, but this one legitimately might not be, and a missing
+/// route-transitive-exposure signal must never take the rest of observation down
+/// with it. Any other error still fails the caller, exactly like every other list.
+async fn list_ingress_routes(
+    client: &kube::Client,
+    lp: &ListParams,
+) -> anyhow::Result<(Vec<Ingress>, Vec<IngressClass>)> {
+    async fn list_or_degrade<K>(client: &kube::Client, lp: &ListParams) -> anyhow::Result<Vec<K>>
+    where
+        K: kube::Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+    {
+        match Api::<K>::all(client.clone()).list(lp).await {
+            Ok(list) => Ok(list.items),
+            Err(error) if ingress_availability::ingress_api_unavailable(&error) => {
+                ingress_availability::warn_ingress_unavailable_once();
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+    Ok((
+        list_or_degrade::<Ingress>(client, lp).await?,
+        list_or_degrade::<IngressClass>(client, lp).await?,
+    ))
 }
 
 /// Best-effort list of the other three trivy-operator report kinds (JEF-244):

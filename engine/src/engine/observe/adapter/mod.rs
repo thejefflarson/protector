@@ -43,6 +43,7 @@ mod enrich;
 mod escape;
 mod exposure;
 mod findings;
+mod ingress_exposure;
 mod linkerd;
 mod network;
 mod rbac;
@@ -55,6 +56,7 @@ pub use self::enrich::{CveReachabilityAdapter, RuntimeAdapter, VulnerabilityAdap
 pub use self::escape::HostEscapeAdapter;
 pub use self::exposure::ExposureAdapter;
 pub use self::findings::{ConfigAuditAdapter, ExposedSecretAdapter, RbacAssessmentAdapter};
+pub use self::ingress_exposure::IngressExposureAdapter;
 pub use self::linkerd::LinkerdReachabilityAdapter;
 pub use self::network::ReachabilityAdapter;
 pub use self::rbac::PrivilegeAdapter;
@@ -183,6 +185,11 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         // Fact-enrichment adapters run last: they read-modify nodes the structural
         // adapters already created.
         Box::new(ExposureAdapter),
+        // Route-transitive internet exposure (ADR-0038): promotes a route-forwarded
+        // backend to Exposure::Internet when a live internet-exposed controller
+        // actually serves the route. Must run after ExposureAdapter — it reads the
+        // controller workload's exposure fact that adapter just computed.
+        Box::new(IngressExposureAdapter),
         Box::new(VulnerabilityAdapter),
         // The other trivy-operator report kinds (JEF-244): exposed secrets onto Images,
         // config-audit + RBAC-assessment findings onto Workloads. Enrich existing nodes,
