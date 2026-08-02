@@ -140,3 +140,41 @@ fn self_severance_is_false_for_a_host_absent_from_the_graph() {
     let graph = crate::engine::graph::SecurityGraph::new();
     assert!(!self_severance(&graph, &NodeKey("host/nonexistent".into())));
 }
+
+#[test]
+fn co_resident_workloads_returns_every_workload_scheduled_on_the_host() {
+    let snap = Snapshot {
+        pods: vec![
+            scheduled_pod("victim", "node-1", json!({"app": "victim"})),
+            scheduled_pod("neighbor", "node-1", json!({})),
+            scheduled_pod("elsewhere", "node-2", json!({"app": "elsewhere"})),
+        ],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let host = NodeKey("host/node-1".into());
+
+    let mut co_resident = co_resident_workloads(&graph, &host);
+    co_resident.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        co_resident,
+        vec![
+            (
+                NodeKey("workload/app/Pod/neighbor".into()),
+                std::collections::BTreeMap::new()
+            ),
+            (
+                NodeKey("workload/app/Pod/victim".into()),
+                [("app".to_string(), "victim".to_string())].into()
+            ),
+        ],
+        "node-2's pod is excluded; the unlabeled neighbor is still RETURNED (declining it \
+         is quarantine_workload_link's job, not this walk's)"
+    );
+}
+
+#[test]
+fn co_resident_workloads_is_empty_for_a_host_absent_from_the_graph() {
+    let graph = crate::engine::graph::SecurityGraph::new();
+    assert!(co_resident_workloads(&graph, &NodeKey("host/nonexistent".into())).is_empty());
+}

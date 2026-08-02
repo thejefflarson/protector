@@ -172,8 +172,8 @@ pub fn build_menu(
         if target.node == chain.entry {
             continue;
         }
-        let fallback =
-            quarantine_workload_link(target).map(|cut| (cut, ProposedAction::QuarantineWorkload));
+        let fallback = quarantine_workload_link(&target.node, &target.labels)
+            .map(|cut| (cut, ProposedAction::QuarantineWorkload));
         match escalate(&target.node, fallback, graph, model_attack) {
             Some((cut, action)) => {
                 selectable.push(menu_line(target.node.clone(), cut, action, graph, health));

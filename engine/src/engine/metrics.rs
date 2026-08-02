@@ -105,6 +105,16 @@ pub(super) struct EngineMetrics {
     /// cumulative, alert-able counter recorded ONCE per edge (never per pass), so an
     /// operator can page on "this fired at all" rather than poll the gauge.
     pub(super) break_glass_transitions: opentelemetry::metrics::Counter<u64>,
+    /// `ProposedAction::ContainNode` (ADR-0040) events, by `event`
+    /// (`proposed`/`applied`/`reverted`/`rail_refused`) and, for a `rail_refused` event,
+    /// `reason` (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned` —
+    /// `respond::actuator::node_containment::RailRefusal::metric_reason`). A separate
+    /// counter from the generic [`Self::mitigations`] one: `ContainNode` is
+    /// `is_additive_live() == false`, so it never reaches `mitigations`' `applied`/
+    /// `reverted` labels through the generic auto-apply path — and its deterministic rails
+    /// must be observable even in shadow (no `node` arming rung wired yet), so a refusal is
+    /// counted regardless of whether anything is armed.
+    pub(super) contain_node: opentelemetry::metrics::Counter<u64>,
 }
 
 impl EngineMetrics {
@@ -226,6 +236,13 @@ impl EngineMetrics {
                 .u64_counter("protector.engine.break_glass_transitions")
                 .with_description("Break-glass engage/clear transitions, by state.")
                 .build(),
+            contain_node: m
+                .u64_counter("protector.engine.contain_node")
+                .with_description(
+                    "ContainNode (ADR-0040) events by event (proposed/applied/reverted/\
+                     rail_refused) and, for a refusal, reason.",
+                )
+                .build(),
         }
     }
 
@@ -239,6 +256,21 @@ impl EngineMetrics {
         let state = if engaged { "engaged" } else { "cleared" };
         self.break_glass_transitions
             .add(1, &[opentelemetry::KeyValue::new("state", state)]);
+    }
+
+    /// Record one `ContainNode` actuation event (ADR-0040): `event` is one of
+    /// `proposed`/`applied`/`reverted`/`rail_refused`; `reason` is `Some` only for
+    /// `rail_refused` — the refusal-reason label
+    /// (`respond::actuator::node_containment::RailRefusal::metric_reason`) alert rules key
+    /// on. Fires unconditionally — this counter carries no arming/mode gate of its own, so a
+    /// `rail_refused` event is exactly as countable in shadow as it would be once a `node`
+    /// arming rung exists.
+    pub(super) fn record_contain_node(&self, event: &'static str, reason: Option<&'static str>) {
+        let mut attrs = vec![opentelemetry::KeyValue::new("event", event)];
+        if let Some(reason) = reason {
+            attrs.push(opentelemetry::KeyValue::new("reason", reason));
+        }
+        self.contain_node.add(1, &attrs);
     }
 
     /// Mirror this pass's runtime-corroboration coverage into the OTLP gauges. A pure
@@ -290,8 +322,30 @@ fn coverage_gauge_values(coverage: &RuntimeCoverage) -> CoverageGaugeValues {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::coverage_gauge_values;
+    use super::{EngineMetrics, coverage_gauge_values};
     use crate::engine::state::{LiveNode, derive_runtime_coverage};
+
+    /// `record_contain_node` takes no `EnabledActions`/mode/scope parameter — only the
+    /// event and an optional reason — so a `rail_refused` event is recordable with nothing
+    /// armed at all, exactly the "must be observable in shadow" requirement (ADR-0040 §5).
+    /// A smoke test: constructing the no-op global meter and recording every event this
+    /// ticket adds (with and without a reason) must not panic.
+    #[test]
+    fn record_contain_node_fires_every_event_with_no_armed_state_required() {
+        let metrics = EngineMetrics::new();
+        metrics.record_contain_node("proposed", None);
+        metrics.record_contain_node("applied", None);
+        metrics.record_contain_node("reverted", None);
+        for reason in [
+            "control-plane",
+            "one-node-cap",
+            "worker-floor",
+            "unlabelled",
+            "not-owned",
+        ] {
+            metrics.record_contain_node("rail_refused", Some(reason));
+        }
+    }
 
     /// Build a `RuntimeCoverage` from the SAME `derive_runtime_coverage` the dashboard uses, so the
     /// mirror is tested against the real derivation, not a hand-built stand-in.
