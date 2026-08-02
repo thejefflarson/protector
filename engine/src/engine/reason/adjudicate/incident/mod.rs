@@ -123,6 +123,9 @@ pub use menu::{Menu, MenuLine, build_menu};
 // rather than inventing its own wording.
 pub(crate) use menu::cut_blast_note;
 pub use parse::parse_incident_decision;
+// The hard-parse-failure seam (see its own doc) — internal to the judge-call retry
+// wrapper (`model_call`), not part of the ADR-0034 output contract, so `pub(crate)`.
+pub(crate) use parse::is_hard_parse_failure;
 
 #[cfg(test)]
 mod fixtures;

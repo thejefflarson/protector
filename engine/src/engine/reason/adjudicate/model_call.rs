@@ -4,6 +4,12 @@
 //! with the caller-built prompt (— the same bytes the verdict cache keyed on),
 //! assembles the entry's evidence for the deterministic backstops, and runs the remaining
 //! backstop (anti-fabrication) over the parsed verdict.
+//!
+//! One retry on a genuine hard-parse-failure (see
+//! [`chat_with_retry_on_hard_parse_failure`]): the deployed judge is non-deterministic
+//! even at temp-0, so a reply that yields no recoverable JSON at all is worth one plain
+//! re-ask before falling to the parser's existing skeptic default. A reply that DID
+//! parse — even to a legitimate `Uncertain` — is never retried.
 
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Behavior, NodeKey, SecurityGraph};
@@ -12,9 +18,48 @@ use super::evidence::{entry_evidence, entry_findings, reachable_cve_lines};
 use super::guards::guard_unsupported_exploitable;
 use super::incident::{
     Assessment, IncidentDecision, Menu, guard_assessment_cuts_consistency,
-    guard_containment_grounding, guard_fabrication, parse_incident_decision,
+    guard_containment_grounding, guard_fabrication, is_hard_parse_failure, parse_incident_decision,
 };
 use super::{Adjudicator, Verdict};
+
+/// Fetch the model's reply, with ONE re-ask when the first reply is a genuine
+/// hard-parse-failure — [`is_hard_parse_failure`] returns `true` only when no JSON object
+/// could be extracted at all (no `{`…`}` substring, or what's between isn't valid JSON).
+/// The deployed judge is non-deterministic even at temp-0 (empirically ~1-in-3 replies
+/// parse, the rest don't), so a plain re-ask of the SAME prompt at the SAME temperature
+/// often recovers a decision the first reply lost to formatting noise, without loosening
+/// the parser's skeptic semantics at all.
+///
+/// This must NOT fire on a reply that parsed to a real decision that happens to land on
+/// `Uncertain` (e.g. a non-member `contain` element, an out-of-range `assessment`) — that
+/// is a legitimate skeptic answer, not a transport/formatting fluke, and retrying it would
+/// add a needless model call to a large fraction of passes. `is_hard_parse_failure` only
+/// ever inspects JSON-extractability, never the parsed assessment, so the two can't be
+/// confused.
+///
+/// One retry max (bounded latency — the CPU judge is slow). If the retry's transport
+/// fails (`chat` returns `None`) or its reply ALSO hard-fails, the ORIGINAL reply is
+/// returned unchanged so the caller's existing parse still lands on the same skeptic
+/// default — this wrapper only ever ADDS a chance at recovery, it never changes the
+/// no-recovery outcome.
+async fn chat_with_retry_on_hard_parse_failure(
+    client: &reqwest::Client,
+    endpoint: &str,
+    model: &str,
+    prompt: &str,
+) -> Option<String> {
+    let reply = crate::engine::model::chat(client, endpoint, model, prompt).await?;
+    if !is_hard_parse_failure(&reply) {
+        return Some(reply);
+    }
+    tracing::warn!("model reply had no recoverable JSON decision; retrying once");
+    match crate::engine::model::chat(client, endpoint, model, prompt).await {
+        Some(retry_reply) if !is_hard_parse_failure(&retry_reply) => Some(retry_reply),
+        // Retry transport failed, or the retry ALSO hard-failed: fall back to the
+        // original reply — it still parses to the same skeptic default.
+        _ => Some(reply),
+    }
+}
 
 /// The downstream counterpart of the entry's own evidence fetch below: every
 /// downstream node on the entry's proven paths is real, structural evidence — same standing as
@@ -171,38 +216,41 @@ impl Adjudicator for ModelAdjudicator {
         // the caller already built this exact prompt to derive the verdict-cache key
         // (its hash); reuse those bytes for the model call rather than rebuilding, so the input
         // the cache keyed on and the input the model sees can never drift.
-        let (reply, decision) =
-            match crate::engine::model::chat(&self.client, &self.endpoint, &self.model, prompt)
-                .await
-            {
-                Some(reply) => {
-                    // The tolerant, skeptic-default parser (ADR-0034 D3): unparseable/out-of-
-                    // range/non-member `contain` all degrade to Uncertain, no cuts — the
-                    // membership check against `menu` is the structural grounding guard.
-                    let decision = parse_incident_decision(&reply, menu);
-                    // The ADR-0034 D5 grounding guards, chained (all downgrade to `Uncertain`,
-                    // never `Refuted`/carry a hidden line of evidence): a contained downstream
-                    // node with no exploitation evidence of its own, then the reused
-                    // anti-fabrication backstops (a fabricated CVE id, or a fabricated
-                    // `[reachability: loaded-at-runtime]` tag — G1) over the
-                    // entry+downstream evidence union, then the assessment↔cuts consistency
-                    // check (idempotent — the parser already enforces it).
-                    let decision = guard_containment_grounding(decision, graph, entry);
-                    let decision = guard_fabrication(decision, graph, entry, downstream);
-                    let decision = guard_assessment_cuts_consistency(decision);
-                    // Grandfathered zero-anchor backstop (ADR-0029 scope note): an `Attack`
-                    // resting on NO anchor at all (no CVE, no exposed secret, no corroborating
-                    // behavior anywhere in the entry+downstream evidence) downgrades all the way
-                    // to `NoAttack`, not merely `Uncertain` — reachability alone was never a
-                    // breach, so there is nothing to re-judge later (the watcher-server false
-                    // breach this backstop was built for).
-                    let decision =
-                        guard_zero_anchor(decision, &cves, &behaviors, has_exposed_secret);
-                    (Some(reply), decision)
-                }
-                // Model unavailable → skeptic: do not let an auto-action proceed.
-                None => (None, IncidentDecision::uncertain("model unavailable")),
-            };
+        let (reply, decision) = match chat_with_retry_on_hard_parse_failure(
+            &self.client,
+            &self.endpoint,
+            &self.model,
+            prompt,
+        )
+        .await
+        {
+            Some(reply) => {
+                // The tolerant, skeptic-default parser (ADR-0034 D3): unparseable/out-of-
+                // range/non-member `contain` all degrade to Uncertain, no cuts — the
+                // membership check against `menu` is the structural grounding guard.
+                let decision = parse_incident_decision(&reply, menu);
+                // The ADR-0034 D5 grounding guards, chained (all downgrade to `Uncertain`,
+                // never `Refuted`/carry a hidden line of evidence): a contained downstream
+                // node with no exploitation evidence of its own, then the reused
+                // anti-fabrication backstops (a fabricated CVE id, or a fabricated
+                // `[reachability: loaded-at-runtime]` tag — G1) over the
+                // entry+downstream evidence union, then the assessment↔cuts consistency
+                // check (idempotent — the parser already enforces it).
+                let decision = guard_containment_grounding(decision, graph, entry);
+                let decision = guard_fabrication(decision, graph, entry, downstream);
+                let decision = guard_assessment_cuts_consistency(decision);
+                // Grandfathered zero-anchor backstop (ADR-0029 scope note): an `Attack`
+                // resting on NO anchor at all (no CVE, no exposed secret, no corroborating
+                // behavior anywhere in the entry+downstream evidence) downgrades all the way
+                // to `NoAttack`, not merely `Uncertain` — reachability alone was never a
+                // breach, so there is nothing to re-judge later (the watcher-server false
+                // breach this backstop was built for).
+                let decision = guard_zero_anchor(decision, &cves, &behaviors, has_exposed_secret);
+                (Some(reply), decision)
+            }
+            // Model unavailable → skeptic: do not let an auto-action proceed.
+            None => (None, IncidentDecision::uncertain("model unavailable")),
+        };
         // Capture the prompt the model saw, its raw reply, and the guarded decision so an
         // `attack` call can be diagnosed from the judgement record (JEF diagnostic).
         self.record_judgement(
@@ -215,3 +263,7 @@ impl Adjudicator for ModelAdjudicator {
         decision
     }
 }
+
+#[cfg(test)]
+#[path = "model_call_tests.rs"]
+mod tests;
