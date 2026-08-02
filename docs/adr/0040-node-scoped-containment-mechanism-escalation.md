@@ -166,6 +166,30 @@ ask.
   the stricter *both*, loosen only on evidence), and the exact closed vocabulary of
   secret-purpose categories (presentation-only).
 
+## Build-settled decisions (2026-08-02)
+
+The design pass left three points for the build to settle; the planning panel settled them:
+
+- **Placement is a distinct `ScheduledOn` relation, not `EscapesTo` reuse.** Every scheduled
+  pod gets a semantically-inert pod→`Host` placement edge derived from `spec.node_name`
+  (already in the snapshot — no new RBAC). Reusing `EscapesTo` would complect "is on this
+  node" with "can break out to this node's host" and silently widen escape-reachability for
+  every pod; keep the two edges distinct.
+- **Trigger (d) defaults to the stricter reading:** *both* co-resident pods must be a
+  decisive model `attack` **and** actively-exploited. Loosen only if a deployed-pod fixture
+  shows a real miss.
+- **Secret-purpose starter vocabulary** for the reach annotation is a small closed set —
+  `{service-account-token, tls-private-key, registry-pull, cloud-provider-credential,
+  database-credential, generic-opaque}` — inferred from the k8s secret `type` + name/mount
+  metadata (never `.data`). Closed vocabulary; extended only by a later ADR.
+
+One operational constraint the panel flagged, to be confirmed during the actuator build: on
+a small fleet the *worker-floor* rail (refuse a cordon leaving <2 schedulable workers) can
+make `ContainNode` correctly but permanently inert (e.g. an HA 3-control-plane + 2-worker
+layout — cordoning either worker leaves one). This is fail-closed by design; keep the floor
+at 2 (a floor that leaves a single worker is an outage, not damage-limitation) and confirm
+the control-plane/worker split on the deployed cluster rather than weakening the rail.
+
 ## References
 
 - `docs/ideas/post-compromise-containment.md` — the design brief this ADR records.
