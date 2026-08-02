@@ -13,7 +13,7 @@
 use crate::engine::respond::Mitigation;
 use crate::engine::respond::actuator::{Actuation, Actuator, IsolationActuator, cut_label};
 
-use super::{render_cordon, render_uncordon};
+use super::{NodeFact, render_cordon, render_uncordon, revert_decision};
 
 /// A dynamic `Api` for the cluster-scoped core `Node` resource.
 fn node_api(client: &kube::Client) -> kube::Api<kube::core::DynamicObject> {
@@ -60,10 +60,26 @@ impl NodeContainmentActuator {
     }
 
     /// Uncordon `mitigation`'s target host and lift every co-resident deny in
-    /// `co_resident`. Callers MUST gate this on [`super::revert_decision`] first — this
-    /// method itself does not re-check ownership; it is the mechanical half, the rail is the
-    /// decision half (mirroring [`super::super::decide`]/[`Actuator::revert`]'s own split).
-    pub async fn revert(&self, mitigation: &Mitigation, co_resident: &[Mitigation]) -> Actuation {
+    /// `co_resident`. Self-gated on [`super::revert_decision`]: `target` is the observed
+    /// [`NodeFact`] for the host, and this method short-circuits to [`Actuation::DryRun`]
+    /// unless protector owns the cordon — the ownership rail cannot be bypassed by a
+    /// forgetful caller, so the highest-blast action is safe by construction rather than by
+    /// caller discipline. The break-glass/self-revert path built on this (ADR-0040 §6) calls
+    /// exactly this method, so the gate lives here, not only in a doc-comment contract.
+    pub async fn revert(
+        &self,
+        mitigation: &Mitigation,
+        target: &NodeFact,
+        co_resident: &[Mitigation],
+    ) -> Actuation {
+        if let Err(refusal) = revert_decision(target) {
+            tracing::warn!(
+                node = %target.name,
+                reason = refusal.metric_reason(),
+                "revert refused by ownership rail; not uncordoning",
+            );
+            return Actuation::DryRun;
+        }
         let Some(manifest) = render_uncordon(mitigation) else {
             tracing::warn!(cut = %cut_label(mitigation), "not a ContainNode mitigation; nothing to uncordon");
             return Actuation::DryRun;
