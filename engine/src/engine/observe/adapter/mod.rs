@@ -19,6 +19,9 @@
 //!   (create pods, bind roles, delete PVCs, …) per the ATT&CK capability catalogue.
 //! - [`HostEscapeAdapter`] — `escapes-to` edges from a Workload to its Host when
 //!   the pod spec exposes a container-escape primitive (ATT&CK T1611).
+//! - [`PlacementAdapter`] — `scheduled-on` edges from every scheduled Workload to
+//!   its `Host` (ADR-0040), the pod→node placement fact node containment resolves
+//!   co-residency from.
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::SystemTime;
@@ -46,6 +49,7 @@ mod findings;
 mod ingress_exposure;
 mod linkerd;
 mod network;
+mod placement;
 mod rbac;
 mod secret_mount;
 mod workload;
@@ -59,6 +63,7 @@ pub use self::findings::{ConfigAuditAdapter, ExposedSecretAdapter, RbacAssessmen
 pub use self::ingress_exposure::IngressExposureAdapter;
 pub use self::linkerd::LinkerdReachabilityAdapter;
 pub use self::network::ReachabilityAdapter;
+pub use self::placement::PlacementAdapter;
 pub use self::rbac::PrivilegeAdapter;
 pub use self::secret_mount::SecretMountAdapter;
 pub use self::workload::WorkloadAdapter;
@@ -181,6 +186,11 @@ pub fn default_adapters() -> Vec<Box<dyn Adapter>> {
         Box::new(LinkerdReachabilityAdapter),
         Box::new(PrivilegeAdapter),
         Box::new(HostEscapeAdapter),
+        // Placement (ADR-0040): every scheduled pod's `scheduled-on` edge to its Host,
+        // independent of whether it carries an escape primitive. Runs alongside
+        // HostEscapeAdapter — both key off `spec.node_name` — and before anything that
+        // reads co-residency off it.
+        Box::new(PlacementAdapter),
         Box::new(EgressAdapter),
         // Fact-enrichment adapters run last: they read-modify nodes the structural
         // adapters already created.
