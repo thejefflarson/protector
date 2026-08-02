@@ -23,7 +23,7 @@ use petgraph::visit::EdgeRef;
 
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{Node, NodeKey, Relation, SecurityGraph};
-use crate::engine::reason::proof::{Link, ProvenChain, QuarantineTarget};
+use crate::engine::reason::proof::{Link, ProvenChain};
 
 /// How a cut edge would be severed by an additive, engine-owned object (ADR-0002).
 /// Descriptive here — the Actuator port renders these into concrete objects in
@@ -301,17 +301,30 @@ pub(crate) fn quarantine_link(chain: &ProvenChain) -> Option<Link> {
 /// `None`-on-unlabeled decline the ledger's `reconcile` uses — so the menu and the ledger
 /// can never disagree on which downstream nodes are containable. `reconcile` itself is
 /// untouched — only this pure builder's visibility widens.
-pub(crate) fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link> {
-    if target.labels.is_empty() {
+///
+/// Takes the bare `(node, labels)` pair rather than a whole
+/// [`QuarantineTarget`](crate::engine::reason::proof::QuarantineTarget) — the only
+/// two fields this builder ever reads — so a caller with a workload key + labels but no
+/// chain-derived [`QuarantineReason`] can reuse the exact same self-reference shape. The
+/// ADR-0040 co-resident default-deny sweep ([`crate::engine::respond::actuator::node_containment::co_resident_denies`])
+/// is that second caller: a pod sharing a contained node's host has no `QuarantineReason` of
+/// its own (it isn't necessarily itself remotely-exploitable/actively-exploited), only its
+/// co-residency, so forcing a reason here would be a fabricated tag on a field nothing reads
+/// for this path.
+pub(crate) fn quarantine_workload_link(
+    node: &NodeKey,
+    labels: &BTreeMap<String, String>,
+) -> Option<Link> {
+    if labels.is_empty() {
         return None;
     }
     Some(Link {
-        from: target.node.clone(),
-        to: target.node.clone(),
+        from: node.clone(),
+        to: node.clone(),
         relation: QUARANTINE_WORKLOAD_RELATION.to_string(),
         technique: None,
-        from_labels: target.labels.clone(),
-        to_labels: target.labels.clone(),
+        from_labels: labels.clone(),
+        to_labels: labels.clone(),
     })
 }
 
@@ -370,12 +383,53 @@ pub(crate) fn self_severance(graph: &SecurityGraph, host: &NodeKey) -> bool {
     let Some(host_idx) = graph.index_of(host) else {
         return false;
     };
+    scheduled_on_host(graph, host_idx).any(|(_, node)| is_protector_component(node))
+}
+
+/// The workload nodes with a `Relation::ScheduledOn` edge into `host_idx` — the shared
+/// walk [`self_severance`] and [`co_resident_workloads`] both need, factored out once so
+/// the two can never quietly diverge on what "scheduled on this host" means.
+fn scheduled_on_host(
+    graph: &SecurityGraph,
+    host_idx: petgraph::stable_graph::NodeIndex,
+) -> impl Iterator<Item = (petgraph::stable_graph::NodeIndex, &Node)> {
     graph
         .inner()
         .edges_directed(host_idx, petgraph::Direction::Incoming)
         .filter(|e| matches!(e.weight().relation, Relation::ScheduledOn))
-        .filter_map(|e| graph.node(e.source()))
-        .any(is_protector_component)
+        .filter_map(move |e| graph.node(e.source()).map(|node| (e.source(), node)))
+}
+
+/// Every workload scheduled on `host` — the co-resident set a
+/// [`ProposedAction::ContainNode`] mitigation's default-deny sweep covers (ADR-0040 §4).
+/// Walks the SAME `Relation::ScheduledOn` placement edge [`contain_node_link`] keys the
+/// mitigation on, in the opposite (incoming) direction. Deliberately includes the
+/// workload(s) whose `boundary_break` triggered the escalation: denying its own pod-scoped
+/// network too is strictly additional containment, not a correctness gap, and excluding it
+/// would need `ContainNode`'s cut to carry the triggering workload key, which the host-only
+/// self-reference deliberately does not ([`contain_node_link`]'s doc). Returns `(node,
+/// labels)` pairs sorted by key; an unlabeled pod is still returned here — declining it is
+/// [`quarantine_workload_link`]'s job (the same decline every other quarantine candidate
+/// gets), not this walk's.
+///
+/// `pub(crate)`: the actuator's node-containment renderer
+/// ([`crate::engine::respond::actuator::node_containment::co_resident_denies`]) is the
+/// consumer — a sibling module under `actuator`, not `respond` itself.
+pub(crate) fn co_resident_workloads(
+    graph: &SecurityGraph,
+    host: &NodeKey,
+) -> Vec<(NodeKey, BTreeMap<String, String>)> {
+    let Some(host_idx) = graph.index_of(host) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(NodeKey, BTreeMap<String, String>)> = scheduled_on_host(graph, host_idx)
+        .filter_map(|(idx, node)| match node {
+            Node::Workload(w) => graph.key_of(idx).map(|k| (k, w.labels.clone())),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Label-based identification of protector's own chart-rendered workloads: the agent
@@ -671,7 +725,7 @@ impl MitigationLedger {
                 if target.node == chain.entry && entry_additively_contained {
                     continue;
                 }
-                let Some(cut) = quarantine_workload_link(target) else {
+                let Some(cut) = quarantine_workload_link(&target.node, &target.labels) else {
                     continue; // no labels — decline rather than widen to a namespace
                 };
                 desired

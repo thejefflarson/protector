@@ -81,7 +81,7 @@ fn deterministic_targets(chains: &[&ProvenChain]) -> BTreeSet<String> {
             if target.node == chain.entry {
                 continue;
             }
-            if quarantine_workload_link(target).is_some() {
+            if quarantine_workload_link(&target.node, &target.labels).is_some() {
                 targets.insert(target.node.0.clone());
             }
         }

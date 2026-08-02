@@ -41,6 +41,11 @@ use crate::engine::observe::health::{Health, HealthReport};
 use render::workload_namespace;
 
 pub mod arming_ladder;
+// The ADR-0040 node-containment actuator: the cordon + co-resident default-deny renderers
+// and the deterministic rails (control-plane exclusion, one-node cap, worker floor,
+// ownership-gated revert). Standalone module — see its own doc for why it is unit-tested
+// but not wired into the live per-pass loop by this ticket.
+pub mod node_containment;
 // The read-only pre-arm scope-simulation projection (ADR-0021/ADR-0016): "what fires and
 // what it severs if `enforceScope` were this scope, right now" — a pure view over the SAME
 // per-mitigation blast data this module's own `decide`/`predict_blast_radius` compute.

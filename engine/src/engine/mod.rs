@@ -98,6 +98,7 @@ use observe::adapter::Adapter;
 use observe::health::{Health, PodStatusHealth};
 use respond::Mitigation;
 use respond::MitigationLedger;
+use respond::ProposedAction;
 use respond::actuator::{
     ActionLog, ActuationScope, Actuator, Decision, EnabledActions, decide, predict_blast_radius,
 };
@@ -656,6 +657,19 @@ impl Engine {
             .iter()
             .map(|m| m.cut_signature())
             .collect();
+        // ADR-0040 actuation metrics: a newly-proposed `ContainNode` mitigation is real,
+        // genuine data today (the `boundary_break` trigger + menu resolver already run
+        // unconditionally, ADR-0040 §1-3) — unlike the deterministic rails
+        // (`respond::actuator::node_containment::cordon_decision`/`revert_decision`), which
+        // need an observed `NodeFact` fleet the engine does not watch yet (that module's own
+        // doc), so evaluating them here would mean gating against fabricated "no data" and
+        // silently reading as always-pass. `applied`/`reverted`/`rail_refused` wire in once
+        // that observation lands.
+        for mitigation in &ledger_delta.proposed {
+            if mitigation.action == ProposedAction::ContainNode {
+                self.metrics.record_contain_node("proposed", None);
+            }
+        }
 
         // The break-glass kill switch (ADR-0021's enforcement gate, fast path): checked fresh
         // every pass, narrowing `self.active` down for THIS pass alone when engaged. See
