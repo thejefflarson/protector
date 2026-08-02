@@ -244,6 +244,7 @@ impl ProvenChain {
 // Cohesive submodules, split out of this file to keep each under the 1,000-line cap
 // (repo CLAUDE.md). The public surface (`Link`, `ProvenChain`, `prove`/`prove_with`)
 // stays here so external paths (`reason::proof::...`) resolve unchanged.
+mod boundary_break;
 mod chain;
 mod corroborate;
 
@@ -252,6 +253,12 @@ use chain::{
     path_steps, proven_paths, quarantine_targets_on_path, reachable_without,
 };
 use corroborate::{EntryContext, corroborated_for, entry_namespace, entry_runtime};
+
+// The node-containment predicate (ADR-0040): pure, no wiring into `prove`/`prove_with`
+// yet — a follow-up resolver composes this with the model-decided cut-choice contract
+// to escalate a workload to `ProposedAction::ContainNode`. Re-exported here so it
+// resolves as `reason::proof::boundary_break`.
+pub use boundary_break::boundary_break;
 
 /// Find every proven chain in `graph` using the default objective recognizers
 /// (ADR-0005).
@@ -350,6 +357,8 @@ pub fn prove_with(
     chains
 }
 
+#[cfg(test)]
+mod boundary_break_tests;
 #[cfg(test)]
 mod corroborate_anon_inode_exec_tests;
 #[cfg(test)]

@@ -16,8 +16,16 @@ use crate::engine::graph::{Exposure, Node, Relation, SecurityGraph, Severity};
 use crate::engine::observe::alarm_class::is_alarming_now;
 
 /// Whether an edge is a valid attacker-movement edge for chain traversal.
+/// `RunsImage` is how a workload becomes *compromisable*, never a movement itself
+/// (see the module doc). `ScheduledOn` (ADR-0040) is excluded for the same reason:
+/// it is a pure pod→node PLACEMENT fact, not an attacker-movement edge — a pod
+/// being scheduled on a node grants an attacker nothing by itself, unlike
+/// `EscapesTo`, which asserts an actual escape primitive. Walking `ScheduledOn`
+/// here would let it silently substitute for `EscapesTo` in a proven chain (the
+/// exact conflation ADR-0040 built the distinct relation to avoid) — `ScheduledOn`
+/// is read directly by [`super::boundary_break`]'s co-residency query instead.
 pub(super) fn is_movement(relation: &Relation) -> bool {
-    !matches!(relation, Relation::RunsImage)
+    !matches!(relation, Relation::RunsImage | Relation::ScheduledOn)
 }
 
 /// Whether a workload is **compromisable**: it runs an image with a vulnerability
@@ -360,7 +368,11 @@ pub(super) fn path_steps(
 /// network position — a drop-and-execute on an internal pod counts. Non-workload nodes have no
 /// runtime and are never actively exploited. Shares the single [`is_alarming_now`] definition
 /// with the corroboration and guard paths so a new alarm source can't drift between them.
-fn actively_exploited(graph: &SecurityGraph, node: NodeIndex) -> bool {
+///
+/// `pub(super)`: also the live-evidence half of trigger (d) in the node-containment
+/// `boundary_break` predicate (ADR-0040) — reused rather than re-derived, so the two
+/// consumers of "is this workload actively exploited right now" can't drift either.
+pub(super) fn actively_exploited(graph: &SecurityGraph, node: NodeIndex) -> bool {
     matches!(
         graph.inner().node_weight(node),
         Some(Node::Workload(w)) if w.runtime.iter().any(|s| is_alarming_now(&s.behavior))
