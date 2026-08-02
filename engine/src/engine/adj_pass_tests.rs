@@ -168,3 +168,109 @@ fn one_failing_cut_drops_the_whole_multi_cut_decision() {
         "one cut failing its lock must drop the entire decision, not just that cut"
     );
 }
+
+// --- ADR-0040: the escalated `ContainNode` cut needs NO special case in the replay lock ---
+
+/// A hand-built menu line resolving to `ContainNode` (a self-reference on a `Host`, not a
+/// workload) — mirrors [`quarantine_line`] but for the node-scoped mechanism.
+fn contain_node_line(node: &str, host: &str) -> incident::MenuLine {
+    let host_key = NodeKey(host.to_string());
+    let cut = Link {
+        from: host_key.clone(),
+        to: host_key,
+        relation: "contain-node".to_string(),
+        technique: None,
+        from_labels: BTreeMap::new(),
+        to_labels: BTreeMap::new(),
+    };
+    incident::MenuLine {
+        node: NodeKey(node.to_string()),
+        action: ProposedAction::ContainNode,
+        cut_signature: crate::engine::respond::cut_signature(&cut),
+        cut,
+        blast_note: "damage-limitation, not a clean sever: ...".to_string(),
+    }
+}
+
+/// A `ContainNode` decision re-arms and re-resolves through the SAME lock as any other
+/// mechanism — the lock only ever compares node/cut_signature strings, never the
+/// `ProposedAction` itself, so the escalated action needs no special case.
+#[test]
+fn a_contain_node_decision_rearms_through_the_same_lock() {
+    let line = contain_node_line("workload/app/Pod/store", "host/node-1");
+    let sig = line.cut_signature.clone();
+    let menu = incident::Menu {
+        selectable: vec![line],
+        uncontainable: Vec::new(),
+    };
+    let r = restored(
+        "fp-1",
+        vec![journal::JournaledCut {
+            node: "workload/app/Pod/store".into(),
+            cut_signature: sig.clone(),
+        }],
+    );
+    let decision = rearm_restored_decision(&r, "fp-1", &menu).expect("both locks hold");
+    assert_eq!(decision.cuts[0].action, ProposedAction::ContainNode);
+    assert_eq!(decision.cuts[0].cut_signature, sig);
+}
+
+/// A `boundary_break` flip between passes changes a node's mechanism resolution
+/// (`ContainNode` ⇄ its ordinary pod-scoped cut) — a DIFFERENT `cut_signature` for the SAME
+/// node key — so lock 2 fails closed: cold re-judge, never a silent repoint from a node cut
+/// to a pod cut or back.
+#[test]
+fn a_boundary_break_flip_fails_the_replay_lock_rather_than_repointing_the_cut() {
+    let r = restored(
+        "fp-1",
+        vec![journal::JournaledCut {
+            node: "workload/app/Pod/store".into(),
+            cut_signature: "host/node-1 -[contain-node]-> host/node-1".into(),
+        }],
+    );
+    // `boundary_break` flipped OFF since the decision was journaled: the current menu now
+    // resolves `store` back to its ordinary pod-scoped quarantine cut.
+    let menu = menu_with(&["workload/app/Pod/store"]);
+    assert!(
+        rearm_restored_decision(&r, "fp-1", &menu).is_none(),
+        "a boundary_break flip must fail the replay-lock, never silently repoint the cut"
+    );
+}
+
+// --- ADR-0040 §3(d): the LIVE cross-entry model-attack set ---
+
+/// [`model_attack_set`] collects every `contain`-named node from a decisive `Attack`
+/// decision, across every entry, and nothing from a `NoAttack`/`Uncertain` one.
+#[test]
+fn model_attack_set_collects_named_nodes_from_every_decisive_attack_entry() {
+    use crate::engine::graph::NodeKey as GraphNodeKey;
+
+    let mut decisions = BTreeMap::new();
+    decisions.insert(
+        "entry-a".to_string(),
+        incident::IncidentDecision {
+            assessment: incident::Assessment::Attack,
+            reason: "x".into(),
+            cuts: vec![incident::ChosenCut {
+                node: GraphNodeKey("workload/app/Pod/a".into()),
+                action: ProposedAction::QuarantineWorkload,
+                cut: Link {
+                    from: GraphNodeKey("workload/app/Pod/a".into()),
+                    to: GraphNodeKey("workload/app/Pod/a".into()),
+                    relation: "quarantine-workload".into(),
+                    technique: None,
+                    from_labels: BTreeMap::new(),
+                    to_labels: BTreeMap::new(),
+                },
+                cut_signature: "sig-a".into(),
+            }],
+        },
+    );
+    decisions.insert(
+        "entry-b".to_string(),
+        incident::IncidentDecision::uncertain("model unavailable"),
+    );
+    let set = model_attack_set(&decisions);
+    assert_eq!(set.len(), 1);
+    assert!(set.contains(&GraphNodeKey("workload/app/Pod/a".into())));
+}

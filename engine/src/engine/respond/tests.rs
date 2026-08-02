@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::engine::observe::Snapshot;
 use crate::engine::observe::adapter::{build_graph, default_adapters};
@@ -21,7 +23,7 @@ fn decisive_attack(
     graph: &crate::engine::graph::SecurityGraph,
     nodes: &[crate::engine::graph::NodeKey],
 ) -> BTreeMap<String, IncidentDecision> {
-    let menu = build_menu(chain, graph, &HealthReport::default());
+    let menu = build_menu(chain, graph, &HealthReport::default(), &BTreeSet::new());
     let cuts = nodes
         .iter()
         .map(|n| {

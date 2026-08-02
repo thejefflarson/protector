@@ -145,6 +145,93 @@ pub(super) fn web_reaches_pivot_store_with_image(
     (graph, chains)
 }
 
+/// As [`web_reaches_pivot_store`], but `store` is SCHEDULED on a `Host` (`nodeName:
+/// node-1`) and carries a `PtraceAttach` signal — `boundary_break(store)` trigger (c)
+/// (kernel tamper, ADR-0040 §3), the pod-boundary-break shape the `ContainNode` escalation
+/// exists for. `web` stays unscheduled and untampered — the negative contrast within the
+/// SAME chain (its own line must NOT escalate).
+pub(super) fn web_reaches_boundary_broken_store() -> (SecurityGraph, Vec<ProvenChain>) {
+    let web = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "web", "namespace": "app", "labels": {"role": "web"}},
+        "spec": {"containers": [{"name": "web", "image": "web:1"}]}
+    }));
+    let lb = service(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "web-lb", "namespace": "app"},
+        "spec": {"type": "LoadBalancer", "selector": {"role": "web"}}
+    }));
+    let store = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "store", "namespace": "app", "labels": {"role": "store"}},
+        "spec": {
+            "nodeName": "node-1",
+            "containers": [{
+                "name": "store", "image": "store:1",
+                "envFrom": [{"secretRef": {"name": "store-creds"}}]
+            }]
+        }
+    }));
+    let policy = netpol(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+        "metadata": {"name": "store-ingress", "namespace": "app"},
+        "spec": {
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+            "ingress": [{"from": [{"podSelector": {"matchLabels": {"role": "web"}}}]}]
+        }
+    }));
+    let ptrace = RuntimeObservation {
+        attribution: Attribution::by_namespaced_name("app", "store"),
+        source: None,
+        observed_at_ms: None,
+        node: None,
+        behavior: Behavior::PtraceAttach,
+    };
+    let snap = Snapshot {
+        pods: vec![web, store],
+        services: vec![lb],
+        network_policies: vec![policy],
+        image_vulns: vec![critical_image("store:1")],
+        runtime_events: vec![ptrace],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let chains = prove(&graph);
+    (graph, chains)
+}
+
+/// As [`web_reaches_boundary_broken_store`], but a THIRD pod — labeled like the eBPF
+/// agent DaemonSet's own pods (`app.kubernetes.io/component: agent`) — is ALSO scheduled
+/// on `node-1`, so cordoning it would collaterally sever protector's own sensor there
+/// (the self-severance warning, ADR-0040 "New failure/interaction surfaces").
+pub(super) fn boundary_broken_store_node_hosts_protector_agent() -> (SecurityGraph, Vec<ProvenChain>)
+{
+    let (mut graph, chains) = web_reaches_boundary_broken_store();
+    let agent = pod(json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {
+            "name": "protector-agent-xyz", "namespace": "protector-system",
+            "labels": {"app.kubernetes.io/component": "agent"}
+        },
+        "spec": {"nodeName": "node-1", "containers": [{"name": "agent", "image": "agent:1"}]}
+    }));
+    // Fold the agent pod into the SAME graph the chain was proven over (rather than
+    // rebuilding from a snapshot, which would also re-run `prove` and could renumber node
+    // indices out from under `chains`): `WorkloadAdapter` sets its labels (the fact
+    // `self_severance` reads), `PlacementAdapter` adds its `ScheduledOn` edge — neither
+    // needs any cross-object context, so running just these two over a snapshot holding
+    // only the agent pod is a faithful incremental fold.
+    use crate::engine::observe::adapter::{Adapter, PlacementAdapter, WorkloadAdapter};
+    let snap = Snapshot {
+        pods: vec![agent],
+        ..Default::default()
+    };
+    WorkloadAdapter.contribute(&snap, &mut graph);
+    PlacementAdapter.contribute(&snap, &mut graph);
+    (graph, chains)
+}
+
 pub(super) fn web_to_store_chain(chains: &[ProvenChain]) -> &ProvenChain {
     chains
         .iter()

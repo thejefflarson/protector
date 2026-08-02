@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
 
@@ -102,7 +102,7 @@ fn decisive_attack(
     graph: &crate::engine::graph::SecurityGraph,
     nodes: &[&str],
 ) -> BTreeMap<String, IncidentDecision> {
-    let menu = build_menu(chain, graph, &HealthReport::default());
+    let menu = build_menu(chain, graph, &HealthReport::default(), &BTreeSet::new());
     let cuts = nodes
         .iter()
         .map(|n| {

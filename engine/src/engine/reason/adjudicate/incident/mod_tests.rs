@@ -29,7 +29,12 @@ fn assessment_values_are_distinct() {
 fn a_grounded_attack_decision_survives_the_full_guard_pipeline() {
     let (graph, chains) = web_reaches_pivot_store(vec![store_live_signal()], true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(
+        chain,
+        &graph,
+        &empty_health(),
+        &std::collections::BTreeSet::new(),
+    );
 
     let reply = format!(
         r#"{{"assessment": "attack", "reason": "store shows a live drop-and-execute", "contain": ["{}"]}}"#,
@@ -58,7 +63,12 @@ fn a_grounded_attack_decision_survives_the_full_guard_pipeline() {
 fn an_ungrounded_attack_decision_is_downgraded_by_the_pipeline() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(
+        chain,
+        &graph,
+        &empty_health(),
+        &std::collections::BTreeSet::new(),
+    );
 
     let reply = format!(
         r#"{{"assessment": "attack", "reason": "store looks compromised", "contain": ["{}"]}}"#,
@@ -78,7 +88,12 @@ fn an_ungrounded_attack_decision_is_downgraded_by_the_pipeline() {
 fn attack_with_no_cuts_survives_the_pipeline_unchanged() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(
+        chain,
+        &graph,
+        &empty_health(),
+        &std::collections::BTreeSet::new(),
+    );
 
     let reply =
         r#"{"assessment": "attack", "reason": "attack in progress, nothing warrants a cut yet"}"#;

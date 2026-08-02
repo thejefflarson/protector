@@ -16,6 +16,7 @@ use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::{Attribution, ImageVulnerabilities, RuntimeObservation, Snapshot};
 use crate::engine::reason::proof::{ProvenChain, prove};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 /// ADR-0034: absent a model there is no cut-choosing analyst to consult, so
@@ -223,6 +224,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
         &toxic,
         &g_toxic,
         &crate::engine::observe::health::HealthReport::default(),
+        &BTreeSet::new(),
     );
     let toxic_decision = adjudicator
         .judge(
@@ -244,6 +246,7 @@ async fn real_model_judges_toxic_vs_unevidenced() {
         &bare,
         &g_bare,
         &crate::engine::observe::health::HealthReport::default(),
+        &BTreeSet::new(),
     );
     let bare_decision = adjudicator
         .judge(

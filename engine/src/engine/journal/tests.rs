@@ -158,6 +158,48 @@ fn incident_decision_round_trips_across_a_reopen() {
     cleanup(&path);
 }
 
+/// ADR-0040: the escalated `ContainNode` cut needs no schema change — `JournaledCut` is
+/// already action-agnostic (only `node` + `cut_signature`, never the `ProposedAction` itself,
+/// per the type's own docs), so a node-scoped cut signature (`host/... -[contain-node]->
+/// host/...`, distinct in SHAPE from a workload self-reference) round-trips byte-for-byte
+/// exactly like any other mechanism's.
+#[test]
+fn a_contain_node_decision_round_trips_across_a_reopen() {
+    let path = temp_path("contain-node-roundtrip");
+    {
+        let journal = DecisionJournal::open(&path);
+        journal.record(Decision::Incident {
+            entry: "workload/app/Pod/web".into(),
+            objectives: 1,
+            assessment: crate::engine::reason::adjudicate::incident::Assessment::Attack,
+            reason: "kernel tamper on a proven pod-boundary break".into(),
+            cuts: vec![JournaledCut {
+                node: "workload/app/Pod/store".into(),
+                cut_signature: "host/node-1 -[contain-node]-> host/node-1".into(),
+            }],
+            fingerprint: "cves=|rt=ptrace-attach|objs=secret|findings=".into(),
+        });
+    }
+    let reopened = DecisionJournal::open(&path);
+    let entries = reopened.replay();
+    assert_eq!(entries.len(), 1);
+    match &entries[0].decision {
+        Decision::Incident {
+            cuts, fingerprint, ..
+        } => {
+            assert_eq!(cuts.len(), 1);
+            assert_eq!(cuts[0].node, "workload/app/Pod/store");
+            assert_eq!(
+                cuts[0].cut_signature, "host/node-1 -[contain-node]-> host/node-1",
+                "the node-keyed cut signature survives the reopen byte-for-byte"
+            );
+            assert_eq!(fingerprint, "cves=|rt=ptrace-attach|objs=secret|findings=");
+        }
+        other => panic!("expected an Incident, got {other:?}"),
+    }
+    cleanup(&path);
+}
+
 /// ADR-0035's shadow-bake step: a `CutDivergence` line — the model-vs-deterministic cut
 /// comparator's classification for one entry — round-trips a "restart" byte-for-byte, so the
 /// bake history a human reads for the arm-readiness review survives across a restart instead of
