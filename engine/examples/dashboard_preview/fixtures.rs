@@ -97,6 +97,13 @@ pub(crate) fn breach_finding() -> Finding {
                 },
             ],
         }),
+        // The adversary-reach annotation (ADR-0040) — demonstrates the finding detail's
+        // "adversary reach" section.
+        reach: Some(
+            "if compromised, this workload grants the attacker: a database-credential secret; \
+             1 reachable data store, 1 reachable RBAC capability, and an internet egress path"
+                .into(),
+        ),
     }
 }
 
@@ -120,6 +127,7 @@ pub(crate) fn simple_finding(entry: &str, objective: &str) -> Finding {
         recency: None,
         node: None,
         incident: None,
+        reach: None,
     }
 }
 
@@ -155,5 +163,6 @@ pub(crate) fn redundant_finding() -> Finding {
         recency: None,
         node: None,
         incident: None,
+        reach: None,
     }
 }

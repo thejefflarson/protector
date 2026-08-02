@@ -328,6 +328,7 @@ pub(super) fn finding_props(
         cuts: cut_set_props(&f.incident),
         evidence: evidence_props(&f.evidence),
         judgement: judgement_props(&f.entry, judgements),
+        reach: f.reach.clone(),
         blind_node_caveat: blind_node_caveat(f, blind_nodes),
         // The live alarming-now signals on this chain's entry — the same seam the Alerts
         // tab projects from, so the "alarming activity observed" annotation and the tab agree.

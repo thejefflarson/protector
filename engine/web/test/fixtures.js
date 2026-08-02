@@ -73,6 +73,8 @@ export function finding(id, overrides = {}) {
       "rbac-findings": [],
     },
     judgement: { prompt: `prompt for ${id}`, reply: `reply for ${id}`, verdict: "Confirmed" },
+    // The adversary-reach annotation (ADR-0040) — a value-free presentation line.
+    reach: `if compromised, entry-${id} grants the attacker: a database-credential secret`,
     "blind-node-caveat": null,
     alerts: [],
     ...overrides,

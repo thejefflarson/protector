@@ -675,6 +675,7 @@ fn sample_finding(id: &str, posture: Posture, verdict: Option<String>) -> Findin
         },
         evidence: EvidenceProps::default(),
         judgement: JudgementProps::default(),
+        reach: None,
         blind_node_caveat: None,
         alerts: vec![],
     }

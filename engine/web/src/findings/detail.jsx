@@ -19,11 +19,26 @@ export function DetailPanel({ f }) {
     <div class={`detail rail-${f.posture}`}>
       <VerdictBlock f={f} />
       <AlarmingNow alerts={f.alerts} />
+      <ReachBlock reach={f.reach} />
       <PathBlock f={f} />
       <EvidenceTables ev={f.evidence} />
       <CutBlock cuts={f.cuts} />
       <ModelPrompt judgement={f.judgement} />
     </div>
+  );
+}
+
+// The adversary-reach annotation (ADR-0040) — a value-free "if compromised, this workload
+// grants the attacker …" line: closed-vocabulary categories and counts only, never a
+// secret/workload name. PRESENTATION ONLY, auto-escaped like every other string here; `null`
+// when the entry isn't a resolvable workload node, in which case the section renders nothing.
+function ReachBlock({ reach }) {
+  if (!reach) return null;
+  return (
+    <section class="detail-section reach-block">
+      <h3 class="detail-h">adversary reach</h3>
+      <p class="reach-line muted">{reach}</p>
+    </section>
   );
 }
 

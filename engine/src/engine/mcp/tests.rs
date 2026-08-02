@@ -69,6 +69,10 @@ fn secret_finding() -> Finding {
         recency: None,
         node: None,
         incident: None,
+        reach: Some(
+            "if compromised, this workload grants the attacker: a database-credential secret"
+                .to_string(),
+        ),
     }
 }
 

@@ -32,6 +32,7 @@ describe("untrusted text is escaped, never executed", () => {
         "rbac-findings": [],
       },
       judgement: { prompt: XSS, reply: XSS, verdict: XSS },
+      reach: XSS,
       path: [{ from: XSS, "from-glyph": "x", relation: XSS, to: XSS, "to-glyph": "x", structural: false, "is-cut": false, shared: false }],
       paths: [[{ from: XSS, "from-glyph": "x", relation: XSS, to: XSS, "to-glyph": "x", structural: false, "is-cut": false, shared: false }]],
       cut: null,
