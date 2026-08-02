@@ -4,6 +4,8 @@
 //! ledger. Split out of `tests.rs` purely to keep every file under the 1,000-line cap
 //! (repo CLAUDE.md); `super::tests` covers the pre-existing containment/quarantine shapes.
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::observe::health::HealthReport;
@@ -160,7 +162,7 @@ fn model_chosen_cut_clears_the_auto_action_gate_when_corroborated() {
     let chains = prove(&graph);
     let chain = web_chain(&chains);
 
-    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let menu = build_menu(chain, &graph, &HealthReport::default(), &BTreeSet::new());
     let cut = menu.resolve(&chain.entry).expect("the entry is selectable");
     let mut decisions = BTreeMap::new();
     decisions.insert(
@@ -264,7 +266,7 @@ fn a_non_member_reply_degrades_to_uncertain_and_reconcile_falls_back() {
     );
     let chains = prove(&graph);
     let chain = web_chain(&chains);
-    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let menu = build_menu(chain, &graph, &HealthReport::default(), &BTreeSet::new());
 
     let reply = r#"{"assessment": "attack", "reason": "x", "contain": ["workload/app/Pod/not-on-the-menu"]}"#;
     let decision = parse_incident_decision(reply, &menu);
@@ -302,7 +304,7 @@ fn a_downstream_cut_persists_across_a_pass_with_no_decision() {
     let chain = web_chain(&chains);
     let store = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
 
-    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let menu = build_menu(chain, &graph, &HealthReport::default(), &BTreeSet::new());
     let store_cut = menu.resolve(&store).expect("store is selectable");
     let store_signature = store_cut.cut_signature.clone();
     // Sanity: this really is a DIFFERENT signature than the entry's own containment_for
@@ -367,7 +369,7 @@ fn a_decisive_no_attack_still_retires_a_standing_cut() {
     let chain = web_chain(&chains);
     let store = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
 
-    let menu = build_menu(chain, &graph, &HealthReport::default());
+    let menu = build_menu(chain, &graph, &HealthReport::default(), &BTreeSet::new());
     let store_cut = menu.resolve(&store).expect("store is selectable");
     let store_signature = store_cut.cut_signature.clone();
 

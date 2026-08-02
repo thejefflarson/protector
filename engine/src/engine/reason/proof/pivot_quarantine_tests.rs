@@ -141,7 +141,12 @@ fn decisions_naming_store(
     use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, build_menu};
 
     let store_node = crate::engine::graph::NodeKey("workload/app/Pod/store".into());
-    let menu = build_menu(chain, graph, &HealthReport::default());
+    let menu = build_menu(
+        chain,
+        graph,
+        &HealthReport::default(),
+        &std::collections::BTreeSet::new(),
+    );
     let cut = menu
         .resolve(&store_node)
         .expect("store is selectable on the menu");

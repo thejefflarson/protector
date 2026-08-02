@@ -327,6 +327,10 @@ pub(crate) fn classify(
         // pass, not a chain's primary containment; the per-pod WHY is named above via
         // `entry_quarantine_reason`). Handled for exhaustiveness.
         Some(A::QuarantineWorkload) => "quarantine workload (default-deny)",
+        // `containment_for` never returns a node containment either — `ContainNode` is an
+        // INCIDENT-menu-only resolution (`menu::build_menu`/`Menu::resolve`, ADR-0040), never
+        // this chain-primary ladder. Handled for exhaustiveness.
+        Some(A::ContainNode) => "quarantine node (cordon + default-deny)",
         Some(A::Unclassified) => "unclassified",
         Some(A::DenyNetworkPath) => {
             if !chain.meets_action_bar() {

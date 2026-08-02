@@ -33,7 +33,7 @@
 //! model-chosen cuts, not a deterministic insertion.
 
 use futures::StreamExt;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{
     Engine, PendingEntry, RestoredDecision, adj_gate, churn_diag, graph, journal, model, notify,
@@ -118,6 +118,15 @@ impl Engine {
         // mid-pass swaps the next pass's snapshot, never this one — so every entry judged this
         // pass sees a consistent provider table (mirrors the KEV/EPSS per-pass snapshot).
         let asn = self.asn.snapshot();
+        // ADR-0040 §3(d): the LIVE cross-entry model-attack set — every workload named in a
+        // decisive `assessment=attack`'s `contain`, across EVERY entry's current standing
+        // decision (not just the one whose menu is being built; a co-resident pair can be
+        // decided across two different entries). Computed ONCE before the per-entry loop from
+        // `self.decisions` as it stands at the START of this pass (last pass's decisive calls,
+        // or a carried-forward decision — ADR-0034 D7), so `boundary_break`'s trigger (d) sees
+        // exactly the decisions the live `IncidentDecision`/judge pipeline has already made,
+        // never a caller-supplied stand-in.
+        let model_attack = model_attack_set(&self.decisions);
         for (entry_key, idxs) in &by_entry {
             let entry = chains[idxs[0]].entry.clone();
             // The (objective, technique) set this entry reaches — what the model judges.
@@ -137,7 +146,7 @@ impl Engine {
             // across every one of its objective-chains (see `entry_menu`) — the SAME menu the
             // prompt's containment-options section renders and the model's `contain` reply
             // resolves against.
-            let menu = entry_menu(idxs, chains, graph, health);
+            let menu = entry_menu(idxs, chains, graph, health, &model_attack);
 
             // Build the entry's delta-aware pending record (prompt + fingerprint + projected
             // surface) and read its baseline — see [`Engine::prepare_pending`] (ADR-0023
@@ -583,11 +592,12 @@ fn entry_menu(
     chains: &[reason::proof::ProvenChain],
     graph: &graph::SecurityGraph,
     health: &observe::health::HealthReport,
+    model_attack: &BTreeSet<graph::NodeKey>,
 ) -> incident::Menu {
     let mut selectable = Vec::new();
     let mut uncontainable = Vec::new();
     for &i in idxs {
-        let m = incident::build_menu(&chains[i], graph, health);
+        let m = incident::build_menu(&chains[i], graph, health, model_attack);
         selectable.extend(m.selectable);
         uncontainable.extend(m.uncontainable);
     }
@@ -596,6 +606,22 @@ fn entry_menu(
         selectable,
         uncontainable,
     }
+}
+
+/// The LIVE cross-entry model-attack set (ADR-0040 §3(d)): every workload named in
+/// `contain` by a decisive `assessment=attack` decision, across every entry `decisions`
+/// currently holds — the set [`crate::engine::reason::proof::boundary_break`]'s trigger (d)
+/// composes two SEPARATE decisive calls over (co-resident workloads decided by different
+/// entries still compose). Pure over `Engine::decisions` so it is directly testable without
+/// spinning up a whole pass.
+fn model_attack_set(
+    decisions: &BTreeMap<String, incident::IncidentDecision>,
+) -> BTreeSet<graph::NodeKey> {
+    decisions
+        .values()
+        .filter(|d| d.assessment == incident::Assessment::Attack)
+        .flat_map(|d| d.cuts.iter().map(|c| c.node.clone()))
+        .collect()
 }
 
 #[cfg(test)]

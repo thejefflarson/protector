@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use super::super::fixtures::{
     direct_mount_chain, direct_mount_entry_chain, empty_health, entry_key, store_key,
-    store_live_signal, web_reaches_pivot_store, web_to_store_chain,
+    store_live_signal, web_reaches_boundary_broken_store, web_reaches_pivot_store,
+    web_to_store_chain,
 };
 use super::*;
 
@@ -12,7 +15,7 @@ use super::*;
 fn resolver_picks_the_surgical_edge_cut_over_quarantine_entry_when_one_exists() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let entry_line = menu
         .selectable
@@ -37,7 +40,7 @@ fn resolver_picks_the_surgical_edge_cut_over_quarantine_entry_when_one_exists() 
 fn resolver_falls_back_to_quarantine_entry_when_no_surgical_cut_exists() {
     let (graph, chains) = direct_mount_entry_chain();
     let chain = direct_mount_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let entry_line = menu
         .selectable
@@ -55,7 +58,7 @@ fn resolver_falls_back_to_quarantine_entry_when_no_surgical_cut_exists() {
 fn downstream_evidence_bearing_workload_is_selectable_via_quarantine_workload() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let store_line = menu
         .selectable
@@ -73,7 +76,7 @@ fn downstream_evidence_bearing_workload_is_selectable_via_quarantine_workload() 
 fn unlabeled_downstream_pivot_is_uncontainable_not_selectable() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), false);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     assert!(
         !menu.selectable.iter().any(|l| l.node == store_key()),
@@ -94,7 +97,7 @@ fn entry_with_no_additive_live_mechanism_is_uncontainable() {
 
     let (graph, chains) = internal_only_rbac_chain();
     let chain = internal_rbac_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let entry = crate::engine::graph::NodeKey("workload/edge/Pod/internal-app".into());
     assert!(
@@ -131,7 +134,7 @@ fn entry_exclusion_the_entry_never_gets_a_second_downstream_line() {
         "the entry itself is ALSO an ActivelyExploited quarantine target on this fixture"
     );
 
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
     let entry_lines: Vec<_> = menu
         .selectable
         .iter()
@@ -151,8 +154,8 @@ fn menu_is_byte_identical_across_two_builds_of_the_same_snapshot() {
     let (graph, chains) = web_reaches_pivot_store(vec![store_live_signal()], true);
     let chain = web_to_store_chain(&chains);
 
-    let first = build_menu(chain, &graph, &empty_health());
-    let second = build_menu(chain, &graph, &empty_health());
+    let first = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+    let second = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     assert_eq!(first, second);
     assert_eq!(first.render(), second.render());
@@ -163,7 +166,7 @@ fn menu_is_byte_identical_across_two_builds_of_the_same_snapshot() {
 fn selectable_lines_are_sorted_by_node_key() {
     let (graph, chains) = web_reaches_pivot_store(vec![store_live_signal()], true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let keys: Vec<_> = menu.selectable.iter().map(|l| l.node.0.clone()).collect();
     let mut sorted = keys.clone();
@@ -177,7 +180,7 @@ fn selectable_lines_are_sorted_by_node_key() {
 fn render_uses_only_fixed_mechanism_strings_and_fences_the_node_key() {
     let (graph, chains) = web_reaches_pivot_store(vec![store_live_signal()], true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
     let rendered = menu.render();
 
     for line in &menu.selectable {
@@ -192,7 +195,7 @@ fn render_uses_only_fixed_mechanism_strings_and_fences_the_node_key() {
 fn every_selectable_line_carries_a_blast_radius_note() {
     let (graph, chains) = web_reaches_pivot_store(vec![store_live_signal()], true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     assert!(!menu.selectable.is_empty());
     for line in &menu.selectable {
@@ -205,7 +208,7 @@ fn every_selectable_line_carries_a_blast_radius_note() {
 fn resolve_returns_none_for_a_node_not_on_the_menu() {
     let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
     let chain = web_to_store_chain(&chains);
-    let menu = build_menu(chain, &graph, &empty_health());
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
 
     let stranger = crate::engine::graph::NodeKey("workload/app/Pod/nonexistent".into());
     assert!(menu.resolve(&stranger).is_none());
@@ -216,4 +219,176 @@ fn resolve_returns_none_for_a_node_not_on_the_menu() {
 fn empty_menu_renders_a_placeholder() {
     let menu = Menu::default();
     assert_eq!(menu.render(), "  (none)");
+}
+
+// --- ADR-0040: boundary-break mechanism escalation ---
+
+/// Deterministic escalation, positive direction: `boundary_break(store)` holds (a
+/// `PtraceAttach` kernel-tamper signal, trigger (c)) — the store's line resolves to
+/// `ContainNode`, on the node it's scheduled on, never `QuarantineWorkload`.
+#[test]
+fn boundary_broken_downstream_workload_escalates_to_contain_node() {
+    let (graph, chains) = web_reaches_boundary_broken_store();
+    let chain = web_to_store_chain(&chains);
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let store_line = menu
+        .selectable
+        .iter()
+        .find(|l| l.node == store_key())
+        .expect("boundary-broken store is selectable");
+    assert_eq!(store_line.action, ProposedAction::ContainNode);
+    assert_eq!(
+        store_line.cut.from,
+        crate::engine::graph::NodeKey("host/node-1".into())
+    );
+
+    // The menu resolver — the SAME path `contain=[store]` goes through — agrees.
+    let resolved = menu.resolve(&store_key()).expect("store resolves");
+    assert_eq!(resolved.action, ProposedAction::ContainNode);
+
+    // `web` (untampered, unscheduled) is untouched by the escalation — the entry line's
+    // own resolution is independent per node.
+    let entry_line = menu
+        .selectable
+        .iter()
+        .find(|l| l.node == entry_key())
+        .expect("web is still selectable");
+    assert_ne!(entry_line.action, ProposedAction::ContainNode);
+}
+
+/// Deterministic escalation, negative direction: the SAME chain shape with no
+/// `boundary_break` evidence keeps the ordinary pod-scoped `QuarantineWorkload` cut.
+#[test]
+fn a_workload_without_boundary_break_evidence_keeps_its_pod_scoped_cut() {
+    let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
+    let chain = web_to_store_chain(&chains);
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let store_line = menu
+        .selectable
+        .iter()
+        .find(|l| l.node == store_key())
+        .expect("store is selectable");
+    assert_eq!(store_line.action, ProposedAction::QuarantineWorkload);
+}
+
+/// No new model-selectable line: escalation only ever changes the MECHANISM of the node
+/// the model could already name, never adds a node/line to the menu.
+#[test]
+fn escalation_never_changes_the_selectable_node_count() {
+    let (graph, broken_chains) = web_reaches_boundary_broken_store();
+    let broken_chain = web_to_store_chain(&broken_chains);
+    let broken_menu = build_menu(broken_chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let (clean_graph, clean_chains) = web_reaches_pivot_store(Vec::new(), true);
+    let clean_chain = web_to_store_chain(&clean_chains);
+    let clean_menu = build_menu(clean_chain, &clean_graph, &empty_health(), &BTreeSet::new());
+
+    assert_eq!(broken_menu.selectable.len(), clean_menu.selectable.len());
+    let broken_nodes: Vec<_> = broken_menu.selectable.iter().map(|l| &l.node).collect();
+    let clean_nodes: Vec<_> = clean_menu.selectable.iter().map(|l| &l.node).collect();
+    assert_eq!(broken_nodes, clean_nodes);
+}
+
+/// The fixed-string honest damage-limitation note, no self-severance collateral.
+#[test]
+fn contain_node_line_carries_the_fixed_damage_limitation_note() {
+    let (graph, chains) = web_reaches_boundary_broken_store();
+    let chain = web_to_store_chain(&chains);
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let store_line = menu
+        .selectable
+        .iter()
+        .find(|l| l.node == store_key())
+        .unwrap();
+    assert!(
+        store_line
+            .blast_note
+            .contains("damage-limitation, not a clean sever")
+    );
+    assert!(
+        store_line
+            .blast_note
+            .contains("cordon stops scheduler-driven spread")
+    );
+    assert!(
+        store_line
+            .blast_note
+            .contains("drain/reimage/rotate is a human act")
+    );
+    assert!(
+        !store_line.blast_note.contains("protector's OWN components"),
+        "no self-severance line when protector shares no co-resident pod on this host"
+    );
+}
+
+/// The self-severance warning appears, verbatim and fixed-string, when protector's own
+/// agent shares the cordoned node.
+#[test]
+fn contain_node_note_names_self_severance_when_protector_shares_the_host() {
+    use super::super::fixtures::boundary_broken_store_node_hosts_protector_agent;
+
+    let (graph, chains) = boundary_broken_store_node_hosts_protector_agent();
+    let chain = web_to_store_chain(&chains);
+    let menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let store_line = menu
+        .selectable
+        .iter()
+        .find(|l| l.node == store_key())
+        .unwrap();
+    assert!(
+        store_line.blast_note.contains("protector's OWN components"),
+        "the self-severance warning must name protector's own collateral explicitly"
+    );
+}
+
+/// ADR-0034 D4 ("a mapping change is a prompt change is a re-judge") applied to the
+/// ADR-0040 escalation specifically: swapping ONE node's mechanism from
+/// `QuarantineWorkload` to `ContainNode` — nothing else about the graph/evidence changes —
+/// still busts the full-state prompt fingerprint, so a `boundary_break` flip forces a
+/// re-judge rather than silently replaying a stale verdict against a since-escalated
+/// mechanism.
+#[test]
+fn a_mechanism_escalation_on_the_same_node_changes_the_prompt_fingerprint() {
+    use crate::engine::observe::asn::AsnDb;
+    use crate::engine::reason::adjudicate::build_delta_prompt_with_menu_asn;
+
+    let (graph, chains) = web_reaches_pivot_store(Vec::new(), true);
+    let chain = web_to_store_chain(&chains);
+    let pod_menu = build_menu(chain, &graph, &empty_health(), &BTreeSet::new());
+
+    let mut node_menu = pod_menu.clone();
+    let store_line = node_menu
+        .selectable
+        .iter_mut()
+        .find(|l| l.node == store_key())
+        .expect("store is on the menu");
+    store_line.action = ProposedAction::ContainNode;
+    store_line.blast_note = "damage-limitation, not a clean sever: (test stand-in)".to_string();
+
+    let asn = AsnDb::empty();
+    let objectives = [(chain.objective.clone(), chain.attack)];
+    let pod_delta = build_delta_prompt_with_menu_asn(
+        &chain.entry,
+        &objectives,
+        &graph,
+        &asn,
+        None,
+        &[store_key()],
+        &pod_menu,
+    );
+    let node_delta = build_delta_prompt_with_menu_asn(
+        &chain.entry,
+        &objectives,
+        &graph,
+        &asn,
+        None,
+        &[store_key()],
+        &node_menu,
+    );
+
+    assert_ne!(pod_delta.cache_key, node_delta.cache_key);
 }

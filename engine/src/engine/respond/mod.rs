@@ -19,7 +19,10 @@ pub mod actuator;
 
 use std::collections::BTreeMap;
 
+use petgraph::visit::EdgeRef;
+
 use crate::engine::graph::attack::AttackRef;
+use crate::engine::graph::{Node, NodeKey, Relation, SecurityGraph};
 use crate::engine::reason::proof::{Link, ProvenChain, QuarantineTarget};
 
 /// How a cut edge would be severed by an additive, engine-owned object (ADR-0002).
@@ -55,6 +58,20 @@ pub enum ProposedAction {
     /// self-reverting, gated identically to [`QuarantineEntry`](Self::QuarantineEntry).
     /// Never targets a merely-reached objective (reached ≠ exploited).
     QuarantineWorkload,
+    /// Contain a **proven pod-boundary break** ([`crate::engine::reason::proof::boundary_break`],
+    /// ADR-0040) at the NODE, not the pod: cordon the `Host` the model-named workload is
+    /// scheduled on, plus a default-deny `NetworkPolicy` per co-resident labelled pod. The
+    /// deterministic escalation of a model-named workload whose own evidence proves a
+    /// `podSelector` policy no longer constrains it — never a model-selectable mechanism
+    /// (the model still only names the workload; [`crate::engine::reason::adjudicate::incident::menu`]
+    /// resolves the escalation the moment `boundary_break` holds). Reversible (an uncordon
+    /// lifts it) but deliberately **not** [`is_additive_live`](Self::is_additive_live): a
+    /// cordon mutates a shared field on a live `Node` object rather than adding a new
+    /// engine-owned one, so this class can never auto-apply — every node cut is
+    /// propose-first by construction, routed to a human via the existing blast/alive-
+    /// collateral gate. Shadow-complete as of this ticket: the actuator that would render
+    /// the cordon + co-resident denies lands separately (ADR-0040 §7).
+    ContainNode,
     /// A cut whose remediation isn't yet mapped to an action.
     Unclassified,
 }
@@ -118,6 +135,10 @@ impl ProposedAction {
             }
             ProposedAction::QuarantineWorkload => {
                 "quarantine the compromised workload with a default-deny NetworkPolicy"
+            }
+            ProposedAction::ContainNode => {
+                "cordon the node and default-deny its co-resident pods (proven pod-boundary \
+                 break — a pod-scoped policy can no longer contain this workload)"
             }
             ProposedAction::Unclassified => "manual remediation (no automatic action mapped)",
         }
@@ -292,6 +313,86 @@ pub(crate) fn quarantine_workload_link(target: &QuarantineTarget) -> Option<Link
         from_labels: target.labels.clone(),
         to_labels: target.labels.clone(),
     })
+}
+
+/// The synthetic relation on a [`ProposedAction::ContainNode`] mitigation's `cut` link — a
+/// self-reference on the `Host` node (`from == to == host`), never on the model-named
+/// workload. See [`contain_node_link`].
+const CONTAIN_NODE_RELATION: &str = "contain-node";
+
+/// Build the [`ProposedAction::ContainNode`] `Link` for a model-named workload `x` whose
+/// pod boundary is proven broken ([`crate::engine::reason::proof::boundary_break`],
+/// ADR-0040 §3): a self-reference on the `Host` node `x` is scheduled onto (the
+/// `Relation::ScheduledOn` placement edge, ADR-0040) — never on `x` itself, because
+/// cordoning is a NODE mechanism. Keying the cut on the host (not on `x`) means two
+/// co-resident boundary-broken workloads collapse onto ONE containment proposal
+/// (`cut_signature` is per-node), matching ADR-0040 §5's "at most one node cordoned
+/// concurrently" rather than a duplicate cut per named workload. Carries no labels: cordon
+/// acts on `Node.spec.unschedulable`, not a pod selector, so there is nothing to widen
+/// (contrast [`quarantine_link`]/[`quarantine_workload_link`]'s label-selector decline).
+/// `None` when `x` carries no `ScheduledOn` edge — unscheduled, nothing to cordon (every
+/// `boundary_break` trigger needs a live, scheduled pod, so this is not actually reachable
+/// in practice; kept fallible rather than panicking).
+///
+/// `pub(crate)`: the ADR-0034 `incident/` menu resolver calls this the moment
+/// `boundary_break(x)` holds, in the SAME `build_menu` pass that would otherwise have
+/// resolved `x` to its ordinary pod-scoped cut — the discipline [`quarantine_workload_link`]
+/// already documents for its own visibility widening.
+pub(crate) fn contain_node_link(graph: &SecurityGraph, x: &NodeKey) -> Option<Link> {
+    let x_idx = graph.index_of(x)?;
+    let host_idx = graph
+        .inner()
+        .edges(x_idx)
+        .find(|e| matches!(e.weight().relation, Relation::ScheduledOn))
+        .map(|e| e.target())?;
+    let host = graph.key_of(host_idx)?;
+    Some(Link {
+        from: host.clone(),
+        to: host,
+        relation: CONTAIN_NODE_RELATION.to_string(),
+        technique: None,
+        from_labels: BTreeMap::new(),
+        to_labels: BTreeMap::new(),
+    })
+}
+
+/// Whether cordoning the `Host` node keyed `host` would collaterally sever one of
+/// protector's OWN components — the eBPF agent DaemonSet's pod on this node, or the
+/// engine's own control-plane pod under the chart's default naming (ADR-0040 "New
+/// failure/interaction surfaces": "the approval UI names protector components in the
+/// collateral list explicitly"). Checked over every workload with a `ScheduledOn` edge into
+/// `host`. Presentation-only — feeds the honest proposal note
+/// ([`crate::engine::reason::adjudicate::incident::cut_blast_note`]), never gates anything;
+/// the alive-collateral/freshness/break-glass rails the ADR cites are the actual safety
+/// backstop, so a label-matching miss here (e.g. under a customized Helm `nameOverride`)
+/// only means a milder note, never a functional gap.
+pub(crate) fn self_severance(graph: &SecurityGraph, host: &NodeKey) -> bool {
+    let Some(host_idx) = graph.index_of(host) else {
+        return false;
+    };
+    graph
+        .inner()
+        .edges_directed(host_idx, petgraph::Direction::Incoming)
+        .filter(|e| matches!(e.weight().relation, Relation::ScheduledOn))
+        .filter_map(|e| graph.node(e.source()))
+        .any(is_protector_component)
+}
+
+/// Label-based identification of protector's own chart-rendered workloads: the agent
+/// DaemonSet's `app.kubernetes.io/component: agent` label (`charts/protector/templates/
+/// _helpers.tpl`'s `protector.agentLabels`), or the engine Deployment's default
+/// `app.kubernetes.io/name: protector` (`protector.selectorLabels` under an un-overridden
+/// chart name). See [`self_severance`] for why a miss here is safe.
+fn is_protector_component(node: &Node) -> bool {
+    let Node::Workload(w) = node else {
+        return false;
+    };
+    w.labels
+        .get("app.kubernetes.io/component")
+        .is_some_and(|v| v == "agent")
+        || w.labels
+            .get("app.kubernetes.io/name")
+            .is_some_and(|v| v == "protector")
 }
 
 /// Choose the single containment for a chain, by the ADR-0009/0010 precedence — the
@@ -620,3 +721,8 @@ mod tests;
 // reaching `reconcile` end to end.
 #[cfg(test)]
 mod decisions_tests;
+
+// ADR-0040: `contain_node_link`/`self_severance` unit coverage, split into their own file —
+// `tests.rs` is already near the 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod contain_node_tests;

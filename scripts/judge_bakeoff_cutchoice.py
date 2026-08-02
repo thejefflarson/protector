@@ -25,6 +25,17 @@ Ground truth of the minimality centerpiece (`downstream_behavioral`: clean inter
 live-compromised downstream) is contain={downstream} ONLY — independently adjudicated against
 ADR-0034: cutting the clean entry is a GROUNDED (guard-admissible via the D5 entry-exemption) but
 non-minimal OVER-cut, exactly the residual risk T2b must penalize, not absolve.
+
+`downstream_boundary_broken_node` (ADR-0040) adds ONE fixture for the node-scoped mechanism
+escalation: a downstream workload with kernel-tamper evidence (a `PtraceAttach`, ADR-0040 §3(c))
+renders its containment-options line as a NODE cordon, not a pod quarantine — the resolver, not
+the model, made that swap (the model still only ever copies a node KEY into `contain`, never a
+mechanism). Ground truth stays contain={the named workload} ONLY: no over-cut of the entry (clean)
+or of any node-mate (not even on the menu — the fixture has none, so a fabricated third key would
+already show as an OVER-CUT). Per ADR-0033 this bench is authoritative ONLY on the DEPLOYED pod
+(local arm64 over-cuts, amd64 under-cuts on the pre-existing fixtures) — this fixture is added +
+documented here but has NOT been run/tuned against any local backend; do not tune the prompt to a
+local result for it.
 """
 import json, re, sys, time, urllib.request
 from collections import Counter
@@ -95,6 +106,22 @@ OBJS = (f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
 # entry status confused with the direct-exposure ENTRY/CACHE pair above).
 ROUTE_ENTRY = "workload/public/Pod/checkout-api-7f9d4c8b6d-x2p9k"
 ROUTE_ENTRY_LINE = f"  - <<<{ROUTE_ENTRY}>>>: isolate the internet-facing entry — deny all ingress + egress except proven-benign peers (reversible NetworkPolicy) [blast radius: drops the route-forwarded backend; 1 alive peer isolated]"
+
+# ADR-0040: a downstream workload the deterministic resolver has already escalated to the
+# NODE-scoped mechanism (a proven pod-boundary break, ADR-0040 §3) — a DISTINCT identity from
+# CACHE so this fixture never collides with the pod-quarantine cases above. The mechanism/blast
+# text is the exact fixed strings `ProposedAction::ContainNode::describe` /
+# `incident::menu::cut_blast_note` render (`engine/src/engine/respond/mod.rs`,
+# `engine/src/engine/reason/adjudicate/incident/menu.rs`) — copied verbatim, never paraphrased,
+# so a prompt-wording drift there would be caught by re-syncing this fixture, not silently missed.
+BOUNDARY_BROKEN_NODE = "workload/public/Pod/web-worker-2"
+BOUNDARY_BROKEN_NODE_LINE = (
+    f"  - <<<{BOUNDARY_BROKEN_NODE}>>>: cordon the node and default-deny its co-resident pods "
+    "(proven pod-boundary break — a pod-scoped policy can no longer contain this workload) "
+    "(damage-limitation, not a clean sever: the cordon stops scheduler-driven spread, the "
+    "co-resident denies stop lateral use of the node's other pods, and drain/reimage/rotate is "
+    "a human act)"
+)
 
 CASES = [
     # entry-only breach: log4j loaded on the ENTRY -> attack, contain ONLY the entry.
@@ -175,6 +202,16 @@ CASES = [
      "  - <<<workload/analytics/Pod/murmurify-metrics-0>>>: no evidence observed.",
      menu("  - <<<workload/analytics/Pod/murmurify-oprf-6f8b9c9d5-xk2p1>>>: isolate the internet-facing entry — deny all ingress + egress except proven-benign peers (reversible NetworkPolicy) [blast radius: drops the OPRF service; 2 alive peers isolated]",
           "  - <<<workload/analytics/Pod/murmurify-metrics-0>>>: quarantine this workload — default-deny NetworkPolicy (reversible, additive) [blast radius: 1 alive peer isolated]")),
+    # ADR-0040 NODE-CONTAINMENT: a downstream workload with kernel-tamper evidence (PtraceAttach,
+    # trigger (c)) — the resolver already escalated ITS containment-options line to the node
+    # cordon; the model's job is UNCHANGED (name the compromised workload's key, never a
+    # mechanism) -> attack, contain ONLY that workload. The clean entry stays running (no
+    # over-cut), and there is no third menu line to over-cut onto either — the fixture's own
+    # minimal shape is the "no over-cut of neighbors" check.
+    ("downstream_boundary_broken_node", "attack", {BOUNDARY_BROKEN_NODE},
+     ENTRY, "(none)", "(none)", "<<<connects to 10.42.3.5:8080 (cluster)>>>", OBJS,
+     f"  - <<<{BOUNDARY_BROKEN_NODE}>>>: CVEs observed loading at runtime: <<<(none)>>> | Exposed secrets: <<<(none)>>> | Observed runtime behavior: <<<PTRACE_ATTACH: ptrace attach into a foreign process (kernel tamper)>>>",
+     menu(ENTRY_LINE, BOUNDARY_BROKEN_NODE_LINE)),
 ]
 
 

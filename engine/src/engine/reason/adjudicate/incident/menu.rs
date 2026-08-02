@@ -14,13 +14,24 @@
 //! Evidence-bearing-but-uncontainable nodes collapse into one aggregate non-selectable
 //! set, so the model isn't baited into naming them. The whole render is content-derived,
 //! sorted, and deduped — byte-identical across passes on the same snapshot (cache-safe).
+//!
+//! **ADR-0040 mechanism escalation**: whichever node a line would otherwise resolve to
+//! (the entry's ladder result, or a downstream's `QuarantineWorkload`) is overridden to
+//! [`ProposedAction::ContainNode`] the moment [`boundary_break`] holds for that node — the
+//! SAME `build_menu` pass, so the menu and the ledger's own resolution
+//! (`respond::MitigationLedger::reconcile` reads back exactly the `ChosenCut` this menu
+//! resolved, ADR-0034 D6) can never disagree. This is a mechanism swap only: the model
+//! still names the SAME node key, never a new node/line ([`escalate`]).
+
+use std::collections::BTreeSet;
 
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::observe::health::HealthReport;
-use crate::engine::reason::proof::{Link, ProvenChain};
+use crate::engine::reason::proof::{Link, ProvenChain, boundary_break};
 use crate::engine::respond::actuator::{BlastRadius, predict_blast_radius};
 use crate::engine::respond::{
-    Mitigation, ProposedAction, containment_for, quarantine_workload_link,
+    Mitigation, ProposedAction, contain_node_link, containment_for, quarantine_workload_link,
+    self_severance,
 };
 
 use super::super::guards::fence;
@@ -130,18 +141,29 @@ impl Menu {
 /// of the existing resolvers — [`containment_for`]'s precedence ladder for the entry,
 /// [`quarantine_workload_link`] for each downstream evidence-bearing workload — so the
 /// menu and the ledger's own containment (`respond::MitigationLedger::reconcile`) can
-/// never disagree.
-pub fn build_menu(chain: &ProvenChain, graph: &SecurityGraph, health: &HealthReport) -> Menu {
+/// never disagree. `model_attack` is this pass's LIVE set of workloads the model has
+/// decisively named `assessment=attack` (across every entry, not just this chain's) —
+/// [`boundary_break`]'s trigger (d) composes two SEPARATE decisive model calls, so it is
+/// threaded through from the caller's already-live decision state rather than re-derived
+/// here (see `engine::adj_pass::model_attack_set`).
+pub fn build_menu(
+    chain: &ProvenChain,
+    graph: &SecurityGraph,
+    health: &HealthReport,
+    model_attack: &BTreeSet<NodeKey>,
+) -> Menu {
     let mut selectable = Vec::new();
     let mut uncontainable = Vec::new();
 
-    // Entry line: the ladder result, selectable only when it is BOTH additive-live and
-    // reversible (a durable-fix/RBAC/mount cut, or no cut at all, is uncontainable).
-    match containment_for(chain) {
-        Some((cut, action)) if action.is_additive_live() && action.is_reversible() => {
+    // Entry line: `escalate` resolves the ladder result, ESCALATED to `ContainNode` when
+    // `boundary_break` holds for the entry — selectable only when what it resolved to is
+    // BOTH additive-live and reversible, UNLESS it escalated (a cordon is deliberately not
+    // additive-live, ADR-0040 §5, but is always selectable once escalated).
+    match escalate(&chain.entry, containment_for(chain), graph, model_attack) {
+        Some((cut, action)) => {
             selectable.push(menu_line(chain.entry.clone(), cut, action, graph, health));
         }
-        _ => uncontainable.push(chain.entry.clone()),
+        None => uncontainable.push(chain.entry.clone()),
     }
 
     // Downstream lines: every evidence-bearing workload on the chain, MINUS the entry
@@ -150,14 +172,12 @@ pub fn build_menu(chain: &ProvenChain, graph: &SecurityGraph, health: &HealthRep
         if target.node == chain.entry {
             continue;
         }
-        match quarantine_workload_link(target) {
-            Some(cut) => selectable.push(menu_line(
-                target.node.clone(),
-                cut,
-                ProposedAction::QuarantineWorkload,
-                graph,
-                health,
-            )),
+        let fallback =
+            quarantine_workload_link(target).map(|cut| (cut, ProposedAction::QuarantineWorkload));
+        match escalate(&target.node, fallback, graph, model_attack) {
+            Some((cut, action)) => {
+                selectable.push(menu_line(target.node.clone(), cut, action, graph, health));
+            }
             None => uncontainable.push(target.node.clone()), // unlabeled — decline, never widen
         }
     }
@@ -167,6 +187,41 @@ pub fn build_menu(chain: &ProvenChain, graph: &SecurityGraph, health: &HealthRep
         selectable,
         uncontainable,
     }
+}
+
+/// Resolve one menu candidate's mechanism (ADR-0040 §1): `boundary_break(node)` escalates to
+/// [`ProposedAction::ContainNode`] regardless of what `fallback` (the ordinary ladder/
+/// quarantine resolution) would have picked — the node's OWN evidence already proves a
+/// pod-scoped policy can't contain it, so the pod-scoped mechanism is never offered
+/// alongside it. `fallback` can be `None` (nothing severs the chain by an edge) and
+/// escalation still applies: `boundary_break` needs only a `ScheduledOn` placement edge, no
+/// edge-cut. When `boundary_break` does NOT hold, `fallback` stands, filtered to the SAME
+/// additive-live + reversible bar the menu has always required (unchanged behavior).
+fn escalate(
+    node: &NodeKey,
+    fallback: Option<(Link, ProposedAction)>,
+    graph: &SecurityGraph,
+    model_attack: &BTreeSet<NodeKey>,
+) -> Option<(Link, ProposedAction)> {
+    if boundary_break_holds(node, graph, model_attack)
+        && let Some(cut) = contain_node_link(graph, node)
+    {
+        return Some((cut, ProposedAction::ContainNode));
+    }
+    fallback.filter(|(_, action)| action.is_additive_live() && action.is_reversible())
+}
+
+/// [`boundary_break`] over a [`NodeKey`] rather than a graph [`petgraph::stable_graph::NodeIndex`]
+/// — `false` (never a break) for a key absent from the graph, so a stale/removed node can
+/// never spuriously escalate.
+fn boundary_break_holds(
+    node: &NodeKey,
+    graph: &SecurityGraph,
+    model_attack: &BTreeSet<NodeKey>,
+) -> bool {
+    graph
+        .index_of(node)
+        .is_some_and(|idx| boundary_break(graph, idx, model_attack))
 }
 
 /// Sort + dedup a menu's two lists into the canonical shape [`Menu`] always carries, and drop
@@ -207,12 +262,21 @@ fn menu_line(
 /// exact cut — empty `justifications` is fine here, `predict_blast_radius` never reads them.
 /// `pub(crate)` (not private): the finding detail's cut-set panel reuses this to
 /// render a model-chosen cut's note identically to how its own menu line resolved it.
+///
+/// [`ProposedAction::ContainNode`] is a special case (ADR-0040 §4): `predict_blast_radius`
+/// walks `Relation::Reaches` edges OUT of the cut's source, which is meaningless for a
+/// node-scoped cut (a `Host` has no `Reaches` edges — its damage is "every co-resident pod",
+/// not a `reaches` peer set) — the honest, fixed-string damage-limitation note stands in
+/// instead, never the network-cut phrasing.
 pub(crate) fn cut_blast_note(
     cut: &Link,
     action: ProposedAction,
     graph: &SecurityGraph,
     health: &HealthReport,
 ) -> String {
+    if action == ProposedAction::ContainNode {
+        return contain_node_note(cut, graph);
+    }
     let mitigation = Mitigation {
         cut: cut.clone(),
         action,
@@ -220,6 +284,28 @@ pub(crate) fn cut_blast_note(
     };
     blast_note(&predict_blast_radius(&mitigation, graph, health))
 }
+
+/// The fixed-string honest damage-limitation note for a [`ProposedAction::ContainNode`]
+/// mitigation (ADR-0040 §4/consequences): never a clean sever — names the cordon, the
+/// co-resident denies, and the human-act durable fix explicitly, with a self-severance
+/// clause appended (also fixed-string) when protector's own agent/control-plane component
+/// is among the node's co-resident pods ([`self_severance`]). Built by concatenating two
+/// `&'static str` literals — no untrusted substrings, either way.
+fn contain_node_note(cut: &Link, graph: &SecurityGraph) -> String {
+    let mut note = CONTAIN_NODE_NOTE.to_string();
+    if self_severance(graph, &cut.from) {
+        note.push_str(CONTAIN_NODE_SELF_SEVERANCE_SUFFIX);
+    }
+    note
+}
+
+const CONTAIN_NODE_NOTE: &str = "damage-limitation, not a clean sever: the cordon stops \
+    scheduler-driven spread, the co-resident denies stop lateral use of the node's other \
+    pods, and drain/reimage/rotate is a human act";
+
+const CONTAIN_NODE_SELF_SEVERANCE_SUFFIX: &str = "; this node also hosts one of protector's \
+    OWN components — containing it will sever protector's own visibility/control of this \
+    node until a human intervenes";
 
 /// A fixed-shape, no-untrusted-text advisory note on a menu line's predicted blast
 /// radius. Only the workload COUNT varies (a number, never a name) — the full collateral
