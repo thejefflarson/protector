@@ -25,6 +25,7 @@ use super::agent_liveness::{
     derive_runtime_coverage, expected_agent_nodes,
 };
 use super::evidence::EntryEvidence;
+use super::reach::ReachAnnotation;
 use super::recency::RecencyInfo;
 use super::verdict_store::{BakeStats, ModelHealth, ReadinessConfig, VerdictStore};
 
@@ -185,6 +186,12 @@ pub struct Finding {
     /// adjudicator this run — distinct from `Some` carrying an empty cut set (see
     /// [`IncidentSummary`]).
     pub incident: Option<IncidentSummary>,
+    /// The adversary-reach annotation (ADR-0040): the value-free "if compromised, this
+    /// workload grants the attacker …" line, rendered once per entry and stamped onto
+    /// every finding that shares it. PRESENTATION-ONLY — see
+    /// [`super::reach::ReachAnnotation`]'s module docs for the judge-prompt-absence
+    /// guarantee. `None` only when the entry isn't a resolvable workload node.
+    pub reach: Option<String>,
 }
 
 /// One hop of a proven chain: `from -[relation]-> to`, with the **full** node keys
@@ -262,6 +269,9 @@ impl Finding {
             incident: decisions
                 .get(&chain.entry.0)
                 .map(|d| IncidentSummary::of(d, chain, graph, health)),
+            // Stamped by `publish_chains` (it computes the annotation once per DISTINCT
+            // entry, not once per finding) — see `with_reach`.
+            reach: None,
         }
     }
 
@@ -269,6 +279,14 @@ impl Finding {
     /// snapshot to resolve the entry pod's `spec.nodeName`.
     pub fn with_node(mut self, node: Option<String>) -> Self {
         self.node = node;
+        self
+    }
+
+    /// Stamp the entry's adversary-reach line (ADR-0040) — builder-style, called by
+    /// [`Findings::publish_chains`], which computes it once per entry and shares it across
+    /// every finding rooted there.
+    pub fn with_reach(mut self, reach: Option<String>) -> Self {
+        self.reach = reach;
         self
     }
 }
@@ -397,12 +415,24 @@ impl Findings {
         decisions: &BTreeMap<String, IncidentDecision>,
         health: &HealthReport,
     ) {
+        // The adversary-reach line (ADR-0040) is ENTRY-scoped, not objective-scoped — an
+        // entry can reach many objectives (argocd -> ~120 secrets), so it is computed once
+        // per DISTINCT entry here and shared across every finding rooted there, rather than
+        // re-derived per finding.
+        let mut reach_cache: BTreeMap<String, Option<String>> = BTreeMap::new();
         self.replace(
             chains
                 .iter()
                 .map(|c| {
+                    let reach = reach_cache
+                        .entry(c.entry.0.clone())
+                        .or_insert_with(|| {
+                            ReachAnnotation::for_entry(graph, &c.entry, chains).map(|a| a.line())
+                        })
+                        .clone();
                     Finding::from_chain(c, graph, decisions, health)
                         .with_node(entry_node(&snapshot.pods, &c.entry.0))
+                        .with_reach(reach)
                 })
                 .collect(),
         );

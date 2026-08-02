@@ -17,6 +17,7 @@ mod divergence;
 mod evidence;
 mod findings;
 mod judgement;
+mod reach;
 mod readiness;
 mod recency;
 mod report;
@@ -33,6 +34,7 @@ pub use divergence::{DivergenceCounts, DivergenceLog, DivergenceRow};
 pub use evidence::{CveEvidence, EntryEvidence, FindingEvidence};
 pub use findings::{CoverageEdge, CutRow, Finding, Findings, IncidentSummary, PathStep};
 pub use judgement::{Judgement, JudgementLog};
+pub use reach::{ReachAnnotation, SecretPurpose};
 pub use readiness::{InputState, NodeCoverageRow, NodeCoverageState, Readiness, ReadinessRow};
 // The dashboard view_model (ADR-0019) derives the live readiness snapshot from the engine's
 // config + per-pass health, the same pure aggregation the OTLP mirror reads.

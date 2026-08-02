@@ -95,6 +95,12 @@ pub struct BreachNotice<'a> {
     pub objectives: &'a [(super::graph::NodeKey, AttackRef)],
     /// Whether an action class is armed (drives shadow-vs-armed wording).
     pub enforcement: Enforcement,
+    /// The adversary-reach annotation (ADR-0040): the value-free "if compromised, this
+    /// workload grants the attacker …" line — closed-vocabulary categories and COUNTS
+    /// only (never a secret/workload name), so unlike everything else in this payload it
+    /// needs no redaction (see `state::ReachAnnotation`'s module docs). `None` when the
+    /// entry isn't a resolvable workload node.
+    pub reach: Option<&'a str>,
 }
 
 /// Which runtime-coverage transition to notify on. The counts-only operator push that
@@ -261,6 +267,15 @@ pub fn redacted_payload(notice: &BreachNotice<'_>, verbose: bool) -> Value {
             })
             .collect();
         payload["attack_detail"] = json!(per_objective);
+    }
+
+    // The adversary-reach line (ADR-0040): value-free by construction (closed-vocabulary
+    // categories + counts, never a secret/workload name), so it needs no scrubbing and is
+    // included whenever computed — sanitized anyway for the same structure-safety every
+    // field here gets. Absent (not a null field) when the entry wasn't a resolvable
+    // workload node, matching `last_observation`'s conditional-field precedent above.
+    if let Some(reach) = notice.reach {
+        payload["reach"] = json!(sanitize(reach));
     }
 
     payload
@@ -456,6 +471,7 @@ mod tests {
             verdict,
             objectives,
             enforcement,
+            reach: None,
         }
     }
 
@@ -576,6 +592,32 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&redacted_payload(&armed, false)).unwrap(),
             r#"{"attack":[{"tactic":"TA0001","technique":"Exploit Public-Facing Application","technique_id":"T1190"},{"tactic":"TA0006","technique":"Unsecured Credentials","technique_id":"T1552"}],"decision":"exploitable","enforcement":"armed","entry":"workload/app/Pod/web","message":"protector isolated workload/app/Pod/web (exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y )","objectives_reached":2,"verdict":"exploitable — [redacted] in web reaches [redacted] ([redacted]) see    x     y "}"#,
+        );
+    }
+
+    /// The adversary-reach line (ADR-0040) is a plain, present field when computed — no
+    /// tiering or scrubbing needed since it is value-free by construction (categories +
+    /// counts, never a secret/workload name) — and simply absent (no key at all, not
+    /// `null`) when the entry wasn't a resolvable workload node.
+    #[test]
+    fn reach_line_is_included_when_present_and_absent_when_none() {
+        let verdict = Verdict::Exploitable("reaches the secret".into());
+        let objectives = secret_objectives();
+
+        let mut with_reach = sample_notice(&verdict, &objectives, Enforcement::Shadow);
+        with_reach.reach =
+            Some("if compromised, this workload grants the attacker: a database-credential secret");
+        let payload = redacted_payload(&with_reach, false);
+        assert_eq!(
+            payload["reach"],
+            "if compromised, this workload grants the attacker: a database-credential secret"
+        );
+
+        let without_reach = sample_notice(&verdict, &objectives, Enforcement::Shadow);
+        let payload = redacted_payload(&without_reach, false);
+        assert!(
+            payload.get("reach").is_none(),
+            "no reach key at all when the entry has no annotation, not a null field"
         );
     }
 

@@ -353,6 +353,11 @@ pub struct FindingProps {
     pub cuts: CutSetProps,
     pub evidence: EvidenceProps,
     pub judgement: JudgementProps,
+    /// The adversary-reach annotation (ADR-0040): the value-free "if compromised, this
+    /// workload grants the attacker …" line — a PRESENTATION annotation only, never judge
+    /// input (see `state::ReachAnnotation`'s module docs). `None` when the entry isn't a
+    /// resolvable workload node.
+    pub reach: Option<String>,
     /// The blind-node caveat: set when this finding sits on a node with NO live runtime
     /// sensor and its disposition is latent / propose-only (uncorroborated). Its calm propose-only
     /// reading would be dishonest there — absence of a corroborating signal is not evidence of

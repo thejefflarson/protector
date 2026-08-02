@@ -116,6 +116,12 @@ pub struct EntryData<'a> {
     pub corroborated: bool,
     /// The verbatim model judgement for the entry, if captured (forensic).
     pub judgement: Option<&'a Judgement>,
+    /// The adversary-reach annotation (ADR-0040): the value-free "if compromised, this
+    /// workload grants the attacker …" line. Closed-vocabulary categories and COUNTS
+    /// only — never a secret/workload name — so unlike every other field here it is safe
+    /// to surface at EVERY tier, no scrubbing needed (see `state::ReachAnnotation`'s
+    /// module docs). `None` when the entry isn't a resolvable workload node.
+    pub reach: Option<&'a str>,
 }
 
 impl<'a> EntryData<'a> {
@@ -174,6 +180,9 @@ impl<'a> EntryData<'a> {
                 .map(|r| r.delta),
             corroborated: group.iter().any(|f| f.corroborated),
             judgement,
+            // Entry-scoped (every finding in the group shares the same computed value,
+            // `state::Findings::publish_chains`) — take the first `Some`.
+            reach: group.iter().find_map(|f| f.reach.as_deref()),
         }
     }
 
@@ -206,6 +215,9 @@ impl<'a> EntryData<'a> {
             "paths": self.paths_field(tier, &names),
             "cve_ids": self.cves_field(tier),
             "judgement": self.judgement_field(tier, &names),
+            // Value-free by construction (closed-vocabulary categories + counts, never a
+            // name) — present at EVERY tier, no scrub needed.
+            "reach": self.reach,
         })
     }
 

@@ -379,12 +379,20 @@ impl Engine {
                 // shadow-vs-armed posture is explicit. A no-op (zero outbound calls) when no
                 // notify URL is configured. Best-effort: it never affects the verdict, the
                 // journal, or actuation.
+                // The adversary-reach line (ADR-0040): value-free by construction
+                // (closed-vocabulary categories + counts, never a name), computed from
+                // THIS pass's already-proven `chains` — never re-walked, never fed to the
+                // model (context-not-evidence is enforced by absence from the judge prompt,
+                // not by a filter here).
+                let reach_line =
+                    state::ReachAnnotation::for_entry(graph, entry, chains).map(|r| r.line());
                 self.notifier
                     .notify(&notify::BreachNotice {
                         entry: entry_key,
                         verdict: &display,
                         objectives,
                         enforcement: notify::Enforcement::from_armed(!self.active.is_empty()),
+                        reach: reach_line.as_deref(),
                     })
                     .await;
             }
