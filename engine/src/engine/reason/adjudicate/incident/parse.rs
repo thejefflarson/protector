@@ -81,6 +81,19 @@ fn extract_object(reply: &str) -> Option<Value> {
         .and_then(|(start, end)| serde_json::from_str::<Value>(&reply[start..=end]).ok())
 }
 
+/// The hard-vs-degraded seam a caller needs to decide whether a reply is worth a re-ask
+/// (the deployed judge is non-deterministic even at temp-0, so a plain retry often
+/// recovers a genuinely unparseable reply): `true` only when [`extract_object`] itself
+/// fails — no `{`…`}` substring is even present, or what's between isn't valid JSON at
+/// all. Every OTHER degrade `parse_incident_decision` can produce (an out-of-range
+/// `assessment`, a non-member `contain` element, an inconsistent assessment↔cuts pairing,
+/// …) still parsed a real JSON object — that is a legitimate skeptic `Uncertain`, not a
+/// transport/formatting fluke, and must NOT trigger a retry (it would add a needless
+/// model call to a large fraction of passes, since `Uncertain` is a common real verdict).
+pub fn is_hard_parse_failure(reply: &str) -> bool {
+    extract_object(reply).is_none()
+}
+
 /// The `assessment` field, restricted to the closed 3-value vocabulary (ADR-0034 D2).
 /// Anything else — missing, wrong type, or an unrecognized string — is out of range.
 fn parse_assessment(object: &Value) -> Option<Assessment> {
