@@ -216,8 +216,11 @@ impl<'a> EntryData<'a> {
             "cve_ids": self.cves_field(tier),
             "judgement": self.judgement_field(tier, &names),
             // Value-free by construction (closed-vocabulary categories + counts, never a
-            // name) — present at EVERY tier, no scrub needed.
-            "reach": self.reach,
+            // name), so it's present at EVERY tier. Routed through the shared `sanitize`
+            // scrubber anyway — the same structure-safety the notifier's reach field gets
+            // (notify.rs) — so the two egress paths can't drift if the closed vocabulary
+            // ever interpolates a cluster string.
+            "reach": self.reach.map(sanitize),
         })
     }
 
