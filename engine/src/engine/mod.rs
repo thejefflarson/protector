@@ -283,6 +283,26 @@ pub struct Engine {
     /// `enforceScope` on demand. Written at the SAME point the live blast gate computes
     /// each blast, never a second, independently-derived pass over the graph/health.
     scope_preview: std::sync::Arc<state::ScopePreviewStore>,
+    /// The live cluster-facing revert half of the ADR-0040 node-containment actuator
+    /// (cordon lift + co-resident-deny lift), reached through the narrow
+    /// [`respond::actuator::node_containment::NodeContainmentRevert`] seam so the
+    /// self-revert loop below can hold either the real cluster actuator or a test double —
+    /// mirroring [`Self::actuator`] above. `None` (the [`Self::new`] default) leaves a
+    /// standing `ContainNode` mitigation un-reverted rather than driving it through the
+    /// wrong-shaped generic `actuator` (see [`Self::revert_contain_node`]); wiring a real
+    /// one in is a follow-up once a node-observation adapter exists
+    /// ([`respond::actuator::node_containment`]'s own doc).
+    node_containment_actuator:
+        Option<Box<dyn respond::actuator::node_containment::NodeContainmentRevert>>,
+    /// Observed [`respond::actuator::node_containment::NodeFact`]s for the `ContainNode`
+    /// revert ownership self-gate (ADR-0040 §5), keyed by node name. Empty (the
+    /// [`Self::new`] default) until seeded via [`Self::with_node_fact`] — a real
+    /// node-observation adapter refreshing this fleet every pass is a follow-up
+    /// (`respond::actuator::node_containment`'s own doc). A `ContainNode` mitigation whose
+    /// host has no entry here is left un-reverted rather than fabricating "no data ⇒ pass"
+    /// for the ownership check — the same discipline that module already applies to the
+    /// cordon rails.
+    node_facts: std::collections::BTreeMap<String, respond::actuator::node_containment::NodeFact>,
 }
 
 impl Engine {
@@ -338,6 +358,8 @@ impl Engine {
             break_glass_was_engaged: false,
             metrics: EngineMetrics::new(),
             scope_preview: std::sync::Arc::new(state::ScopePreviewStore::new()),
+            node_containment_actuator: None,
+            node_facts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -746,7 +768,16 @@ impl Engine {
             .reconcile(&health, &justified, &effective_active)
         {
             tracing::info!(reason = %reversion.reason, "reverting applied mitigation");
-            self.actuator.revert(&reversion.mitigation).await;
+            // ADR-0040 §5: a `ContainNode` reversion is a cordon lift + co-resident-deny
+            // lift, not the generic network actuator's `AdminNetworkPolicy`/`NetworkPolicy`
+            // delete — routing it through `self.actuator` would silently no-op (wrong object
+            // name, wrong kind) and leave the node cordoned. See `revert_contain_node`.
+            if reversion.mitigation.action == ProposedAction::ContainNode {
+                self.revert_contain_node(&reversion.mitigation, &graph)
+                    .await;
+            } else {
+                self.actuator.revert(&reversion.mitigation).await;
+            }
             self.metrics
                 .mitigations
                 .add(1, &[opentelemetry::KeyValue::new("action", "reverted")]);
@@ -831,6 +862,11 @@ impl Engine {
     }
 }
 
+// The ADR-0040 `ContainNode` revert seam (the builders attaching a live actuator/observed
+// `NodeFact`s, and the self-revert loop's `revert_contain_node` call above), extracted to
+// keep this orchestrator under the file-size cap (repo CLAUDE.md).
+mod node_containment_revert;
+
 // The engine's driver (`run_watch`) and its env-driven builders live in a sibling
 // module, split out to keep this file under the 1,000-line cap (repo CLAUDE.md). The
 // public surface (`run_watch`) is re-exported here so external paths
@@ -863,6 +899,13 @@ mod judge_freshness_tests;
 // switch), split out of `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).
 #[cfg(test)]
 mod break_glass_tests;
+
+// The ADR-0040 `ContainNode` revert-wiring tests (break-glass + the standard ledger
+// self-revert must actually uncordon a node, not just drop its co-resident
+// NetworkPolicies), split out of `break_glass_tests.rs` to keep every file under the
+// 1,000-line cap (CLAUDE.md).
+#[cfg(test)]
+mod break_glass_node_tests;
 
 // The pre-arm scope-simulation preview's engine-level mutation-free proof (ADR-0021,
 // ADR-0016), split out of `tests.rs` to keep every file under the 1,000-line cap (CLAUDE.md).

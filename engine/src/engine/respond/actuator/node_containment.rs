@@ -2,12 +2,19 @@
 //! default-deny rendering, and the deterministic rails that gate it. Split out of the
 //! actuator module root purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
 //!
-//! **This module is unit-tested, wired nowhere live yet.** `ContainNode` is
+//! **The apply side is unit-tested, wired nowhere live yet; the revert side IS wired into
+//! `Engine::process`'s break-glass/self-revert loop.** `ContainNode` is
 //! `is_additive_live() == false` ([`ProposedAction::is_additive_live`]), so
 //! [`super::decide`] already routes every `ContainNode` mitigation to
 //! [`super::Decision::Forbidden`] regardless of what these rails would say — there is no
 //! `node` arming rung to escalate past (ADR-0040 §6, a separate ticket), so nothing here can
-//! become live-armable through this module alone. What IS delivered:
+//! become live-*applied* through this module alone. But ADR-0040 §5 also requires
+//! `ContainNode` to join the armed-set revert trigger (ADR-0036) and the standard ledger
+//! self-revert (ADR-0017) — that half does not depend on the apply-side rung existing at
+//! all, so it is wired now: `Engine::process`'s self-revert loop routes a standing
+//! `ContainNode` reversion through [`NodeContainmentRevert`] rather than the generic network
+//! `actuator`, whose `revert()` speaks a different object shape entirely and would silently
+//! leave the node cordoned. What IS delivered:
 //!
 //! - [`render_cordon`]/[`render_uncordon`]: the pure `Node.spec.unschedulable` patch,
 //!   carrying [`CORDON_OWNER_ANNOTATION`] so a revert only ever lifts a cordon protector
@@ -22,10 +29,10 @@
 //!   [`NodeFact`] fleet so they're unit-testable without a live cluster and independent of
 //!   any arming/enabled state — a rail refusal is exactly as meaningful in shadow as it
 //!   would be armed.
-//! - [`live`]'s [`NodeContainmentActuator`]: the cluster-facing apply/revert glue a future
-//!   ticket's break-glass/self-revert verification and rung-3 wiring calls into. Thin and
-//!   untested against a real cluster, like [`super::KubeActuator`]/[`super::IsolationActuator`]
-//!   — [`render_cordon`]/[`render_uncordon`] are the unit-tested pure half.
+//! - [`live`]'s [`NodeContainmentActuator`]/[`NodeContainmentRevert`]: the cluster-facing
+//!   apply/revert glue. Thin and untested against a real cluster, like
+//!   [`super::KubeActuator`]/[`super::IsolationActuator`] — [`render_cordon`]/
+//!   [`render_uncordon`] are the unit-tested pure half.
 //!
 //! **Node role/schedulability observation is a follow-up, not this ticket.** [`NodeFact`]
 //! is the fleet-state shape the rails need, but nothing in the engine watches Kubernetes
@@ -33,11 +40,13 @@
 //! adapter, ADR-0040 §3), which needs no new RBAC. Populating a
 //! real `NodeFact` fleet needs a `nodes` `get/list/watch` grant this ticket deliberately
 //! does not add (ADR-0040 §7 ships the actuator split from the chart/RBAC change; the
-//! ticket that adds this observation is the natural place to also wire these rails into
-//! `Engine::process`'s per-pass loop). Evaluating a rail against a fabricated "no data"
+//! ticket that adds this observation is the natural place to also wire the apply side of
+//! these rails into `Engine::process`'s per-pass loop, and to keep `Engine`'s attached
+//! `NodeFact` fleet fresh every pass). Evaluating a rail against a fabricated "no data"
 //! fleet would silently default it to PASS — exactly the "weakening the rail" the ADR's
-//! build-settled note warns against — so this module is deliberately not wired into the
-//! live per-pass loop until real fleet data exists.
+//! build-settled note warns against — so the engine's self-revert loop skips (rather than
+//! fabricates) a revert for any host with no attached [`NodeContainmentRevert`] or no
+//! observed [`NodeFact`], the same discipline this doc already applied to the cordon rails.
 
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::respond::{
@@ -45,7 +54,7 @@ use crate::engine::respond::{
 };
 
 mod live;
-pub use live::NodeContainmentActuator;
+pub use live::{NodeContainmentActuator, NodeContainmentRevert};
 
 /// The annotation a cordon carries to record that PROTECTOR placed it (ADR-0040 §5). A
 /// revert only lifts a cordon carrying this — never a human's or the cluster

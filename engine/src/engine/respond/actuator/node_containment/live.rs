@@ -15,6 +15,37 @@ use crate::engine::respond::actuator::{Actuation, Actuator, IsolationActuator, c
 
 use super::{NodeFact, render_cordon, render_uncordon, revert_decision};
 
+/// The revert half of [`NodeContainmentActuator`]'s contract, pulled into a trait purely so
+/// the break-glass/self-revert loop ([`crate::engine::Engine::process`]) can hold either the
+/// live cluster-facing actuator or a test double — mirroring how [`Actuator`] lets
+/// [`crate::engine::respond::actuator::KubeActuator`] and a recording double stand in for
+/// each other there. `NodeContainmentActuator` itself deliberately does not implement
+/// `Actuator` (this module's own doc: one `ContainNode` mitigation maps to MANY cluster
+/// objects, a shape `Actuator`'s single-mitigation signature can't express) — this trait
+/// keeps that multi-object shape (mitigation + observed [`NodeFact`] + the co-resident set)
+/// while still giving the engine a swappable seam onto it.
+#[async_trait::async_trait]
+pub trait NodeContainmentRevert: Send + Sync {
+    async fn revert(
+        &self,
+        mitigation: &Mitigation,
+        target: &NodeFact,
+        co_resident: &[Mitigation],
+    ) -> Actuation;
+}
+
+#[async_trait::async_trait]
+impl NodeContainmentRevert for NodeContainmentActuator {
+    async fn revert(
+        &self,
+        mitigation: &Mitigation,
+        target: &NodeFact,
+        co_resident: &[Mitigation],
+    ) -> Actuation {
+        NodeContainmentActuator::revert(self, mitigation, target, co_resident).await
+    }
+}
+
 /// A dynamic `Api` for the cluster-scoped core `Node` resource.
 fn node_api(client: &kube::Client) -> kube::Api<kube::core::DynamicObject> {
     let gvk = kube::core::GroupVersionKind::gvk("", "v1", "Node");
