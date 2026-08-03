@@ -99,6 +99,41 @@ jobs:
                --set mode=enforce >/dev/null 2>&1; then
             echo "mode: enforce with empty enforceScope was not refused"; exit 1
           fi
+      - name: "Assert node-containment RBAC (ADR-0040 §6) is posture-derived on enforceRung: node"
+        run: |
+          # The metadata-only nodes READ (fleet observation for the rails) is ALWAYS ON,
+          # even under mode: audit (the default) — a read is harmless, and ContainNode
+          # stays structurally unarmed either way (ADR-0040 §5).
+          audit=$(helm template protector charts/protector --namespace protector)
+          echo "$audit" | grep -A3 'resources: ."nodes".' | grep -q 'get' \
+            || { echo "audit default is missing the always-on nodes read grant"; exit 1; }
+          # But NO install below the top rung — including audit and enforce+quarantine —
+          # may ever grant the nodes WRITE (patch).
+          if echo "$audit" | grep -A3 'resources: ."nodes".' | grep -q 'patch'; then
+            echo "audit default leaked the nodes patch (write) grant"; exit 1
+          fi
+          quarantine=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.namespaces={payments}' \
+            --set enforceRung=quarantine)
+          if echo "$quarantine" | grep -A3 'resources: ."nodes".' | grep -q 'patch'; then
+            echo "enforce+quarantine leaked the nodes patch (write) grant"; exit 1
+          fi
+          # enforce + enforceRung: node is the ONLY posture that grants nodes patch —
+          # cluster-scoped (no per-namespace Role/RoleBinding exists for it, unlike
+          # NetworkPolicy) — alongside its predecessor rungs' NetworkPolicy write grant.
+          node=$(helm template protector charts/protector --namespace protector \
+            --set mode=enforce --set 'enforceScope.namespaces={payments}' \
+            --set enforceRung=node)
+          echo "$node" | grep -A3 'resources: ."nodes".' | grep -q 'patch' \
+            || { echo "enforce+node did not derive the nodes patch (write) grant"; exit 1; }
+          echo "$node" | grep -A3 'resources: ."networkpolicies".' | grep -q 'create' \
+            || { echo "enforce+node lost the predecessor NetworkPolicy write grant"; exit 1; }
+          # enforceRung: node without mode: enforce must be refused at render time too
+          # (defense-in-depth alongside the engine's own startup refusal).
+          if helm template protector charts/protector --namespace protector \
+               --set enforceRung=node >/dev/null 2>&1; then
+            echo "enforceRung: node under mode: audit was not refused"; exit 1
+          fi
       - name: "Assert namespace-scoped enforce tightens NetworkPolicy write to per-namespace Roles"
         run: |
           # NetworkPolicy is namespaced and the engine only writes cuts inside

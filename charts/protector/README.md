@@ -111,6 +111,26 @@ rung:
 A rung implies its narrower predecessor — `quarantine` still arms the edge-cut too —
 so this is one ordered position to reason about, not independent per-cut toggles.
 
+**A third, explicit opt-in — `enforceRung: node` — makes `ContainNode` ELIGIBLE TO
+PROPOSE, protector's first NODE-write RBAC (ADR-0040).** Strictly above `quarantine`
+(`edge-cut < quarantine < node`): a proven pod-boundary break (a host-credential read,
+a root escalation paired with a container-escape primitive, a kernel tamper, or
+co-resident model-confirmed compromise) escalates from a pod-scoped cut to a *proposal*
+to cordon the `Host` node plus a default-deny sweep of its other labelled pods.
+**`ContainNode` is PROPOSE-ONLY and NEVER auto-applied, at any rung** — ADR-0040 §5
+makes a node cut propose-first *by construction* (a real node always has alive
+collateral): arming this rung only makes a rails-clean cut surface as an actionable
+proposal (the deterministic rails — never the control plane, at most one node
+concurrently, a two-schedulable-worker floor, ownership-gated revert — are pre-checked
+and named on it) instead of a bare "not auto-enabled" line; an actual cordon requires an
+explicit human action outside protector. Requires `mode: enforce` with a non-empty
+`enforceScope`, exactly like every other rung; the chart and the engine both refuse to
+start otherwise:
+
+```sh
+--set enforceRung=node
+```
+
 **The fail-closed webhook and the actuation RBAC are derived from the same
 `enforceScope`** — they can no longer drift from what the gates enforce. By default the
 audit webhook **fails open** (`failurePolicy: Ignore`, so a protector outage never
@@ -231,11 +251,17 @@ The engine's reversible network cut is armed together with the webhook surfaces 
 `mode: enforce` (above) — there is no separate engine arming switch — but *how much* of
 it is armed is its own ORDERED ladder, `enforceRung` (ADR-0035): `edge-cut` (the
 default) arms only the surgical edge-cut; `quarantine` also arms the broader
-quarantines. In `mode: audit` the engine is always dry-run, regardless of `enforceRung`;
-under `mode: enforce` it applies the rung's armed cut(s) on a corroborated attack path
-whose endpoints are within `enforceScope`, and the NetworkPolicy write grant is derived
+quarantines; `node` (ADR-0040 §6) additionally makes `ContainNode`, protector's first
+node-write action, ELIGIBLE TO PROPOSE — never to auto-apply, at any rung (ADR-0040 §5's
+propose-first-by-construction rule), gated the whole way down by its own deterministic
+rails. In `mode: audit` the engine is always dry-run, regardless of `enforceRung`; under
+`mode: enforce` it applies the rung's armed cut(s) on a corroborated attack path whose
+endpoints are within `enforceScope`, and the NetworkPolicy write grant is derived
 from `mode` (they arm together, independent of the rung — the RBAC grant covers the same
-object kind at either rung). Choose the CNI mechanism the cut renders with:
+object kind at either rung). The `nodes` `patch` grant, unlike NetworkPolicy's, is
+derived from `enforceRung: node` specifically (see "Enforce" above) — it is the one
+grant on this ladder that does NOT arm together with the others. Choose the CNI
+mechanism the cut renders with:
 
 ```sh
 --set engine.actuator=networkpolicy      # default — any NetworkPolicy-enforcing CNI (ADR-0010)
@@ -275,7 +301,7 @@ Requires the `protector-agent` image and probes load-tested on your kernel (see
 | `mode`                       | `audit`                              | **The posture switch** (ADR-0021). `enforce` arms the webhooks + the engine's cut up to `enforceRung`, all in `enforceScope`. |
 | `enforceScope.namespaces`    | `[]`                                 | Namespace names to enforce (used only under `mode: enforce`). No wildcard. |
 | `enforceScope.labels`        | `{}`                                 | Pod labels (`key: value`) to enforce anywhere; labels behave like namespaces. |
-| `enforceRung`                | `edge-cut`                           | **The engine's cut-severity ladder** (ADR-0035, used only under `mode: enforce`). `edge-cut` arms only the surgical `DenyNetworkPath` cut; `quarantine` also arms the broader entry/workload quarantines. Ordered — `quarantine` implies `edge-cut`. |
+| `enforceRung`                | `edge-cut`                           | **The engine's cut-severity ladder** (ADR-0035, used only under `mode: enforce`). `edge-cut` arms only the surgical `DenyNetworkPath` cut; `quarantine` also arms the broader entry/workload quarantines; `node` (ADR-0040 §6) makes `ContainNode` (cordon + co-resident deny) ELIGIBLE TO PROPOSE — never to auto-apply, at any rung — and grants the cluster-scoped `nodes` `patch` RBAC. Ordered — each rung implies its predecessor(s). `node` requires `mode: enforce` with a non-empty `enforceScope`. |
 | `image.tag`                  | `""` → chart `appVersion`            | Pin a cosign-signed semver tag.                    |
 | `imagePullSecrets`           | `[]`                                 | protector publishes to a public ghcr repo.         |
 | `engine.enabled`             | `true`                               | The mitigation engine (the product).               |

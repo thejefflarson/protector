@@ -22,6 +22,10 @@
 //! - [`PlacementAdapter`] — `scheduled-on` edges from every scheduled Workload to
 //!   its `Host` (ADR-0040), the pod→node placement fact node containment resolves
 //!   co-residency from.
+//! - [`node_fact::observe_node_facts`] — the node-containment rails' `NodeFact` fleet
+//!   (ADR-0040 §3/§6), mapped from the watched `Node` fleet. NOT an [`Adapter`] (its
+//!   output bypasses the graph by design, per its own module doc), so it is a free
+//!   function rather than a struct in this list.
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::SystemTime;
@@ -49,6 +53,7 @@ mod findings;
 mod ingress_exposure;
 mod linkerd;
 mod network;
+pub mod node_fact;
 mod placement;
 mod rbac;
 mod secret_mount;

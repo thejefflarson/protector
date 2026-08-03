@@ -86,7 +86,10 @@ impl Posture {
     /// Resolve `PROTECTOR_MODE` + `PROTECTOR_ENFORCE_SCOPE_NAMESPACES` /
     /// `PROTECTOR_ENFORCE_SCOPE_LABELS` + `PROTECTOR_ENFORCE_RUNG`. `mode: enforce`
     /// with an empty scope is refused — enforcing everywhere is the footgun ADR-0021
-    /// guards against (no wildcard).
+    /// guards against (no wildcard). `PROTECTOR_ENFORCE_RUNG=node` additionally
+    /// requires `mode: enforce` (with the non-empty scope the check above already
+    /// requires) — protector's first node-write action class must never be configured
+    /// without both enforcement gates armed (ADR-0040 §6).
     fn from_env() -> Result<Self> {
         let mode = env_or("PROTECTOR_MODE", "audit")
             .trim()
@@ -106,6 +109,15 @@ impl Posture {
             );
         }
         let rung = ArmingRung::from_name(&env_or("PROTECTOR_ENFORCE_RUNG", "edge-cut"));
+        if rung == ArmingRung::Node && !enforce {
+            anyhow::bail!(
+                "PROTECTOR_ENFORCE_RUNG=node requires PROTECTOR_MODE=enforce (with a \
+                 non-empty enforceScope) — refusing to start: node containment \
+                 (ADR-0040) is protector's first node-write action, and configuring its \
+                 rung without the enforce gate armed is very likely a misconfiguration, \
+                 not an intentional shadow rung (ADR-0035)."
+            );
+        }
         Ok(Self {
             enforce,
             namespaces,
@@ -501,6 +513,16 @@ mod tests {
     use protector::engine::respond::ProposedAction;
     use protector::policy::EnforceScope;
     use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    /// `cargo test` runs unit tests on multiple threads by default, but
+    /// `PROTECTOR_MODE`/`PROTECTOR_ENFORCE_SCOPE_NAMESPACES`/`PROTECTOR_ENFORCE_RUNG` are
+    /// process-global env vars — every test below that sets/clears them must hold this
+    /// lock for its whole body, or two such tests interleaved on different threads race
+    /// each other's env mutations (a `Posture::from_env()` call can observe a var another
+    /// concurrently-running test just set or cleared). `Mutex<()>`, not an atomic: this is
+    /// pure mutual exclusion, no data is actually guarded.
+    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Build a Posture directly, bypassing env, so the derivation is tested without
     /// touching process-global env. Defaults to the narrowest rung (`edge-cut`) — the
@@ -630,8 +652,9 @@ mod tests {
     #[test]
     fn enforce_with_empty_scope_is_refused() {
         // ADR-0021: no enforce-everywhere wildcard. `mode: enforce` with an empty scope
-        // must fail at startup. Serial env mutation guarded like the other env tests.
-        // SAFETY: single-threaded within this test; vars are set + cleared here only.
+        // must fail at startup. Serial env mutation guarded like the other env tests
+        // (`ENV_TEST_LOCK`) — held for the whole test body.
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("PROTECTOR_MODE", "enforce");
             std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
@@ -658,7 +681,7 @@ mod tests {
     fn enforce_rung_env_var_selects_the_ladder_position() {
         // ADR-0035: `PROTECTOR_ENFORCE_RUNG` unset defaults to the narrowest rung
         // (edge-cut-only); `quarantine` opts into the second rung.
-        // SAFETY: single-threaded within this test; vars are set + cleared here only.
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("PROTECTOR_MODE", "enforce");
             std::env::set_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES", "payments");
@@ -676,6 +699,39 @@ mod tests {
         }
         let quarantine_rung = Posture::from_env().expect("quarantine rung is accepted");
         assert_eq!(quarantine_rung.rung, ArmingRung::Quarantine);
+
+        unsafe {
+            std::env::remove_var("PROTECTOR_MODE");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+            std::env::remove_var("PROTECTOR_ENFORCE_RUNG");
+        }
+    }
+
+    #[test]
+    fn enforce_rung_node_requires_enforce_mode() {
+        // ADR-0040 §6: `enforceRung: node` without `mode: enforce` (+ non-empty
+        // enforceScope) must refuse to start — protector's first node-write action
+        // class is never configured on a hunch.
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("PROTECTOR_MODE");
+            std::env::remove_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES");
+            std::env::set_var("PROTECTOR_ENFORCE_RUNG", "node");
+        }
+        assert!(
+            Posture::from_env().is_err(),
+            "enforceRung: node under mode: audit (the default) must be refused"
+        );
+
+        // Armed correctly (enforce + scope + node rung), it is accepted.
+        unsafe {
+            std::env::set_var("PROTECTOR_MODE", "enforce");
+            std::env::set_var("PROTECTOR_ENFORCE_SCOPE_NAMESPACES", "payments");
+        }
+        let p = Posture::from_env().expect("enforce + scope + node rung is accepted");
+        assert_eq!(p.rung, ArmingRung::Node);
+        let (active, _scope) = p.engine_arming();
+        assert!(active.is_enabled(ProposedAction::ContainNode));
 
         unsafe {
             std::env::remove_var("PROTECTOR_MODE");

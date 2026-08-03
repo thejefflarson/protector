@@ -403,7 +403,7 @@ pub async fn run_watch(
     signing_exceptions: crate::policies::signature::SigningExceptions,
 ) -> anyhow::Result<()> {
     use futures::stream::StreamExt;
-    use k8s_openapi::api::core::v1::{Pod, Secret, Service};
+    use k8s_openapi::api::core::v1::{Node, Pod, Secret, Service};
     use k8s_openapi::api::networking::v1::{Ingress, IngressClass, NetworkPolicy};
     use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
     use kube::Api;
@@ -449,7 +449,16 @@ pub async fn run_watch(
     // The offline IP→ASN dataset: read each pass to group INTERNET egress by
     // provider in the prompt. Shares the same swap cell we spawn the reloader on below.
     .with_asn(asn.clone())
-    .with_break_glass(break_glass.clone());
+    .with_break_glass(break_glass.clone())
+    // The node-containment REVERT actuator (ADR-0040 §5): uncordon/co-resident-deny-lift
+    // glue for the break-glass/self-revert loop
+    // (`crate::engine::node_containment_revert::Engine::revert_contain_node`). There is
+    // deliberately no corresponding APPLY wiring here — `ContainNode` is propose-only at
+    // every arming rung (ADR-0040 §5's propose-first-by-construction rule), so nothing in
+    // `Engine::process` ever calls `NodeContainmentActuator::apply`.
+    .with_node_containment_actuator(Box::new(
+        respond::actuator::node_containment::NodeContainmentActuator::new(client.clone()),
+    ));
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
     // so the admission-decision log isn't blank after a restart — parallel to how
@@ -733,6 +742,13 @@ pub async fn run_watch(
     // IngressExposureAdapter's raw material.
     let (ingresses, ingresses_w) = reflector::store::<Ingress>();
     let (ingress_classes, ingress_classes_w) = reflector::store::<IngressClass>();
+    // The Node fleet (ADR-0040 §3/§6) — the node-containment rails' raw material
+    // (`observe::adapter::node_fact::observe_node_facts`). Metadata-only in effect (only
+    // name/labels/spec.unschedulable/the cordon annotation are ever read from it), always
+    // watched regardless of posture — the always-on `nodes` read grant (see the chart's
+    // ClusterRole) — so the rails have real fleet data from the pass `enforceRung: node`
+    // is armed, not just from the pass after.
+    let (nodes, nodes_w) = reflector::store::<Node>();
 
     let cfg = watcher::Config::default();
     // CRITICAL: each reflector runs in its OWN task so its Store stays current no
@@ -772,6 +788,7 @@ pub async fn run_watch(
     spawn_reflector!(rolebindings_w, RoleBinding);
     spawn_reflector!(clusterroles_w, ClusterRole);
     spawn_reflector!(clusterrolebindings_w, ClusterRoleBinding);
+    spawn_reflector!(nodes_w, Node);
     // ADR-0038: unlike every type above (always granted), the Ingress/IngressClass
     // RBAC can legitimately be missing (an older chart render, or the forked cluster
     // chart before its RBAC hand-port lands — see the ADR's rollout note). Preflight
@@ -863,6 +880,8 @@ pub async fn run_watch(
             linkerd_servers: linkerd_servers_now,
             linkerd_authz_policies: linkerd_policies_now,
             linkerd_mtls_auths: linkerd_mtls_now,
+            // The Node fleet (ADR-0040 §3/§6) — the node-containment rails' raw material.
+            nodes: nodes.state().iter().map(|n| (**n).clone()).collect(),
         };
         // Run the supply-chain sweep pipeline over this snapshot: observe signing posture,
         // opt-in Rekor reconciliation, default-on provenance observation, publish the whole-pass

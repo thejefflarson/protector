@@ -66,7 +66,7 @@ enforceScope:
   namespaces: []
   labels: {}
 
-# The ORDERED network-cut arming ladder (ADR-0035) — how far `mode: enforce` is armed.
+# The ORDERED cut-severity arming ladder (ADR-0035) — how far `mode: enforce` is armed.
 # One position, not independent per-cut toggles: a higher rung always implies its
 # narrower predecessor. Used only when mode: enforce; ignored under mode: audit.
 #   edge-cut   (DEFAULT) — arms ONLY the surgical DenyNetworkPath edge-cut, the
@@ -75,6 +75,18 @@ enforceScope:
 #              entry quarantine and the compromised-workload quarantine (both still the
 #              same additive/reversible network-deny mechanism, ADR-0010). Escalate here
 #              only after baking confidence on edge-cut.
+#   node       — an explicit THIRD opt-in, strictly above quarantine (ADR-0040 §6): makes
+#              ContainNode (cordon the Host a proven pod-boundary break is scheduled on,
+#              plus a co-resident default-deny sweep) ELIGIBLE to be PROPOSED — protector's
+#              first node-write RBAC. ContainNode is PROPOSE-ONLY: ADR-0040 §5 makes a node
+#              cut propose-first BY CONSTRUCTION (a real node always has alive collateral),
+#              so it is NEVER auto-applied at any rung — the deterministic rails (never the
+#              control plane, at most one node, a two-schedulable-worker floor,
+#              ownership-gated revert) are a bound on the proposal, not a replacement for
+#              human review; an actual cordon needs an explicit human action outside
+#              protector. Requires mode: enforce with a non-empty enforceScope, exactly
+#              like every other rung — the engine refuses to start otherwise. Escalate here
+#              only after baking confidence on quarantine.
 enforceRung: edge-cut
 
 image:

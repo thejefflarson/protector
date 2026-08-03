@@ -49,6 +49,17 @@ rules:
   - apiGroups: ["policy.linkerd.io"]
     resources: ["servers", "authorizationpolicies", "meshtlsauthentications"]
     verbs: ["get", "list", "watch"]
+  # Node fleet observation (ADR-0040 §3/§6) — metadata-only (name, the
+  # node-role.kubernetes.io/control-plane label, spec.unschedulable, protector's own
+  # cordon-ownership annotation; never .data, there is none on a Node). ALWAYS ON,
+  # like every other read grant above: this is a READ, harmless under mode: audit (the
+  # ContainNode class stays structurally unarmed either way, ADR-0040 §5), and the
+  # node-containment rails need real fleet data the moment `enforceRung: node` is armed
+  # — gating the read behind the rung too would leave the very first pass after arming
+  # blind. The WRITE this read feeds (below) stays posture-derived.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   {{- if eq .Values.mode "enforce" }}
   # mode: enforce — the network actuator creates/deletes its own (managed-by: protector)
   # additive, reversible objects to quarantine/sever a corroborated attack path. The
@@ -79,6 +90,24 @@ rules:
   - apiGroups: ["policy.networking.k8s.io"]
     resources: ["adminnetworkpolicies"]
     verbs: ["create", "delete", "patch"]
+  {{- end }}
+  {{- if eq .Values.enforceRung "node" }}
+  # mode: enforce + enforceRung: node (ADR-0040 §6, ADR-0021 posture-derived RBAC) —
+  # the top rung's ONLY new write surface: Node.spec.unschedulable (cordon/uncordon).
+  # ContainNode is PROPOSE-ONLY and never auto-applied at any rung (ADR-0040 §5's
+  # propose-first-by-construction rule) — this grant exists for the standard ledger
+  # self-revert/break-glass UNCORDON path (a standing cut, however it became standing,
+  # must still be liftable) and for a future human-approval-to-apply flow, gated the
+  # whole way down by the SAME deterministic rails regardless of this grant existing
+  # (respond::actuator::node_containment::cordon_decision). `nodes` is IRREDUCIBLY
+  # CLUSTER-SCOPED — unlike NetworkPolicy there is no namespaced Node kind to narrow
+  # this to — so the grant is cluster-wide even for a namespace-only enforceScope;
+  # `enforceScope`/the arming ladder still confine WHICH mitigations may be proposed,
+  # this only grants the mechanism. `patch` only: the engine never creates or deletes
+  # a Node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
   {{- end }}
   {{- end }}
 {{- end }}

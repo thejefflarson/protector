@@ -106,14 +106,25 @@ pub(super) struct EngineMetrics {
     /// operator can page on "this fired at all" rather than poll the gauge.
     pub(super) break_glass_transitions: opentelemetry::metrics::Counter<u64>,
     /// `ProposedAction::ContainNode` (ADR-0040) events, by `event`
-    /// (`proposed`/`applied`/`reverted`/`rail_refused`) and, for a `rail_refused` event,
-    /// `reason` (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned` —
-    /// `respond::actuator::node_containment::RailRefusal::metric_reason`). A separate
-    /// counter from the generic [`Self::mitigations`] one: `ContainNode` is
-    /// `is_additive_live() == false`, so it never reaches `mitigations`' `applied`/
-    /// `reverted` labels through the generic auto-apply path — and its deterministic rails
-    /// must be observable even in shadow (no `node` arming rung wired yet), so a refusal is
-    /// counted regardless of whether anything is armed.
+    /// (`proposed`/`reverted`/`rail_refused`) and, for a `rail_refused` event, `reason`
+    /// (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned`/
+    /// `unknown-node` — `respond::actuator::node_containment::RailRefusal::metric_reason`).
+    /// **There is no `applied` event and never will be**: ADR-0040 §5 makes `ContainNode`
+    /// propose-first BY CONSTRUCTION (never auto-applied, at any arming rung), so this
+    /// counter only ever observes proposal/refusal/revert, never an apply. `proposed`
+    /// fires from TWO call sites at different cadences, both meaning "there is a live,
+    /// reviewable node-containment candidate right now": edge-triggered the moment the
+    /// ledger first proposes the mitigation at all (`Engine::process`'s ledger-delta
+    /// loop, unconditional — fires even under `mode: audit`), and level-triggered every
+    /// pass thereafter while it is ALSO armed (`node` rung), in `enforceScope`, and every
+    /// deterministic rail passes (`respond::actuator::node_containment::evaluate_proposal`)
+    /// — the stronger claim "this is currently a rails-clean, actionable proposal", not
+    /// just "boundary_break fired once". A separate counter from the generic
+    /// [`Self::mitigations`] one: `ContainNode` never reaches `mitigations`' `applied`/
+    /// `reverted` labels through the generic auto-apply path (it is
+    /// `is_additive_live() == false`), and its deterministic rails must be observable
+    /// even when unarmed (a rail refusal is exactly as meaningful in shadow), so a
+    /// refusal is counted regardless of whether anything is armed.
     pub(super) contain_node: opentelemetry::metrics::Counter<u64>,
 }
 
@@ -239,8 +250,9 @@ impl EngineMetrics {
             contain_node: m
                 .u64_counter("protector.engine.contain_node")
                 .with_description(
-                    "ContainNode (ADR-0040) events by event (proposed/applied/reverted/\
-                     rail_refused) and, for a refusal, reason.",
+                    "ContainNode (ADR-0040) events by event (proposed/reverted/\
+                     rail_refused) and, for a refusal, reason. Propose-only — no \
+                     applied event exists.",
                 )
                 .build(),
         }
@@ -258,9 +270,10 @@ impl EngineMetrics {
             .add(1, &[opentelemetry::KeyValue::new("state", state)]);
     }
 
-    /// Record one `ContainNode` actuation event (ADR-0040): `event` is one of
-    /// `proposed`/`applied`/`reverted`/`rail_refused`; `reason` is `Some` only for
-    /// `rail_refused` — the refusal-reason label
+    /// Record one `ContainNode` proposal-lifecycle event (ADR-0040 §5): `event` is one of
+    /// `proposed`/`reverted`/`rail_refused` — there is deliberately no `applied` event, a
+    /// node cut is propose-first by construction and never auto-applies; `reason` is
+    /// `Some` only for `rail_refused` — the refusal-reason label
     /// (`respond::actuator::node_containment::RailRefusal::metric_reason`) alert rules key
     /// on. Fires unconditionally — this counter carries no arming/mode gate of its own, so a
     /// `rail_refused` event is exactly as countable in shadow as it would be once a `node`
@@ -332,9 +345,9 @@ mod tests {
     /// ticket adds (with and without a reason) must not panic.
     #[test]
     fn record_contain_node_fires_every_event_with_no_armed_state_required() {
+        // Propose-only (ADR-0040 §5): no "applied" event exists at all.
         let metrics = EngineMetrics::new();
         metrics.record_contain_node("proposed", None);
-        metrics.record_contain_node("applied", None);
         metrics.record_contain_node("reverted", None);
         for reason in [
             "control-plane",
@@ -342,6 +355,7 @@ mod tests {
             "worker-floor",
             "unlabelled",
             "not-owned",
+            "unknown-node",
         ] {
             metrics.record_contain_node("rail_refused", Some(reason));
         }

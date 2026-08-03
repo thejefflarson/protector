@@ -4,9 +4,10 @@
 //! [`Engine::revert_contain_node`] — the call `Engine::process`'s self-revert loop makes for
 //! a standing `ContainNode` reversion instead of the generic network `actuator`. Extracted
 //! from the orchestrator purely to keep every file under the 1,000-line cap (repo
-//! CLAUDE.md); this is a behavior-neutral code move, not a design change — see
-//! `respond::actuator::node_containment`'s own doc for why the revert side is wired now
-//! while the apply side (the `node` arming rung, node observation, RBAC) is a follow-up.
+//! CLAUDE.md). [`Engine::process`] refreshes `node_facts` every pass from the node
+//! observation adapter (`observe::adapter::node_fact::observe_node_facts`) now that it
+//! exists; [`Self::with_node_fact`] remains for a test that seeds the map directly instead
+//! of driving a real `Snapshot::nodes` watch.
 
 use super::{Engine, Mitigation, graph, respond};
 
@@ -28,12 +29,12 @@ impl Engine {
         self
     }
 
-    /// Seed one observed [`respond::actuator::node_containment::NodeFact`] for the
-    /// `ContainNode` revert ownership self-gate (ADR-0040 §5), keyed by its own
-    /// `name`. Builder-style, chainable per node. A real node-observation adapter
-    /// refreshing this fleet every pass is a follow-up
-    /// (`respond::actuator::node_containment`'s own doc); until then the map is exactly
-    /// what a caller (today, only tests) seeded it with.
+    /// Seed one observed [`respond::actuator::node_containment::NodeFact`] directly, keyed
+    /// by its own `name` — for a test that exercises the revert/proposal rails without
+    /// driving a real `Snapshot::nodes` watch. Builder-style, chainable per node.
+    /// [`Engine::process`] refreshes the map wholesale from the real observation adapter
+    /// once `Snapshot::nodes` is non-empty (see its own doc), so a seeded fact here only
+    /// persists across passes that observe no real Node fleet at all.
     pub fn with_node_fact(mut self, fact: respond::actuator::node_containment::NodeFact) -> Self {
         self.node_facts.insert(fact.name.clone(), fact);
         self

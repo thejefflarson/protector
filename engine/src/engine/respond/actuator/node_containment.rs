@@ -1,20 +1,7 @@
-//! The [`ProposedAction::ContainNode`] actuator (ADR-0040 §4/§5): the cordon + co-resident
-//! default-deny rendering, and the deterministic rails that gate it. Split out of the
-//! actuator module root purely to keep every file under the 1,000-line cap (repo CLAUDE.md).
-//!
-//! **The apply side is unit-tested, wired nowhere live yet; the revert side IS wired into
-//! `Engine::process`'s break-glass/self-revert loop.** `ContainNode` is
-//! `is_additive_live() == false` ([`ProposedAction::is_additive_live`]), so
-//! [`super::decide`] already routes every `ContainNode` mitigation to
-//! [`super::Decision::Forbidden`] regardless of what these rails would say — there is no
-//! `node` arming rung to escalate past (ADR-0040 §6, a separate ticket), so nothing here can
-//! become live-*applied* through this module alone. But ADR-0040 §5 also requires
-//! `ContainNode` to join the armed-set revert trigger (ADR-0036) and the standard ledger
-//! self-revert (ADR-0017) — that half does not depend on the apply-side rung existing at
-//! all, so it is wired now: `Engine::process`'s self-revert loop routes a standing
-//! `ContainNode` reversion through [`NodeContainmentRevert`] rather than the generic network
-//! `actuator`, whose `revert()` speaks a different object shape entirely and would silently
-//! leave the node cordoned. What IS delivered:
+//! The [`ProposedAction::ContainNode`] actuator (ADR-0040 §4/§5/§6): the cordon +
+//! co-resident default-deny rendering, and the deterministic rails that gate it. Split out
+//! of the actuator module root purely to keep every file under the 1,000-line cap (repo
+//! CLAUDE.md).
 //!
 //! - [`render_cordon`]/[`render_uncordon`]: the pure `Node.spec.unschedulable` patch,
 //!   carrying [`CORDON_OWNER_ANNOTATION`] so a revert only ever lifts a cordon protector
@@ -28,30 +15,61 @@
 //!   exclusion, one-node cap, the two-worker floor, ownership-gated revert), pure over a
 //!   [`NodeFact`] fleet so they're unit-testable without a live cluster and independent of
 //!   any arming/enabled state — a rail refusal is exactly as meaningful in shadow as it
-//!   would be armed.
+//!   would be armed. These rails are a BOUND layered on top of the human-approval gate
+//!   below, never a substitute for it.
+//! - [`contain_node_in_scope`]: the `enforceScope` confinement check
+//!   [`crate::engine::Engine::process`] uses in place of the generic
+//!   [`super::ActuationScope::in_scope`] — `ContainNode`'s own cut is a `host/<name>`
+//!   self-reference, which the generic check can't resolve a namespace for and so treats
+//!   as vacuously in scope; this instead confines through the co-resident LABELLED
+//!   workload set (ADR-0021: no enforce-everywhere).
+//! - [`evaluate_proposal`]: the PROPOSAL-side gate [`crate::engine::Engine::process`] calls
+//!   for every active `ContainNode` mitigation each pass — armed/in-scope/
+//!   live-corroborated (mirroring [`super::decide`]'s own ordering), THEN the
+//!   [`cordon_decision`] rail against the pass's observed [`NodeFact`] fleet, fail-closed on
+//!   a target absent from the fleet ([`RailRefusal::UnknownNode`]) rather than fabricating a
+//!   passing rail. Pure — the caller maps its result onto the `proposed`/`rail_refused`
+//!   metric. **There is no `evaluate_apply` and no cluster write here**: ADR-0040 §5 is
+//!   explicit that a node cut is propose-first BY CONSTRUCTION ("a real node always has
+//!   alive collateral, so the existing blast/alive-collateral gate routes every node cut to
+//!   human approval even at the armed rung; propose-first is structural, not a toggle") —
+//!   these rails are bounds a human reviews the proposal against, never an auto-apply gate.
 //! - [`live`]'s [`NodeContainmentActuator`]/[`NodeContainmentRevert`]: the cluster-facing
-//!   apply/revert glue. Thin and untested against a real cluster, like
+//!   REVERT glue only (lifting an already-standing cut via break-glass/self-revert,
+//!   `crate::engine::node_containment_revert`) — there is no corresponding live APPLY call
+//!   site; `NodeContainmentActuator::apply` exists and is unit-tested in isolation for a
+//!   future human-approval-to-apply flow (out of scope here), but nothing in `Engine`
+//!   invokes it. Thin and untested against a real cluster, like
 //!   [`super::KubeActuator`]/[`super::IsolationActuator`] — [`render_cordon`]/
-//!   [`render_uncordon`] are the unit-tested pure half.
+//!   [`render_uncordon`]/[`evaluate_proposal`]/[`contain_node_in_scope`] are the unit-tested
+//!   pure half.
 //!
-//! **Node role/schedulability observation is a follow-up, not this ticket.** [`NodeFact`]
-//! is the fleet-state shape the rails need, but nothing in the engine watches Kubernetes
-//! `Node` objects today — only `Pod.spec.nodeName`-derived placement (the placement
-//! adapter, ADR-0040 §3), which needs no new RBAC. Populating a
-//! real `NodeFact` fleet needs a `nodes` `get/list/watch` grant this ticket deliberately
-//! does not add (ADR-0040 §7 ships the actuator split from the chart/RBAC change; the
-//! ticket that adds this observation is the natural place to also wire the apply side of
-//! these rails into `Engine::process`'s per-pass loop, and to keep `Engine`'s attached
-//! `NodeFact` fleet fresh every pass). Evaluating a rail against a fabricated "no data"
-//! fleet would silently default it to PASS — exactly the "weakening the rail" the ADR's
-//! build-settled note warns against — so the engine's self-revert loop skips (rather than
-//! fabricates) a revert for any host with no attached [`NodeContainmentRevert`] or no
-//! observed [`NodeFact`], the same discipline this doc already applied to the cordon rails.
+//! `ContainNode` is `is_additive_live() == false` ([`ProposedAction::is_additive_live`]), so
+//! [`super::decide`]'s generic AutoApply path always routes it to
+//! [`super::Decision::Forbidden`] — a cordon mutates a shared field on a live object rather
+//! than adding a new engine-owned one, so it can never ride the generic additive-object
+//! auto-apply path, and (unlike every other class) arming the `node` rung
+//! ([`super::arming_ladder::ArmingRung::Node`]) does not change that: [`evaluate_proposal`]
+//! only ever answers "should this be SURFACED as an actionable proposal", never "should
+//! this be applied".
+//!
+//! **Node role/schedulability observation** (ADR-0040 §3, `node_fact` fleet): a metadata-only
+//! `Node` watch (name; the `node-role.kubernetes.io/control-plane` label, the legacy
+//! `node-role.kubernetes.io/master` label, and a control-plane-shaped `NoSchedule` taint;
+//! `spec.unschedulable`; [`CORDON_OWNER_ANNOTATION`]) —
+//! [`crate::engine::observe::adapter::node_fact::observe_node_facts`] — is the sole source of
+//! the [`NodeFact`] fleet [`evaluate_proposal`]/[`cordon_decision`] consult. See that
+//! module's doc for why it does not implement the graph-contributing
+//! [`crate::engine::observe::adapter::Adapter`] trait `PlacementAdapter` does: [`NodeFact`]
+//! deliberately bypasses the [`crate::engine::graph::SecurityGraph`] entirely, to keep the
+//! rails pure and testable without one.
 
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::respond::{
     Mitigation, ProposedAction, co_resident_workloads, quarantine_workload_link,
 };
+
+use super::ActuationScope;
 
 mod live;
 pub use live::{NodeContainmentActuator, NodeContainmentRevert};
@@ -132,20 +150,31 @@ pub fn co_resident_denies(graph: &SecurityGraph, host: &NodeKey) -> Vec<Mitigati
 }
 
 /// A per-pass fact for one node in the fleet — the shape [`cordon_decision`]/
-/// [`revert_decision`] need, sourced from an observed Kubernetes `Node` (name; the
-/// `node-role.kubernetes.io/control-plane` label; `spec.unschedulable`; whether
-/// [`CORDON_OWNER_ANNOTATION`] is set to [`CORDON_OWNER_VALUE`]) once that observation is
-/// wired (see this module's doc — a follow-up). Deliberately a plain data type, not the
-/// graph's [`crate::engine::graph::Node::Host`], so the rail predicates stay pure and
-/// unit-testable over hand-built fixtures without a full [`SecurityGraph`].
+/// [`revert_decision`] need, sourced from an observed Kubernetes `Node`
+/// ([`crate::engine::observe::adapter::node_fact::observe_node_facts`]): name; whether it
+/// carries a control-plane role signal (the canonical or legacy label, or a control-plane
+/// taint — see that module's doc); `spec.unschedulable`; whether
+/// [`CORDON_OWNER_ANNOTATION`] is set to [`CORDON_OWNER_VALUE`]. Deliberately a plain data
+/// type, not the graph's [`crate::engine::graph::Node::Host`], so the rail predicates stay
+/// pure and unit-testable over hand-built fixtures without a full [`SecurityGraph`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeFact {
     pub name: String,
-    /// Carries a control-plane role label — VISION's "protector cannot touch the control
-    /// plane" (ADR-0040 §5).
+    /// Carries a control-plane role signal (label, canonical or legacy, or a
+    /// control-plane taint) — VISION's "protector cannot touch the control plane"
+    /// (ADR-0040 §5).
     pub control_plane: bool,
     /// `!Node.spec.unschedulable` — true unless something (protector, a human, the
-    /// autoscaler) has already cordoned it.
+    /// autoscaler) has already cordoned it. **This is SCHEDULABILITY, not READINESS**: a
+    /// node whose kubelet has stopped reporting (`NotReady`) but whose
+    /// `spec.unschedulable` is still `false` counts as schedulable here, and therefore
+    /// still counts toward [`WORKER_FLOOR`]. Deliberate: `Node.status.conditions` (where
+    /// `Ready` lives) is exactly the kind of operational-status field this fleet
+    /// observation stays metadata-only by never reading
+    /// (`crate::engine::observe::adapter::node_fact`'s own doc) — cross-referencing
+    /// pod-health-per-node via the graph's `ScheduledOn` edges is possible but not
+    /// implemented here. Treat the floor as a **blast-radius bound on schedulable
+    /// capacity**, not a "currently healthy capacity" guarantee.
     pub schedulable: bool,
     /// [`CORDON_OWNER_ANNOTATION`] is set to [`CORDON_OWNER_VALUE`] on this node right now.
     pub owned_by_protector: bool,
@@ -167,6 +196,11 @@ pub enum RailRefusal {
     /// The target node does not carry protector's own cordon-ownership annotation — never
     /// revert a cordon protector didn't place.
     NotOwned,
+    /// The target host has no entry in the observed [`NodeFact`] fleet — the watch hasn't
+    /// synced yet, or the mitigation names a host that no longer exists. FAIL CLOSED: a
+    /// missing fact is refused, never treated as a passing rail
+    /// ([`evaluate_proposal`]'s doc).
+    UnknownNode,
 }
 
 impl RailRefusal {
@@ -179,14 +213,16 @@ impl RailRefusal {
             Self::WorkerFloor => "worker-floor",
             Self::Unlabelled => "unlabelled",
             Self::NotOwned => "not-owned",
+            Self::UnknownNode => "unknown-node",
         }
     }
 }
 
-/// The minimum number of schedulable, non-control-plane workers a cordon must leave behind
-/// (ADR-0040 §5, build-settled 2026-08-02: "a floor that leaves a single worker is an
-/// outage, not damage-limitation" — kept at 2 even on a small fleet where this can make
-/// `ContainNode` correctly, permanently inert).
+/// The minimum number of SCHEDULABLE (not necessarily Ready — [`NodeFact::schedulable`]'s
+/// own doc), non-control-plane workers a cordon must leave behind (ADR-0040 §5,
+/// build-settled 2026-08-02: "a floor that leaves a single worker is an outage, not
+/// damage-limitation" — kept at 2 even on a small fleet where this can make `ContainNode`
+/// correctly, permanently inert).
 const WORKER_FLOOR: usize = 2;
 
 /// Whether cordoning `target` is deterministically allowed, over the CURRENT `fleet`
@@ -231,6 +267,97 @@ pub fn revert_decision(target: &NodeFact) -> Result<(), RailRefusal> {
     } else {
         Err(RailRefusal::NotOwned)
     }
+}
+
+/// Whether a `ContainNode` mitigation targeting `host` is within `scope` (ADR-0021: no
+/// enforce-everywhere). Unlike every other mitigation, `ContainNode`'s own cut is a
+/// `host/<name>` self-reference — a non-workload key [`ActuationScope::in_scope`] can't
+/// resolve a namespace for (`workload_namespace` returns `None`), so checking the cut
+/// directly would be vacuously true regardless of `enforceScope`, a real scope bypass:
+/// arming the `node` rung would then confine nothing. This confines it instead through the
+/// SAME co-resident LABELLED workload set the default-deny sweep already computes
+/// ([`co_resident_denies`]) — which structurally includes whichever workload's
+/// `boundary_break` triggered the escalation, since it is scheduled on `host` by
+/// construction ([`crate::engine::respond::contain_node_link`]'s own doc).
+///
+/// In scope iff `scope` is unscoped (the historical, no-`enforceScope`-configured
+/// behavior), OR at least one co-resident deny target is itself in scope. A host with no
+/// co-resident LABELLED pod at all (nothing for [`co_resident_denies`] to return) is never
+/// presumed in scope once a scope IS configured — the same "decline rather than widen"
+/// discipline [`co_resident_denies`] already applies to an unlabelled pod.
+pub fn contain_node_in_scope(
+    graph: &SecurityGraph,
+    host: &NodeKey,
+    scope: &ActuationScope,
+) -> bool {
+    if scope.is_unscoped() {
+        return true;
+    }
+    co_resident_denies(graph, host)
+        .iter()
+        .any(|deny| scope.in_scope(deny))
+}
+
+/// What [`evaluate_proposal`] decided for one active `ContainNode` mitigation this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalOutcome {
+    /// Every deterministic rail passes: the cut is ELIGIBLE to be surfaced as an
+    /// actionable proposal. This NEVER means it was applied — ADR-0040 §5 makes a node
+    /// cut propose-first BY CONSTRUCTION, so there is no cluster write on this path at
+    /// any rung; a human out-of-band action is the only route to an actual cordon.
+    Proposed,
+    /// A deterministic rail refused — includes [`RailRefusal::UnknownNode`] for a target
+    /// absent from the observed fleet (fail closed).
+    Refuse(RailRefusal),
+}
+
+/// The proposal-side decision for one active `ContainNode` mitigation this pass (ADR-0040
+/// §5/§6): whether `mitigation` should be surfaced as a rails-clean, actionable proposal,
+/// given this pass's arming/scope/corroboration state and the observed [`NodeFact`] fleet.
+/// **Never an apply decision** — see this module's doc for why `ContainNode` has no
+/// `evaluate_apply` counterpart: ADR-0040 §5 states plainly that "a real node always has
+/// alive collateral, so the existing blast/alive-collateral gate routes every node cut to
+/// human approval even at the armed rung; propose-first is structural, not a toggle." The
+/// rails here are the SAME bound that gate carries — control-plane/one-node/worker-floor —
+/// layered on top of the human-approval requirement, never a way to skip it.
+///
+/// `None` when the mitigation is not yet eligible to be evaluated against the rails at
+/// all — not armed at the `node` rung, out of `enforceScope`
+/// ([`contain_node_in_scope`]), or not live-corroborated (mirrors [`super::decide`]'s own
+/// ordering for every other action class: the generic `Decision::Forbidden`/`Propose` path
+/// above already explains a `None` case, so this function stays silent rather than
+/// emitting a competing "reason"). `Some` once eligible: [`ProposalOutcome::Proposed`] if
+/// [`cordon_decision`] passes (or the host is unrecognized, in which case this fails
+/// closed to [`ProposalOutcome::Refuse`]`(`[`RailRefusal::UnknownNode`]`)` rather than
+/// silently defaulting a missing fact to a passing rail — the exact "weakening the rail"
+/// failure mode this ADR's build-settled note warns against), otherwise
+/// [`ProposalOutcome::Refuse`] with the rail that blocked it.
+///
+/// Pure: takes the mitigation, the three upstream gates as bools, and the fleet — no
+/// [`SecurityGraph`], no cluster client, no metrics/OTLP — so it is fully unit-testable and
+/// the only thing [`Engine::process`](crate::engine::Engine::process) has to do with the
+/// result is record the matching metric. There is no further action to take on
+/// `Proposed`: it is surfaced, never applied.
+pub fn evaluate_proposal(
+    mitigation: &Mitigation,
+    armed: bool,
+    in_scope: bool,
+    fleet: &[NodeFact],
+) -> Option<ProposalOutcome> {
+    if mitigation.action != ProposedAction::ContainNode {
+        return None;
+    }
+    if !armed || !in_scope || !mitigation.is_live_corroborated() {
+        return None;
+    }
+    let host_name = mitigation.cut.from.short();
+    let Some(target) = fleet.iter().find(|n| n.name == host_name) else {
+        return Some(ProposalOutcome::Refuse(RailRefusal::UnknownNode));
+    };
+    Some(match cordon_decision(target, fleet) {
+        Ok(()) => ProposalOutcome::Proposed,
+        Err(refusal) => ProposalOutcome::Refuse(refusal),
+    })
 }
 
 #[cfg(test)]

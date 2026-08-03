@@ -4,11 +4,12 @@
 //! exercised only against a real cluster — like the `kube` module's live actuators — with
 //! [`super::render_cordon`]/[`super::render_uncordon`] as the unit-tested pure half.
 //!
-//! **Not wired into anything live in this ticket.** No `node` arming rung exists yet
-//! (ADR-0040 §6, a separate ticket) and `ContainNode`'s `is_additive_live() == false` means
-//! [`super::super::decide`] never routes here through the generic auto-apply path either —
-//! this exists so a future human-approval/break-glass-revert path has a real apply/revert to
-//! call, callable and testable in isolation today.
+//! [`Self::revert`] is the break-glass/self-revert call site's real revert to call
+//! ([`crate::engine::node_containment_revert`]), self-gated on [`super::revert_decision`]
+//! regardless of caller discipline. **[`Self::apply`] has NO call site in `Engine`** —
+//! ADR-0040 §5 makes a node cut propose-first by construction (never auto-applied, at any
+//! arming rung), so nothing in the engine's per-pass loop ever reaches it; it exists,
+//! tested in isolation, for a future human-approval-to-apply flow.
 
 use crate::engine::respond::Mitigation;
 use crate::engine::respond::actuator::{Actuation, Actuator, IsolationActuator, cut_label};
