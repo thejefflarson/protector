@@ -9,8 +9,14 @@
 {{- end }}
 {{- /* ADR-0035 arming-ladder validation (defense-in-depth; the engine also falls back to
   the narrowest rung on an unrecognized value): enforceRung must be a rung on the ladder. */}}
-{{- if not (or (eq .Values.enforceRung "edge-cut") (eq .Values.enforceRung "quarantine")) }}
-{{- fail (printf "enforceRung must be 'edge-cut' or 'quarantine', got %q" .Values.enforceRung) }}
+{{- if not (or (eq .Values.enforceRung "edge-cut") (eq .Values.enforceRung "quarantine") (eq .Values.enforceRung "node")) }}
+{{- fail (printf "enforceRung must be 'edge-cut', 'quarantine', or 'node', got %q" .Values.enforceRung) }}
+{{- end }}
+{{- /* ADR-0040 §6 (defense-in-depth; the engine also refuses at startup): the top rung is
+  protector's first node-write action class — never render it without mode: enforce (which
+  the check above already requires to carry a non-empty enforceScope). */}}
+{{- if and (eq .Values.enforceRung "node") (ne .Values.mode "enforce") }}
+{{- fail "enforceRung: node requires mode: enforce with a non-empty enforceScope — node containment (ADR-0040) is protector's first node-write action and must never be configured without both enforcement gates armed" }}
 {{- end }}
 {{- /*
 Feed-fetcher sidecar wiring. When feedSync is ON (the default), a native
@@ -243,11 +249,13 @@ spec:
               value: {{ join "," .Values.enforceScope.namespaces | quote }}
             - name: PROTECTOR_ENFORCE_SCOPE_LABELS
               value: {{ include "protector.enforceScopeLabels" . | quote }}
-            # The ordered network-cut arming ladder (ADR-0035): how far `mode: enforce`
+            # The ordered cut-severity arming ladder (ADR-0035): how far `mode: enforce`
             # is armed. `edge-cut` (the default) arms ONLY the surgical DenyNetworkPath
             # cut; `quarantine` is an explicit second opt-in that adds the broader
-            # QuarantineEntry/QuarantineWorkload denies (implying the edge-cut rung too
-            # — one ordered position, not independent toggles). Ignored under mode: audit.
+            # QuarantineEntry/QuarantineWorkload denies (implying the edge-cut rung too);
+            # `node` is an explicit third opt-in that additionally arms ContainNode, the
+            # first node-write action class (ADR-0040 §6) — one ordered position, not
+            # independent toggles. Ignored under mode: audit.
             - name: PROTECTOR_ENFORCE_RUNG
               value: {{ .Values.enforceRung | quote }}
             {{- if .Values.rekor.enabled }}

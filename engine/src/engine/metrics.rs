@@ -107,13 +107,15 @@ pub(super) struct EngineMetrics {
     pub(super) break_glass_transitions: opentelemetry::metrics::Counter<u64>,
     /// `ProposedAction::ContainNode` (ADR-0040) events, by `event`
     /// (`proposed`/`applied`/`reverted`/`rail_refused`) and, for a `rail_refused` event,
-    /// `reason` (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned` —
-    /// `respond::actuator::node_containment::RailRefusal::metric_reason`). A separate
-    /// counter from the generic [`Self::mitigations`] one: `ContainNode` is
+    /// `reason` (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned`/
+    /// `unknown-node` — `respond::actuator::node_containment::RailRefusal::metric_reason`).
+    /// A separate counter from the generic [`Self::mitigations`] one: `ContainNode` is
     /// `is_additive_live() == false`, so it never reaches `mitigations`' `applied`/
-    /// `reverted` labels through the generic auto-apply path — and its deterministic rails
-    /// must be observable even in shadow (no `node` arming rung wired yet), so a refusal is
-    /// counted regardless of whether anything is armed.
+    /// `reverted` labels through the generic auto-apply path — it has its own apply-side
+    /// gate (`respond::actuator::node_containment::evaluate_apply`), armed by the `node`
+    /// rung (ADR-0040 §6) — and its deterministic rails must be observable even when
+    /// unarmed (a rail refusal is exactly as meaningful in shadow), so a refusal is counted
+    /// regardless of whether anything is armed.
     pub(super) contain_node: opentelemetry::metrics::Counter<u64>,
 }
 
@@ -342,6 +344,7 @@ mod tests {
             "worker-floor",
             "unlabelled",
             "not-owned",
+            "unknown-node",
         ] {
             metrics.record_contain_node("rail_refused", Some(reason));
         }

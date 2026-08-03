@@ -1,11 +1,15 @@
 //! Unit tests for the ADR-0040 node-containment actuator: the cordon/uncordon renderers,
-//! the co-resident default-deny sweep, and each deterministic rail — plus the standing
-//! invariant that `ContainNode` still never auto-applies (no `node` rung wired).
+//! the co-resident default-deny sweep, each deterministic rail, and the apply-side gate
+//! (`evaluate_apply`) — including that it stays `None` (never armed) unless the mitigation
+//! is armed, in scope, AND live-corroborated, and fails closed on a host absent from the
+//! observed fleet.
 
 use super::*;
+use crate::engine::graph::attack::CREDENTIAL_ACCESS;
 use crate::engine::observe::Snapshot;
 use crate::engine::observe::adapter::{build_graph, default_adapters};
 use crate::engine::reason::proof::Link;
+use crate::engine::respond::Justification;
 use serde_json::json;
 
 /// A `ContainNode` mitigation self-referencing `host/<name>` — the exact shape
@@ -24,6 +28,24 @@ fn contain_node_mitigation(host_name: &str) -> Mitigation {
         action: ProposedAction::ContainNode,
         justifications: vec![],
     }
+}
+
+/// A `ContainNode` mitigation that ALSO clears the live-corroboration bar
+/// (`Mitigation::is_live_corroborated`) — a corroborated, adjudicated,
+/// breach-relevant justification, mirroring `respond::tests`' own fixture shape.
+fn corroborated_contain_node_mitigation(host_name: &str) -> Mitigation {
+    let mut m = contain_node_mitigation(host_name);
+    m.justifications.push(Justification {
+        entry: "workload/app/Pod/entry".into(),
+        objective: format!("host/{host_name}"),
+        attack: CREDENTIAL_ACCESS,
+        foothold: false,
+        corroborated: true,
+        adjudicated: true,
+        promoted: false,
+        breach_relevant: true,
+    });
+    m
 }
 
 fn scheduled_pod(
@@ -151,6 +173,7 @@ fn every_rail_refusal_has_its_specified_metric_reason() {
     assert_eq!(RailRefusal::WorkerFloor.metric_reason(), "worker-floor");
     assert_eq!(RailRefusal::Unlabelled.metric_reason(), "unlabelled");
     assert_eq!(RailRefusal::NotOwned.metric_reason(), "not-owned");
+    assert_eq!(RailRefusal::UnknownNode.metric_reason(), "unknown-node");
 }
 
 // --- cordon_decision rails ---
@@ -289,4 +312,122 @@ fn rail_decisions_take_no_arming_state_and_so_are_exactly_as_meaningful_in_shado
     );
     let unowned = fact("node-1", false, false, false);
     assert_eq!(revert_decision(&unowned), Err(RailRefusal::NotOwned));
+}
+
+// --- evaluate_apply: the apply-side gate Engine::process calls (ADR-0040 §5/§6) ---
+
+#[test]
+fn evaluate_apply_is_none_for_a_non_contain_node_action() {
+    let other = Mitigation {
+        cut: Link {
+            from: NodeKey("workload/app/Pod/web".into()),
+            to: NodeKey("workload/app/Pod/web".into()),
+            relation: "quarantine-workload".to_string(),
+            technique: None,
+            from_labels: [("app".to_string(), "web".to_string())].into(),
+            to_labels: [("app".to_string(), "web".to_string())].into(),
+        },
+        action: ProposedAction::QuarantineWorkload,
+        justifications: vec![],
+    };
+    assert_eq!(evaluate_apply(&other, true, true, &[]), None);
+}
+
+#[test]
+fn evaluate_apply_is_none_when_not_armed() {
+    let m = corroborated_contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-1", false, true, false),
+        fact("node-2", false, true, false),
+    ];
+    assert_eq!(evaluate_apply(&m, false, true, &fleet), None);
+}
+
+#[test]
+fn evaluate_apply_is_none_when_out_of_scope() {
+    let m = corroborated_contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-1", false, true, false),
+        fact("node-2", false, true, false),
+    ];
+    assert_eq!(evaluate_apply(&m, true, false, &fleet), None);
+}
+
+#[test]
+fn evaluate_apply_is_none_when_not_live_corroborated() {
+    // `contain_node_mitigation` carries no justifications at all — never corroborated.
+    let m = contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-1", false, true, false),
+        fact("node-2", false, true, false),
+    ];
+    assert_eq!(evaluate_apply(&m, true, true, &fleet), None);
+}
+
+#[test]
+fn evaluate_apply_fails_closed_on_a_host_absent_from_the_fleet() {
+    // Armed + in-scope + corroborated, but the fleet has no entry for the target host at
+    // all (the watch hasn't synced, or the host no longer exists) — must refuse, never
+    // fabricate a passing rail.
+    let m = corroborated_contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-2", false, true, false),
+        fact("node-3", false, true, false),
+    ];
+    assert_eq!(
+        evaluate_apply(&m, true, true, &fleet),
+        Some(ApplyOutcome::Refuse(RailRefusal::UnknownNode))
+    );
+}
+
+#[test]
+fn evaluate_apply_applies_when_eligible_and_the_rails_pass() {
+    let m = corroborated_contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-1", false, true, false),
+        fact("node-2", false, true, false),
+        fact("node-3", false, true, false),
+        fact("cp-1", true, true, false),
+    ];
+    assert_eq!(
+        evaluate_apply(&m, true, true, &fleet),
+        Some(ApplyOutcome::Apply {
+            already_cordoned: false
+        })
+    );
+}
+
+#[test]
+fn evaluate_apply_reports_already_cordoned_for_a_standing_protector_cordon() {
+    // The target is ALREADY cordoned by protector (unschedulable + owned) — the rails
+    // still pass (cordon_decision doesn't gate on the target's own state, only on the
+    // REST of the fleet), and `already_cordoned` tells the caller there is no new
+    // cluster write to make.
+    let m = corroborated_contain_node_mitigation("node-1");
+    let fleet = vec![
+        fact("node-1", false, false, true),
+        fact("node-2", false, true, false),
+        fact("node-3", false, true, false),
+    ];
+    assert_eq!(
+        evaluate_apply(&m, true, true, &fleet),
+        Some(ApplyOutcome::Apply {
+            already_cordoned: true
+        })
+    );
+}
+
+#[test]
+fn evaluate_apply_surfaces_the_cordon_rail_refusal() {
+    // Eligible on every upstream gate, but the target is control-plane — the rail (not
+    // the arming/scope/corroboration gate) is what refuses here.
+    let m = corroborated_contain_node_mitigation("cp-1");
+    let fleet = vec![
+        fact("cp-1", true, true, false),
+        fact("node-1", false, true, false),
+    ];
+    assert_eq!(
+        evaluate_apply(&m, true, true, &fleet),
+        Some(ApplyOutcome::Refuse(RailRefusal::ControlPlane))
+    );
 }

@@ -31,7 +31,7 @@ pub mod trivy_config;
 pub mod trivy_rbac;
 pub mod trivy_secret;
 
-use k8s_openapi::api::core::v1::{Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{Node, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
 use kube::Api;
@@ -273,6 +273,13 @@ pub struct Snapshot {
     pub linkerd_servers: Vec<self::linkerd::LinkerdServer>,
     pub linkerd_authz_policies: Vec<self::linkerd::LinkerdAuthzPolicy>,
     pub linkerd_mtls_auths: Vec<self::linkerd::LinkerdMeshTlsAuth>,
+    /// The cluster's `Node` fleet (ADR-0040 §3/§6) — the raw material
+    /// [`adapter::node_fact::observe_node_facts`] maps into the node-containment rails'
+    /// [`crate::engine::respond::actuator::node_containment::NodeFact`] shape. Read-only,
+    /// always populated (the `nodes` RBAC read is always-on regardless of posture — see
+    /// the chart's ClusterRole); empty when the watch hasn't synced yet, which the rails
+    /// then treat as "no fact for this host" and fail closed on.
+    pub nodes: Vec<Node>,
 }
 
 impl Snapshot {
@@ -299,6 +306,7 @@ impl Snapshot {
             image_vulns,
             trivy_findings,
             linkerd,
+            nodes,
         ) = tokio::try_join!(
             async { anyhow::Ok(Api::<Pod>::all(client.clone()).list(&lp).await?.items) },
             async {
@@ -375,6 +383,10 @@ impl Snapshot {
             // report — empty when their CRDs are absent, so they never fail the join.
             async { anyhow::Ok(list_trivy_findings(&client).await) },
             async { anyhow::Ok(list_linkerd_authz(&client).await) },
+            // The Node fleet (ADR-0040 §3/§6) — the node-containment rails' raw material.
+            // Always-granted (like every other list here except Ingress), so a failure
+            // fails the whole join rather than degrading.
+            async { anyhow::Ok(Api::<Node>::all(client.clone()).list(&lp).await?.items) },
         )?;
         let (image_secrets, config_audits, rbac_assessments) = trivy_findings;
         let (linkerd_servers, linkerd_authz_policies, linkerd_mtls_auths) = linkerd;
@@ -413,6 +425,7 @@ impl Snapshot {
             linkerd_servers,
             linkerd_authz_policies,
             linkerd_mtls_auths,
+            nodes,
         })
     }
 }

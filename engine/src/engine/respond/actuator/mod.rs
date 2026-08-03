@@ -183,6 +183,15 @@ impl ActuationScope {
         Self { namespaces, labels }
     }
 
+    /// Whether NO `enforceScope` is configured (both axes empty) — the historical,
+    /// shadow-default meaning "every namespace eligible", not "matches nothing". Exposed
+    /// for a caller (`node_containment::contain_node_in_scope`) that can't route a
+    /// non-workload cut through [`Self::in_scope`]'s own per-mitigation shortcut and needs
+    /// the same "is a scope even configured" check directly.
+    pub fn is_unscoped(&self) -> bool {
+        self.namespaces.is_empty() && self.labels.is_empty()
+    }
+
     /// Whether one workload endpoint (its namespace + labels) is in scope: its namespace
     /// is listed, **or** it carries one of the scoped labels. Mirrors `EnforceScope`'s
     /// namespace-OR-label match so the engine cut and the webhook gates agree.

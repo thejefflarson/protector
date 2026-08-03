@@ -99,6 +99,7 @@ use observe::health::{Health, PodStatusHealth};
 use respond::Mitigation;
 use respond::MitigationLedger;
 use respond::ProposedAction;
+use respond::actuator::node_containment::{self, ProposalOutcome};
 use respond::actuator::{
     ActionLog, ActuationScope, Actuator, Decision, EnabledActions, decide, predict_blast_radius,
 };
@@ -289,19 +290,24 @@ pub struct Engine {
     /// self-revert loop below can hold either the real cluster actuator or a test double —
     /// mirroring [`Self::actuator`] above. `None` (the [`Self::new`] default) leaves a
     /// standing `ContainNode` mitigation un-reverted rather than driving it through the
-    /// wrong-shaped generic `actuator` (see [`Self::revert_contain_node`]); wiring a real
-    /// one in is a follow-up once a node-observation adapter exists
-    /// ([`respond::actuator::node_containment`]'s own doc).
+    /// wrong-shaped generic `actuator` (see [`Self::revert_contain_node`]). Wired to the
+    /// real cluster actuator in `run_loop.rs` now that the node observation adapter below
+    /// exists. **There is still NO apply-side actuator field** — ADR-0040 §5 is explicit
+    /// that a node cut is propose-first BY CONSTRUCTION (alive collateral always present),
+    /// so arming `ContainNode` (the `node` rung) only makes it ELIGIBLE to be proposed; it
+    /// is never auto-applied, so there is nothing here for an apply call to reach through.
     node_containment_actuator:
         Option<Box<dyn respond::actuator::node_containment::NodeContainmentRevert>>,
     /// Observed [`respond::actuator::node_containment::NodeFact`]s for the `ContainNode`
-    /// revert ownership self-gate (ADR-0040 §5), keyed by node name. Empty (the
-    /// [`Self::new`] default) until seeded via [`Self::with_node_fact`] — a real
-    /// node-observation adapter refreshing this fleet every pass is a follow-up
-    /// (`respond::actuator::node_containment`'s own doc). A `ContainNode` mitigation whose
-    /// host has no entry here is left un-reverted rather than fabricating "no data ⇒ pass"
-    /// for the ownership check — the same discipline that module already applies to the
-    /// cordon rails.
+    /// revert ownership self-gate (ADR-0040 §5) AND the proposal-side rails
+    /// (`respond::actuator::node_containment::evaluate_proposal`), keyed by node name.
+    /// Refreshed every pass in [`Self::process`] from the node observation adapter
+    /// (`observe::adapter::node_fact::observe_node_facts`) over `Snapshot::nodes` — the
+    /// `nodes` `get/list/watch` RBAC this class's chart wiring always grants. Also
+    /// seedable directly via [`Self::with_node_fact`] for a test that doesn't drive a real
+    /// `Snapshot::nodes` watch. A `ContainNode` mitigation whose host has no entry here is
+    /// left un-reverted / never proposed rather than fabricating "no data ⇒ pass" — the
+    /// same discipline this module already applies to the cordon rails.
     node_facts: std::collections::BTreeMap<String, respond::actuator::node_containment::NodeFact>,
 }
 
@@ -680,18 +686,29 @@ impl Engine {
             .map(|m| m.cut_signature())
             .collect();
         // ADR-0040 actuation metrics: a newly-proposed `ContainNode` mitigation is real,
-        // genuine data today (the `boundary_break` trigger + menu resolver already run
-        // unconditionally, ADR-0040 §1-3) — unlike the deterministic rails
-        // (`respond::actuator::node_containment::cordon_decision`/`revert_decision`), which
-        // need an observed `NodeFact` fleet the engine does not watch yet (that module's own
-        // doc), so evaluating them here would mean gating against fabricated "no data" and
-        // silently reading as always-pass. `applied`/`reverted`/`rail_refused` wire in once
-        // that observation lands.
+        // genuine data (the `boundary_break` trigger + menu resolver already run
+        // unconditionally, ADR-0040 §1-3).
         for mitigation in &ledger_delta.proposed {
             if mitigation.action == ProposedAction::ContainNode {
                 self.metrics.record_contain_node("proposed", None);
             }
         }
+        // Refresh the observed NodeFact fleet (ADR-0040 §3/§6) from this pass's snapshot —
+        // the SAME map `revert_contain_node`'s ownership self-gate reads (`node_facts`), so
+        // the proposal-side rails below and the revert path can never disagree about the
+        // fleet. Only overwritten when the watch actually observed something THIS pass:
+        // `Snapshot::nodes` is legitimately empty before the reflector's first sync, and
+        // replacing wholesale on an empty read would silently erase either that transient
+        // gap or a test's directly-seeded `with_node_fact` fixture. A later pass with a
+        // real, non-empty fleet becomes authoritative (a decommissioned node's stale fact
+        // is dropped once the watch reports its removal).
+        if !snapshot.nodes.is_empty() {
+            self.node_facts = observe::adapter::node_fact::observe_node_facts(&snapshot.nodes)
+                .into_iter()
+                .map(|fact| (fact.name.clone(), fact))
+                .collect();
+        }
+        let node_fleet: Vec<_> = self.node_facts.values().cloned().collect();
 
         // The break-glass kill switch (ADR-0021's enforcement gate, fast path): checked fresh
         // every pass, narrowing `self.active` down for THIS pass alone when engaged. See
@@ -750,6 +767,45 @@ impl Engine {
                     if newly_proposed.contains(&mitigation.cut_signature()) {
                         tracing::info!(%reason, "mitigation not auto-enabled");
                     }
+                }
+            }
+            // ADR-0040 §5/§6: `ContainNode`'s OWN PROPOSAL-side gate — never an apply
+            // gate. `decide()` above always Forbids it (`is_additive_live() == false`,
+            // the generic additive-object auto-apply path never applies here) and that
+            // is correct and permanent: ADR-0040 §5 is explicit that a node cut is
+            // propose-first BY CONSTRUCTION ("a real node always has alive collateral,
+            // so the existing blast/alive-collateral gate routes every node cut to human
+            // approval even at the armed rung") — the deterministic rails below are a
+            // BOUND layered on top of that human gate, never a replacement for it, so
+            // there is no cluster write anywhere on this path, armed or not. What arming
+            // the `node` rung does is make a rails-clean cut ELIGIBLE to be surfaced as
+            // an actionable proposal instead of merely a structural "not auto-enabled"
+            // line. `None` (not yet armed/in-scope/corroborated) records nothing new;
+            // the `Forbidden` arm above already explains that case. Fail closed: a
+            // target absent from the fleet refuses rather than fabricating a passing
+            // rail (`node_containment::evaluate_proposal`'s doc).
+            let armed = effective_active.is_enabled(ProposedAction::ContainNode);
+            // `ActuationScope::in_scope` resolves a namespace per endpoint via
+            // `workload_namespace`, which returns `None` for a `host/<name>` key —
+            // ContainNode's own cut is exactly that, a host self-reference, so checking
+            // it directly is vacuously in-scope regardless of `enforceScope` (ADR-0021's
+            // no-wildcard invariant would otherwise not bind this class at all).
+            // `contain_node_in_scope` confines it through the co-resident LABELLED
+            // workload set instead, which structurally includes whichever workload's
+            // `boundary_break` triggered the escalation.
+            let in_scope = if mitigation.action == ProposedAction::ContainNode {
+                node_containment::contain_node_in_scope(&graph, &mitigation.cut.from, &self.scope)
+            } else {
+                self.scope.in_scope(mitigation)
+            };
+            match node_containment::evaluate_proposal(mitigation, armed, in_scope, &node_fleet) {
+                None => {}
+                Some(ProposalOutcome::Proposed) => {
+                    self.metrics.record_contain_node("proposed", None);
+                }
+                Some(ProposalOutcome::Refuse(refusal)) => {
+                    self.metrics
+                        .record_contain_node("rail_refused", Some(refusal.metric_reason()));
                 }
             }
             blasts.push(blast);

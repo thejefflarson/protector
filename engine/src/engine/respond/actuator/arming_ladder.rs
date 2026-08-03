@@ -14,9 +14,10 @@
 use super::EnabledActions;
 use crate::engine::respond::ProposedAction;
 
-/// How far up the network-cut severity ladder `mode: enforce` is armed. Ordered:
-/// each rung implies its narrower predecessor(s) — [`Quarantine`](Self::Quarantine)
-/// still arms the edge-cut, it never replaces it.
+/// How far up the cut-severity ladder `mode: enforce` is armed. Ordered: each rung
+/// implies its narrower predecessor(s) — [`Quarantine`](Self::Quarantine) still arms
+/// the edge-cut, it never replaces it, and [`Node`](Self::Node) still arms both network
+/// rungs beneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArmingRung {
     /// Rung 1 — the narrowest, most-reversible cut, and the `enforce` default: only the
@@ -29,6 +30,19 @@ pub enum ArmingRung {
     /// ADR-0010) and the compromised-workload quarantine
     /// ([`QuarantineWorkload`](ProposedAction::QuarantineWorkload)).
     Quarantine,
+    /// Rung 3 — the top of the ladder, strictly above [`Quarantine`](Self::Quarantine)
+    /// (`edge-cut < quarantine < node`, ADR-0040 §6): also arms
+    /// [`ContainNode`](ProposedAction::ContainNode), the node-scoped escalation of a
+    /// model-named workload whose own evidence proves its pod boundary broken.
+    /// Protector's first NODE-write action class — a cordon plus a co-resident
+    /// default-deny sweep — so it is a deliberate, explicit third opt-in, never implied
+    /// by `quarantine`. Arming this rung does not by itself make a cordon happen: the
+    /// class still runs through the deterministic rails (control-plane exclusion,
+    /// one-node cap, the two-worker floor, ownership-gated revert —
+    /// `respond::actuator::node_containment::cordon_decision`) every time, regardless of
+    /// this rung; the rung only lets those rails act on real cluster state instead of
+    /// staying shadow-only.
+    Node,
 }
 
 impl ArmingRung {
@@ -38,6 +52,7 @@ impl ArmingRung {
     pub fn from_name(name: &str) -> Self {
         match name.trim() {
             "quarantine" => Self::Quarantine,
+            "node" => Self::Node,
             _ => Self::EdgeCut,
         }
     }
@@ -46,11 +61,15 @@ impl ArmingRung {
     /// always include every action their narrower predecessors arm.
     pub fn enabled_actions(self) -> EnabledActions {
         let armed = EnabledActions::none().enable(ProposedAction::DenyNetworkPath);
+        let quarantines = |armed: EnabledActions| {
+            armed
+                .enable(ProposedAction::QuarantineEntry)
+                .enable(ProposedAction::QuarantineWorkload)
+        };
         match self {
             Self::EdgeCut => armed,
-            Self::Quarantine => armed
-                .enable(ProposedAction::QuarantineEntry)
-                .enable(ProposedAction::QuarantineWorkload),
+            Self::Quarantine => quarantines(armed),
+            Self::Node => quarantines(armed).enable(ProposedAction::ContainNode),
         }
     }
 }
@@ -84,13 +103,51 @@ mod tests {
             ArmingRung::from_name("  quarantine  "),
             ArmingRung::Quarantine
         );
+        assert_eq!(ArmingRung::from_name("  node  "), ArmingRung::Node);
     }
 
     #[test]
-    fn neither_rung_arms_a_non_network_action_class() {
-        // The ladder only ever governs the two live-actuatable network classes — no
-        // rung enables a subtractive/irreversible class regardless of position.
-        for rung in [ArmingRung::EdgeCut, ArmingRung::Quarantine] {
+    fn node_rung_implies_the_quarantine_and_edge_cut_rungs_and_adds_contain_node() {
+        // ADR-0040 §6: `node` is strictly above `quarantine` — arming it still implies
+        // every narrower rung's actions, plus the new node-write class.
+        let armed = ArmingRung::Node.enabled_actions();
+        assert!(armed.is_enabled(ProposedAction::DenyNetworkPath));
+        assert!(armed.is_enabled(ProposedAction::QuarantineEntry));
+        assert!(armed.is_enabled(ProposedAction::QuarantineWorkload));
+        assert!(armed.is_enabled(ProposedAction::ContainNode));
+    }
+
+    #[test]
+    fn only_the_node_rung_arms_contain_node() {
+        // Neither lower rung may arm the node-write class — it is a deliberate, explicit
+        // third opt-in, never implied by `edge-cut`/`quarantine` (ADR-0040 §6).
+        assert!(
+            !ArmingRung::EdgeCut
+                .enabled_actions()
+                .is_enabled(ProposedAction::ContainNode)
+        );
+        assert!(
+            !ArmingRung::Quarantine
+                .enabled_actions()
+                .is_enabled(ProposedAction::ContainNode)
+        );
+        assert!(
+            ArmingRung::Node
+                .enabled_actions()
+                .is_enabled(ProposedAction::ContainNode)
+        );
+    }
+
+    #[test]
+    fn no_rung_arms_a_subtractive_or_irreversible_action_class() {
+        // The ladder only ever governs the live-actuatable classes (the two network
+        // denies, and now ContainNode) — no rung, including the top one, enables a
+        // subtractive/irreversible class.
+        for rung in [
+            ArmingRung::EdgeCut,
+            ArmingRung::Quarantine,
+            ArmingRung::Node,
+        ] {
             let armed = rung.enabled_actions();
             assert!(!armed.is_enabled(ProposedAction::RevokeRbacGrant));
             assert!(!armed.is_enabled(ProposedAction::RemoveSecretMount));
