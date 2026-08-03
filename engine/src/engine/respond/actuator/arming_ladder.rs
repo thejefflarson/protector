@@ -34,14 +34,17 @@ pub enum ArmingRung {
     /// (`edge-cut < quarantine < node`, ADR-0040 §6): also arms
     /// [`ContainNode`](ProposedAction::ContainNode), the node-scoped escalation of a
     /// model-named workload whose own evidence proves its pod boundary broken.
-    /// Protector's first NODE-write action class — a cordon plus a co-resident
+    /// Protector's first NODE-write RBAC class — a cordon plus a co-resident
     /// default-deny sweep — so it is a deliberate, explicit third opt-in, never implied
-    /// by `quarantine`. Arming this rung does not by itself make a cordon happen: the
-    /// class still runs through the deterministic rails (control-plane exclusion,
-    /// one-node cap, the two-worker floor, ownership-gated revert —
-    /// `respond::actuator::node_containment::cordon_decision`) every time, regardless of
-    /// this rung; the rung only lets those rails act on real cluster state instead of
-    /// staying shadow-only.
+    /// by `quarantine`. **Arming this rung never makes a cordon happen.** ADR-0040 §5
+    /// makes a node cut propose-first BY CONSTRUCTION (a real node always has alive
+    /// collateral) — `ContainNode` has no auto-apply path at any rung, armed or not.
+    /// What this rung does is make a cut whose deterministic rails (control-plane
+    /// exclusion, one-node cap, the two-worker floor, ownership-gated revert —
+    /// `respond::actuator::node_containment::cordon_decision`) all pass ELIGIBLE to
+    /// surface as an actionable proposal (`respond::actuator::node_containment::evaluate_proposal`)
+    /// instead of a bare "not auto-enabled" line; a human out-of-band action is the only
+    /// route to an actual cordon.
     Node,
 }
 

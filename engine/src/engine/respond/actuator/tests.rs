@@ -274,11 +274,12 @@ fn decide_forbids_subtractive_rbac() {
 /// ADR-0040 §5/§6: `ContainNode` must never auto-apply through the GENERIC `decide()` path
 /// — `is_additive_live() == false` means [`decide`] forbids it structurally, before even
 /// reaching the enabled/scope checks, REGARDLESS of the arming ladder's `node` rung
-/// (`arming_ladder::ArmingRung::Node`) enabling the class. `ContainNode` gets its own
-/// apply-side gate instead (`node_containment::evaluate_apply`, called from
-/// `Engine::process`), gated by the deterministic rails rather than this generic path.
-/// Enabling the class here directly proves the generic forbid is unconditional, not just
-/// "nobody happens to enable it".
+/// (`arming_ladder::ArmingRung::Node`) enabling the class. `ContainNode` has NO apply path
+/// at all, generic or otherwise — its own gate
+/// (`node_containment::evaluate_proposal`, called from `Engine::process`) only ever
+/// decides whether to SURFACE a proposal, never whether to apply one (ADR-0040 §5:
+/// propose-first by construction). Enabling the class here directly proves the generic
+/// forbid is unconditional, not just "nobody happens to enable it".
 #[test]
 fn decide_forbids_contain_node_even_when_the_class_would_be_enabled() {
     let m = mitigation(

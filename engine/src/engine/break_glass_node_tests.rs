@@ -1,30 +1,36 @@
-//! Engine-level acceptance tests for ADR-0040 §5's `ContainNode` revert wiring: break-glass
-//! (ADR-0036) and the standard ledger self-revert lifecycle (ADR-0017) must uncordon a
-//! standing node-containment cut within one pass — never leave it silently in place through
-//! the wrong-shaped generic network `actuator`. Split out of `break_glass_tests.rs` purely to
-//! keep every file under the 1,000-line cap (repo CLAUDE.md); `use super::*` resolves to the
-//! engine module, matching every sibling `*_tests.rs` file.
+//! Engine-level acceptance tests for ADR-0040 §5's `ContainNode` revert wiring AND its
+//! propose-only invariant: break-glass (ADR-0036) and the standard ledger self-revert
+//! lifecycle (ADR-0017) must uncordon a standing node-containment cut within one pass —
+//! never leave it silently in place through the wrong-shaped generic network `actuator` —
+//! while `ContainNode` itself must NEVER be reachable through any apply call, at any
+//! arming/scope/rails state (there is no such call site to reach: `ContainNode` is
+//! propose-first by construction, ADR-0040 §5). Split out of `break_glass_tests.rs` purely
+//! to keep every file under the 1,000-line cap (repo CLAUDE.md); `use super::*` resolves to
+//! the engine module, matching every sibling `*_tests.rs` file.
 //!
-//! Deliberately does NOT depend on the `node` arming rung (ADR-0040 §6, a separate ticket) or
-//! on any node-observation adapter (`respond::actuator::node_containment`'s own doc):
+//! Deliberately does NOT depend on the `node` arming rung
+//! (`respond::actuator::arming_ladder::ArmingRung::Node`) or a live fleet watch:
 //! `EnabledActions::enable(ProposedAction::ContainNode)` arms the class directly, bypassing
-//! `EnabledActions::from_names` (which has no `node` name yet), and each test seeds its own
-//! `NodeFact`/actuator double via `Engine::with_node_fact`/`Engine::with_node_containment_actuator`
-//! rather than a live fleet watch. The PROPOSAL half is real production machinery — the model
-//! naming a boundary-broken workload, the menu escalating it to `ContainNode`
+//! `EnabledActions::from_names` (which has no `node` name), and each test seeds its own
+//! `NodeFact`/actuator double via `Engine::with_node_fact`/`Engine::with_node_containment_actuator`.
+//! The PROPOSAL half is real production machinery — the model naming a boundary-broken
+//! workload, the menu escalating it to `ContainNode`
 //! (`reason::proof::boundary_break`, `reason::adjudicate::incident::menu`), the ledger
-//! tracking it — only the "this was already applied" step is synthesized directly into the
-//! action log, standing in for the sibling ticket's future apply-side rail wiring.
+//! tracking it, and (for the revert tests below) `Engine::process`'s own proposal-side gate
+//! (`respond::actuator::node_containment::evaluate_proposal`) all run for real. Only the
+//! "this was already applied" step in the REVERT tests is synthesized directly into the
+//! action log — standing in for a HYPOTHETICAL future human-approval-to-apply flow
+//! (out of scope of every ticket to date); there is no code path that does this for real.
 
 use super::*;
 use crate::engine::graph::attack::AttackRef;
 use crate::engine::graph::{NodeKey, SecurityGraph};
 use crate::engine::observe::Snapshot;
 use crate::engine::reason::adjudicate::incident::{Assessment, IncidentDecision, Menu};
-use crate::engine::respond::actuator::{Actuation, node_containment};
+use crate::engine::respond::actuator::{Actuation, Actuator, node_containment};
 use serde_json::json;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A unique temp flag path for a test, without a temp-file crate — mirrors
 /// `break_glass_tests::temp_flag_path`.
@@ -420,4 +426,84 @@ async fn clearing_break_glass_leaves_the_node_classs_posture_byte_identical() {
     );
     assert_eq!(after_clear.action, baseline.action);
     assert_eq!(engaged_then_cleared.actions.active_count(), 0);
+}
+
+/// A spy [`Actuator`] that records every `apply()` call it receives, by action, via a
+/// shared handle — the acceptance-level proof that `ContainNode` has NO reachable apply
+/// call through the GENERIC actuator, at any arming/scope/rails state. Mirrors
+/// [`RecordingNodeContainmentActuator`]'s pattern of sharing state through a clone rather
+/// than downcasting the `Box<dyn Actuator>` `Engine` owns.
+struct SpyActuator {
+    applied: Arc<Mutex<Vec<ProposedAction>>>,
+}
+
+#[async_trait::async_trait]
+impl Actuator for SpyActuator {
+    async fn apply(&self, mitigation: &Mitigation) -> Actuation {
+        self.applied.lock().unwrap().push(mitigation.action);
+        Actuation::DryRun
+    }
+    async fn revert(&self, _mitigation: &Mitigation) -> Actuation {
+        Actuation::DryRun
+    }
+}
+
+/// ADR-0040 §5 acceptance proof: `ContainNode` never reaches ANY apply call — not the
+/// generic network [`Actuator::apply`] (already structurally forbidden by `decide()`'s
+/// `is_additive_live()` check, `respond::actuator::tests::decide_forbids_contain_node_even_when_the_class_would_be_enabled`),
+/// and there is no SEPARATE node-apply seam in `Engine` to call instead (only
+/// [`Engine::with_node_containment_actuator`] for REVERT exists — there is no
+/// `with_node_containment_actuator`-for-apply counterpart). Armed, unscoped (so
+/// `enforceScope` can't be the reason nothing applies), and every deterministic rail
+/// passing (three plain workers, no control-plane, no one-node-cap conflict) — the
+/// maximally-eligible case for the proposal gate to say "yes" — still applies nothing.
+#[tokio::test]
+async fn contain_node_never_reaches_an_apply_call_even_fully_eligible() {
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let actuator = SpyActuator {
+        applied: applied.clone(),
+    };
+    let mut engine = Engine::new(
+        EnabledActions::from_names(["judgement"]).enable(ProposedAction::ContainNode),
+        ActuationScope::unscoped(),
+        Box::new(actuator),
+        Box::new(NamesWhateverTheMenuResolves),
+    )
+    .with_node_fact(node_containment::NodeFact {
+        name: "node-1".to_string(),
+        control_plane: false,
+        schedulable: true,
+        owned_by_protector: false,
+    })
+    .with_node_fact(node_containment::NodeFact {
+        name: "node-2".to_string(),
+        control_plane: false,
+        schedulable: true,
+        owned_by_protector: false,
+    })
+    .with_node_fact(node_containment::NodeFact {
+        name: "node-3".to_string(),
+        control_plane: false,
+        schedulable: true,
+        owned_by_protector: false,
+    });
+    let snap = boundary_broken_snapshot(true);
+
+    // Proves eligibility was genuinely reached (not vacuously "nothing to apply because
+    // nothing was even proposed"): the real proof + menu resolution produced a
+    // `ContainNode` mitigation over a healthy 3-node fleet with no control-plane/
+    // one-node-cap conflict — exactly the fleet shape `evaluate_proposal`'s own unit
+    // tests confirm resolves to `ProposalOutcome::Proposed`.
+    let mitigation = contain_node_mitigation(&mut engine, &snap).await;
+    assert_eq!(mitigation.action, ProposedAction::ContainNode);
+
+    assert!(
+        applied.lock().unwrap().is_empty(),
+        "no apply call of any kind must ever be made for a ContainNode-eligible pass"
+    );
+    assert_eq!(
+        engine.actions.active_count(),
+        0,
+        "ContainNode must never be recorded as an applied/standing action"
+    );
 }

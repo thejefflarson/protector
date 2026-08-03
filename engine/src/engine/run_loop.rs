@@ -450,15 +450,15 @@ pub async fn run_watch(
     // provider in the prompt. Shares the same swap cell we spawn the reloader on below.
     .with_asn(asn.clone())
     .with_break_glass(break_glass.clone())
-    // The node-containment actuator (ADR-0040 §5/§6): cordon/uncordon glue for the
-    // `ContainNode` apply/self-revert paths. Built unconditionally, like every other
-    // actuator here — it holds only a client clone and does nothing until a mitigation's
-    // rails pass (`respond::actuator::node_containment::evaluate_apply`), gated by the
-    // `node` arming rung, exactly like `build_actuator`'s network actuators are inert
-    // until their own class is armed.
-    .with_node_containment(
+    // The node-containment REVERT actuator (ADR-0040 §5): uncordon/co-resident-deny-lift
+    // glue for the break-glass/self-revert loop
+    // (`crate::engine::node_containment_revert::Engine::revert_contain_node`). There is
+    // deliberately no corresponding APPLY wiring here — `ContainNode` is propose-only at
+    // every arming rung (ADR-0040 §5's propose-first-by-construction rule), so nothing in
+    // `Engine::process` ever calls `NodeContainmentActuator::apply`.
+    .with_node_containment_actuator(Box::new(
         respond::actuator::node_containment::NodeContainmentActuator::new(client.clone()),
-    );
+    ));
 
     // Repopulate the webhook's admission-decision ring from the durable journal on boot
     // so the admission-decision log isn't blank after a restart — parallel to how

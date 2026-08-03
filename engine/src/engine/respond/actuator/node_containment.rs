@@ -160,11 +160,21 @@ pub fn co_resident_denies(graph: &SecurityGraph, host: &NodeKey) -> Vec<Mitigati
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeFact {
     pub name: String,
-    /// Carries a control-plane role label — VISION's "protector cannot touch the control
-    /// plane" (ADR-0040 §5).
+    /// Carries a control-plane role signal (label, canonical or legacy, or a
+    /// control-plane taint) — VISION's "protector cannot touch the control plane"
+    /// (ADR-0040 §5).
     pub control_plane: bool,
     /// `!Node.spec.unschedulable` — true unless something (protector, a human, the
-    /// autoscaler) has already cordoned it.
+    /// autoscaler) has already cordoned it. **This is SCHEDULABILITY, not READINESS**: a
+    /// node whose kubelet has stopped reporting (`NotReady`) but whose
+    /// `spec.unschedulable` is still `false` counts as schedulable here, and therefore
+    /// still counts toward [`WORKER_FLOOR`]. Deliberate: `Node.status.conditions` (where
+    /// `Ready` lives) is exactly the kind of operational-status field this fleet
+    /// observation stays metadata-only by never reading
+    /// (`crate::engine::observe::adapter::node_fact`'s own doc) — cross-referencing
+    /// pod-health-per-node via the graph's `ScheduledOn` edges is possible but not
+    /// implemented here. Treat the floor as a **blast-radius bound on schedulable
+    /// capacity**, not a "currently healthy capacity" guarantee.
     pub schedulable: bool,
     /// [`CORDON_OWNER_ANNOTATION`] is set to [`CORDON_OWNER_VALUE`] on this node right now.
     pub owned_by_protector: bool,
@@ -208,10 +218,11 @@ impl RailRefusal {
     }
 }
 
-/// The minimum number of schedulable, non-control-plane workers a cordon must leave behind
-/// (ADR-0040 §5, build-settled 2026-08-02: "a floor that leaves a single worker is an
-/// outage, not damage-limitation" — kept at 2 even on a small fleet where this can make
-/// `ContainNode` correctly, permanently inert).
+/// The minimum number of SCHEDULABLE (not necessarily Ready — [`NodeFact::schedulable`]'s
+/// own doc), non-control-plane workers a cordon must leave behind (ADR-0040 §5,
+/// build-settled 2026-08-02: "a floor that leaves a single worker is an outage, not
+/// damage-limitation" — kept at 2 even on a small fleet where this can make `ContainNode`
+/// correctly, permanently inert).
 const WORKER_FLOOR: usize = 2;
 
 /// Whether cordoning `target` is deterministically allowed, over the CURRENT `fleet`
@@ -274,7 +285,11 @@ pub fn revert_decision(target: &NodeFact) -> Result<(), RailRefusal> {
 /// co-resident LABELLED pod at all (nothing for [`co_resident_denies`] to return) is never
 /// presumed in scope once a scope IS configured — the same "decline rather than widen"
 /// discipline [`co_resident_denies`] already applies to an unlabelled pod.
-pub fn contain_node_in_scope(graph: &SecurityGraph, host: &NodeKey, scope: &ActuationScope) -> bool {
+pub fn contain_node_in_scope(
+    graph: &SecurityGraph,
+    host: &NodeKey,
+    scope: &ActuationScope,
+) -> bool {
     if scope.is_unscoped() {
         return true;
     }

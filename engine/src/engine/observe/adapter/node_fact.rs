@@ -2,7 +2,7 @@
 //! mapping from the watched `Node` fleet to the
 //! [`node_containment::NodeFact`](crate::engine::respond::actuator::node_containment::NodeFact)
 //! shape [`cordon_decision`](crate::engine::respond::actuator::node_containment::cordon_decision)/
-//! [`evaluate_apply`](crate::engine::respond::actuator::node_containment::evaluate_apply)
+//! [`evaluate_proposal`](crate::engine::respond::actuator::node_containment::evaluate_proposal)
 //! consult.
 //!
 //! Mirrors [`super::placement::PlacementAdapter`] in spirit (a small, single-purpose
@@ -15,10 +15,12 @@
 //! This function is [`crate::engine::Engine::process`]'s direct source for the fleet it
 //! passes to the rails, built fresh each pass from [`crate::engine::observe::Snapshot::nodes`].
 //!
-//! **Reads exactly four fields per `Node` and nothing else** — the metadata-only
-//! discipline the module doc promises: the name; the
-//! `node-role.kubernetes.io/control-plane` label (any value, including absent-but-keyed,
-//! counts — kubeadm sets it to the empty string); `spec.unschedulable`; and whether
+//! **Reads exactly five fields per `Node` and nothing else** — the metadata-only
+//! discipline the module doc promises: the name; the canonical
+//! `node-role.kubernetes.io/control-plane` label, the legacy
+//! `node-role.kubernetes.io/master` label, AND `spec.taints` (any value, including
+//! absent-but-keyed, counts for the labels — kubeadm sets them to the empty string; see
+//! [`is_control_plane`] for why all three are checked); `spec.unschedulable`; and whether
 //! [`CORDON_OWNER_ANNOTATION`] is set to exactly [`CORDON_OWNER_VALUE`]. In particular it
 //! never reads `status` (conditions, capacity, allocatable, images, kubelet version) —
 //! there is no sensitive `.data` on a `Node` the way there is on a `Secret`, but the rails
@@ -31,25 +33,55 @@ use crate::engine::respond::actuator::node_containment::{
 };
 
 /// The label kubeadm (and every major managed-Kubernetes control plane) sets on a
-/// control-plane node — the source of [`NodeFact::control_plane`] (VISION: protector
-/// cannot touch the control plane, ADR-0040 §5).
+/// control-plane node — the primary source of [`NodeFact::control_plane`] (VISION:
+/// protector cannot touch the control plane, ADR-0040 §5). Also the taint KEY kubeadm
+/// applies alongside the label (`NoSchedule`) — [`is_control_plane`] checks it as its own,
+/// independent signal, since an operator can taint without labeling (or vice versa).
 const CONTROL_PLANE_LABEL: &str = "node-role.kubernetes.io/control-plane";
+
+/// The legacy pre-1.20 spelling of [`CONTROL_PLANE_LABEL`]/its taint — some distros and
+/// long-lived clusters still carry `master` rather than `control-plane`. Checked as an
+/// equally authoritative signal, never treated as inferior to the canonical spelling.
+const LEGACY_CONTROL_PLANE_LABEL: &str = "node-role.kubernetes.io/master";
+
+/// Whether `node` carries ANY recognized control-plane signal — the canonical label, the
+/// legacy label, or a taint keyed on either (regardless of effect: a control-plane-shaped
+/// taint key is itself the signal, not specifically its `NoSchedule` effect). FAIL CLOSED
+/// by union, not intersection: a node matching just ONE of these is control-plane, full
+/// stop — a heterogeneous or partially-migrated cluster (legacy label only, or a taint
+/// applied without the modern label) must never be misread as a plain worker. A node
+/// carrying NONE of these signals is treated as an ordinary, cordon-eligible worker — the
+/// sound default for vanilla/kubeadm clusters, where every worker legitimately carries no
+/// `node-role.kubernetes.io/*` marker at all (only control-plane nodes are labeled); the
+/// deterministic rails' own worker-floor/one-node-cap remain the backstop for any
+/// residual misclassification this narrower, three-signal check still misses.
+fn is_control_plane(node: &Node) -> bool {
+    let labelled = node.metadata.labels.as_ref().is_some_and(|labels| {
+        labels.contains_key(CONTROL_PLANE_LABEL) || labels.contains_key(LEGACY_CONTROL_PLANE_LABEL)
+    });
+    let tainted = node
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.taints.as_ref())
+        .is_some_and(|taints| {
+            taints.iter().any(|taint| {
+                taint.key == CONTROL_PLANE_LABEL || taint.key == LEGACY_CONTROL_PLANE_LABEL
+            })
+        });
+    labelled || tainted
+}
 
 /// Map the observed `Node` fleet to the [`NodeFact`] shape the node-containment rails
 /// consult. Pure and total: every `Node` in `nodes` yields exactly one `NodeFact`, in the
 /// same order, so an empty/absent watch simply yields an empty fleet (the rails then fail
-/// closed on any host they can't find, per `evaluate_apply`'s doc — never fabricate a
+/// closed on any host they can't find, per `evaluate_proposal`'s doc — never fabricate a
 /// passing rail from a missing fact).
 pub fn observe_node_facts(nodes: &[Node]) -> Vec<NodeFact> {
     nodes
         .iter()
         .filter_map(|node| {
             let name = node.metadata.name.clone()?;
-            let control_plane = node
-                .metadata
-                .labels
-                .as_ref()
-                .is_some_and(|labels| labels.contains_key(CONTROL_PLANE_LABEL));
+            let control_plane = is_control_plane(node);
             let schedulable = !node
                 .spec
                 .as_ref()
@@ -111,6 +143,90 @@ mod tests {
             facts[0].control_plane,
             "the control-plane label must be recognized"
         );
+    }
+
+    #[test]
+    fn the_legacy_master_label_is_also_control_plane() {
+        // Some distros/long-lived clusters still carry the pre-1.20 `master` spelling
+        // instead of `control-plane` — it must be an equally authoritative signal, not a
+        // second-class one, or a legacy-labelled control plane is misclassified as a
+        // cordon-eligible worker.
+        let n = node(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "cp-1", "labels": {"node-role.kubernetes.io/master": ""}},
+            "spec": {}
+        }));
+        let facts = observe_node_facts(&[n]);
+        assert!(
+            facts[0].control_plane,
+            "the legacy master label must be recognized"
+        );
+    }
+
+    #[test]
+    fn a_control_plane_taint_with_no_label_at_all_is_still_control_plane() {
+        // Fail closed: a control-plane-shaped taint is its own signal, independent of
+        // whether the node also carries the label — an operator who taints without
+        // labeling (or a label that was stripped) must not slip through as a worker.
+        let n = node(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "cp-1"},
+            "spec": {
+                "taints": [
+                    {"key": "node-role.kubernetes.io/control-plane", "effect": "NoSchedule"}
+                ]
+            }
+        }));
+        let facts = observe_node_facts(&[n]);
+        assert!(
+            facts[0].control_plane,
+            "a control-plane taint alone must mark the node control-plane"
+        );
+    }
+
+    #[test]
+    fn a_legacy_master_taint_is_also_recognized() {
+        let n = node(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "cp-1"},
+            "spec": {
+                "taints": [{"key": "node-role.kubernetes.io/master", "effect": "NoSchedule"}]
+            }
+        }));
+        let facts = observe_node_facts(&[n]);
+        assert!(facts[0].control_plane);
+    }
+
+    #[test]
+    fn an_unrelated_taint_does_not_mark_a_node_control_plane() {
+        // Only a control-plane-shaped taint KEY counts — an ordinary workload taint
+        // (dedicated-node-pool style) must not false-positive a worker into
+        // control-plane (which would make it un-cordonable but is not the fail-closed
+        // direction this check protects — it is checked for completeness alongside the
+        // fail-closed cases above).
+        let n = node(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "node-1"},
+            "spec": {
+                "taints": [{"key": "dedicated", "value": "gpu", "effect": "NoSchedule"}]
+            }
+        }));
+        let facts = observe_node_facts(&[n]);
+        assert!(!facts[0].control_plane);
+    }
+
+    #[test]
+    fn a_node_with_no_role_signal_at_all_is_the_ordinary_cordon_eligible_worker_default() {
+        // Vanilla/kubeadm workers carry NO node-role label or taint at all — that is the
+        // expected, sound "worker" case, not a gap: only a POSITIVE control-plane signal
+        // (label or taint, canonical or legacy) ever excludes a node here.
+        let n = node(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "node-1"},
+            "spec": {}
+        }));
+        let facts = observe_node_facts(&[n]);
+        assert!(!facts[0].control_plane);
     }
 
     #[test]
