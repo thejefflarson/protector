@@ -365,6 +365,15 @@ rules:
   - apiGroups: ["aquasecurity.github.io"]
     resources: ["vulnerabilityreports"]
     verbs: ["get", "list", "watch"]
+  # Node fleet observation (ADR-0040 §3/§6) — metadata-only read (name,
+  # control-plane signal, spec.unschedulable, protector's cordon-ownership annotation);
+  # mirrors charts/protector/templates/clusterrole.yaml. ALWAYS ON like every other read:
+  # the engine's Node watch runs every pass regardless of mode, so without this grant it
+  # 403-floods the run loop and starves the proof passes. No `patch` — e2e never arms
+  # enforceRung: node (ContainNode is propose-only, ADR-0040 §5).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["policy.linkerd.io"]
     resources: ["servers", "authorizationpolicies", "meshtlsauthentications"]
     verbs: ["get", "list", "watch"]$np_write
