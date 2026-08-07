@@ -687,7 +687,10 @@ impl Engine {
             .collect();
         // ADR-0040 actuation metrics: a newly-proposed `ContainNode` mitigation is real,
         // genuine data (the `boundary_break` trigger + menu resolver already run
-        // unconditionally, ADR-0040 §1-3).
+        // unconditionally, ADR-0040 §1-3). Edge-triggered: fires ONCE, the pass the ledger
+        // first surfaces the candidate — distinct from the level-triggered `eligible` label
+        // recorded below every pass the SAME proposal also clears the deterministic rails,
+        // so a single fresh proposal never double-increments one label in its first pass.
         for mitigation in &ledger_delta.proposed {
             if mitigation.action == ProposedAction::ContainNode {
                 self.metrics.record_contain_node("proposed", None);
@@ -801,7 +804,11 @@ impl Engine {
             match node_containment::evaluate_proposal(mitigation, armed, in_scope, &node_fleet) {
                 None => {}
                 Some(ProposalOutcome::Proposed) => {
-                    self.metrics.record_contain_node("proposed", None);
+                    // Distinct label from the edge-triggered `proposed` above (ADR-0040 §5):
+                    // this fires every pass the mitigation stays armed/in-scope/rails-clean,
+                    // not once at ledger surfacing, so sharing the `proposed` label would
+                    // double-count a single logical proposal in its first pass.
+                    self.metrics.record_contain_node("eligible", None);
                 }
                 Some(ProposalOutcome::Refuse(refusal)) => {
                     self.metrics

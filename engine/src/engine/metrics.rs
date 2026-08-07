@@ -106,31 +106,46 @@ pub(super) struct EngineMetrics {
     /// operator can page on "this fired at all" rather than poll the gauge.
     pub(super) break_glass_transitions: opentelemetry::metrics::Counter<u64>,
     /// `ProposedAction::ContainNode` (ADR-0040) events, by `event`
-    /// (`proposed`/`reverted`/`rail_refused`) and, for a `rail_refused` event, `reason`
-    /// (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned`/
+    /// (`proposed`/`eligible`/`reverted`/`rail_refused`) and, for a `rail_refused` event,
+    /// `reason` (`control-plane`/`one-node-cap`/`worker-floor`/`unlabelled`/`not-owned`/
     /// `unknown-node` — `respond::actuator::node_containment::RailRefusal::metric_reason`).
     /// **There is no `applied` event and never will be**: ADR-0040 §5 makes `ContainNode`
     /// propose-first BY CONSTRUCTION (never auto-applied, at any arming rung), so this
-    /// counter only ever observes proposal/refusal/revert, never an apply. `proposed`
-    /// fires from TWO call sites at different cadences, both meaning "there is a live,
-    /// reviewable node-containment candidate right now": edge-triggered the moment the
-    /// ledger first proposes the mitigation at all (`Engine::process`'s ledger-delta
-    /// loop, unconditional — fires even under `mode: audit`), and level-triggered every
-    /// pass thereafter while it is ALSO armed (`node` rung), in `enforceScope`, and every
-    /// deterministic rail passes (`respond::actuator::node_containment::evaluate_proposal`)
-    /// — the stronger claim "this is currently a rails-clean, actionable proposal", not
-    /// just "boundary_break fired once". A separate counter from the generic
-    /// [`Self::mitigations`] one: `ContainNode` never reaches `mitigations`' `applied`/
-    /// `reverted` labels through the generic auto-apply path (it is
-    /// `is_additive_live() == false`), and its deterministic rails must be observable
-    /// even when unarmed (a rail refusal is exactly as meaningful in shadow), so a
-    /// refusal is counted regardless of whether anything is armed.
+    /// counter only ever observes proposal/eligibility/refusal/revert, never an apply.
+    /// `proposed` and `eligible` are DELIBERATELY DISTINCT labels for two different
+    /// signals at two different cadences — sharing one label between them would
+    /// double-count a single logical proposal in its first pass:
+    /// - `proposed`: edge-triggered, fires ONCE, the pass the ledger first surfaces the
+    ///   mitigation at all (`Engine::process`'s ledger-delta loop, unconditional — fires
+    ///   even under `mode: audit`). Means "there is a live, reviewable node-containment
+    ///   candidate right now".
+    /// - `eligible`: level-triggered, fires EVERY pass thereafter while the SAME
+    ///   mitigation is ALSO armed (`node` rung), in `enforceScope`, and every
+    ///   deterministic rail passes
+    ///   (`respond::actuator::node_containment::evaluate_proposal`). Means the stronger
+    ///   claim "this is currently a rails-clean, actionable proposal", not just
+    ///   "boundary_break fired once".
+    ///
+    /// A separate counter from the generic [`Self::mitigations`] one: `ContainNode` never
+    /// reaches `mitigations`' `applied`/`reverted` labels through the generic auto-apply
+    /// path (it is `is_additive_live() == false`), and its deterministic rails must be
+    /// observable even when unarmed (a rail refusal is exactly as meaningful in shadow),
+    /// so a refusal is counted regardless of whether anything is armed.
     pub(super) contain_node: opentelemetry::metrics::Counter<u64>,
 }
 
 impl EngineMetrics {
     pub(super) fn new() -> Self {
-        let m = opentelemetry::global::meter("protector.engine");
+        Self::from_meter(opentelemetry::global::meter("protector.engine"))
+    }
+
+    /// Build the instruments against an explicit `Meter` rather than the process-global
+    /// one. [`Self::new`] is the only non-test caller (against the global meter, which is
+    /// a no-op unless [`crate::telemetry::init`] wired an OTLP exporter); tests use this to
+    /// wire a local `SdkMeterProvider` + in-memory exporter instead, so a recorded-value
+    /// assertion never has to mutate the process-global meter provider other tests in this
+    /// binary also read.
+    fn from_meter(m: opentelemetry::metrics::Meter) -> Self {
         Self {
             passes: m
                 .u64_counter("protector.engine.passes")
@@ -250,7 +265,7 @@ impl EngineMetrics {
             contain_node: m
                 .u64_counter("protector.engine.contain_node")
                 .with_description(
-                    "ContainNode (ADR-0040) events by event (proposed/reverted/\
+                    "ContainNode (ADR-0040) events by event (proposed/eligible/reverted/\
                      rail_refused) and, for a refusal, reason. Propose-only — no \
                      applied event exists.",
                 )
@@ -271,8 +286,11 @@ impl EngineMetrics {
     }
 
     /// Record one `ContainNode` proposal-lifecycle event (ADR-0040 §5): `event` is one of
-    /// `proposed`/`reverted`/`rail_refused` — there is deliberately no `applied` event, a
-    /// node cut is propose-first by construction and never auto-applies; `reason` is
+    /// `proposed`/`eligible`/`reverted`/`rail_refused` — there is deliberately no `applied`
+    /// event, a node cut is propose-first by construction and never auto-applies. `proposed`
+    /// and `eligible` are separate labels for the two distinct call sites in
+    /// `Engine::process` (see [`Self::contain_node`]'s doc) — never share one label between
+    /// them, or a single fresh proposal double-increments it in its first pass. `reason` is
     /// `Some` only for `rail_refused` — the refusal-reason label
     /// (`respond::actuator::node_containment::RailRefusal::metric_reason`) alert rules key
     /// on. Fires unconditionally — this counter carries no arming/mode gate of its own, so a
@@ -348,6 +366,7 @@ mod tests {
         // Propose-only (ADR-0040 §5): no "applied" event exists at all.
         let metrics = EngineMetrics::new();
         metrics.record_contain_node("proposed", None);
+        metrics.record_contain_node("eligible", None);
         metrics.record_contain_node("reverted", None);
         for reason in [
             "control-plane",
@@ -359,6 +378,74 @@ mod tests {
         ] {
             metrics.record_contain_node("rail_refused", Some(reason));
         }
+    }
+
+    /// A single newly-proposed, rails-clean `ContainNode` fires from TWO call sites in one
+    /// pass (`Engine::process`'s ledger-delta loop, then its `evaluate_proposal` arm — see
+    /// [`EngineMetrics::contain_node`]'s doc) — this guards that the two use DISTINCT
+    /// labels rather than double-incrementing `proposed`. Wires a local `SdkMeterProvider`
+    /// plus an in-memory exporter (not the process-global one — see
+    /// [`EngineMetrics::from_meter`]) so the recorded values are actually readable back,
+    /// rather than the no-op smoke test above.
+    #[test]
+    fn a_single_pass_never_double_counts_one_label() {
+        use std::collections::HashMap;
+
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let metrics = EngineMetrics::from_meter(provider.meter("test"));
+
+        // One pass, one logical proposal: the edge-triggered ledger surfacing, then the
+        // level-triggered rails-clean arm landing on the SAME mitigation.
+        metrics.record_contain_node("proposed", None);
+        metrics.record_contain_node("eligible", None);
+        provider
+            .force_flush()
+            .expect("flush the in-memory exporter");
+
+        let counts: HashMap<String, u64> = exporter
+            .get_finished_metrics()
+            .expect("read back the in-memory exporter")
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .find(|m| m.name() == "protector.engine.contain_node")
+            .and_then(|m| match m.data() {
+                opentelemetry_sdk::metrics::data::AggregatedMetrics::U64(
+                    opentelemetry_sdk::metrics::data::MetricData::Sum(sum),
+                ) => Some(
+                    sum.data_points()
+                        .map(|dp| {
+                            let event = dp
+                                .attributes()
+                                .find(|kv| kv.key.as_str() == "event")
+                                .map(|kv| kv.value.to_string())
+                                .unwrap_or_default();
+                            (event, dp.value())
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .expect("contain_node is a u64 sum");
+
+        assert_eq!(
+            counts.get("proposed").copied(),
+            Some(1),
+            "proposed must fire exactly once for a single fresh proposal in one pass"
+        );
+        assert_eq!(
+            counts.get("eligible").copied(),
+            Some(1),
+            "eligible is a distinct label from proposed, not a second increment of it"
+        );
     }
 
     /// Build a `RuntimeCoverage` from the SAME `derive_runtime_coverage` the dashboard uses, so the
