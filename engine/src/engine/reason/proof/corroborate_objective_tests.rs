@@ -183,7 +183,7 @@ fn alert_still_corroborates_any_objective() {
 /// internet egress in a tight window is corroboration instead — see
 /// `corroborate_reverse_shell_tests.rs`.
 #[test]
-fn shell_exec_corroborates_any_objective() {
+fn shell_exec_no_longer_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
         path: "/bin/bash".into(),
         exe_anon_inode: false,
@@ -204,7 +204,7 @@ fn shell_exec_corroborates_any_objective() {
 /// real install still corroborates via `alarming_write`; a no-op package-manager exec stays
 /// model evidence only.
 #[test]
-fn package_manager_exec_corroborates_any_objective() {
+fn package_manager_exec_no_longer_corroborates_any_objective() {
     let pkg = Behavior::ProcessExec {
         path: "/usr/bin/apt".into(),
         exe_anon_inode: false,
