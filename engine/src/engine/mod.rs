@@ -74,6 +74,12 @@ use metrics::EngineMetrics;
 // and the dashboard's read-only view can share its record/class types.
 pub mod cut_divergence;
 
+// The narrowing-delta comparator (ADR-0041 §6): the Falco-retirement parity-matrix input —
+// counts breach-relevant chains where a notable exec is present on the entry's runtime but the
+// chain is uncorroborated (the cases the retiring blanket notable-exec corroboration arm would
+// have flipped). View only — see the module docs; mirrors `cut_divergence`'s shape.
+mod narrowing_delta;
+
 // The ADJ-MISS-DIAG re-judge diagnostic, extracted to keep this orchestrator under
 // the file-size cap (CLAUDE.md). Emits the compact, per-section-fingerprinted line the churn
 // harness ingests.
@@ -591,6 +597,18 @@ impl Engine {
         self.metrics.breach_paths.record(breach_paths, &[]);
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
+        }
+        // Narrowing-delta comparator (ADR-0041 §6): the Falco-retirement parity-matrix input.
+        // VIEW ONLY — reads `graph`/`chains`, feeds nothing back into adjudication, the ledger,
+        // or the arming state; see the module docs.
+        let narrowing_delta = narrowing_delta::compute(&graph, &chains);
+        if !narrowing_delta.is_empty() {
+            self.metrics
+                .narrowing_delta
+                .add(narrowing_delta.len() as u64, &[]);
+        }
+        for record in &narrowing_delta {
+            record.emit();
         }
         // Publish this pass's behavioral-bake snapshot into the output state. Done
         // here, before the slow adjudication loop, for the same reason the findings are:
