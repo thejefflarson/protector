@@ -174,8 +174,14 @@ fn alert_still_corroborates_any_objective() {
     assert!(corroborates(&alert, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// A shell exec (interactive-shell) corroborates ANY objective like an alert
-/// : the "terminal shell in container" tamper-now signal.
+/// FLIP-PROOF (ADR-0041): a bare shell exec (interactive-shell) NO LONGER corroborates via
+/// the flat [`corroborates`] relation — this is exactly what the blanket-arm narrowing
+/// changed. It still classifies as `is_interactive_shell` (the exec-class annotation the
+/// model's evidence line still carries) and still satisfies
+/// `observe::alarm_class::is_alarming_now` (the drift-guard in this file pins that); only
+/// the DETERMINISTIC corroboration gate narrows. A shell CORRELATED with a same-entry
+/// internet egress in a tight window is corroboration instead — see
+/// `corroborate_reverse_shell_tests.rs`.
 #[test]
 fn shell_exec_corroborates_any_objective() {
     let shell = Behavior::ProcessExec {
@@ -185,14 +191,18 @@ fn shell_exec_corroborates_any_objective() {
     assert!(crate::engine::observe::exec_class::is_interactive_shell(
         &shell
     ));
-    assert!(corroborates(&shell, &CREDENTIAL_ACCESS));
-    assert!(corroborates(&shell, &EXFILTRATION));
-    assert!(corroborates(&shell, &ESCAPE_TO_HOST));
-    assert!(corroborates(&shell, &EXPLOIT_PUBLIC_FACING));
+    assert!(!corroborates(&shell, &CREDENTIAL_ACCESS));
+    assert!(!corroborates(&shell, &EXFILTRATION));
+    assert!(!corroborates(&shell, &ESCAPE_TO_HOST));
+    assert!(!corroborates(&shell, &EXPLOIT_PUBLIC_FACING));
 }
 
-/// A package-manager exec corroborates ANY objective like an alert:
-/// the "package management in container" tamper-now signal.
+/// FLIP-PROOF (ADR-0041): a package-manager exec NO LONGER corroborates via the flat
+/// [`corroborates`] relation, and — unlike an interactive shell — it never will: package
+/// managers are deliberately EXCLUDED from the reverse-shell shape too (they always egress
+/// fetching packages, so including them would just re-create a blanket for that class). A
+/// real install still corroborates via `alarming_write`; a no-op package-manager exec stays
+/// model evidence only.
 #[test]
 fn package_manager_exec_corroborates_any_objective() {
     let pkg = Behavior::ProcessExec {
@@ -200,10 +210,10 @@ fn package_manager_exec_corroborates_any_objective() {
         exe_anon_inode: false,
     };
     assert!(crate::engine::observe::exec_class::is_package_manager(&pkg));
-    assert!(corroborates(&pkg, &CREDENTIAL_ACCESS));
-    assert!(corroborates(&pkg, &EXFILTRATION));
-    assert!(corroborates(&pkg, &ESCAPE_TO_HOST));
-    assert!(corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
+    assert!(!corroborates(&pkg, &CREDENTIAL_ACCESS));
+    assert!(!corroborates(&pkg, &EXFILTRATION));
+    assert!(!corroborates(&pkg, &ESCAPE_TO_HOST));
+    assert!(!corroborates(&pkg, &EXPLOIT_PUBLIC_FACING));
 }
 
 /// NEGATIVE / REGRESSION GUARD: an anon-inode exec (`exe_anon_inode: true`) must
@@ -212,13 +222,15 @@ fn package_manager_exec_corroborates_any_objective() {
 /// withdrawn version (which routed a path-shape classification into this same blanket
 /// gate, forging corroboration on routine `fexecve()`/runc-memfd-reexec behavior). The real
 /// signal has its own, far narrower, entry-scoped gate — see
-/// `corroborate_anon_inode_exec_tests.rs`.
+/// `corroborate_anon_inode_exec_tests.rs`. (Post-ADR-0041 this is no longer the only
+/// non-corroborating exec path — a bare shell/pkg-mgr exec joins it — but the isolation
+/// this test does (a non-shell/pkg-mgr path) stays meaningful for a future exec-scoped arm.)
 #[test]
 fn anon_inode_exec_does_not_blanket_corroborate() {
     let anon = Behavior::ProcessExec {
         // NOT a shell/package-manager path — isolates exe_anon_inode as the only thing
-        // under test (a shell path would ALSO blanket-corroborate via notable_exec, for
-        // an unrelated reason).
+        // under test (post-ADR-0041 a shell/pkg-mgr path is ALSO non-corroborating via the
+        // flat arm now, for the unrelated reason the two tests above pin).
         path: "/tmp/payload".into(),
         exe_anon_inode: true,
     };
@@ -226,6 +238,27 @@ fn anon_inode_exec_does_not_blanket_corroborate() {
     assert!(!corroborates(&anon, &EXFILTRATION));
     assert!(!corroborates(&anon, &ESCAPE_TO_HOST));
     assert!(!corroborates(&anon, &EXPLOIT_PUBLIC_FACING));
+}
+
+/// DRIFT-GUARD (ADR-0041): narrowing the flat corroboration arm must NOT touch
+/// `observe::alarm_class::is_alarming_now` — the model's "hands-on-keyboard happened"
+/// evidence line and the actively-exploited marking / downstream `contain` menu seeding
+/// all key off it, and none of that is in scope here. A notable exec (shell or
+/// package-manager) still satisfies it even though it no longer `corroborates`.
+#[test]
+fn notable_exec_still_satisfies_is_alarming_now_after_the_narrow() {
+    let shell = Behavior::ProcessExec {
+        path: "/bin/bash".into(),
+        exe_anon_inode: false,
+    };
+    let pkg = Behavior::ProcessExec {
+        path: "/usr/bin/apt".into(),
+        exe_anon_inode: false,
+    };
+    assert!(!corroborates(&shell, &CREDENTIAL_ACCESS));
+    assert!(!corroborates(&pkg, &CREDENTIAL_ACCESS));
+    assert!(crate::engine::observe::alarm_class::is_alarming_now(&shell));
+    assert!(crate::engine::observe::alarm_class::is_alarming_now(&pkg));
 }
 
 /// NEGATIVE: a *bare* (non-shell, non-pkg-mgr) ProcessExec stays non-corroborating — legit

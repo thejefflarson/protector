@@ -376,6 +376,8 @@ mod corroborate_privesc_tests;
 #[cfg(test)]
 mod corroborate_ptrace_tests;
 #[cfg(test)]
+mod corroborate_reverse_shell_tests;
+#[cfg(test)]
 mod corroborate_tests;
 #[cfg(test)]
 mod pivot_quarantine_tests;

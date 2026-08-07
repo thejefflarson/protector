@@ -11,12 +11,9 @@
 //! on the `cross_tenant_lateral` predicate directly — plus regression guards that ordinary
 //! egress / ordinary in-cluster traffic still corroborate only via the unchanged flat arms.
 //!
-//! (The reverse-shell shape considered in was dropped at integration: it was
-//! redundant-by-construction under the blanket notable-exec arm — a notable exec
-//! already corroborates ANY objective, so the narrower exec+egress-timing shape could not
-//! flip `corroborated_for` today. It lands load-bearing only WHEN that blanket exec arm is
-//! narrowed; a follow-up ticket tracks implementing it then, so it arrives with a test that
-//! can actually fail rather than dead-on-arrival.)
+//! The sibling reverse-shell-on-foothold shape (ADR-0041) has its own file,
+//! `corroborate_reverse_shell_tests.rs` — it needs the blanket notable-exec arm narrowed to
+//! `false` (see `corroborate.rs`) to be load-bearing, which landed alongside it.
 
 use std::time::{Duration, SystemTime};
 
