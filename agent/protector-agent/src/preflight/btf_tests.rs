@@ -31,6 +31,41 @@ fn rejects_a_type_section_that_overruns_the_blob() {
 }
 
 #[test]
+fn endian_u32_and_i32_are_total_on_a_too_short_slice() {
+    // Regression for the ADR-0014 never-panic contract: `Endian::u32`/`i32` used to
+    // `.expect()` a 4-byte slice. Every current caller happens to pass one, but a
+    // wrong-sized caller (or a future one) must fail closed with `Truncated`, not panic.
+    assert!(matches!(
+        Endian::Little.u32(&[1, 2, 3]),
+        Err(BtfParseError::Truncated)
+    ));
+    assert!(matches!(
+        Endian::Big.u32(&[]),
+        Err(BtfParseError::Truncated)
+    ));
+    assert!(matches!(
+        Endian::Little.i32(&[0u8; 2]),
+        Err(BtfParseError::Truncated)
+    ));
+}
+
+#[test]
+fn a_blob_truncated_mid_integer_fails_closed_without_panicking() {
+    // A well-formed blob (built by the same fixture builder the other tests use), then
+    // cut short a couple of bytes into its type section — the truncation lands
+    // mid-integer, inside the last member's byte_offset word, not on a type boundary.
+    // The parser must fail closed (Truncated), never panic, on this malformed input.
+    let mut b = BtfBuilder::new();
+    b.add_struct("demo_file", false, &[("f_flags", 0, 40), ("f_path", 0, 64)]);
+    let mut blob = b.build();
+    blob.truncate(blob.len() - 2);
+    assert!(matches!(
+        RawBtf::parse(&blob),
+        Err(BtfParseError::Truncated)
+    ));
+}
+
+#[test]
 fn finds_a_plain_struct_field_offset() {
     let mut b = BtfBuilder::new();
     b.add_struct("demo_file", false, &[("f_flags", 0, 40), ("f_path", 0, 64)]);
