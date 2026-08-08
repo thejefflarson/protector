@@ -15,6 +15,13 @@ mod linkage;
 mod observer;
 #[cfg(any(feature = "ebpf", test))]
 mod pod;
+// The load-time BTF preflight (ADR-0014 amendment): re-verifies every baked kernel-struct
+// field offset against a node's live BTF before any probe attaches. Only called from the
+// `ebpf`-gated observer, but is itself plain userspace Rust with no bpf-toolchain
+// dependency — gated like `pod`/`linkage` so its fixture-based unit tests run in the
+// default (no `ebpf` feature) build too.
+#[cfg(any(feature = "ebpf", test))]
+mod preflight;
 mod reporter;
 
 use std::io::IsTerminal;

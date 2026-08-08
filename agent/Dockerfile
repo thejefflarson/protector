@@ -5,9 +5,13 @@
 # Builds the agent WITH the eBPF probe (`--features ebpf`): the builder stage carries
 # the bpf toolchain (prebuilt bpf-linker + nightly + rust-src), and the userspace
 # build.rs compiles the sibling protector-agent-ebpf crate to a BPF object and embeds
-# it in the loader. The BPF object is architecture-neutral (CO-RE-relocated against the
-# node's BTF at load); the elevated caps it needs are granted at RUNTIME by the
-# DaemonSet's securityContext, never baked into the image.
+# it in the loader. The BPF object bakes hand-verified kernel struct offsets rather than
+# CO-RE-relocating them — rustc emits no BTF field relocations (ADR-0014's amendment on
+# the load-time BTF preflight) — so it is the SAME object on every node/arch; the
+# userspace loader re-verifies those baked offsets against each node's live BTF before
+# attach (a check, not a relocation) and degrades gracefully on a mismatch. The elevated
+# caps it needs are granted at RUNTIME by the DaemonSet's securityContext, never baked
+# into the image.
 
 # bookworm-based to match the bookworm-slim runtime's glibc 2.36.
 # Via mirror.gcr.io (Docker Hub pull-through) to dodge the anonymous 429.

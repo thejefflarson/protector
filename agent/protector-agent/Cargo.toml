@@ -14,14 +14,18 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The shared repr(C) event layouts AND the FIELD_OFFSETS/LOADING_MODULE table
+# (`agent/common/src/offsets.rs`, ADR-0014 amendment). NOT feature-gated: the load-time
+# BTF preflight (`src/preflight`) that reads this table is plain userspace Rust with no
+# bpf-toolchain dependency, so its fixture-based unit tests run in the default (no
+# `--features ebpf`) build too — see `src/preflight/mod.rs`'s module doc.
+protector-agent-common = { version = "0.1.0", path = "../common" }
 
-# The eBPF loader + the shared repr(C) event layouts. Feature-gated so the default build
-# (and its unit tests) compile without the bpf toolchain; enable `--features ebpf` on a
-# node to load real probes.
+# The eBPF loader itself. Feature-gated so the default build (and its unit tests) compile
+# without the bpf toolchain; enable `--features ebpf` on a node to load real probes.
 aya = { version = "0.13", optional = true }
 aya-log = { version = "0.2", optional = true }
-protector-agent-common = { path = "../common", optional = true }
 
 [features]
 default = []
-ebpf = ["dep:aya", "dep:aya-log", "dep:protector-agent-common"]
+ebpf = ["dep:aya", "dep:aya-log"]
