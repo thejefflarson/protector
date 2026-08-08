@@ -8,13 +8,16 @@
 //! ([`crate::engine::node_containment_revert`]), self-gated on [`super::revert_decision`]
 //! regardless of caller discipline. **[`Self::apply`] has NO call site in `Engine`** —
 //! ADR-0040 §5 makes a node cut propose-first by construction (never auto-applied, at any
-//! arming rung), so nothing in the engine's per-pass loop ever reaches it; it exists,
-//! tested in isolation, for a future human-approval-to-apply flow.
+//! arming rung), and the ADR-0040 addendum settles that protector never grows an in-product
+//! approve→apply path for node containment at all, so nothing in the engine's per-pass loop
+//! ever reaches it. It exists, tested in isolation, as the actuator glue for the human's
+//! out-of-band act (cordon + runbook) — gated on [`ScopedDenies`] BY TYPE so it can never
+//! be called with an `enforceScope`-unfiltered set.
 
 use crate::engine::respond::Mitigation;
 use crate::engine::respond::actuator::{Actuation, Actuator, IsolationActuator, cut_label};
 
-use super::{NodeFact, render_cordon, render_uncordon, revert_decision};
+use super::{NodeFact, ScopedDenies, render_cordon, render_uncordon, revert_decision};
 
 /// The revert half of [`NodeContainmentActuator`]'s contract, pulled into a trait purely so
 /// the break-glass/self-revert loop ([`crate::engine::Engine::process`]) can hold either the
@@ -71,10 +74,13 @@ impl NodeContainmentActuator {
     }
 
     /// Cordon `mitigation`'s target host and default-deny every co-resident mitigation in
-    /// `co_resident` (built by [`super::co_resident_denies`]). Best-effort: a co-resident
-    /// deny failure is logged by [`IsolationActuator`] and does not roll back the cordon — a
-    /// partial containment (node cordoned, some pods still reachable) is safer than none.
-    pub async fn apply(&self, mitigation: &Mitigation, co_resident: &[Mitigation]) -> Actuation {
+    /// `co_resident` (built by [`super::co_resident_denies_in_scope`] — the ONLY door into
+    /// this method takes the `enforceScope`-confined [`ScopedDenies`] set BY TYPE, ADR-0040
+    /// addendum: a caller cannot hand this the unfiltered [`super::co_resident_denies`] set
+    /// even by mistake). Best-effort: a co-resident deny failure is logged by
+    /// [`IsolationActuator`] and does not roll back the cordon — a partial containment (node
+    /// cordoned, some pods still reachable) is safer than none.
+    pub async fn apply(&self, mitigation: &Mitigation, co_resident: &ScopedDenies) -> Actuation {
         let Some(manifest) = render_cordon(mitigation) else {
             tracing::warn!(cut = %cut_label(mitigation), "not a ContainNode mitigation; nothing to cordon");
             return Actuation::DryRun;
@@ -85,7 +91,7 @@ impl NodeContainmentActuator {
         }
         tracing::info!(node = %host_name, "cordoned node (ADR-0040 containment)");
         let isolation = IsolationActuator::new(self.client.clone());
-        for co_resident_mitigation in co_resident {
+        for co_resident_mitigation in co_resident.as_slice() {
             isolation.apply(co_resident_mitigation).await;
         }
         Actuation::Applied

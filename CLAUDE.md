@@ -51,6 +51,9 @@ knob with a sane default — not an operator toggle. Prefer a good default over 
 ## Workflow
 
 - Branch + PR; never commit directly to `main`. Merge on green CI.
+- Review checklist: a PR that removes a consumer of a shared layer states the
+  layer's remaining live-consumer count in one line; a drop-to-one is a refactor
+  smell to flag, not merge silently ([ADR-0042](docs/adr/0042-flag-remaining-consumer-count-on-consumer-removal.md)).
 - **Releases follow strict semver**, computed from the conventional-commit subjects since
   the last tag: `feat` → **minor**; `fix`/`perf`/`refactor`/`chore`/`docs`/`ci`/`build` →
   **patch**; `!` or `BREAKING CHANGE` → **major** (pre-1.0: breaking → minor). Do not
