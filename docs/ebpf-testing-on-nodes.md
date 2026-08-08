@@ -31,8 +31,9 @@ first for this kernel:
 
 1. **fentry on `security_file_open(struct file *file)` + `bpf_d_path(&file->f_path,…)`**
    — BTF-aware, clean. Needs vmlinux struct bindings for `struct file` so the probe can
-   take the address of `f_path` (CO-RE-relocated). Does **not** require BPF-LSM to be in
-   the active `lsm=` list, which is why it's preferred over option 2.
+   take the address of `f_path` (a baked, hand-verified offset — see the "no CO-RE field
+   relocation" note below). Does **not** require BPF-LSM to be in the active `lsm=` list,
+   which is why it's preferred over option 2.
 2. **`lsm/file_open`** — simplest code, but requires `CONFIG_BPF_LSM=y` **and** `bpf` in
    the kernel's active LSM list (`/sys/kernel/security/lsm`). Ubuntu ships the config but
    whether `bpf` is in the active list is unconfirmed (couldn't read it without node
@@ -50,6 +51,18 @@ on any kernel struct change by dumping BTF from a node (`kubectl` a hostPath-`/s
 btf` pod, then `bpftool btf dump … format c`, or parse the raw BTF) on **every** fleet arch
 and confirming the read fields share one offset. As of 2026-07-05 the fleet is `7.0.0`
 (arm64 raspi + amd64 generic) and all read fields align across both arches.
+
+**Load-time BTF preflight:** re-verifying by hand on every kernel bump doesn't scale, and a
+stale `bpf_probe_read_kernel` offset (unlike `bpf_d_path`) reads garbage silently rather
+than failing the verifier. The userspace loader (`agent/protector-agent/src/observer.rs`)
+therefore re-checks every baked offset — plus the `LOADING_MODULE` enum value — against each
+node's own live BTF before attaching anything (`agent/protector-agent/src/preflight`, ADR-0014's
+amendment). A struct-reading probe whose offsets diverged is disabled (fail-closed); the
+struct-free probes (connect, ptrace-attach, module-load) still attach. Every divergence is
+logged expected-vs-actual — that log line is the regeneration data for `vmlinux.rs`, replacing
+the manual `bpftool btf dump` re-verification above as the *safety net*; doing it by hand
+after a known kernel change is still the fastest way to fix the bindings once the preflight
+has told you which field moved.
 
 ## The validation loop (no exec, no SSH)
 

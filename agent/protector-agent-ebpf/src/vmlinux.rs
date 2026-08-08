@@ -31,18 +31,21 @@
 //! degraded the two `bpf_d_path` probes (secret-read `file_open` + `file_write`) to
 //! loaded=4/6 fleet-wide. Regenerate (re-verify the offsets) on any kernel struct change.
 //!
-//! # `linux_binprm.file` / `inode.i_nlink` — ON-NODE BTF VERIFICATION PENDING
+//! # `linux_binprm.file` / `inode.i_nlink` — verified continuously, not just once
 //!
 //! Two fields added for the fileless-exec (anon-inode) probe were derived from kernel
 //! *source* layout, not dumped from live BTF like everything else above: `linux_binprm.file`
 //! (+64) and `inode.i_nlink` (+72). Each carries its own derivation in its struct's doc
-//! comment. Both must be confirmed against `bpftool btf dump` on BOTH fleet arches — the
-//! same process that produced the offsets above — before this probe ships past a spike
-//! deploy (docs/ebpf-testing-on-nodes.md). A wrong offset here fails the SAME way a wrong
-//! `f_path` offset would have: either a verifier rejection (probe degrades,
-//! loud in the heartbeat) or, worse, a silently wrong bool if the misread pointer happens
-//! to still verify — which is why this module keeps every derivation reasoning explicit
-//! rather than asserting a bare number.
+//! comment. Unlike the offsets above (dumped once from live BTF on both fleet arches),
+//! these two were never manually confirmed against `bpftool btf dump` — but they don't
+//! need to be, ONE-TIME, by hand: the userspace loader's load-time BTF preflight
+//! (`agent/protector-agent/src/preflight`, ADR-0014 amendment) re-derives every field in
+//! this module — these two included — against each node's live BTF before any probe
+//! attaches, every time the agent starts. A wrong offset here fails the SAME way a wrong
+//! `f_path` offset would have: either a verifier rejection (probe degrades, loud in the
+//! heartbeat) or, worse, a silently wrong bool if the misread pointer happens to still
+//! verify — which is why the preflight disables the struct-reading probes on a mismatch
+//! (fail-closed) rather than trusting a compile-time assertion alone.
 
 // Padding fields (and `mnt`, present only to place `dentry` at +8) are never read — they
 // exist solely to position the fields the probes DO read at the right byte offset.
@@ -93,14 +96,14 @@ pub struct qstr {
 /// the anon-inode discriminator — `0` for an unlinked inode (a memfd, or any file `rm`'d
 /// while still executing), non-zero for a normal directory-linked file.
 ///
-/// **ON-NODE BTF VERIFICATION PENDING for `i_nlink`:** derived from kernel
-/// source, not dumped from live BTF like the fields above it. `i_nlink` is the first field
-/// of an anonymous union (`union { const unsigned int i_nlink; unsigned int __i_nlink; }`)
-/// immediately after `i_ino` in `struct inode` — no padding needed since `i_ino` (an
-/// 8-byte `unsigned long`) already leaves the next field 8-aligned. +72 = +64 (`i_ino`'s
-/// offset) + 8 (`i_ino`'s size). Must be confirmed against BOTH fleet arches' live BTF
-/// (`bpftool btf dump … format c`) before this ships past a spike deploy — see
-/// docs/ebpf-testing-on-nodes.md.
+/// `i_nlink`'s offset was derived from kernel source, not dumped from live BTF like the
+/// fields above it. `i_nlink` is the first field of an anonymous union (`union { const
+/// unsigned int i_nlink; unsigned int __i_nlink; }`) immediately after `i_ino` in `struct
+/// inode` — no padding needed since `i_ino` (an 8-byte `unsigned long`) already leaves the
+/// next field 8-aligned. +72 = +64 (`i_ino`'s offset) + 8 (`i_ino`'s size). The load-time
+/// BTF preflight re-derives this offset on every node at every agent start — including
+/// recursing into the anonymous union — so a derivation error here is caught continuously,
+/// not just once (see the module doc above and `agent/protector-agent/src/preflight`).
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct inode {
@@ -108,7 +111,7 @@ pub struct inode {
     pub i_sb: *mut super_block, // +40
     _pad1: [u8; 16],
     pub i_ino: u64,   // +64  unsigned long
-    pub i_nlink: u32, // +72 ON-NODE BTF VERIFICATION PENDING (see doc above)
+    pub i_nlink: u32, // +72 — verified at every load, not just once (see doc above)
 }
 
 /// `struct super_block` — prefix through `s_magic` (+96), the tmpfs filter's discriminator.
@@ -150,38 +153,49 @@ pub struct cred {
 /// `interpreter`(+56) + `file`(+64) + `cred`(+72) + `unsafe`(+80) + `per_clear`(+84) +
 /// `argc`(+88) + `envc`(+92) = `filename` at +96 — which matches the INDEPENDENTLY
 /// on-node-verified `filename` offset below exactly, a strong (but not certain) signal
-/// this derivation tracks the real fleet layout. Must still be confirmed against BOTH
-/// fleet arches' live BTF (`bpftool btf dump … format c`) before this ships past a spike
-/// deploy — see docs/ebpf-testing-on-nodes.md.
+/// this derivation tracks the real fleet layout. Like `inode.i_nlink` above, the
+/// load-time BTF preflight re-derives this offset from live BTF on every node at every
+/// agent start, so this derivation is checked continuously rather than trusted once — see
+/// the module doc above and `agent/protector-agent/src/preflight`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct linux_binprm {
     _pad0: [u8; 64],
-    pub file: *mut file, // +64 ON-NODE BTF VERIFICATION PENDING (see doc above)
+    pub file: *mut file, // +64 — verified at every load, not just once (see doc above)
     _pad1: [u8; 24],
     pub filename: *const c_char, // +96
 }
 
-// Compile-time guard: pin every read field to its verified 7.0.0 byte offset (see the
-// module header). These are the offsets the compiler bakes into `bpf_d_path` and the
-// `bpf_probe_read_kernel` chases; if a future edit (padding slip, a reverted binding, a
-// kernel struct change) moves one, the eBPF crate fails to BUILD here — loud at CI time
-// rather than a silent misread or a verifier rejection only visible on a live node.
-// `offset_of!` is const, so this costs nothing at runtime.
+// Compile-time guard: pin every read field to the SHARED offset table in
+// `protector-agent-common` (ADR-0014 amendment) — `bindings == table`, asserted here, plus
+// the userspace loader's load-time preflight asserting `table == node-BTF`
+// (agent/protector-agent/src/preflight), transitively proves `bindings == kernel` on every
+// node at every start, not just at this compile. These are the offsets the compiler bakes
+// into `bpf_d_path` and the `bpf_probe_read_kernel` chases; if a future edit (padding
+// slip, a reverted binding, a kernel struct change) moves one without updating the shared
+// table too, the eBPF crate fails to BUILD here — loud at CI time rather than a silent
+// misread or a verifier rejection only visible on a live node. `offset_of!` and
+// `offset_of_table` are both const, so this costs nothing at runtime.
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(file, f_inode) == 32);
-    assert!(offset_of!(file, f_flags) == 40);
-    assert!(offset_of!(file, f_path) == 64);
-    assert!(offset_of!(path, dentry) == 8);
-    assert!(offset_of!(dentry, d_name) == 32);
-    assert!(offset_of!(qstr, name) == 8);
-    assert!(offset_of!(inode, i_sb) == 40);
-    assert!(offset_of!(inode, i_ino) == 64);
-    assert!(offset_of!(inode, i_nlink) == 72); // ON-NODE PENDING
-    assert!(offset_of!(super_block, s_magic) == 96);
-    assert!(offset_of!(cred, uid) == 8);
-    assert!(offset_of!(kuid_t, val) == 0);
-    assert!(offset_of!(linux_binprm, file) == 64); // ON-NODE PENDING
-    assert!(offset_of!(linux_binprm, filename) == 96);
+    // `offset_of!` yields `usize`; the shared table stores `u32` (plenty for any struct
+    // offset in these bindings) so it can be `no_std`-friendly without pulling in a
+    // pointer-width-specific type — cast at the comparison, not in the table.
+    const fn tbl(kernel_struct: &str, field: &str) -> usize {
+        protector_agent_common::offsets::offset_of_table(kernel_struct, field) as usize
+    }
+    assert!(offset_of!(file, f_inode) == tbl("file", "f_inode"));
+    assert!(offset_of!(file, f_flags) == tbl("file", "f_flags"));
+    assert!(offset_of!(file, f_path) == tbl("file", "f_path"));
+    assert!(offset_of!(path, dentry) == tbl("path", "dentry"));
+    assert!(offset_of!(dentry, d_name) == tbl("dentry", "d_name"));
+    assert!(offset_of!(qstr, name) == tbl("qstr", "name"));
+    assert!(offset_of!(inode, i_sb) == tbl("inode", "i_sb"));
+    assert!(offset_of!(inode, i_ino) == tbl("inode", "i_ino"));
+    assert!(offset_of!(inode, i_nlink) == tbl("inode", "i_nlink"));
+    assert!(offset_of!(super_block, s_magic) == tbl("super_block", "s_magic"));
+    assert!(offset_of!(cred, uid) == tbl("cred", "uid"));
+    assert!(offset_of!(kuid_t, val) == tbl("kuid_t", "val"));
+    assert!(offset_of!(linux_binprm, file) == tbl("linux_binprm", "file"));
+    assert!(offset_of!(linux_binprm, filename) == tbl("linux_binprm", "filename"));
 };
