@@ -22,6 +22,22 @@ fn assessment_values_are_distinct() {
     assert_ne!(Assessment::NoAttack, Assessment::Uncertain);
 }
 
+/// Pins the `Assessment` → `Verdict` bridge this ADR-0041's lane-shift reasoning depends
+/// on: an `Attack` assessment maps to `Verdict::Exploitable`, the ONLY verdict that
+/// `promotes()` a proven-but-uncorroborated chain to auto-eligible. If this ever stopped
+/// holding, the narrowed exec arm's "shell-only + decisive-attack becomes a proposal
+/// instead of an auto-cut" behavior (the one real behavioral change the ADR names) would
+/// silently not hold either.
+#[test]
+fn attack_assessment_promotes_via_to_verdict() {
+    let decision = IncidentDecision {
+        assessment: Assessment::Attack,
+        reason: "test".into(),
+        cuts: Vec::new(),
+    };
+    assert!(decision.to_verdict().promotes());
+}
+
 /// End-to-end: a well-formed model reply naming a genuinely grounded downstream node,
 /// against the real menu for a real chain, survives every guard and resolves to the
 /// menu's own action/signature.

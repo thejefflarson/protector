@@ -37,15 +37,23 @@ pub(super) struct EntryContext<'a> {
 ///
 /// An *alerting* signal corroborates **any** objective: an alert means "an attack is
 /// happening now" regardless of which chain. An alert arrives via the tool-agnostic
-/// behavioral port (ADR-0003), so any sensor can raise one. An interactive-shell or
-/// package-manager exec corroborates the same broad way: a
-/// hands-on-keyboard / tamper-now signal that, like the alert, evidences active intrusion
-/// irrespective of which chain it lands on. An *alarming* file write — a write to
-/// a sensitive path (drop-and-execute / config tamper) — is a further such blanket source
-/// (`observe::alarm_class::alarming_write`). The agent's own mundane behaviors
-/// (connection / secret-read / library-load) corroborate per objective — each only for
-/// the objective class whose ATT&CK *tactic* it evidences, so they are never the
+/// behavioral port (ADR-0003), so any sensor can raise one. An *alarming* file write — a
+/// write to a sensitive path (drop-and-execute / config tamper) — is a further such
+/// blanket source (`observe::alarm_class::alarming_write`). The agent's own mundane
+/// behaviors (connection / secret-read / library-load) corroborate per objective — each
+/// only for the objective class whose ATT&CK *tactic* it evidences, so they are never the
 /// "everything corroborates everything" blanket the alert gate intentionally is.
+///
+/// **`ProcessExec` is NOT one of these blanket sources (ADR-0041).** An interactive-shell
+/// or package-manager exec used to corroborate the same broad way an Alert does — the
+/// Falco-parity floor, deliberately broad while Falco was the ingest-time backstop for the
+/// exec class. ADR-0041 narrowed that to `false`: a bare exec — including
+/// `is_interactive_shell` — is model evidence only, mirroring `PrivilegeChange` /
+/// `PtraceAttach` / `ModuleLoad` below, restoring the ADR-0011 on-call-engineer
+/// (`kubectl exec -it … bash`) false-positive guard the blanket had suspended. What
+/// replaces it is a SHAPE, not a wider blanket: [`reverse_shell_on_foothold`] correlates an
+/// `is_interactive_shell` exec with a same-entry internet egress in a tight symmetric
+/// window — a live C2 session, not a bare shell.
 ///
 /// ** (anon-inode exec) is deliberately NOT one of these blanket sources.** An
 /// earlier version routed a "fileless exec" classification (matched on exec *path shape*)
@@ -111,18 +119,26 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
         // FileRead never reaches here — the RuntimeAdapter refines it to SecretRead or
         // drops it before it becomes graph state.
         Behavior::FileRead { .. } => false,
-        // A *notable* exec — an interactive shell or a package manager run in the container
-        // — corroborates ANY objective like an Alert does: a tamper-now
-        // signal that evidences active intrusion regardless of chain. Conservative on
-        // purpose: a *bare* ProcessExec (anything else, including one with
-        // `exe_anon_inode: true` — see [`anon_inode_exec_on_foothold`] for that shape's
-        // own, much narrower gate) stays NON-corroborating here — legit entrypoints exec
-        // constantly (the ADR-0011 on-call-engineer false positive), so it remains model
-        // evidence only. `notable_exec` is `Some` exactly for shell/pkg-mgr execs (
-        // the classifier is engine policy in `observe::exec_class`, not on the wire type).
-        Behavior::ProcessExec { .. } => {
-            crate::engine::observe::exec_class::notable_exec(behavior).is_some()
-        }
+        // ProcessExec is NON-corroborating here (ADR-0041 narrowed this from a blanket
+        // "any notable exec corroborates ANY objective" arm): model evidence, not a
+        // per-objective "now" signal, mirroring `PrivilegeChange` / `PtraceAttach` /
+        // `ModuleLoad` below. Legit entrypoints exec constantly — an `is_interactive_shell`
+        // exec included, the textbook ADR-0011 on-call-engineer `kubectl exec -it … bash`
+        // false positive the old blanket arm suspended. `notable_exec` (shell OR
+        // package-manager) still annotates the model's evidence line
+        // (`observe::exec_class::annotated_summary`) and still satisfies
+        // `observe::alarm_class::is_alarming_now` (the actively-exploited marking + the
+        // downstream `contain` menu seeding, both untouched) — only the DETERMINISTIC
+        // corroboration gate narrows. A shell exec CORRELATED with a same-entry internet
+        // egress within a tight window is corroboration — that shape lives at the
+        // entry-scoped seam ([`reverse_shell_on_foothold`]), scoped to `is_interactive_shell`
+        // only: a package-manager exec is excluded from the shape too, because it always
+        // egresses (fetching packages) and would just re-create a blanket for that class —
+        // a real install still corroborates via `alarming_write` (writes under `/usr/bin`,
+        // `/lib`, …); a no-op package-manager exec stays model evidence. See ADR-0041 /
+        // ADR-0024 (no redundant-by-construction predicates — this narrowing is what makes
+        // the shape load-bearing) / ADR-0011 (the false positive this restores).
+        Behavior::ProcessExec { .. } => false,
         // PrivilegeChange is NON-corroborating here: model evidence, not a per-objective
         // "now" signal (legit entrypoints escalate too — the same ADR-0011 false positive).
         // Context-free root escalation stays this way for ANY pod on purpose: a root
@@ -187,16 +203,19 @@ pub(super) fn corroborates(behavior: &Behavior, attack: &AttackRef) -> bool {
 /// ([`host_credential_read_on_foothold`]) — **anon-inode exec on the foothold** (
 /// Route A) — an Execution-tactic objective with an `exe_anon_inode` exec on the entry
 /// ([`anon_inode_exec_on_foothold`]) — **ptrace-attach on the foothold** — a
-/// `PtraceAttach` on the entry itself ([`ptrace_attach_on_foothold`]) — or **kernel-module
+/// `PtraceAttach` on the entry itself ([`ptrace_attach_on_foothold`]) — **kernel-module
 /// load on the foothold** — a `ModuleLoad` on the entry itself
-/// ([`module_load_on_foothold`]). All seven are scoped to a proven foothold entry.
+/// ([`module_load_on_foothold`]) — or **reverse-shell on the foothold** (ADR-0041) — an
+/// `is_interactive_shell` exec correlated with a same-entry internet `NetworkConnection`
+/// within a symmetric window ([`reverse_shell_on_foothold`]), corroborating ANY objective.
+/// All eight are scoped to a proven foothold entry.
 ///
 /// None of these shapes widens the flat predicates it sits beside: ordinary internet egress,
 /// ordinary in-cluster traffic, an ordinary setuid, an ordinary write-then-run of a benign
-/// path, an ordinary in-container process reading a host credential path, and an ordinary
-/// ptrace-attach or driver load off a non-foothold pod all still corroborate nothing
-/// (ADR-0011). Like every arm here this only sets `corroborated`; it never actuates
-/// (shadow-gated, ADR-0014).
+/// path, an ordinary in-container process reading a host credential path, an ordinary
+/// ptrace-attach or driver load off a non-foothold pod, and a bare shell exec with no
+/// correlated egress all still corroborate nothing (ADR-0011). Like every arm here this only
+/// sets `corroborated`; it never actuates (shadow-gated, ADR-0014).
 pub(super) fn corroborated_for(
     runtime: &[RuntimeSignal],
     attack: &AttackRef,
@@ -212,6 +231,7 @@ pub(super) fn corroborated_for(
         || anon_inode_exec_on_foothold(runtime, attack, entry)
         || ptrace_attach_on_foothold(runtime, attack, entry)
         || module_load_on_foothold(runtime, attack, entry)
+        || reverse_shell_on_foothold(runtime, entry)
 }
 
 /// The cross-tenant lateral-movement shape: a `NetworkConnection` from the entry to
@@ -240,6 +260,16 @@ pub(super) fn cross_tenant_lateral(runtime: &[RuntimeSignal], entry: EntryContex
 /// script dropped and immediately run is seconds to low minutes apart; the same path written
 /// and re-run much later (a build cache, a rotated log re-opened for append) is unrelated.
 pub(super) const DROP_EXEC_WINDOW: Duration = Duration::from_secs(300);
+
+/// The tight window an `is_interactive_shell` exec and a same-entry internet
+/// `NetworkConnection` can sit apart and still read as one live reverse-shell session
+/// rather than an unrelated exec and an unrelated later/earlier egress. A `bash -i >&
+/// /dev/tcp/…`-style reverse shell dials out within seconds of the exec; kept small on
+/// purpose (ADR-0011), mirroring [`DROP_EXEC_WINDOW`], so a wide window doesn't re-admit
+/// the ordinary "container execs a shell, then egresses minutes later for something
+/// unrelated" false positive. Symmetric (ADR-0041): applied in BOTH directions — see
+/// [`reverse_shell_on_foothold`].
+pub(super) const REVERSE_SHELL_WINDOW: Duration = Duration::from_secs(60);
 
 /// The drop-then-execute shape: a `ProcessExec` of a path RECENTLY `FileWrite`n by
 /// the SAME workload — the classic "drop a payload under a benign-looking path (e.g. `/tmp`),
@@ -456,6 +486,64 @@ pub(super) fn module_load_on_foothold(
     runtime
         .iter()
         .any(|s| matches!(s.behavior, Behavior::ModuleLoad))
+}
+
+/// The reverse-shell-on-foothold shape (ADR-0041): an `is_interactive_shell` `ProcessExec`
+/// and an internet `NetworkConnection` on the SAME entry, within [`REVERSE_SHELL_WINDOW`] of
+/// each other in EITHER direction, corroborates ANY objective — a live command-and-control
+/// session evidences active intrusion on every chain from that entry, the blanket exec arm's
+/// semantic (ADR-0041 narrowed away, see [`corroborates`]), now re-homed in shaped form.
+///
+/// **Symmetric window (`|Δt| ≤ 60s`, ADR-0041):** covers BOTH `exec-then-connect`
+/// (`bash -i >& /dev/tcp/…` dials out right after the shell spawns) AND
+/// `connect-back-then-spawn` (the attacker's listener accepts the connection and the shell
+/// is spawned into it a moment later) — the two orderings a real reverse shell can present,
+/// as opposed to a one-directional "exec at-or-before egress" gate that would miss the
+/// second.
+///
+/// **Interactive shells ONLY — package managers excluded.** `is_interactive_shell`
+/// (`observe::exec_class`), not the broader `notable_exec` (shell OR package manager): a
+/// package-manager exec ALWAYS egresses (fetching packages), so folding it into this shape
+/// would just re-create a blanket for that class — exactly what ADR-0041 narrows away. A
+/// real install still corroborates via `alarming_write` (writes under `/usr/bin`, `/lib`,
+/// …); a no-op package-manager exec stays model evidence.
+///
+/// Conservative scoping (ADR-0011 / ADR-0014), mirroring [`cross_tenant_lateral`]:
+/// corroborates ONLY when the entry is a proven internet-facing foothold
+/// (`entry.is_foothold`) — the house pattern every entry-scoped shape in this module
+/// follows. An ordinary shell into a non-foothold pod, or a shell with no correlated
+/// egress anywhere in the window, never corroborates.
+pub(super) fn reverse_shell_on_foothold(
+    runtime: &[RuntimeSignal],
+    entry: EntryContext<'_>,
+) -> bool {
+    if !entry.is_foothold {
+        return false;
+    }
+    // Interactive-shell exec timestamps on the entry.
+    let shells: Vec<_> = runtime
+        .iter()
+        .filter(|s| crate::engine::observe::exec_class::is_interactive_shell(&s.behavior))
+        .map(|s| s.provenance.observed_at)
+        .collect();
+    if shells.is_empty() {
+        return false;
+    }
+    runtime.iter().any(|s| match &s.behavior {
+        Behavior::NetworkConnection { internet: true, .. } => {
+            let egress_at = s.provenance.observed_at;
+            // Symmetric: the absolute gap between the shell and the egress, whichever
+            // came first — `duration_since` is `Err` when its argument is LATER than
+            // `self`, so trying both orderings computes `|Δt|` without a manual subtract.
+            shells.iter().any(|&shell_at| {
+                egress_at
+                    .duration_since(shell_at)
+                    .or_else(|_| shell_at.duration_since(egress_at))
+                    .is_ok_and(|gap| gap <= REVERSE_SHELL_WINDOW)
+            })
+        }
+        _ => false,
+    })
 }
 
 /// The entry workload's runtime signals (empty for a non-workload node), resolved once
