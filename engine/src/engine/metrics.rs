@@ -49,6 +49,13 @@ pub(super) struct EngineMetrics {
     /// predicate is set (ADR-0009). In shadow this is the countable answer to "would this
     /// have promoted?" without any behavior change.
     pub(super) corroborations: opentelemetry::metrics::Counter<u64>,
+    /// Narrowing-delta count this pass (ADR-0041 §6): breach-relevant chains where a notable
+    /// exec is present on the entry's runtime but the chain is `!corroborated` — the cases the
+    /// retiring blanket notable-exec corroboration arm would have flipped to `corroborated`.
+    /// The Falco-retirement parity-matrix input. No labels — the count alone is the bake
+    /// signal, and any per-entry/per-node dimension would be a cardinality/PII vector (the
+    /// entry name still appears in the accompanying structured log, never in this counter).
+    pub(super) narrowing_delta: opentelemetry::metrics::Counter<u64>,
     /// Per-pass adjudications that issued a fresh model call (verdict-cache miss). A
     /// proper cumulative counter (replaces the prior `verdicts{verdict="judged_this_pass"}`
     /// gauge hack) so model-call frequency is rate-able.
@@ -197,6 +204,13 @@ impl EngineMetrics {
             corroborations: m
                 .u64_counter("protector.engine.corroborations")
                 .with_description("Corroborations fired (corroborated breach chains) per pass.")
+                .build(),
+            narrowing_delta: m
+                .u64_counter("protector.engine.narrowing_delta")
+                .with_description(
+                    "Breach chains with a notable exec present but uncorroborated (ADR-0041 \
+                     §6) — the retiring blanket notable-exec corroboration arm's parity delta.",
+                )
                 .build(),
             judged: m
                 .u64_counter("protector.engine.judged")
