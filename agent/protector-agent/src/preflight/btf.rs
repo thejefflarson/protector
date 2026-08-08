@@ -72,16 +72,24 @@ enum Endian {
 }
 
 impl Endian {
-    fn u32(self, b: &[u8]) -> u32 {
-        let a: [u8; 4] = b.try_into().expect("4-byte slice");
-        match self {
+    /// Total: a slice shorter than 4 bytes yields `Truncated` rather than panicking — the
+    /// one integer reader on the blob-derived parse path (ADR-0014's never-panic,
+    /// degrade-gracefully contract). `get(..4)` bounds-checks the length, so the
+    /// subsequent `try_into` is infallible.
+    fn u32(self, b: &[u8]) -> Result<u32, BtfParseError> {
+        let a: [u8; 4] = b
+            .get(..4)
+            .ok_or(BtfParseError::Truncated)?
+            .try_into()
+            .unwrap();
+        Ok(match self {
             Self::Little => u32::from_le_bytes(a),
             Self::Big => u32::from_be_bytes(a),
-        }
+        })
     }
 
-    fn i32(self, b: &[u8]) -> i32 {
-        self.u32(b) as i32
+    fn i32(self, b: &[u8]) -> Result<i32, BtfParseError> {
+        self.u32(b).map(|v| v as i32)
     }
 }
 
@@ -142,11 +150,11 @@ impl RawBtf {
         } else {
             return Err(BtfParseError::BadMagic);
         };
-        let hdr_len = endian.u32(&data[4..8]) as usize;
-        let type_off = endian.u32(&data[8..12]) as usize;
-        let type_len = endian.u32(&data[12..16]) as usize;
-        let str_off = endian.u32(&data[16..20]) as usize;
-        let str_len = endian.u32(&data[20..24]) as usize;
+        let hdr_len = endian.u32(&data[4..8])? as usize;
+        let type_off = endian.u32(&data[8..12])? as usize;
+        let type_len = endian.u32(&data[12..16])? as usize;
+        let str_off = endian.u32(&data[16..20])? as usize;
+        let str_len = endian.u32(&data[20..24])? as usize;
 
         let type_start = hdr_len
             .checked_add(type_off)
@@ -191,9 +199,9 @@ impl RawBtf {
             if buf.len() < 12 {
                 return Err(BtfParseError::Truncated);
             }
-            let name_off = endian.u32(&buf[0..4]);
-            let info = endian.u32(&buf[4..8]);
-            let extra = endian.u32(&buf[8..12]);
+            let name_off = endian.u32(&buf[0..4])?;
+            let info = endian.u32(&buf[4..8])?;
+            let extra = endian.u32(&buf[8..12])?;
             let kind = ((info >> 24) & 0x1f) as u8;
             let kind_flag = (info >> 31) & 1 == 1;
             let vlen = (info & 0xffff) as usize;
@@ -208,9 +216,9 @@ impl RawBtf {
                     let mut members = Vec::with_capacity(vlen);
                     for i in 0..vlen {
                         let base = consumed + i * 12;
-                        let m_name = endian.u32(&buf[base..base + 4]);
-                        let m_type = endian.u32(&buf[base + 4..base + 8]);
-                        let m_off = endian.u32(&buf[base + 8..base + 12]);
+                        let m_name = endian.u32(&buf[base..base + 4])?;
+                        let m_type = endian.u32(&buf[base + 4..base + 8])?;
+                        let m_off = endian.u32(&buf[base + 8..base + 12])?;
                         // kind_flag set ⇒ the low 24 bits are the bit-offset (high 8 the
                         // bitfield size, discarded); unset ⇒ the whole word is the plain
                         // bit-offset. Either way this crate's targets are never
@@ -241,8 +249,8 @@ impl RawBtf {
                     let mut variants = Vec::with_capacity(vlen);
                     for i in 0..vlen {
                         let base = consumed + i * 8;
-                        let v_name = endian.u32(&buf[base..base + 4]);
-                        let v_val = endian.i32(&buf[base + 4..base + 8]);
+                        let v_name = endian.u32(&buf[base..base + 4])?;
+                        let v_val = endian.i32(&buf[base + 4..base + 8])?;
                         variants.push(EnumVariant {
                             name: Self::string_at(strings, v_name),
                             value: v_val as i64,
@@ -259,9 +267,9 @@ impl RawBtf {
                     let mut variants = Vec::with_capacity(vlen);
                     for i in 0..vlen {
                         let base = consumed + i * 12;
-                        let v_name = endian.u32(&buf[base..base + 4]);
-                        let lo = endian.u32(&buf[base + 4..base + 8]) as u64;
-                        let hi = endian.u32(&buf[base + 8..base + 12]) as u64;
+                        let v_name = endian.u32(&buf[base..base + 4])?;
+                        let lo = endian.u32(&buf[base + 4..base + 8])? as u64;
+                        let hi = endian.u32(&buf[base + 8..base + 12])? as u64;
                         variants.push(EnumVariant {
                             name: Self::string_at(strings, v_name),
                             value: ((hi << 32) | lo) as i64,
