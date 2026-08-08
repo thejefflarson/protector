@@ -252,6 +252,36 @@ The first-party eBPF agent is now the **sole deployed** corroboration source. Th
 feeds remains open to any sensor; only the Falco-specific adapter and the cancelled-bake
 measurement are gone.
 
+## Amendment (2026-08-08): baked offsets are the decided posture; a load-time BTF preflight replaces manual re-verification
+
+The agent's eBPF bindings hand-lay kernel struct offsets (verified at kernel 7.0.0) rather
+than relocating them via CO-RE. **The original CO-RE language was aspirational: rustc cannot
+emit BTF field relocations** (`preserve_access_index` is a pending Rust RFC; bpf-linker emits
+func_info BTF for fentry attach but not field-access relocations), so the agent bakes
+hand-verified offsets. The `offset_of!` guard catches an inconsistent *edit* but not a
+correct-looking layout that is *wrong for a new kernel* — and a stale
+`bpf_probe_read_kernel` offset reads **garbage silently**, feeding wrong corroboration
+signals into the action bar (only the `bpf_d_path` reads are verifier-checked).
+
+**The durable guard is a userspace load-time preflight.** Before attach, the loader verifies
+every baked field offset and BTF-visible enum value (`LOADING_MODULE`) against the node's
+**live BTF** (the same BTF it already reads for fentry attach). On mismatch it attaches only
+the struct-free probes (connect/ptrace/module-load), logs each divergent field
+(expected-vs-actual — the data needed to update the bindings), and reports degraded via the
+existing heartbeat — never crash-loops (degrade-gracefully). A kernel bump can move a field
+but can never silently ship wrong reads. Offsets live in **one place** — a const table in
+`agent/common`: the eBPF crate's `offset_of!` asserts `bindings == table` at compile time;
+the loader asserts `table == node-BTF` at load; transitively `bindings == kernel`. No
+`PROTECTOR_*` toggle (a correctness guard, not a feature).
+
+**Build-time binding generation was considered and rejected** — it bakes the *builder*
+kernel's offsets, which diverge from node kernels exactly during a rolling upgrade (the event
+this defends against), and cannot run off-fleet. **Real CO-RE is the recorded end state**:
+when the Rust toolchain can emit BTF field relocations, the preflight retires with the baked
+offsets. Any comments claiming the object is "CO-RE-relocated against node BTF at load" are
+corrected to reflect this — baked offsets + a load-time BTF check, not relocation. See
+`docs/ideas/ebpf-offset-self-verification.md`.
+
 ## Addendum — in-repo chart migrated to `PROTECTOR_BEHAVIOR_ADDR`; compat fallback dropped (2026-08-08)
 
 The rename addendum decision 1 above shipped `PROTECTOR_BEHAVIOR_ADDR` with

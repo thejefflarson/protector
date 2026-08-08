@@ -10,6 +10,14 @@
 
 #![no_std]
 
+/// The single source of truth for every kernel struct field offset and BTF-visible enum
+/// value the eBPF probes bake in (ADR-0014 amendment, load-time BTF preflight). The eBPF
+/// crate's `offset_of!` guard (`vmlinux.rs`) asserts `bindings == table` at compile time;
+/// the userspace loader's preflight (`agent/protector-agent/src/preflight`) asserts
+/// `table == node-BTF` at load time — transitively `bindings == kernel`, with the number
+/// living in exactly one place.
+pub mod offsets;
+
 /// Event-kind discriminators. Stable wire values; never renumber an existing one.
 pub const KIND_CONNECT: u32 = 1;
 /// A tmpfs file was opened (fentry on `security_file_open`). Carries the container path;

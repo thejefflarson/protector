@@ -26,8 +26,10 @@ jobs:
   # Compile the BPF programs to bytecode on the self-hosted runners — their image
   # (../runner) bakes in nightly + rust-src + a prebuilt bpf-linker (ADR-0014), so the
   # job is just the compile (the tiny eBPF crate; the LLVM-heavy bpf-linker build was
-  # done once at image-build time). BPF is architecture-neutral bytecode, CO-RE-
-  # relocated against the node's BTF at load.
+  # done once at image-build time). BPF is architecture-neutral bytecode; its kernel
+  # struct offsets are hand-verified and baked in at compile time (no CO-RE field
+  # relocation — rustc emits none), then re-checked against each node's live BTF at
+  # load by the userspace loader's preflight (ADR-0014's amendment).
   ebpf:
     runs-on: protector-runners
     # Self-hosted + persistent: never execute forked-PR code (mirrors the docker job).
@@ -98,8 +100,10 @@ jobs:
       # The image is built WITH the eBPF probe: agent/Dockerfile runs
       # `cargo build --release -p protector-agent --features ebpf`, and its build.rs compiles
       # the sibling protector-agent-ebpf crate to a BPF object (bpf-linker, nightly) embedded in
-      # the binary and CO-RE-relocated against the node's BTF at load (ADR-0014). The default
-      # (no-feature) build — a no-op observer — exists only for toolchain-free local dev/test.
+      # the binary, its kernel struct offsets baked in at compile time and re-verified against
+      # each node's live BTF at load by the userspace loader's preflight — NOT CO-RE-relocated
+      # (ADR-0014's amendment: rustc emits no BTF field relocations). The default (no-feature)
+      # build — a no-op observer — exists only for toolchain-free local dev/test.
       - name: Build and push agent image
         id: build-and-push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7

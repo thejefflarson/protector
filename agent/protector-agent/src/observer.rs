@@ -85,6 +85,11 @@ mod ebpf {
     };
     use protector_behavior::{Attribution, Behavior};
 
+    // The load-time BTF preflight's probe-gating table + wiring (ADR-0014 amendment) —
+    // split into its own file to keep this one under the repo's 1,000-line file cap.
+    mod preflight_gate;
+    use preflight_gate::{load_preflight, struct_deps};
+
     /// This sensor's identity, carried into each observation's provenance so the engine
     /// can tell one sensor's signals from another's (ADR-0003 corroboration).
     const SOURCE: &str = "protector-agent";
@@ -599,6 +604,15 @@ mod ebpf {
         /// BTF, so it's separate from the kprobe table; the BTF is loaded once. Returns
         /// `(attached, attempted)` so the caller can publish the probe-attach status the
         /// per-node liveness beacon reads — a partial load reads degraded.
+        ///
+        /// Before attaching anything, runs the load-time BTF preflight (ADR-0014
+        /// amendment, `crate::preflight`): re-verifies every field offset the eBPF crate
+        /// bakes in against THIS node's live BTF. A struct-reading probe whose struct(s)
+        /// diverged is skipped (fail-closed — a stale `bpf_probe_read_kernel` offset
+        /// reads garbage silently, unlike `bpf_d_path`'s verifier check); the struct-free
+        /// probes (`ptrace_access_check`, `kernel_load_data`; `connect` is a separate
+        /// kprobe, unaffected) always attach regardless (fail-open — see
+        /// [`preflight_gate::struct_deps`]).
         fn attach_fentry(ebpf: &mut Ebpf) -> (u32, u32) {
             const FENTRY_PROBES: &[(&str, &str)] = &[
                 ("file_open", "security_file_open"),
@@ -617,8 +631,19 @@ mod ebpf {
                     return (0, attempted);
                 }
             };
+            let preflight = load_preflight();
             let mut attached = 0u32;
             for (name, func) in FENTRY_PROBES {
+                if let Some(bad_struct) = struct_deps(name).iter().find(|s| !preflight.struct_ok(s))
+                {
+                    tracing::warn!(
+                        probe = *name,
+                        kernel_struct = *bad_struct,
+                        "BTF preflight: disabling struct-reading probe (offset mismatch — see \
+                         the preceding per-field mismatch line for expected-vs-actual)"
+                    );
+                    continue;
+                }
                 match Self::attach_one_fentry(ebpf, &btf, name, func) {
                     Ok(()) => {
                         attached += 1;

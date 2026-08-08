@@ -717,13 +717,15 @@ fn try_ptrace_access_check(ctx: &FEntryContext) -> Result<(), i64> {
 /// the enum is a stable, list-ordered generator macro — `LOADING_UNKNOWN`(0),
 /// `LOADING_FIRMWARE`(1), `LOADING_MODULE`(2), `LOADING_KEXEC_IMAGE`(3),
 /// `LOADING_KEXEC_INITRAMFS`(4), `LOADING_POLICY`(5), `LOADING_X509_CERTIFICATE`(6),
-/// `LOADING_MAX_ID`(7). **ON-NODE BTF VERIFICATION PENDING:** confirm against
-/// `bpftool btf dump … format c | grep -A8 'enum kernel_load_data_id'` on BOTH fleet arches
-/// before this ships past a spike deploy (docs/ebpf-testing-on-nodes.md). Unlike a struct
-/// offset, a wrong value here is NOT verifier-checked — it's a plain integer compare, so a
-/// reorder (unlikely; this list has been stable since its 5.x introduction, but unconfirmed
-/// on THIS fleet kernel) would misclassify silently rather than fail loud.
-const LOADING_MODULE: u32 = 2;
+/// `LOADING_MAX_ID`(7). Sourced from the SHARED table in `protector-agent-common`
+/// (ADR-0014 amendment) rather than a bare literal, so the userspace loader's load-time
+/// BTF preflight (`agent/protector-agent/src/preflight`) checks the SAME value against
+/// each node's live BTF at every agent start. Unlike a struct offset, a wrong value here
+/// is NOT verifier-checked — it's a plain integer compare, so a reorder (unlikely; this
+/// list has been stable since its 5.x introduction) would misclassify silently rather than
+/// fail loud, which is exactly why the preflight checks it explicitly and logs
+/// expected-vs-actual on a mismatch rather than relying on this compile-time value alone.
+const LOADING_MODULE: u32 = protector_agent_common::offsets::LOADING_MODULE_VALUE;
 
 /// fentry on `security_kernel_load_data(enum kernel_load_data_id id, bool contents)` — the
 /// kernel-module-load probe (Retire-Falco G2). Falco fires critical on

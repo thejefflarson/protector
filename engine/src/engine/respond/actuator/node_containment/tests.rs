@@ -317,6 +317,103 @@ fn rail_decisions_take_no_arming_state_and_so_are_exactly_as_meaningful_in_shado
     assert_eq!(revert_decision(&unowned), Err(RailRefusal::NotOwned));
 }
 
+// --- co_resident_denies_in_scope / ScopedDenies (ADR-0040 addendum, ADR-0021) ---
+
+#[test]
+fn co_resident_denies_in_scope_returns_the_full_set_when_unscoped() {
+    let snap = Snapshot {
+        pods: vec![
+            scheduled_pod("victim", "node-1", json!({"app": "victim"})),
+            scheduled_pod("neighbor", "node-1", json!({"app": "neighbor"})),
+        ],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let host = NodeKey("host/node-1".into());
+
+    let scoped = co_resident_denies_in_scope(&graph, &host, &ActuationScope::unscoped());
+    assert_eq!(
+        scoped.as_slice().len(),
+        co_resident_denies(&graph, &host).len(),
+        "unscoped returns the same full set co_resident_denies does"
+    );
+}
+
+#[test]
+fn co_resident_denies_in_scope_retains_only_the_in_scope_namespace() {
+    let snap = Snapshot {
+        pods: vec![
+            scheduled_pod("victim", "node-1", json!({"app": "victim"})),
+            scheduled_pod("neighbor", "node-1", json!({"app": "neighbor"})),
+        ],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let host = NodeKey("host/node-1".into());
+    // Both pods live in the "app" namespace (`scheduled_pod`'s own fixture), so scoping to
+    // it must retain BOTH — this asserts the subset tracks the scope match, not an
+    // arbitrary truncation.
+    let scope = ActuationScope::enforce_namespaces(["app".to_string()]);
+
+    let scoped = co_resident_denies_in_scope(&graph, &host, &scope);
+    assert_eq!(scoped.as_slice().len(), 2);
+}
+
+#[test]
+fn co_resident_denies_in_scope_is_empty_when_no_co_resident_pod_is_in_scope() {
+    let snap = Snapshot {
+        pods: vec![scheduled_pod("victim", "node-1", json!({"app": "victim"}))],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let host = NodeKey("host/node-1".into());
+    let scope = ActuationScope::enforce_namespaces(["payments".to_string()]);
+
+    let scoped = co_resident_denies_in_scope(&graph, &host, &scope);
+    assert!(
+        scoped.is_empty(),
+        "the only co-resident pod is outside the configured scope"
+    );
+}
+
+#[test]
+fn co_resident_denies_in_scope_matches_on_the_label_axis() {
+    let snap = Snapshot {
+        pods: vec![
+            scheduled_pod("victim", "node-1", json!({"app": "victim", "tier": "hot"})),
+            scheduled_pod("neighbor", "node-1", json!({"app": "neighbor"})),
+        ],
+        ..Default::default()
+    };
+    let graph = build_graph(&snap, &default_adapters());
+    let host = NodeKey("host/node-1".into());
+    // Namespace axis is empty; only the label axis is configured, and only "victim"
+    // carries it — the subset must track the LABEL match, not the namespace (both pods
+    // share the same "app" namespace).
+    let scope = ActuationScope::new(
+        Default::default(),
+        vec![("tier".to_string(), "hot".to_string())],
+    );
+
+    let scoped = co_resident_denies_in_scope(&graph, &host, &scope);
+    assert_eq!(scoped.as_slice().len(), 1);
+    assert_eq!(scoped.as_slice()[0].cut.from.0, "workload/app/Pod/victim");
+}
+
+// The compile-time half of "constructible only by `co_resident_denies_in_scope`" lives as
+// a `compile_fail` doctest on the [`ScopedDenies`] type itself (this `tests` module is
+// `#[cfg(test)]`, which rustdoc never compiles, so a doctest here would silently never
+// run). This is the runtime witness: the ONLY way this test (or anything outside the
+// module) obtains a `ScopedDenies` is through the function — there is no
+// `ScopedDenies::new`/`From`/public tuple constructor to call instead.
+#[test]
+fn scoped_denies_has_no_public_constructor_besides_co_resident_denies_in_scope() {
+    let graph = crate::engine::graph::SecurityGraph::new();
+    let host = NodeKey("host/nonexistent".into());
+    let scoped = co_resident_denies_in_scope(&graph, &host, &ActuationScope::unscoped());
+    assert!(scoped.is_empty());
+}
+
 // --- contain_node_in_scope: enforceScope confinement (ADR-0021) ---
 
 #[test]
