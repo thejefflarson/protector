@@ -10,7 +10,17 @@
 //!   [`crate::engine::respond::quarantine_workload_link`]'s exact self-reference shape (and
 //!   therefore [`super::render_isolation`]'s renderer) per co-resident LABELLED workload
 //!   ([`crate::engine::respond::co_resident_workloads`]) — an unlabeled pod declines exactly
-//!   like every other quarantine candidate.
+//!   like every other quarantine candidate. UNFILTERED by `enforceScope` — the revert seam
+//!   (`live::NodeContainmentActuator::revert`) needs the full set, since lifting a deny
+//!   protector never placed under any historical scope is a harmless no-op, but filtering
+//!   it would orphan an out-of-scope deny protector DID place under a wider, earlier scope.
+//! - [`co_resident_denies_in_scope`]/[`ScopedDenies`]: the `enforceScope`-confined subset
+//!   (ADR-0040 addendum, ADR-0021), and the newtype that is the ONLY door into
+//!   [`live::NodeContainmentActuator::apply`] — unscoped scope returns the full set
+//!   (historical meaning), a configured scope retains only the co-resident denies
+//!   [`super::ActuationScope::in_scope`] itself accepts, so the actuation boundary is
+//!   scope-confined by TYPE, not caller discipline. [`contain_node_in_scope`] is rebased on
+//!   this same function, so eligibility and the apply subset share one scope-match source.
 //! - [`cordon_decision`]/[`revert_decision`]: the deterministic rails (control-plane
 //!   exclusion, one-node cap, the two-worker floor, ownership-gated revert), pure over a
 //!   [`NodeFact`] fleet so they're unit-testable without a live cluster and independent of
@@ -37,12 +47,15 @@
 //! - [`live`]'s [`NodeContainmentActuator`]/[`NodeContainmentRevert`]: the cluster-facing
 //!   REVERT glue only (lifting an already-standing cut via break-glass/self-revert,
 //!   `crate::engine::node_containment_revert`) — there is no corresponding live APPLY call
-//!   site; `NodeContainmentActuator::apply` exists and is unit-tested in isolation for a
-//!   future human-approval-to-apply flow (out of scope here), but nothing in `Engine`
-//!   invokes it. Thin and untested against a real cluster, like
+//!   site. Per the ADR-0040 addendum, protector never grows an in-product approve→apply
+//!   path for node containment at all (the durable act stays out-of-band, a human cordon +
+//!   runbook); `NodeContainmentActuator::apply` exists and is unit-tested in isolation as
+//!   the actuator's glue for that out-of-band act, gated on [`ScopedDenies`] by type so it
+//!   can never be called with an unfiltered set, but nothing in `Engine` invokes it. Thin
+//!   and untested against a real cluster, like
 //!   [`super::KubeActuator`]/[`super::IsolationActuator`] — [`render_cordon`]/
-//!   [`render_uncordon`]/[`evaluate_proposal`]/[`contain_node_in_scope`] are the unit-tested
-//!   pure half.
+//!   [`render_uncordon`]/[`evaluate_proposal`]/[`contain_node_in_scope`]/
+//!   [`co_resident_denies_in_scope`] are the unit-tested pure half.
 //!
 //! `ContainNode` is `is_additive_live() == false` ([`ProposedAction::is_additive_live`]), so
 //! [`super::decide`]'s generic AutoApply path always routes it to
@@ -147,6 +160,70 @@ pub fn co_resident_denies(graph: &SecurityGraph, host: &NodeKey) -> Vec<Mitigati
             justifications: Vec::new(),
         })
         .collect()
+}
+
+/// The `enforceScope`-confined co-resident deny set (ADR-0040 addendum, ADR-0021: no
+/// enforce-everywhere) — the ONLY set [`live::NodeContainmentActuator::apply`] accepts,
+/// wrapped in [`ScopedDenies`] so that door is scope-confined by TYPE. Unscoped `scope` (no
+/// `enforceScope` configured) returns the FULL [`co_resident_denies`] set — the historical,
+/// shadow-default meaning. A configured scope retains only the denies
+/// [`super::ActuationScope::in_scope`] itself accepts — the SAME namespace-OR-label match
+/// the webhook's `EnforceScope` uses — so a deny targeting a namespace/label the operator
+/// never authorized is dropped rather than applied: writing a `NetworkPolicy` into an
+/// unauthorized namespace is exactly the enforce-everywhere escape ADR-0021 exists to
+/// prevent. This is honest PARTIAL containment: an out-of-scope co-resident pod on a
+/// contained node stays reachable (filter, don't refuse-whole — the actuator's own
+/// "partial containment is safer than none" discipline).
+///
+/// [`contain_node_in_scope`] is rebased on this same function (its eligibility check reduces
+/// to "the subset is non-empty"), so proposal-side eligibility and the apply-side subset can
+/// never diverge on what counts as in scope.
+pub fn co_resident_denies_in_scope(
+    graph: &SecurityGraph,
+    host: &NodeKey,
+    scope: &ActuationScope,
+) -> ScopedDenies {
+    let denies = co_resident_denies(graph, host);
+    let scoped = if scope.is_unscoped() {
+        denies
+    } else {
+        denies
+            .into_iter()
+            .filter(|deny| scope.in_scope(deny))
+            .collect()
+    };
+    ScopedDenies(scoped)
+}
+
+/// An `enforceScope`-confined co-resident deny set — constructible ONLY by
+/// [`co_resident_denies_in_scope`], so [`live::NodeContainmentActuator::apply`] (the only
+/// function that accepts one) can never be handed the unfiltered [`co_resident_denies`] set
+/// by a forgetful caller. Safe by construction, mirroring how
+/// [`live::NodeContainmentActuator::revert`] is safe by construction on the ownership rail
+/// rather than caller discipline. The inner `Vec` is deliberately private with no public
+/// constructor besides [`co_resident_denies_in_scope`] — attempting to build one directly
+/// from outside this module does not compile:
+///
+/// ```compile_fail
+/// # use protector::engine::respond::Mitigation;
+/// # use protector::engine::respond::actuator::node_containment::ScopedDenies;
+/// let denies: Vec<Mitigation> = Vec::new();
+/// let _ = ScopedDenies(denies); // E0603: tuple struct constructor is private
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScopedDenies(Vec<Mitigation>);
+
+impl ScopedDenies {
+    /// The confined deny set as a slice — the shape [`live::NodeContainmentActuator::apply`]
+    /// iterates.
+    pub fn as_slice(&self) -> &[Mitigation] {
+        &self.0
+    }
+
+    /// Whether the confined set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A per-pass fact for one node in the fleet — the shape [`cordon_decision`]/
@@ -281,21 +358,20 @@ pub fn revert_decision(target: &NodeFact) -> Result<(), RailRefusal> {
 /// construction ([`crate::engine::respond::contain_node_link`]'s own doc).
 ///
 /// In scope iff `scope` is unscoped (the historical, no-`enforceScope`-configured
-/// behavior), OR at least one co-resident deny target is itself in scope. A host with no
-/// co-resident LABELLED pod at all (nothing for [`co_resident_denies`] to return) is never
-/// presumed in scope once a scope IS configured — the same "decline rather than widen"
-/// discipline [`co_resident_denies`] already applies to an unlabelled pod.
+/// behavior), OR at least one co-resident deny target is itself in scope — i.e. the
+/// [`co_resident_denies_in_scope`] subset is non-empty. Rebased on that same function
+/// (ADR-0040 addendum) so eligibility and the apply-side subset share one scope-match
+/// source rather than two implementations that could drift apart; behavior-identical to
+/// the prior direct any-match. A host with no co-resident LABELLED pod at all (nothing for
+/// [`co_resident_denies`] to return) is never presumed in scope once a scope IS configured
+/// — the same "decline rather than widen" discipline [`co_resident_denies`] already applies
+/// to an unlabelled pod.
 pub fn contain_node_in_scope(
     graph: &SecurityGraph,
     host: &NodeKey,
     scope: &ActuationScope,
 ) -> bool {
-    if scope.is_unscoped() {
-        return true;
-    }
-    co_resident_denies(graph, host)
-        .iter()
-        .any(|deny| scope.in_scope(deny))
+    scope.is_unscoped() || !co_resident_denies_in_scope(graph, host, scope).is_empty()
 }
 
 /// What [`evaluate_proposal`] decided for one active `ContainNode` mitigation this pass.
