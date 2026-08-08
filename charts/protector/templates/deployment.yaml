@@ -198,9 +198,9 @@ spec:
             - name: https
               containerPort: {{ .Values.service.port }}
               protocol: TCP
-            {{- if and .Values.engine.enabled .Values.engine.falco.enabled }}
-            - name: falco-ingest
-              containerPort: {{ .Values.engine.falco.port }}
+            {{- if and .Values.engine.enabled .Values.engine.ingest.enabled }}
+            - name: behavior-ingest
+              containerPort: {{ .Values.engine.ingest.port }}
               protocol: TCP
             {{- end }}
             {{- if and .Values.engine.enabled .Values.engine.dashboard.enabled }}
@@ -310,9 +310,9 @@ spec:
             # when it does actuate.
             - name: PROTECTOR_ENGINE_ACTUATOR
               value: {{ .Values.engine.actuator | quote }}
-            {{- if .Values.engine.falco.enabled }}
-            - name: PROTECTOR_FALCO_ADDR
-              value: "0.0.0.0:{{ .Values.engine.falco.port }}"
+            {{- if .Values.engine.ingest.enabled }}
+            - name: PROTECTOR_BEHAVIOR_ADDR
+              value: "0.0.0.0:{{ .Values.engine.ingest.port }}"
             {{- end }}
             {{- if .Values.engine.dashboard.enabled }}
             # The read-only operator dashboard (ADR-0019). Zero-egress, in-cluster only —

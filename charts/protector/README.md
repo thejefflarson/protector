@@ -144,7 +144,7 @@ be created in the enforced scope until it recovers. Bake a scope in `mode: audit
 
 ### Ingest authentication (on by default) — rollout ordering
 
-The engine's runtime/behavioral ingest (the `:9999` falco-ingest port) accepts
+The engine's runtime/behavioral ingest (the `:9999` behavior-ingest port) accepts
 observations that can make a proven attack chain *actionable*. App-layer
 authentication is **on by default** (`ingestAuth.enabled: true`): the chart
 provisions a Secret with a random bearer token, the engine **requires** it, and the

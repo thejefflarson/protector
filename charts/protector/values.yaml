@@ -273,7 +273,7 @@ webhook:
   enforcedFailurePolicy: Fail
 
 # --- ingest authentication (security fix) ---
-# The engine's runtime/behavioral ingest (the :9999 falco-ingest port) accepts
+# The engine's runtime/behavioral ingest (the :9999 behavior-ingest port) accepts
 # observations that can make a proven attack chain ACTIONABLE (the corroborated-now
 # signal). Any caller that can reach the port could otherwise forge those. This wires a
 # shared bearer token that the engine requires and the agent presents — app-layer
@@ -333,9 +333,11 @@ engine:
   #   dryrun             — log only; touches nothing (force shadow even under enforce).
   actuator: networkpolicy
   # Runtime-evidence ingest (the corroborated-now signal that makes a chain
-  # live-actionable). A Falco/falcosidekick deployment POSTs alerts here; the optional
-  # eBPF agent below also feeds this port. Enabling the listener is harmless on its own.
-  falco:
+  # live-actionable). The first-party eBPF agent below POSTs behavioral observations
+  # here (ADR-0014's addendum: the Falco adapter that historically fed this port has
+  # been retired — the agent is the sole deployed corroboration source). Enabling the
+  # listener is harmless on its own.
+  ingest:
     enabled: true
     port: 9999
   # Read-only operator dashboard (ADR-0019). A server-rendered, zero-egress view of the

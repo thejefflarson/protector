@@ -423,10 +423,9 @@ async fn run() -> Result<()> {
         let (active, scope) = posture.engine_arming();
         // Runtime-evidence ingest endpoint (the first-party agent, and any sensor, POSTs
         // behaviors here) for the RuntimeEvidence "corroborated-now" signal. Unset = no runtime
-        // feed. Prefer PROTECTOR_BEHAVIOR_ADDR; fall back to the deprecated PROTECTOR_FALCO_ADDR.
-        // compat: cluster chart still sets PROTECTOR_FALCO_ADDR; remove after the chart migrates.
+        // feed. The deprecated PROTECTOR_FALCO_ADDR compat fallback was dropped once the
+        // in-repo chart migrated (ADR-0014's addenda).
         let behavior_addr = env::var("PROTECTOR_BEHAVIOR_ADDR")
-            .or_else(|_| env::var("PROTECTOR_FALCO_ADDR"))
             .ok()
             .and_then(|v| v.parse::<SocketAddr>().ok());
         // The k8s audit-log ingest endpoint: the apiserver's audit webhook POSTs
