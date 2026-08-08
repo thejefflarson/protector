@@ -209,3 +209,28 @@ the control-plane/worker split on the deployed cluster rather than weakening the
 - [ADR-0038](0038-transitive-internet-exposure-l7-routes.md) /
   [ADR-0039](0039-downstream-cve-residual-no-llm-reads-code.md) — the exposure-boundary work
   that strengthens the off-path won't-build.
+
+## Addendum (2026-08-08): apply-side scope confinement; no in-product approve-to-apply
+
+§5's "human approval" is pinned down: **protector never grows an in-product approve→apply
+path for node containment.** Every operator-reachable surface is read-only by decision
+([ADR-0016](0016-severity-vs-urgency.md): presentation is a view, never a decision gate;
+[ADR-0031](0031-read-only-mcp-server-tiered-redaction.md): the MCP is read-only), and an
+approval control would be exactly the view-becomes-gate shape those ADRs refuse. The durable
+act stays where §4 put it — a human, out of band (cordon + runbook). The actuator's `apply`
+glue remains in-tree, tested in isolation; any future in-product flow requires its own ADR.
+This retires "the future apply call-site" as a design location.
+
+Consequently the `enforceScope` confinement of the co-resident deny sweep lives at the
+**actuation boundary**, not a hypothetical apply flow: the shared full-set sweep stays
+unfiltered (the revert path must lift *every* deny protector could ever have placed —
+filtering revert would orphan out-of-scope denies), while the **apply-facing subset — the
+only set `apply` accepts, by type (a `ScopedDenies` newtype)** — and the proposal-side
+eligibility check (`contain_node_in_scope`) both derive from the same
+[ADR-0021](0021-two-setting-operating-posture.md) scope match the webhook uses. Unscoped =
+full set; scoped = only in-scope co-residents are denied, and the containment is honestly
+**weaker**: out-of-scope pods on a contained node stay reachable, because a deny written into
+an unauthorized namespace is the enforce-everywhere escape ADR-0021 exists to prevent
+(filter, don't refuse-whole). The model-visible fixed proposal note is unchanged — the model
+decides *what*; `enforceScope` governs *where-authorized*. See
+`docs/ideas/containnode-scope-confinement.md`.
