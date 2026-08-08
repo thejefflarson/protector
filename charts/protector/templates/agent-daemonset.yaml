@@ -1,7 +1,7 @@
 {{- if .Values.agent.enabled }}
 # protector's first-party eBPF behavioral collector (ADR-0014), a DaemonSet on every
 # node. It loads eBPF probes, resolves cgroup->pod, and POSTs normalized observations to
-# the engine's behavioral ingest (the falco-ingest service, /behavior). Passive and
+# the engine's behavioral ingest (the behavior-ingest service, /behavior). Passive and
 # read-only — it observes, it never blocks/kills/rewrites; enforcement stays the engine's
 # reversible NetworkPolicy cut.
 #
@@ -96,7 +96,7 @@ spec:
                   fieldPath: spec.nodeName
             # The engine's behavioral ingest base — the agent appends /behavior.
             - name: PROTECTOR_AGENT_ENDPOINT
-              value: "http://{{ include "protector.fullname" . }}-falco-ingest.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.engine.falco.port }}"
+              value: "http://{{ include "protector.fullname" . }}-behavior-ingest.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.engine.ingest.port }}"
             {{- if .Values.ingestAuth.enabled }}
             # Ingest authn (Fix A): present this bearer token on every POST so the engine
             # accepts the agent's observations. Same Secret the engine reads.

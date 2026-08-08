@@ -251,3 +251,17 @@ shadow-by-default framing.**
 The first-party eBPF agent is now the **sole deployed** corroboration source. The port it
 feeds remains open to any sensor; only the Falco-specific adapter and the cancelled-bake
 measurement are gone.
+
+## Addendum — in-repo chart migrated to `PROTECTOR_BEHAVIOR_ADDR`; compat fallback dropped (2026-08-08)
+
+The rename addendum decision 1 above shipped `PROTECTOR_BEHAVIOR_ADDR` with
+`PROTECTOR_FALCO_ADDR` read as a deprecated compat fallback "until the deployed chart
+migrates." The **in-repo** `charts/protector` chart now renders only
+`PROTECTOR_BEHAVIOR_ADDR` (the `engine.falco.*` values key and the `…-falco-ingest`
+Service are renamed `engine.ingest.*` / `…-behavior-ingest` to match), and the engine
+(`engine/src/main.rs`) reads only `PROTECTOR_BEHAVIOR_ADDR` — the fallback is deleted.
+
+This addendum covers the in-repo chart only. The deployed cluster runs a diverged fork
+of this chart (outside this repository) that still sets `PROTECTOR_FALCO_ADDR`; porting
+the rename there, and rolling it out *before* the fallback-dropped engine, is a separate,
+deploy-ordering-sensitive step tracked outside this repo.
