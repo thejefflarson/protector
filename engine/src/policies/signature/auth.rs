@@ -88,6 +88,17 @@ impl RegistryAuth {
             None => Auth::Anonymous,
         }
     }
+
+    /// The resolved `(username, password)` for `image`, or `None` for `Anonymous` — the same
+    /// precedence as [`for_image`](Self::for_image), but auth-library-agnostic so the provenance
+    /// referrer fetch (which drives oci-client directly, not sigstore's wrapper) can authenticate
+    /// private images identically without this module depending on either client's auth enum.
+    pub(super) fn basic_for_image(&self, image: &str) -> Option<(String, String)> {
+        if let Some((user, pass)) = &self.env_override {
+            return Some((user.clone(), pass.clone()));
+        }
+        self.entries.get(&image_registry_key(image)).cloned()
+    }
 }
 
 /// Parse the whole dockerconfigjson `auths` map into a `host key → (user, pass)` table. Each entry

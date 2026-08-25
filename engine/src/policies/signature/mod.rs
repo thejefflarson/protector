@@ -14,6 +14,7 @@ pub mod continuity;
 mod cosign;
 pub mod posture;
 pub mod provenance;
+mod provenance_observer;
 pub mod rekor;
 pub mod tuf_tmpdir;
 
