@@ -110,6 +110,20 @@ fn recurses_through_a_typedef_wrapping_the_anonymous_members_type() {
 }
 
 #[test]
+fn resolves_a_struct_name_that_is_itself_a_typedef() {
+    // The real `kuid_t`: the kernel declares `typedef struct { uid_t val; } kuid_t;` — an
+    // ANONYMOUS struct whose only name lives on the typedef. A `KIND_STRUCT`-by-name scan
+    // finds nothing, so `kuid_t.val` read as absent (expected=0 actual=None) and the BTF
+    // preflight disabled the `fix_setuid` probe (setuid→root escalation) on EVERY node.
+    // Looking the struct up by the typedef name must resolve to the anonymous struct.
+    let mut b = BtfBuilder::new();
+    let anon_struct = b.add_struct("", false, &[("val", 0, 0)]);
+    b.add_typedef("kuid_t", anon_struct);
+    let btf = RawBtf::parse(&b.build()).unwrap();
+    assert_eq!(btf.struct_field_offset("kuid_t", "val"), Some(0));
+}
+
+#[test]
 fn finds_an_enum_variant_value() {
     let mut b = BtfBuilder::new();
     b.add_enum(
