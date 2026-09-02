@@ -288,7 +288,8 @@ new egress path.
    default-on, not opt-in — it was never a new egress destination, so gating it behind a
    flag was detection proliferation, not an egress control.)*
 
-**Known limitation (DECISION NEEDED — recorded for the architect).** The pinned
+**Known limitation (DECISION NEEDED — recorded for the architect).** *(RESOLVED — see the
+"provenance is verified via `sigstore-verify`" addendum at the end of this file.)* The pinned
 `sigstore` crate (0.14) verifies DSSE bundle referrers only for the cosign `sign/v1`
 predicate — `from_sigstore_bundle` rejects any other predicate type, so a **SLSA
 provenance** attestation is currently *not surfaced* by `trusted_signature_layers` end to
@@ -298,7 +299,10 @@ the `Verified` path is real, correct code that activates the moment the verifier
 SLSA layer; until then the production observer yields `Absent`/`Checking` — the safe,
 honest degradation. Closing the gap (compose sigstore's lower-level DSSE + Fulcio + Rekor
 primitives, or an upgraded `sigstore` release) is a follow-up that does not change this
-addendum's contract.
+addendum's contract. *(The optimism above was half-right: the pipeline/parser were correct,
+but the `Verified` path did NOT just activate — the resolving addendum documents why both of
+the `sigstore` crate's verify paths are dead ends for GitHub attestations, and what replaced
+them.)*
 
 ## Addenda (— the rendered "if enforced" is CONTINUITY, not keyless-identity)
 
@@ -422,6 +426,10 @@ not egress, and is retired.
    contacted; the only change is that the SLSA in-toto/DSSE layer `trusted_signature_layers` already
    fetched is now also classified. So flipping the default costs nothing egress-wise: any image the
    signing sweep already observes is now also read for provenance off the identical bytes.
+   *(Superseded in mechanism by the "provenance is verified via `sigstore-verify`" addendum below:
+   provenance no longer rides `fetch_layers` — it makes its OWN referrer fetch to the same registry.
+   The zero-egress conclusion still holds — same registry host, no new destination, offline
+   verification — but it is now a **separate** round trip, not the shared one described here.)*
 2. **The provenance sweep is now built unconditionally** (`build_provenance_scanner`, mirroring
    `build_signing_observer` exactly), bounded by the same `PROTECTOR_MAX_IMAGES` cap and TTL cache as
    before. `PROTECTOR_PROVENANCE_ENABLE` is removed; there is no replacement flag and no migration
@@ -432,3 +440,59 @@ not egress, and is retired.
    admission. The genuinely opt-in Rekor lane (`PROTECTOR_REKOR_ENABLE`) is UNCHANGED by this
    addendum — it remains gated because it is a real second egress destination, the case this
    principle's "egress" carve-out exists for.
+
+## Addenda (— provenance is verified via `sigstore-verify`; the `sigstore` crate cannot)
+
+The "Known limitation" note above assumed the `Verified` path would light up the moment the
+verifier surfaced a SLSA layer. It did not, and observation confirmed it in production: **every**
+image — including protector's own, which ships a real `actions/attest-build-provenance` attestation
+— read `Absent`, so the inventory's provenance column was uniformly blank. Root-causing it turned up
+**two** independent dead ends in the pinned `sigstore` crate (0.14, the newest release), not one:
+
+1. **The predicate guard (already known).** `trusted_signature_layers` fetches the SLSA bundle as an
+   OCI referrer, then `from_sigstore_bundle` rejects it — it hardcodes the cosign `sign/v1` predicate
+   and errors on `https://slsa.dev/provenance/v1`. So the shared signing fetch can never yield a SLSA
+   layer; the `Verified` path was unreachable, not merely dormant.
+2. **The DSSE verifier is also broken (newly found).** The crate's OTHER public path,
+   `bundle::verify::Verifier`, verifies a bundle directly — but its **offline** DSSE check recomputes
+   the Rekor `envelopeHash` from a proto round-trip of the envelope, which never equals the hash Rekor
+   stored over the originally-submitted bytes (a canonicalization bug), so it always fails; its
+   **online** DSSE path is an unimplemented stub. Both were confirmed against protector's live agent
+   image (`envelopeHash mismatch`). No published `sigstore` version fixes either, and the lower-level
+   Fulcio-chain / SCT primitives needed to hand-roll a correct verifier are `pub(crate)`.
+
+**Decision — add the `sigstore-verify` crate (prefix-dev) for the provenance verify step only.** It
+is a maintained, published verifier purpose-built for GitHub artifact attestation: it handles the
+DSSE Rekor-entry consistency correctly (matches the payload hash + signature, not the broken envelope
+recompute) and ships a built-in `SIGSTORE_PRODUCTION_TRUSTED_ROOT`. The signing axis stays on the
+`sigstore` crate untouched; only provenance uses the new stack. This carries a second sigstore
+dependency stack, accepted deliberately as the alternative to vendoring a patched `sigstore` fork of
+security-critical verification code.
+
+Mechanics ([`policies::signature::provenance_observer`]):
+
+1. **Its own referrer fetch, same registry.** Because the shared `fetch_layers` drops the SLSA layer
+   (dead end 1), provenance now fetches the image's OCI referrers directly via `oci-client`, selects
+   the `slsa.dev/provenance/*` bundle(s), and verifies each with `sigstore-verify`. This is a
+   **separate** round trip from the signing fetch (superseding the "one round trip, two postures"
+   claim in the default-ON addendum above), but to the **same registry host** — no new egress
+   destination, and the ADR-0015 zero-egress default holds. Verification is fully **offline**
+   (built-in trust root; the bundle's own embedded inclusion proof + checkpoint), so it adds no
+   transparency-log call.
+2. **The verified facts feed the unchanged classifier.** A verified bundle's `(predicate, keyless?)`
+   is turned into the same `ProvenanceFacts` the pure `classify_provenance` + `parse_slsa_predicate`
+   already consume, so the four-state precedence (verified / unverifiable / absent / checking), the
+   TOFU baseline, the drift finding, and the render are all unchanged — only the *source* of the
+   facts moved. Observation stays permissive on identity (no configured signer — the Fulcio/Rekor
+   chain is the anchor; the builder is learned, not gated), matching the signing sweep.
+3. **Referrers-unsupported is `Absent`, not `Checking`.** The manifest fetch runs first and proves
+   the image is reachable + authorized; a subsequent failure to LIST referrers therefore means the
+   registry does not support the OCI referrers API (common on mirrors, which return an
+   unparseable/empty referrers tag), which is the calm `Absent` — never a perpetual `Checking` that
+   would leave every mirrored base image stuck showing the transient glyph. Only an unreachable
+   *image* is `Checking`.
+4. **Guarded by a live end-to-end test.** The failure that hid here for so long was invisible to unit
+   tests — the pipeline was green on synthetic fixtures while dead in production. An `#[ignore]`d
+   integration test (`engine/tests/provenance_live.rs`) now verifies the whole chain against a real
+   attested image (`Verified`, right source + builder) and a real unattested mirror image (`Absent`),
+   so a future regression to the silent-blank state is catchable with one command.
