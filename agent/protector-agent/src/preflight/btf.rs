@@ -337,18 +337,30 @@ impl RawBtf {
         self.types.get((type_id - 1) as usize).map(|t| &t.kind)
     }
 
-    /// Find the first `KIND_STRUCT` type named `name` and return its 1-based type id.
-    /// `HashMap`-free linear scan: this runs once at agent startup against a
-    /// (large but bounded) live-kernel BTF, not per-event.
-    fn struct_id(&self, name: &str) -> Option<u32> {
-        self.types.iter().enumerate().find_map(|(i, t)| {
-            (t.name == name && matches!(t.kind, Decoded::Struct(_))).then_some((i + 1) as u32)
-        })
-    }
-
     fn enum_id(&self, name: &str) -> Option<u32> {
         self.types.iter().enumerate().find_map(|(i, t)| {
             (t.name == name && matches!(t.kind, Decoded::Enum(_))).then_some((i + 1) as u32)
+        })
+    }
+
+    /// The type id of the struct/union reached by `name` — either a struct/union declared
+    /// with that name directly, OR a same-named `typedef`/see-through that forwards to one.
+    /// The typedef case is not exotic: the kernel declares `kuid_t` as
+    /// `typedef struct { uid_t val; } kuid_t;` — an ANONYMOUS struct whose only name lives
+    /// on the typedef — so a `KIND_STRUCT`-by-name scan alone never finds it, and the
+    /// `fix_setuid` probe (which reads `cred → uid`, a `kuid_t.val`) was disabled fleet-wide
+    /// on a false `actual=None` mismatch. Resolving the typedef here fixes that.
+    fn aggregate_id(&self, name: &str) -> Option<u32> {
+        self.types.iter().enumerate().find_map(|(i, t)| {
+            if t.name != name {
+                return None;
+            }
+            let id = (i + 1) as u32;
+            match &t.kind {
+                Decoded::Struct(_) | Decoded::Union(_) => Some(id),
+                Decoded::Forward(_) => self.resolve_to_aggregate(id),
+                _ => None,
+            }
         })
     }
 
@@ -408,7 +420,7 @@ impl RawBtf {
     /// present or has no member (directly, or via anonymous-union/struct recursion) named
     /// `field`.
     pub fn struct_field_offset(&self, struct_name: &str, field: &str) -> Option<u32> {
-        let id = self.struct_id(struct_name)?;
+        let id = self.aggregate_id(struct_name)?;
         self.member_offset(id, field)
     }
 
