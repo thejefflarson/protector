@@ -67,6 +67,17 @@ jobs:
       # cache, but not the binary, so a plain binstall skips and sccache is absent
       # from PATH (RUSTC_WRAPPER then fails). Force a real install every run.
       run: cargo binstall --no-confirm --force sccache
+    - name: Selftest sccache fail-soft fallback
+      # Drives the fallback script's own fixtures (stubbed sccache, no real R2 call)
+      # so a regression in the empty-SCCACHE_BUCKET fallback fails loudly here
+      # instead of during an actual R2 outage.
+      run: bash .github/scripts/start-sccache.sh --selftest
+    - name: Start sccache (fail-soft to local disk if R2 is down)
+      # sccache's R2 backend is EAGER (see the script): without this probe, an R2
+      # outage would kill this job outright on the first cargo invocation below
+      # ("sccache: Timed out waiting for server startup") instead of just costing
+      # a cold-cache build.
+      run: bash .github/scripts/start-sccache.sh
     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: "22"
@@ -127,6 +138,10 @@ jobs:
         cache-targets: false
     - name: Install sccache
       run: cargo binstall --no-confirm --force sccache
+    - name: Start sccache (fail-soft to local disk if R2 is down)
+      # Same rationale as the lint job's step: probe R2 before the first cargo
+      # invocation below, degrade to a local disk cache rather than hard-failing.
+      run: bash .github/scripts/start-sccache.sh
     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: "22"
