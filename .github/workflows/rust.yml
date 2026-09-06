@@ -24,6 +24,12 @@ jobs:
     # redis. Sized in the cluster repo (charts/actions/runners/values-protector.yaml —
     # 6Gi/8Gi + anti-affinity onto the 16GB nodes); the base 3Gi runner OOM-killed this.
     runs-on: protector-runners
+    # The runners are self-hosted and persistent, so never execute code from a
+    # forked pull request on them — that would be arbitrary code execution on
+    # the build infrastructure. Push events and same-repo PRs are fine.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     env:
       # sccache -> the shared Cloudflare R2 bucket (cluster repo: charts/sccache,
       # ADR-0020). The backend config -- SCCACHE_BUCKET/ENDPOINT/REGION plus the
@@ -114,6 +120,12 @@ jobs:
     permissions:
       contents: read
     runs-on: protector-runners
+    # The runners are self-hosted and persistent, so never execute code from a
+    # forked pull request on them — that would be arbitrary code execution on
+    # the build infrastructure. Push events and same-repo PRs are fine.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     env:
       # sccache backend comes from the runner pod's `sccache-r2` envFrom -- see the
       # note on the first job. The redis backend is deliberately unset.
