@@ -11,12 +11,13 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
 
-use super::Verifier;
-use super::claims::Tier;
+use super::claims::{Tier, TierGrants};
 use super::enforce::Enforcer;
+use super::internal::InternalAuth;
 use super::test_support::{
     KEY_A_N, KEY_A_PEM, KID_A, TestFetcher, base_claims, jwk_set, now, sign, test_config,
 };
+use super::{OidcConfig, SigningAlgorithm, Verifier};
 use crate::engine::dashboard::{AuthMode, DashboardState, router};
 use crate::engine::journal::DecisionJournal;
 use crate::engine::policy_log::PolicyDecisionLog;
@@ -58,6 +59,57 @@ fn enforcer_jwks_down() -> Arc<Enforcer> {
         LOGIN_URL.into(),
         Tier::Redacted,
     ))
+}
+
+// --- the additive internal Kubernetes SA-token lane (ADR-0043) ----------------------------------
+
+const INTERNAL_ISSUER: &str = "https://kubernetes.default.svc.cluster.local";
+const INTERNAL_AUD: &str = "protector";
+const FIXER_SUB: &str = "system:serviceaccount:fixer:fixer";
+
+/// The cluster OIDC config the internal lane's verifier enforces (RS256, cluster issuer, internal
+/// audience). DISTINCT from `test_config`'s edge issuer, so an internal token verifies on the
+/// internal lane and an edge token on the edge lane.
+fn internal_config() -> OidcConfig {
+    OidcConfig {
+        issuer: INTERNAL_ISSUER.into(),
+        audience: INTERNAL_AUD.into(),
+        tier_claim: "tier".into(),
+        algorithm: SigningAlgorithm::Rs256,
+        tier_grants: TierGrants::default(),
+    }
+}
+
+/// An enforcer with BOTH the edge lane (`test_config` issuer) and the additive internal lane
+/// (cluster issuer/aud), each served key-A in-memory (zero egress), allowlisting `allowed`.
+fn enforcer_with_internal(min_tier: Tier, allowed: &[&str]) -> Arc<Enforcer> {
+    let edge = Verifier::with_fetcher(
+        test_config(),
+        Arc::new(TestFetcher::new(jwk_set(&[(KID_A, KEY_A_N)]))),
+    );
+    let internal_verifier = Verifier::with_fetcher(
+        internal_config(),
+        Arc::new(TestFetcher::new(jwk_set(&[(KID_A, KEY_A_N)]))),
+    );
+    let internal = InternalAuth::with_verifier(
+        internal_verifier,
+        allowed.iter().map(|s| s.to_string()).collect(),
+    );
+    Arc::new(Enforcer::from_parts(edge, LOGIN_URL.into(), min_tier).with_internal(Some(internal)))
+}
+
+/// A cluster-SA-token-shaped JWT: cluster issuer, internal aud, the given `sub`, in-window exp/nbf,
+/// and — like a real projected token — NO `tier` claim.
+fn internal_token(sub: &str) -> String {
+    let claims = serde_json::json!({
+        "iss": INTERNAL_ISSUER,
+        "aud": INTERNAL_AUD,
+        "sub": sub,
+        "iat": now() - 10,
+        "nbf": now() - 10,
+        "exp": now() + 3600,
+    });
+    sign(KEY_A_PEM, KID_A, &claims)
 }
 
 /// Send a request through the configured router and return the response.
@@ -414,4 +466,123 @@ async fn unconfigured_router_serves_without_rejecting() {
         serde_json::json!("edge-only"),
         "an unconfigured dashboard honestly reports edge-only"
     );
+}
+
+// -------------------------------------------------------------------------------------------------
+// The additive internal Kubernetes SA-token lane (ADR-0043): an allowlisted in-cluster SA token
+// reads `/api` read-only WITHOUT an edge Access JWT; a non-allowlisted one is a hard 401; the edge
+// path is untouched; and the lane never fails open.
+// -------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn api_with_allowlisted_internal_sa_token_is_200_read_only() {
+    // fixer's own cluster SA token (cluster issuer, internal aud, allowlisted sub, no tier claim)
+    // authorizes the read-only JSON — the whole point of the lane. No edge Access JWT involved.
+    let response = send(
+        Some(enforcer_with_internal(Tier::Redacted, &[FIXER_SUB])),
+        get(
+            "/api/findings.json",
+            Some(&internal_token(FIXER_SUB)),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert!(
+        value.get("strip").is_some(),
+        "the internal lane authorizes the read-only view-model"
+    );
+}
+
+#[tokio::test]
+async fn api_with_valid_but_non_allowlisted_internal_sa_token_is_401_never_302() {
+    // A validly-signed cluster token whose `sub` is NOT allowlisted is a hard 401 — never a 302
+    // (a machine token is not a browser to redirect) and never the graph.
+    let response = send(
+        Some(enforcer_with_internal(Tier::Redacted, &[FIXER_SUB])),
+        get(
+            "/api/findings.json",
+            Some(&internal_token("system:serviceaccount:other:intruder")),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response.headers().get(header::LOCATION).is_none(),
+        "a non-allowlisted machine token is a hard 401, never a redirect"
+    );
+    assert_eq!(
+        body_string(response).await,
+        r#"{"error":"unauthenticated"}"#
+    );
+}
+
+#[tokio::test]
+async fn internal_lane_leaves_the_edge_bearer_path_working_via_fall_through() {
+    // An EDGE token offered on Bearer fails the internal verifier (wrong issuer → Unverifiable) and
+    // FALLS THROUGH to the unchanged edge path, which accepts it → 200. Proves the lane is additive
+    // (the existing machine/ID-JAG Bearer path still works) and that the fall-through reaches edge.
+    let response = send(
+        Some(enforcer_with_internal(Tier::Redacted, &[FIXER_SUB])),
+        get(
+            "/api/findings.json",
+            Some(&valid_token()),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn internal_unverifiable_bearer_falls_through_and_edge_rejects_401() {
+    // A tampered cluster token fails the internal verifier (Unverifiable, NOT a hard reject) → falls
+    // through to the edge path, which also rejects → 401. The internal lane never fails OPEN.
+    let token = internal_token(FIXER_SUB);
+    let mut segments: Vec<String> = token.split('.').map(String::from).collect();
+    let sig = &segments[2];
+    let first = sig.chars().next().unwrap();
+    segments[2] = format!("{}{}", if first == 'A' { 'B' } else { 'A' }, &sig[1..]);
+    let tampered = segments.join(".");
+    let response = send(
+        Some(enforcer_with_internal(Tier::Redacted, &[FIXER_SUB])),
+        get(
+            "/api/findings.json",
+            Some(&tampered),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_configured_still_401s_an_unauthenticated_api_request() {
+    // With the internal lane configured but NO bearer present, the lane does not engage and the edge
+    // path rejects fail-closed — the additive lane never opens an unauthenticated hole.
+    let response = send(
+        Some(enforcer_with_internal(Tier::Redacted, &[FIXER_SUB])),
+        get("/api/findings.json", None, Some("application/json")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn internal_sa_token_below_the_minimum_tier_is_403() {
+    // A cluster SA token resolves to the floor (Redacted). If the operator raised the viewing
+    // minimum to Raw, the internal identity is verified-but-forbidden → 403, exactly as the edge
+    // path treats a below-tier identity (the lane authorizes "exactly as the edge path does").
+    let response = send(
+        Some(enforcer_with_internal(Tier::Raw, &[FIXER_SUB])),
+        get(
+            "/api/findings.json",
+            Some(&internal_token(FIXER_SUB)),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

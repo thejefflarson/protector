@@ -75,6 +75,11 @@ fn build_dashboard_auth() -> Option<(
             // gate that silently degrades to allow-all.
             match dashboard::auth::enforce::Enforcer::new(config) {
                 Ok(enforcer) => {
+                    // Additive internal SA-token lane (ADR-0043): attach it when configured so an
+                    // in-cluster caller (fixer) authorized by its SA identity can read `/api`
+                    // without an edge Access JWT. It rides on the Enforcer — so it is active only in
+                    // this Oidc mode — and never weakens the edge path (a `None` here is edge-only).
+                    let enforcer = enforcer.with_internal(build_dashboard_internal_auth());
                     tracing::info!(
                         %issuer,
                         "dashboard OIDC enforcement ENABLED (fail-closed, ADR-0030)"
@@ -110,6 +115,44 @@ fn build_dashboard_auth() -> Option<(
             None
         }
     }
+}
+
+/// Build the additive internal Kubernetes SA-token lane for the dashboard read surface (ADR-0043),
+/// or `None` when it is off / misconfigured. `None` leaves the gate edge-only — the lane is pure
+/// addition and never weakens the edge path. It is **fail-closed**: an empty allowlist or an
+/// unreadable cluster CA DISABLES the lane (admitting no internal token), logged loudly, rather than
+/// widening access. Enabled only when `PROTECTOR_DASHBOARD_INTERNAL_AUD` is set.
+fn build_dashboard_internal_auth() -> Option<dashboard::auth::internal::InternalAuth> {
+    let config = dashboard::auth::internal::InternalConfig::from_env()?;
+    if config.allowed_subs.is_empty() {
+        tracing::error!(
+            aud = %config.audience,
+            "dashboard internal SA-token auth: PROTECTOR_DASHBOARD_INTERNAL_AUD is set but \
+             PROTECTOR_DASHBOARD_INTERNAL_ALLOWED_SUBS is empty — lane DISABLED (fail closed, \
+             admitting no internal token); edge auth is unaffected"
+        );
+        return None;
+    }
+    let ca_pem = match std::fs::read(&config.ca_path) {
+        Ok(pem) => pem,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                ca_path = %config.ca_path,
+                "dashboard internal SA-token auth: cannot read the cluster CA — lane DISABLED \
+                 (fail closed); edge auth is unaffected"
+            );
+            return None;
+        }
+    };
+    let auth = dashboard::auth::internal::InternalAuth::from_config(&config, &ca_pem);
+    tracing::info!(
+        issuer = %auth.issuer(),
+        aud = %auth.audience(),
+        allowed_subs = ?auth.allowed_subs(),
+        "dashboard internal SA-token auth ENABLED (additive, read-only, fail-closed, ADR-0043)"
+    );
+    Some(auth)
 }
 
 /// Build the read-only MCP server's OIDC verifier from the environment (ADR-0031). The

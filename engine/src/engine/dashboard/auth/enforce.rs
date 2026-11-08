@@ -30,6 +30,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use super::claims::Tier;
+use super::internal::{InternalAuth, InternalOutcome};
 use super::{AuthError, ConfigError, Identity, OidcConfig, Verifier, authenticate, non_empty_env};
 
 /// The tiny JSON body for a `401` — no graph data, no stack, no which-check-failed detail (ADR-0030
@@ -60,6 +61,12 @@ pub struct Enforcer {
     login_redirect: String,
     /// The minimum authorization tier a verified identity must hold to view (default `Redacted`).
     min_tier: Tier,
+    /// The additive internal Kubernetes SA-token lane (ADR-0043), or `None` when it is not
+    /// configured. When set, it is tried BEFORE the edge path and ONLY for an
+    /// `Authorization: Bearer` token: a verified, allowlisted SA token is admitted read-only; a
+    /// non-allowlisted one is a hard `401`; an unverifiable one falls through to the edge path. It
+    /// never weakens the edge path and never fails open.
+    internal: Option<InternalAuth>,
 }
 
 impl Enforcer {
@@ -67,7 +74,8 @@ impl Enforcer {
     /// issuer's keys over HTTPS, the login redirect (configured URL, else the issuer), and the
     /// minimum tier (env escape hatch, else the most-restricted default). A MISTYPED minimum tier is
     /// a loud [`ConfigError`] — fail-closed exactly like a bad audience/algorithm, so `run_loop`
-    /// refuses to serve rather than silently degrade the gate to allow-all.
+    /// refuses to serve rather than silently degrade the gate to allow-all. The internal lane is
+    /// NOT attached here — the caller adds it with [`with_internal`](Self::with_internal).
     pub fn new(config: OidcConfig) -> Result<Self, ConfigError> {
         let login_redirect = login_redirect(&config);
         let min_tier = configured_min_tier()?;
@@ -75,17 +83,27 @@ impl Enforcer {
             verifier: Verifier::from_config(config),
             login_redirect,
             min_tier,
+            internal: None,
         })
+    }
+
+    /// Attach (or clear) the additive internal SA-token lane (ADR-0043). Pure addition and
+    /// reversible: `None` leaves the enforcer the edge-only gate it was.
+    pub fn with_internal(mut self, internal: Option<InternalAuth>) -> Self {
+        self.internal = internal;
+        self
     }
 
     /// Assemble a gate from explicit parts — the seam tests use to inject a [`Verifier`] built over
     /// an in-memory JWKS (no egress) and pin the login redirect / minimum tier deterministically.
+    /// The internal lane starts unattached; a test adds it with [`with_internal`](Self::with_internal).
     #[cfg(test)]
     pub(crate) fn from_parts(verifier: Verifier, login_redirect: String, min_tier: Tier) -> Self {
         Self {
             verifier,
             login_redirect,
             min_tier,
+            internal: None,
         }
     }
 
@@ -107,6 +125,46 @@ pub async fn enforce(
     next: Next,
 ) -> Response {
     let class = route_class(request.uri(), request.headers());
+
+    // 1. Internal Kubernetes SA-token lane (ADR-0043) — additive, read-only, tried FIRST. It engages
+    //    only when configured AND an `Authorization: Bearer` token is present, and it NEVER fails
+    //    open: an unverifiable internal token falls through to the unchanged edge path below.
+    if let Some(internal) = &enforcer.internal
+        && let Some(token) = super::bearer_from_headers(request.headers())
+    {
+        match internal.authorize(&token).await {
+            InternalOutcome::Admit(identity) => {
+                // Authorize READ-ONLY exactly as the edge path does: insert the verified
+                // Identity and apply the SAME minimum-tier gate.
+                if enforcer.identity_permitted(&identity) {
+                    request.extensions_mut().insert(identity);
+                    return next.run(request).await;
+                }
+                tracing::warn!(
+                    subject = %identity.subject,
+                    "dashboard: internal SA identity is below the minimum tier (forbidden)"
+                );
+                return deny(Denial::Forbidden, class, &enforcer.login_redirect);
+            }
+            InternalOutcome::NotAllowed(subject) => {
+                // A validly-signed cluster token whose `sub` is NOT allowlisted is a hard reject
+                // — never a fall-through, and never a browser redirect (a machine identity is
+                // not re-challenged with a login page).
+                tracing::warn!(%subject, "dashboard: internal SA-token sub not in allowlist");
+                return deny_internal_unauthorized(class);
+            }
+            InternalOutcome::Unverifiable(error) => {
+                // Do NOT fail open: fall through to the edge path. An in-cluster caller carries
+                // no Cloudflare Access assertion, so the edge path then rejects it fail-closed.
+                tracing::debug!(
+                    %error,
+                    "dashboard: internal bearer did not verify; falling through to edge auth"
+                );
+            }
+        }
+    }
+
+    // 2. Edge Cloudflare Access lane (ADR-0030) — UNCHANGED.
     match authenticate(&enforcer.verifier, request.headers()).await {
         Ok(identity) if enforcer.identity_permitted(&identity) => {
             request.extensions_mut().insert(identity);
@@ -183,6 +241,18 @@ fn deny(denial: Denial, class: RouteClass, login_redirect: &str) -> Response {
         (Denial::Forbidden, RouteClass::Document) => StatusCode::FORBIDDEN.into_response(),
         (Denial::Auth(_), RouteClass::Api) => json(StatusCode::UNAUTHORIZED, BODY_UNAUTHENTICATED),
         (Denial::Auth(_), RouteClass::Document) => redirect(login_redirect),
+    };
+    no_store(response)
+}
+
+/// A hard `401` for a validly-signed internal SA token whose `sub` is NOT allowlisted (ADR-0043).
+/// NEVER a `302` — a machine identity is not a browser to re-challenge at a login page — and never
+/// a fall-through. It carries the same tiny JSON body (for the `/api` class) + `no-store` as the
+/// edge `401`, so a rejected internal caller leaks no more than an edge one.
+fn deny_internal_unauthorized(class: RouteClass) -> Response {
+    let response = match class {
+        RouteClass::Api => json(StatusCode::UNAUTHORIZED, BODY_UNAUTHENTICATED),
+        RouteClass::Document => StatusCode::UNAUTHORIZED.into_response(),
     };
     no_store(response)
 }

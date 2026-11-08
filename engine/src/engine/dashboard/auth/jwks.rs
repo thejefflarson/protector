@@ -111,20 +111,98 @@ impl JwksFetcher for HttpJwksFetcher {
             "{}/.well-known/openid-configuration",
             self.issuer.trim_end_matches('/')
         );
-        let discovery: Discovery = get_json(client, &discovery_url).await?;
-        get_json(client, &discovery.jwks_uri).await
+        let discovery: Discovery = get_json(client, &discovery_url, None).await?;
+        get_json(client, &discovery.jwks_uri, None).await
     }
 }
 
-/// GET `url` and deserialize a 2xx JSON body **under a hard byte budget**. Any failure —
-/// unreachable, non-2xx, an over-large body, or an unparsable one — collapses to
-/// [`AuthError::JwksUnreachable`] so a fetch failure denies, never bypasses.
+/// Fetches the **cluster's** OIDC JWKS for the additive internal ServiceAccount-token lane
+/// (ADR-0043). Unlike [`HttpJwksFetcher`], the Kubernetes apiserver's discovery endpoint
+/// (`<issuer>/openid/v1/jwks`) is itself **authenticated** — the
+/// `system:service-account-issuer-discovery` ClusterRole gates it — and its serving cert chains to
+/// the **cluster CA**, not a public root. So this fetcher trusts the cluster CA and presents this
+/// pod's own projected ServiceAccount token as `Authorization: Bearer`, **read fresh on every
+/// fetch** (projected tokens rotate; a token cached at construction would go stale). It hits the
+/// JWKS URL directly — no discovery round-trip. Any failure is [`AuthError::JwksUnreachable`], so a
+/// fetch failure denies rather than bypasses (ADR-0030 §6 posture, carried into the internal lane).
+pub struct ClusterJwksFetcher {
+    /// `None` when a bounded client trusting the cluster CA could not be built (unreadable/unparsable
+    /// CA, TLS backend init failure). We fail closed at fetch rather than fall back to a client that
+    /// skips CA verification or drops the timeout.
+    client: Option<reqwest::Client>,
+    jwks_url: String,
+    /// Path to this pod's projected SA token, re-read on every fetch.
+    token_path: String,
+}
+
+impl ClusterJwksFetcher {
+    /// Build a fetcher for `jwks_url`, trusting `ca_pem` (the cluster CA) and presenting the token
+    /// at `token_path` on each fetch. The timeout honors `PROTECTOR_OIDC_JWKS_TIMEOUT_SECS` (shared
+    /// with [`HttpJwksFetcher`]).
+    pub fn new(jwks_url: impl Into<String>, token_path: impl Into<String>, ca_pem: &[u8]) -> Self {
+        let timeout = std::env::var("PROTECTOR_OIDC_JWKS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(DEFAULT_FETCH_TIMEOUT_SECS);
+        Self {
+            client: build_cluster_client(timeout, ca_pem),
+            jwks_url: jwks_url.into(),
+            token_path: token_path.into(),
+        }
+    }
+}
+
+/// A bounded-timeout client that trusts ONLY the supplied cluster CA. `None` on any failure — we
+/// never fall back to the default trust store or an unbounded client (either would defeat the
+/// fail-closed posture), so the fetch simply denies.
+fn build_cluster_client(timeout: u64, ca_pem: &[u8]) -> Option<reqwest::Client> {
+    let cert = match reqwest::Certificate::from_pem(ca_pem) {
+        Ok(cert) => cert,
+        Err(error) => {
+            tracing::error!(%error, "OIDC(internal): cluster CA PEM did not parse; internal JWKS fetch will fail closed");
+            return None;
+        }
+    };
+    match reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout))
+        .add_root_certificate(cert)
+        .build()
+    {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::error!(%error, "OIDC(internal): could not build a bounded cluster JWKS client; internal JWKS fetch will fail closed");
+            None
+        }
+    }
+}
+
+#[async_trait]
+impl JwksFetcher for ClusterJwksFetcher {
+    async fn fetch(&self) -> Result<JwkSet, AuthError> {
+        let client = self.client.as_ref().ok_or(AuthError::JwksUnreachable)?;
+        // Re-read the projected token each fetch (it rotates). A tiny local file — a blocking read
+        // is sub-millisecond and matches the rest of the engine's `std::fs` file reads.
+        let token =
+            std::fs::read_to_string(&self.token_path).map_err(|_| AuthError::JwksUnreachable)?;
+        get_json(client, &self.jwks_url, Some(token.trim())).await
+    }
+}
+
+/// GET `url` and deserialize a 2xx JSON body **under a hard byte budget**, optionally presenting a
+/// `Bearer` credential (the authenticated cluster discovery endpoint requires it; the public
+/// Cloudflare path passes `None`). Any failure — unreachable, non-2xx, an over-large body, or an
+/// unparsable one — collapses to [`AuthError::JwksUnreachable`] so a fetch failure denies, never
+/// bypasses.
 async fn get_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
+    bearer: Option<&str>,
 ) -> Result<T, AuthError> {
-    let mut response = client
-        .get(url)
+    let mut request = client.get(url);
+    if let Some(token) = bearer {
+        request = request.bearer_auth(token);
+    }
+    let mut response = request
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
