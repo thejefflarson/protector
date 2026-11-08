@@ -118,6 +118,76 @@ fn tier_grants_config_fails_loud_but_serves_on_valid_or_absent() {
     clear();
 }
 
+/// The additive internal SA-token lane (ADR-0043) is off unless `PROTECTOR_DASHBOARD_INTERNAL_AUD`
+/// is set, FAILS CLOSED (lane disabled, never admit-all) on an empty allowlist, and builds once a
+/// non-empty allowlist and a readable cluster CA are present. Drives the real
+/// `build_dashboard_internal_auth` over the env.
+#[test]
+fn dashboard_internal_auth_off_unless_aud_set_and_fails_closed_on_empty_allowlist() {
+    let _env = crate::engine::dashboard::auth::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    const AUD: &str = "PROTECTOR_DASHBOARD_INTERNAL_AUD";
+    const SUBS: &str = "PROTECTOR_DASHBOARD_INTERNAL_ALLOWED_SUBS";
+    const CA: &str = "PROTECTOR_DASHBOARD_INTERNAL_CA_PATH";
+    let clear = || unsafe {
+        for key in [
+            AUD,
+            SUBS,
+            CA,
+            "PROTECTOR_DASHBOARD_INTERNAL_ISSUER",
+            "PROTECTOR_DASHBOARD_INTERNAL_JWKS_URL",
+            "PROTECTOR_DASHBOARD_INTERNAL_TOKEN_PATH",
+        ] {
+            std::env::remove_var(key);
+        }
+    };
+    clear();
+
+    // Audience unset ⇒ the lane is off (edge-only).
+    assert!(
+        super::build_dashboard_internal_auth().is_none(),
+        "no PROTECTOR_DASHBOARD_INTERNAL_AUD ⇒ no internal lane"
+    );
+
+    // Audience set but the allowlist empty ⇒ fail closed: the lane is DISABLED, never admit-all.
+    unsafe { std::env::set_var(AUD, "protector") };
+    assert!(
+        super::build_dashboard_internal_auth().is_none(),
+        "an empty allowlist disables the lane (fail closed), never admits anyone"
+    );
+
+    // A non-empty allowlist + a readable CA ⇒ the lane builds. (A bad CA PEM still builds the lane;
+    // it just fails closed at fetch — so any readable CA file suffices to exercise the wiring.)
+    let ca_file = std::env::temp_dir().join(format!(
+        "protector-internal-ca-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::write(
+        &ca_file,
+        b"-----BEGIN CERTIFICATE-----\nnot-a-real-cert\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var(SUBS, "system:serviceaccount:fixer:fixer");
+        std::env::set_var(CA, &ca_file);
+    }
+    let auth =
+        super::build_dashboard_internal_auth().expect("aud + allowlist + readable CA ⇒ lane built");
+    assert_eq!(auth.allowed_subs().len(), 1);
+    assert_eq!(auth.allowed_subs()[0], "system:serviceaccount:fixer:fixer");
+    assert_eq!(auth.audience(), "protector");
+    assert_eq!(
+        auth.issuer(),
+        "https://kubernetes.default.svc.cluster.local"
+    );
+
+    let _ = std::fs::remove_file(&ca_file);
+    clear();
+}
+
 // an operational incident reported the protector container exiting cleanly
 // (exit 0) and restart-looping, never reaching Ready — read from the tail of its logs as
 // "the engine is doing real work, then the process just stops" and hypothesized as a

@@ -25,6 +25,7 @@
 
 pub mod claims;
 pub mod enforce;
+pub mod internal;
 pub mod jwks;
 
 #[cfg(test)]
@@ -483,6 +484,17 @@ fn bearer_token(value: &str) -> Option<&str> {
         .or_else(|| value.strip_prefix("bearer "))?
         .trim();
     (!rest.is_empty()).then_some(rest)
+}
+
+/// The `Authorization: Bearer` token from a request, if present. The internal SA-token lane
+/// (ADR-0043) reads ONLY this header — a cluster SA token is presented as a bearer, never as a
+/// Cloudflare Access assertion — so it does not reuse [`extract_token`]'s edge-lane fallbacks.
+pub(super) fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer_token)
+        .map(str::to_string)
 }
 
 /// The value of a named cookie from the `Cookie` header, if present and non-empty.
