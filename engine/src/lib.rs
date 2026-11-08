@@ -8,6 +8,10 @@
 //! rules engine — this is not a Kyverno re-implementation.
 //!
 //! [`Policy`]: policy::Policy
+
+// false positive on #[async_trait]-generated futures; 2026-11-07
+#![allow(clippy::double_must_use)]
+
 pub mod engine;
 pub mod metrics;
 pub mod policies;
