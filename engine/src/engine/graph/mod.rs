@@ -26,7 +26,7 @@
 pub mod attack;
 pub mod delta;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
@@ -166,6 +166,17 @@ impl NodeKey {
             "secret" | "identity" if count == 3 => self.0.split('/').nth(2),
             _ => None,
         }
+    }
+
+    /// The Kubernetes workload kind of a workload key (`workload/<ns>/<kind>/<name>`) —
+    /// the owning kind as observed (`Pod`, `Deployment`, `DaemonSet`, …). `None` for any
+    /// non-workload or malformed key. Distinct from [`NodeKey::kind`], which names the
+    /// NODE kind (the literal `workload` discriminant), not the Kubernetes kind.
+    pub fn workload_kind(&self) -> Option<&str> {
+        let mut parts = self.0.split('/');
+        (parts.next()? == "workload")
+            .then(|| parts.nth(1))
+            .flatten()
     }
 
     /// Everything after the kind prefix — the human-facing remainder of the key with the
@@ -790,6 +801,26 @@ impl SecurityGraph {
             }
         }
         (exposed_secrets, misconfigs, rbac_findings)
+    }
+
+    /// The deployed reference(s) of the image(s) an `entry` workload runs, followed across
+    /// its `RunsImage` edges (the same walk [`entry_evidence`](Self::entry_evidence) uses) —
+    /// for human narration and the per-finding telemetry label. Distinct references are
+    /// de-duplicated and joined with `,` (a multi-container pod can run several); `None` when
+    /// the key is unknown, the node is not a workload, or no image carried a reference
+    /// (references are human-narration-only and may be absent, see [`Image::reference`]).
+    pub fn entry_image_reference(&self, entry_key: &NodeKey) -> Option<String> {
+        let entry = self.index_of(entry_key)?;
+        let mut refs: BTreeSet<&str> = BTreeSet::new();
+        for edge in self.graph.edges(entry) {
+            if matches!(edge.weight().relation, Relation::RunsImage)
+                && let Some(Node::Image(image)) = self.graph.node_weight(edge.target())
+                && let Some(reference) = image.reference.as_deref()
+            {
+                refs.insert(reference);
+            }
+        }
+        (!refs.is_empty()).then(|| refs.into_iter().collect::<Vec<_>>().join(","))
     }
 }
 
