@@ -12,7 +12,7 @@
 # `npm ci --ignore-scripts` kills install hooks; the build uses esbuild-WASM (arch-neutral,
 # so the same command works on the amd64 and arm64 native builders — no per-arch esbuild
 # binary to resolve).
-FROM mirror.gcr.io/library/node:22-bookworm-slim AS web
+FROM mirror.gcr.io/library/node:26-bookworm-slim AS web
 WORKDIR /web
 COPY engine/web/package.json engine/web/package-lock.json ./
 RUN npm ci --ignore-scripts
