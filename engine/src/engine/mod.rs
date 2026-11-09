@@ -598,6 +598,10 @@ impl Engine {
         if corroborations > 0 {
             self.metrics.corroborations.add(corroborations, &[]);
         }
+        // KEV-corroborated-and-reachable findings (ADR-0044): per-finding entity labels on
+        // every reachable chain whose entry image runs a CISA-KEV exploited-in-wild CVE. Gate
+        // and dedupe live in the recorder (see its doc) so the pass stays unit-testable.
+        self.metrics.record_kev_reachable_findings(&graph, &chains);
         // Narrowing-delta comparator (ADR-0041 §6): the Falco-retirement parity-matrix input.
         // VIEW ONLY — reads `graph`/`chains`, feeds nothing back into adjudication, the ledger,
         // or the arming state; see the module docs.
@@ -619,8 +623,9 @@ impl Engine {
         // Runtime-corroboration coverage per node for the readiness row, and its
         // OTLP mirror. Reading the coverage back after stamping means the gauges are
         // sourced from the SAME `derive_runtime_coverage` the dashboard reads — they can never
-        // disagree. Counts only, no per-node label dimension: node names are attacker-
-        // influenceable, so a per-node series would be a cardinality/DoS vector.
+        // disagree. Counts only — the readiness row consumes aggregate healthy/degraded/blind
+        // tallies, so a per-node label dimension would buy nothing here (per-entity labels
+        // themselves are permitted since ADR-0044, see `record_kev_reachable_finding`).
         if let Some(liveness) = &self.agent_liveness {
             let edge = self
                 .findings

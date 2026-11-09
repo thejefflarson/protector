@@ -2,6 +2,10 @@
 //! CLAUDE.md). A cohesive unit: the counters/gauges/histograms the engine records against the
 //! global meter, and their one-shot construction. `pub(super)` so the engine core reads the fields.
 
+use std::collections::BTreeSet;
+
+use crate::engine::graph::{NodeKey, SecurityGraph};
+use crate::engine::reason::proof::ProvenChain;
 use crate::engine::state::RuntimeCoverage;
 
 /// OTLP instruments for the engine, recorded against the global meter (see
@@ -19,6 +23,20 @@ pub(super) struct EngineMetrics {
     pub(super) chains: opentelemetry::metrics::Gauge<u64>,
     /// Breach-relevant findings (internet-facing) in the last pass.
     pub(super) breach_paths: opentelemetry::metrics::Gauge<u64>,
+    /// KEV-corroborated-and-reachable findings this pass, carrying **per-finding entity
+    /// labels** (`k8s.namespace.name`, `k8s.workload.kind`, `k8s.workload.name`,
+    /// `image.reference`, `cve.ids`). A "finding" here is a reachable chain — internet-facing
+    /// OR a proven foothold — whose entry image runs a CVE that CISA KEV lists as
+    /// exploited-in-wild (`Vulnerability::exploited_in_wild`). The entity labels let an
+    /// operator route a KEV hit straight to the workload and image without a second lookup;
+    /// ADR-0044 traded the former no-entity-labels rule for exactly that rapid-response value
+    /// (the rule was over-cautious for this bounded single-operator homelab — an attacker who
+    /// could forge these names has already compromised the cluster). The series is one per
+    /// distinct entry workload per pass: the labels are entry-scoped, so counting each of an
+    /// entry's several objective-chains would only inflate one series. "KEV" is the
+    /// `exploited_in_wild` catalogue flag — NOT the runtime `corroborated` signal that
+    /// [`Self::corroborations`] counts (ADR-0009); the two are unrelated predicates.
+    pub(super) kev_reachable_findings: opentelemetry::metrics::Counter<u64>,
     /// Active mitigations currently in the ledger.
     pub(super) active_mitigations: opentelemetry::metrics::Gauge<u64>,
     /// Whether the model adjudicator looks degraded RIGHT NOW (`1`) or healthy (`0`) — the
@@ -52,9 +70,10 @@ pub(super) struct EngineMetrics {
     /// Narrowing-delta count this pass (ADR-0041 §6): breach-relevant chains where a notable
     /// exec is present on the entry's runtime but the chain is `!corroborated` — the cases the
     /// retiring blanket notable-exec corroboration arm would have flipped to `corroborated`.
-    /// The Falco-retirement parity-matrix input. No labels — the count alone is the bake
-    /// signal, and any per-entry/per-node dimension would be a cardinality/PII vector (the
-    /// entry name still appears in the accompanying structured log, never in this counter).
+    /// The Falco-retirement parity-matrix input. No labels: the count alone is the bake
+    /// signal this metric needs, and the entry name already rides the accompanying structured
+    /// log for the per-entry view. (Per-entity metric labels are permitted since ADR-0044 —
+    /// see [`Self::kev_reachable_findings`] — this counter simply has no use for one.)
     pub(super) narrowing_delta: opentelemetry::metrics::Counter<u64>,
     /// Per-pass adjudications that issued a fresh model call (verdict-cache miss). A
     /// proper cumulative counter (replaces the prior `verdicts{verdict="judged_this_pass"}`
@@ -90,8 +109,9 @@ pub(super) struct EngineMetrics {
     /// [`derive_runtime_coverage`](crate::engine::state::derive_runtime_coverage) the dashboard
     /// reads (they must never disagree). In-scope expected nodes as of this pass — the agent
     /// DaemonSet's own pods, matching `RuntimeCoverage::expected_count`; out-of-scope reporters are
-    /// excluded. Counts ONLY, with NO per-node label dimension: node names are attacker-influenceable,
-    /// so a per-node series would be a cardinality/DoS vector (see `agent_liveness`).
+    /// excluded. Counts only: the readiness row consumes aggregate healthy/degraded/blind tallies,
+    /// so a per-node label dimension would buy nothing here. (Per-entity labels are allowed since
+    /// ADR-0044 — see [`Self::kev_reachable_findings`] — this gauge just doesn't need one.)
     pub(super) coverage_expected: opentelemetry::metrics::Gauge<u64>,
     /// Expected nodes reporting with their probes loaded this pass (quiet counts as healthy).
     pub(super) coverage_healthy: opentelemetry::metrics::Gauge<u64>,
@@ -173,6 +193,13 @@ impl EngineMetrics {
             breach_paths: m
                 .u64_gauge("protector.engine.breach_paths")
                 .with_description("Breach-relevant (internet-facing) findings in the last pass.")
+                .build(),
+            kev_reachable_findings: m
+                .u64_counter("protector.engine.kev_reachable_findings")
+                .with_description(
+                    "Reachable findings whose entry image runs a CISA-KEV exploited-in-wild CVE, \
+                     by namespace/workload/image/CVE (ADR-0044).",
+                )
                 .build(),
             active_mitigations: m
                 .u64_gauge("protector.engine.active_mitigations")
@@ -321,8 +348,9 @@ impl EngineMetrics {
     /// Mirror this pass's runtime-corroboration coverage into the OTLP gauges. A pure
     /// mirror of already-derived state: it takes the SAME [`RuntimeCoverage`] the dashboard reads
     /// (the caller passes back what `stamp_runtime_coverage` just stored), so the two can never
-    /// disagree. Counts ONLY — no per-node label dimension, because node names are
-    /// attacker-influenceable and a per-node series would be a cardinality/DoS vector.
+    /// disagree. Counts only — the readiness row needs the aggregate tallies, not a per-node
+    /// series (per-entity labels themselves are permitted since ADR-0044, see
+    /// [`Self::record_kev_reachable_finding`]).
     pub(super) fn record_coverage(&self, coverage: &RuntimeCoverage) {
         let CoverageGaugeValues {
             expected,
@@ -336,6 +364,85 @@ impl EngineMetrics {
         self.coverage_degraded.record(degraded, &[]);
         self.coverage_blind.record(blind, &[]);
         self.coverage_signals.record(signals, &[]);
+    }
+
+    /// Emit the KEV-corroborated-and-reachable findings for one pass (ADR-0044). A finding is
+    /// a chain that is *reachable* — `is_breach_relevant()` (internet-facing entry) OR
+    /// `foothold.is_some()` (a proven exploitable front door) — AND *KEV-backed*: its entry
+    /// image carries a CVE with `exploited_in_wild` (the CISA KEV flag, NOT the runtime
+    /// `corroborated` signal of [`Self::corroborations`], ADR-0009). One series per distinct
+    /// entry workload per pass: every label here is entry-scoped, so an entry's several
+    /// objective-chains would only inflate one series — the dedupe keeps the series count
+    /// equal to the number of KEV-reachable workloads. Series hygiene, not a cardinality cap.
+    pub(super) fn record_kev_reachable_findings(
+        &self,
+        graph: &SecurityGraph,
+        chains: &[ProvenChain],
+    ) {
+        let mut seen: BTreeSet<&NodeKey> = BTreeSet::new();
+        for chain in chains
+            .iter()
+            .filter(|c| c.is_breach_relevant() || c.foothold.is_some())
+        {
+            if !seen.insert(&chain.entry) {
+                continue;
+            }
+            let (vulns, _) = graph.entry_evidence(&chain.entry);
+            let mut kev_ids: Vec<&str> = vulns
+                .iter()
+                .filter(|v| v.exploited_in_wild)
+                .map(|v| v.id.as_str())
+                .collect();
+            if kev_ids.is_empty() {
+                continue;
+            }
+            kev_ids.sort_unstable();
+            kev_ids.dedup();
+            self.record_kev_reachable_finding(
+                &chain.entry,
+                graph.entry_image_reference(&chain.entry).as_deref(),
+                &kev_ids,
+            );
+        }
+    }
+
+    /// Record one KEV-corroborated-and-reachable finding (ADR-0044) with its per-finding
+    /// entity labels. `entry` supplies the namespace / workload kind / workload name (parsed
+    /// from the `workload/<ns>/<kind>/<name>` key); `image` is the entry's deployed image
+    /// reference(s); `cve_ids` are the entry image's exploited-in-wild CVE ids, joined into a
+    /// single `cve.ids` value so the whole finding stays ONE series rather than fanning out
+    /// per CVE. The labels are attacker-influenceable by construction (ADR-0044 accepts this
+    /// for the homelab's bound); a missing key segment renders as `unknown` rather than
+    /// dropping the label. "KEV" is `exploited_in_wild`, never the runtime `corroborated`
+    /// signal.
+    pub(super) fn record_kev_reachable_finding(
+        &self,
+        entry: &NodeKey,
+        image: Option<&str>,
+        cve_ids: &[&str],
+    ) {
+        self.kev_reachable_findings.add(
+            1,
+            &[
+                opentelemetry::KeyValue::new(
+                    "k8s.namespace.name",
+                    entry.namespace().unwrap_or("unknown").to_string(),
+                ),
+                opentelemetry::KeyValue::new(
+                    "k8s.workload.kind",
+                    entry.workload_kind().unwrap_or("unknown").to_string(),
+                ),
+                opentelemetry::KeyValue::new(
+                    "k8s.workload.name",
+                    entry.name().unwrap_or("unknown").to_string(),
+                ),
+                opentelemetry::KeyValue::new(
+                    "image.reference",
+                    image.unwrap_or("unknown").to_string(),
+                ),
+                opentelemetry::KeyValue::new("cve.ids", cve_ids.join(",")),
+            ],
+        );
     }
 }
 
@@ -532,5 +639,202 @@ mod tests {
             v.signals, 3,
             "only healthy-node signals count; the out-of-scope node's 99 is excluded"
         );
+    }
+
+    use std::collections::HashMap;
+
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+    use super::{ProvenChain, SecurityGraph};
+    use crate::engine::graph::attack::{CREDENTIAL_ACCESS, EXPLOIT_PUBLIC_FACING};
+    use crate::engine::graph::{
+        Edge, Exposure, Image, Node, NodeKey, Provenance, Relation, Severity, Trust, Vulnerability,
+        Workload,
+    };
+
+    /// One KEV-reachable data point read back from the in-memory exporter: the five entity
+    /// labels keyed by attribute name, so a test reads `points[…]` by label rather than index.
+    type LabelSet = BTreeMap<String, String>;
+
+    fn kev_points(exporter: &InMemoryMetricExporter) -> Vec<(LabelSet, u64)> {
+        exporter
+            .get_finished_metrics()
+            .expect("read back the in-memory exporter")
+            .iter()
+            .flat_map(|rm| rm.scope_metrics())
+            .flat_map(|sm| sm.metrics())
+            .find(|m| m.name() == "protector.engine.kev_reachable_findings")
+            .map(|m| match m.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
+                    .data_points()
+                    .map(|dp| {
+                        let labels = dp
+                            .attributes()
+                            .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+                            .collect();
+                        (labels, dp.value())
+                    })
+                    .collect(),
+                _ => panic!("kev_reachable_findings is a u64 sum"),
+            })
+            .unwrap_or_default()
+    }
+
+    fn prov() -> Provenance {
+        Provenance::new("test", std::time::SystemTime::UNIX_EPOCH)
+    }
+
+    fn vuln(id: &str, kev: bool) -> Vulnerability {
+        Vulnerability {
+            id: id.into(),
+            severity: Severity::Critical,
+            exploited_in_wild: kev,
+            ..Default::default()
+        }
+    }
+
+    /// Add a workload running one image (a `RunsImage` edge) to `graph`. The image carries
+    /// `vulns`; `reference` is its deployed ref. Returns the workload's `NodeKey` — the entry
+    /// a chain is keyed on.
+    fn add_workload(
+        graph: &mut SecurityGraph,
+        name: &str,
+        exposure: Exposure,
+        reference: &str,
+        vulns: Vec<Vulnerability>,
+    ) -> NodeKey {
+        let wl = graph.upsert_node(Node::Workload(Workload {
+            namespace: "app".into(),
+            name: name.into(),
+            kind: "Pod".into(),
+            labels: Default::default(),
+            meshed: false,
+            exposure,
+            runtime: Vec::new(),
+            persistent: false,
+            misconfigs: Vec::new(),
+            rbac_findings: Vec::new(),
+        }));
+        let img = graph.upsert_node(Node::Image(Image {
+            digest: format!("sha256:{name}"),
+            reference: Some(reference.into()),
+            trust: Trust::Unknown,
+            vulnerabilities: vulns,
+            exposed_secrets: Vec::new(),
+            static_binary: None,
+        }));
+        graph.add_edge(
+            wl,
+            img,
+            Edge {
+                relation: Relation::RunsImage,
+                provenance: prov(),
+            },
+        );
+        NodeKey::workload("app", "Pod", name)
+    }
+
+    /// A chain over `entry` with the reachability flags set directly (as `narrowing_delta`'s
+    /// tests do) — the KEV gate reads `exposed_entry` / `foothold` plus the graph's entry
+    /// evidence, never how the chain was derived.
+    fn chain_over(entry: NodeKey, exposed: bool, foothold: bool, objective: &str) -> ProvenChain {
+        ProvenChain {
+            entry,
+            objective: NodeKey::workload("app", "Secret", objective),
+            attack: CREDENTIAL_ACCESS,
+            foothold: foothold.then_some(EXPLOIT_PUBLIC_FACING),
+            corroborated: false,
+            adjudicated: true,
+            promoted: false,
+            exposed_entry: exposed,
+            verdict: None,
+            links: Vec::new(),
+            paths: Vec::new(),
+            paths_truncated: false,
+            single_edge_cuts: Vec::new(),
+            quarantine_targets: Vec::new(),
+        }
+    }
+
+    /// The ADR-0044 metric emits one labelled series — namespace / workload kind+name / image
+    /// reference / joined-and-sorted CVE ids — for a KEV + internet-facing finding, and emits
+    /// NOTHING for a non-KEV internet finding or a KEV internal-only finding. Also guards the
+    /// one-series-per-entry dedupe: a KEV entry with two objective-chains still yields one
+    /// series of value 1. Reads values back through a local in-memory exporter (never the
+    /// process-global meter), like `a_single_pass_never_double_counts_one_label`.
+    #[test]
+    fn kev_reachable_emits_entity_labels_only_for_kev_and_reachable_findings() {
+        let mut graph = SecurityGraph::new();
+        // (1) internet-facing + two KEV CVEs → emits, cve.ids sorted and joined.
+        let web = add_workload(
+            &mut graph,
+            "web",
+            Exposure::Internet,
+            "ghcr.io/x/web:1",
+            vec![vuln("CVE-2021-45046", true), vuln("CVE-2021-44228", true)],
+        );
+        // (2) internet-facing but its only CVE is critical-not-KEV → reachable, no KEV → skip.
+        let nokev = add_workload(
+            &mut graph,
+            "nokev",
+            Exposure::Internet,
+            "ghcr.io/x/nokev:1",
+            vec![vuln("CVE-2020-0001", false)],
+        );
+        // (3) internal-only, KEV CVE → not reachable → skip.
+        let internal = add_workload(
+            &mut graph,
+            "internal",
+            Exposure::Internal,
+            "ghcr.io/x/internal:1",
+            vec![vuln("CVE-2021-44228", true)],
+        );
+
+        let chains = vec![
+            chain_over(web.clone(), true, true, "session-key"),
+            // Same KEV entry, a second objective: must collapse to one series (dedupe).
+            chain_over(web, true, true, "db-password"),
+            chain_over(nokev, true, false, "session-key"),
+            chain_over(internal, false, false, "session-key"),
+        ];
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let metrics = EngineMetrics::from_meter(provider.meter("test"));
+
+        metrics.record_kev_reachable_findings(&graph, &chains);
+        provider.force_flush().expect("flush the exporter");
+
+        let points = kev_points(&exporter);
+        assert_eq!(
+            points.len(),
+            1,
+            "only the KEV + internet-facing entry emits, and its two chains dedupe to one series"
+        );
+        let (labels, value) = &points[0];
+        assert_eq!(*value, 1, "one dedup'd finding this pass");
+        let expected: HashMap<&str, &str> = HashMap::from([
+            ("k8s.namespace.name", "app"),
+            ("k8s.workload.kind", "Pod"),
+            ("k8s.workload.name", "web"),
+            ("image.reference", "ghcr.io/x/web:1"),
+            ("cve.ids", "CVE-2021-44228,CVE-2021-45046"),
+        ]);
+        assert_eq!(
+            labels.len(),
+            expected.len(),
+            "exactly the entity labels, no more"
+        );
+        for (key, want) in expected {
+            assert_eq!(
+                labels.get(key).map(String::as_str),
+                Some(want),
+                "label {key} must be {want}"
+            );
+        }
     }
 }
