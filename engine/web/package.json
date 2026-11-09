@@ -23,7 +23,7 @@
     "jsdom": "^25.0.1",
     "preact": "10.29.7",
     "typescript": "7.0.2",
-    "vitest": "^3.2.6",
+    "vitest": "^5.1.0",
     "vitest-axe": "0.1.0"
   }
 }
