@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, JsonObject, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
@@ -81,8 +81,8 @@ impl ProtectorMcp {
 }
 
 impl ServerHandler for ProtectorMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "protector read-only security surface (ADR-0031): four read tools, no actuation. \
              Output is redacted to the tier your token grants; request a lower tier with the \
              `tier` argument.",
@@ -101,14 +101,15 @@ impl ServerHandler for ProtectorMcp {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         // The ceiling + subject come ONLY from the verified token (never the request params).
         let Some(identity) = Self::identity(&context) else {
             // Behind the auth layer this is unreachable; treat a missing identity as fail-closed.
             return Ok(CallToolResult::structured_error(json!({
                 "error": "unauthenticated",
                 "detail": "no verified identity on the request",
-            })));
+            }))
+            .into());
         };
         let ceiling: Tier = identity.tier;
         let subject = identity.subject.as_str();
@@ -121,15 +122,17 @@ impl ServerHandler for ProtectorMcp {
             request.arguments.as_ref(),
             ceiling,
         ) {
-            Ok(value) => Ok(CallToolResult::structured(value)),
+            Ok(value) => Ok(CallToolResult::structured(value).into()),
             Err(ToolError::UnknownEntry) => Ok(CallToolResult::structured_error(json!({
                 "error": "unknown_entry",
                 "detail": "no such breach-relevant entry (validate against list_findings refs)",
-            }))),
+            }))
+            .into()),
             Err(ToolError::BadArguments(detail)) => Ok(CallToolResult::structured_error(json!({
                 "error": "bad_arguments",
                 "detail": detail,
-            }))),
+            }))
+            .into()),
             Err(ToolError::UnknownTool) => Err(ErrorData::invalid_params(
                 "no such tool (the surface is exactly four read tools)",
                 None,
