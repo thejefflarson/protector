@@ -15,7 +15,7 @@
 # one it replaced: `sccache --start-server` FAILS outright when the bucket is
 # unreachable, and the first rustc-through-sccache call then dies with "sccache:
 # Timed out waiting for server startup", killing the whole job. Measured against
-# sccache 0.16.0 (cluster repo, JEF-564 R2 cutover):
+# sccache 0.16.0 (the S3-to-R2 object-store backend cutover):
 #
 #   S3 configured, endpoint unreachable    -> --start-server FAILS
 #   empty SCCACHE_BUCKET + SCCACHE_DIR set -> "Cache location: Local disk"

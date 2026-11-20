@@ -79,7 +79,8 @@ fn no_ticket_breadcrumbs_in_tracked_source_or_docs() {
     let root = repo_root();
     // First-party source trees + docs the guardrail covers (mirrors CLAUDE.md's own list:
     // ADRs, source comments/docstrings, CLAUDE.md, VISION.md, scripts, chart templates) plus
-    // the workflow scripts that carry the same kind of human-authored, tracker-blind prose.
+    // the workflow and CI helper scripts that carry the same kind of human-authored,
+    // tracker-blind prose.
     let scoped_dirs = [
         "docs",
         "scripts",
@@ -92,6 +93,7 @@ fn no_ticket_breadcrumbs_in_tracked_source_or_docs() {
         "behavior/src",
         "agent",
         ".github/workflows",
+        ".github/scripts",
     ];
     let scoped_files = [
         "CLAUDE.md",
