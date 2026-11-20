@@ -135,7 +135,10 @@ pub async fn serve_mcp(
 fn server_config() -> rmcp::transport::StreamableHttpServerConfig {
     let mut config = rmcp::transport::StreamableHttpServerConfig::default();
     // STATELESS request→response mode (the config is `#[non_exhaustive]`, so set fields on default).
-    config.stateful_mode = false;
+    // `legacy_session_mode = false` forces the sessionless path on every protocol version, not only
+    // the modern one that drops sessions anyway — the default is `true`, which would re-introduce the
+    // per-session keep-alive this server must never accumulate.
+    config.legacy_session_mode = false;
     config.json_response = true;
     if let Some(hosts) = non_empty_env(ENV_ALLOWED_HOSTS) {
         let hosts: Vec<String> = hosts
