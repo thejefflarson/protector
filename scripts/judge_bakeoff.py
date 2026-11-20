@@ -66,15 +66,15 @@ SYS = """You are a senior security analyst making one call: is this internet-fac
 
 A deterministic analysis already PROVED this workload can reach every objective listed below — that reachability is a GIVEN, not the question. Reaching things — however broadly, however many tenants, however high-impact, whether granted by RBAC, mounted, or over the network (same-namespace OR cross-namespace) — is NEVER a breach by itself. Breadth, tenancy, and the severity of what is reached are how BAD it would be if exploited; they are not whether it IS being exploited.
 
-A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one of these three IS exploitation evidence — if ANY one is present, the reached objective is exploitable:
-  - a CVE in the "Critical CVEs observed loading at runtime" list below — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
+A breach is a reached objective that carries EXPLOITATION EVIDENCE. Exactly one of these three IS exploitation evidence — if ANY one is present, the reached objective is a BREACH (which breach verdict — "confirmed" for a live attack vs "exploitable" for a provable one — is settled by the split in Decide below):
+  - a CVE in the "Critical CVEs observed loading at runtime" list below (the ENTRY's own field — the workload the attacker directly hits, not a downstream hop) — that list contains ONLY CVEs whose vulnerable code was observed LOADING AT RUNTIME on this workload's reachable path, so any CVE in it is proof that vulnerable code runs, exploitation evidence on its own, OR
   - an ALERT or hands-on-keyboard signal in the observed runtime behavior (something happening now), OR
   - a credential listed in the "Exposed secrets baked into this image" field below (a usable API key, token, or private key committed into the image — an immediately-usable breach primitive).
 If NONE of the three is present, it is NOT a breach — refute it, no matter how broad, cross-tenant, high-impact, or cross-namespace the reach. A cross-namespace network path or a delete/escalate capability is loose topology / broad authorization (how severe a fix is), not an attack in progress.
 
-The same three evidence types apply to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A CVE observed loading at runtime, a live alert/hands-on-keyboard signal, or an exposed secret found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: a popped pod partway down a proven path completes the chain. A downstream workload marked "no evidence observed" carries none of its own.
+Two of these three extend to a DOWNSTREAM workload the entry's proven path reaches, not only the entry itself — see "Downstream evidence" below. A live alert/hands-on-keyboard signal, or an exposed secret, found on a workload two (or more) hops downstream is exploitation evidence for THIS entry's breach call exactly as if it were on the entry: on-box evidence that node actually WAS popped completes the chain. A downstream node's OWN loaded-at-runtime CVE is DIFFERENT and is NOT exploitation evidence on its own: reachability (network/RBAC/mount) proves a PATH to that node exists, it does not prove attacker input flows THROUGH that path to trigger that node's specific vulnerable code — an application-dataflow question this analysis cannot answer from reach tags alone. Treat a downstream CVE as CONTEXT/SEVERITY ONLY: that node's vulnerability surface — how bad it would be IF that node were ever popped — never a breach driver by itself, on the same calibrated footing as reach breadth below. A downstream workload marked "no evidence observed" carries none of any of this.
 
-Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)".
+Vulnerable code that is present in the image but NOT observed loading at runtime is deliberately NOT shown here: it is context (how bad IF exploited), never exploitation evidence, and not something to reason about for this call. The CVE list below therefore contains ONLY reachable (running) CVEs, or "(none)". The same filter applies to every downstream node's CVE block.
 
 Traps that are NOT evidence, no matter how they are labeled:
   - the workload's OWN normal activity (outbound connections, file reads, library loads, reading its own mounted secrets) is NOT a live signal — only an ALERT or hands-on-keyboard action counts.
@@ -95,13 +95,13 @@ Observed runtime behavior: {runtime}
 Static posture findings (misconfiguration + RBAC checks — CONTEXT for how SEVERE a finding would be, NOT a breach on their own): {posture}
 Reachable objectives (each states the OUTCOME an attacker achieves by reaching it):
 {objectives}{changes}
-Downstream evidence on this entry's proven paths — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence (a "no evidence observed" workload carries none; this is the SAME exploitation-evidence bar as the entry's own fields above):
+Downstream evidence on this entry's proven paths — every workload the entry can reach along a PROVEN path, each with its OWN CVE/secret/behavior evidence: its secret/behavior evidence is the SAME exploitation-evidence bar as the entry's own fields above, but its CVE evidence is CONTEXT/SEVERITY ONLY (that node's vulnerability surface IF it were ever popped), never a breach driver by itself — see above. A "no evidence observed" workload carries none of any of this.
 {downstream}
 
 Decide:
-  "exploitable" — a reached objective WITH exploitation evidence: a CVE in the "observed loading at runtime" list above, an alert/hands-on-keyboard runtime signal, a credential listed in the (non-empty) "Exposed secrets baked into this image" field, OR the same evidence on a downstream workload on the proven path.
+  "exploitable" — a PROVABLE-but-not-live breach: a proven chain exploitable on evidence that is NOT an attack in progress — a CVE in the "observed loading at runtime" list above (the ENTRY's own field), or a credential listed in the (non-empty) "Exposed secrets baked into this image" field (on the ENTRY, or on a downstream workload on the proven path). A downstream CVE is CONTEXT/SEVERITY ONLY, never a breach driver — see above. A live alert / hands-on-keyboard signal is NOT "exploitable" — that is "confirmed".
   "refuted"     — the CVE list is "(none)" (no vulnerable code observed running), no live signal, and no exposed secret in that field: NOT a breach, however broad, cross-tenant, high-impact, or cross-namespace the reach, however many reachable secret objectives, and however many misconfig/RBAC posture findings.
-  "confirmed"   — ONLY an already-in-progress attack corroborated by a live alert / hands-on-keyboard signal that should stand. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed".
+  "confirmed"   — a breach with an attack ALREADY IN PROGRESS: a live ALERT or hands-on-keyboard signal in the observed runtime behavior, on the ENTRY or on a downstream workload on the proven path (on-box evidence that node WAS popped). This is a breach exactly like "exploitable"; it differs only in that a live signal corroborates it NOW. A CVE observed loading at runtime, or an exposed secret in the field, is "exploitable", NEVER "confirmed"; a live alert is "confirmed", NEVER "exploitable".
   "uncertain"   — ONLY when the evidence is self-contradictory or unintelligible. Absence of evidence is NOT uncertainty: an empty CVE list, no live signal, and no exposed secret is a confident "refuted", not "uncertain".
 
 Output ONLY this JSON: {{"verdict": "exploitable"|"confirmed"|"refuted"|"uncertain", "reason": "one sentence on what made it a breach or not"}}. If you say "exploitable" citing a CVE, that CVE id MUST appear VERBATIM in the CVE list above or in a downstream workload's block below — never invent, recall, or copy a CVE id from anywhere else; if both are "(none)", do not name any CVE."""
@@ -298,8 +298,11 @@ CASES = [
      "<<<connects to 10.42.3.5:8080 (cluster)>>>",
      "  - host/node-2 [NETWORK] [cross-ns] (Privilege Escalation: Escape to Host)\n"
      f"  - secret/public/web-session.key [MOUNTED] ({CRED})"),
-    # The OTHER evidence type: no CVE, but a live hands-on-keyboard signal = breach happening now.
-    ("live_signal_breach", "exploitable",
+    # The OTHER evidence type: no CVE, but a live hands-on-keyboard signal = attack in progress NOW,
+    # so the engine's live-attack verdict ("confirmed"), never the provable-but-not-live "exploitable"
+    # (Verdict::Confirmed vs Exploitable in engine/.../adjudicate/mod.rs — Confirmed stands on a live
+    # signal and does not promote; Exploitable is the model's positive call on an uncorroborated chain).
+    ("live_signal_breach", "confirmed",
      "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
      "<<<ALERT (Falco): a terminal shell was spawned in the container>>> <<<reverse-shell connect to 203.0.113.7:4444 (INTERNET egress)>>>",
      f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
@@ -366,8 +369,9 @@ CASES = [
     # SAME downstream hop now carries an ALARMING-NOW on-box behavior (hands-on-keyboard exec /
     # a live alert) and no CVE of its own. Downstream evidence is BEHAVIORAL-only — this is the
     # one signal type that stands on its own two hops in, exactly as it would on the entry.
-    # MUST be exploitable.
-    ("downstream_behavioral_compromise", "exploitable",
+    # A live signal is an attack in progress, so MUST be "confirmed" (not "exploitable") — same
+    # live-vs-provable split as live_signal_breach above.
+    ("downstream_behavioral_compromise", "confirmed",
      "workload/public/Pod/web-frontend-5d8", "(none)", "(none)",
      "<<<connects to 10.42.3.5:8080 (cluster)>>>",
      f"  - secret/public/web-session.key [MOUNTED] ({CRED})\n"
@@ -391,6 +395,14 @@ CASES = [
 DEFAULT_MODELS = [
     "qwen2.5:3b-instruct",                   # CURRENT DEPLOYED judge (cluster values.yaml) — the calibration target; misses exposed_secret_in_field (11/12)
     "qwen3:1.7b", # LEAD CANDIDATE — 12/12 here (only model to sweep all three evidence types + every refute), standard transformer (KV cache works)
+    # --- small-MoE field (low active params = fast CPU decode; total params still set resident RAM) ---
+    # The performance half of this bench is the real gate here: a hybrid/recurrent (Mamba/SSM) MoE
+    # whose KV/recurrent cache is mishandled by the target Ollama build decodes at minutes-per-call on
+    # CPU (the failure that retired granite4:3b-h). A standard-attention MoE has a normal KV cache.
+    "granite4:tiny-h",                       # Granite 4.0 H-Tiny: 7B total / ~1B active, HYBRID Mamba-2+transformer MoE, ~4.2 GB Q4. Same arch class as the retired granite4:3b-h — viability is the latency measurement, not a given.
+    "lfm2.5:8b",                             # LFM2.5-8B-A1B: 8.3B total / 1.5B active, HYBRID (lfm2moe) MoE, ~5.2 GB Q4_K_M. Needs a recent Ollama; same hybrid-cache caveat as granite4:tiny-h.
+    "granite4:micro",                        # Granite 4.0 Micro: 3B DENSE transformer (non-hybrid) — the safe-arch Granite 4.0 baseline, KV cache works, ~2.1 GB.
+    "hf.co/inclusionAI/Ling-mini-2.0-GGUF:Q4_K_M",  # Ling-mini-2.0: 16B total / 1.4B active, STANDARD-attention MoE (BailingMoeV2, KV cache works — sidesteps the hybrid trap) but ~9–10 GB resident; needs the RAM headroom.
     "ibm/granite4:3b-h",                     # RETIRED from prod: hybrid/recurrent, cache broken, 8–20 min/call on Pis
     "qwen3:4b-instruct",                     # research #1 (instruct-tuned; correct tag)
     "qwen2.5:3b",
@@ -484,13 +496,21 @@ def chat(model, prompt, temp=0.0, seed=None):
     opts = {"temperature": temp, "num_ctx": NUM_CTX}
     if seed is not None:
         opts["seed"] = seed
-    body = json.dumps({
+    payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "options": opts,
         "keep_alive": KEEP_ALIVE,
-    }).encode()
+    }
+    # Reasoning models (Qwen3/3.5, etc.) emit a <think> trace by default that blows the judge's
+    # latency budget and buries the verdict JSON; a latency-bound judge wants it off, so BAKEOFF_NO_THINK
+    # benches the no-think path. Harmless on non-thinking models only if they accept the field — set it
+    # just for thinking-capable candidates.
+    import os
+    if os.environ.get("BAKEOFF_NO_THINK"):
+        payload["think"] = False
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(OLLAMA, body, {"Content-Type": "application/json"})
     t = time.time()
     try:
@@ -509,7 +529,7 @@ def chat(model, prompt, temp=0.0, seed=None):
         except Exception:
             pass
     if not json_ok:  # salvage the verdict even if the JSON is malformed
-        m = re.search(r'"?verdict"?\s*:\s*"?(exploitable|refuted|uncertain)', txt, re.I)
+        m = re.search(r'"?verdict"?\s*:\s*"?(exploitable|confirmed|refuted|uncertain)', txt, re.I)
         if m:
             verdict = m.group(1).lower()
     return {
