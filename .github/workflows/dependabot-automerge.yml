@@ -11,7 +11,8 @@ name: Dependabot auto-merge
 # Depends on two one-time repo settings that cannot be set from a PR:
 #   1. "Allow auto-merge" enabled in repo settings.
 #   2. Branch protection on main requiring `lint` + `test` (and NOT the path-skipped
-#      `docker` check).
+#      `docker` check), with no required approvals: the repo forbids Actions from
+#      approving PRs, so an approval rule would leave every Dependabot PR stuck.
 permissions:
   contents: read
 on:
@@ -29,13 +30,6 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Approve the PR
-        # Dependabot cannot approve its own PR, so do it here to satisfy any
-        # "1 approval" branch-protection rule. No update-type gate — all bumps.
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Enable auto-merge
         # Squash + delete-branch to match the repo's manual merge convention.
         # `--auto` waits for the required checks; ALL update types, majors included.
