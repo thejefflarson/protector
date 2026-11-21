@@ -120,7 +120,8 @@ pub(super) async fn observe_provenance(
         }
     };
 
-    let verifier = Verifier::new(trusted_root());
+    let verifier = Verifier::new(trusted_root())
+        .context("building the Sigstore verifier from the trusted root")?;
     let mut facts: Vec<ProvenanceFacts> = Vec::new();
     for entry in &referrers.manifests {
         let referrer_ref = Reference::with_digest(
@@ -192,7 +193,7 @@ fn verify_bundle(verifier: &Verifier, bundle_json: &[u8], subject_digest: &str) 
     // Default policy: verify cert chain + SCT + transparency log, but require NO specific signing
     // identity — observation learns the builder, it does not gate on it.
     verifier
-        .verify(hash, &bundle, &VerificationPolicy::default())
+        .verify(hash, &bundle, &VerificationPolicy::any_identity())
         .is_ok()
 }
 
