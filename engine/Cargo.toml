@@ -29,7 +29,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
 sigstore = { version = "0.15.0", default-features = false, features = ["cosign", "sigstore-trust-root", "rustls-tls"] }
-sigstore-verify = "0.16.0"
+sigstore-verify = "0.17.0"
 subtle = "2.6.1"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "process"] }
